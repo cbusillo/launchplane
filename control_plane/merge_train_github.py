@@ -4486,7 +4486,8 @@ class GitHubMergeTrainSnapshotReader:
         if not pure_dependency_update(
             pull_request,
             read=lambda path: self.transport.request(method="GET", path=path),
-            policy=policy,
+            store=self._branch_refresh_store,
+            repository_policy=self._repository_policy,
         ):
             return "needs_review"
         return update_class
@@ -4719,7 +4720,8 @@ class GitHubMergeTrainSnapshotReader:
             and pure_dependency_update(
                 pull_request,
                 read=lambda path: self.transport.request(method="GET", path=path),
-                policy=self._dependency_policy(pull_request),
+                store=self._branch_refresh_store,
+                repository_policy=self._repository_policy,
             )
         )
         intents = tuple(

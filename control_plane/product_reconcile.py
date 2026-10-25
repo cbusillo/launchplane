@@ -49,7 +49,7 @@ from control_plane.testing_restore_prerequisite import (
 )
 
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
-from control_plane.dependency_update_review import dependency_update_policy, pure_dependency_update
+from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_reconcile_read import preview_refresh_failure
 from control_plane import secrets
@@ -2158,7 +2158,7 @@ def _plan_preview_target(
         pure_dependency_update=pure_dependency_update(
             pull_request,
             read=transport.get_json,
-            policy=dependency_update_policy(pull_request, store=record_store),
+            store=record_store,
         ),
         director_standing=profile.release_on_acceptance == "director_standing",
     )

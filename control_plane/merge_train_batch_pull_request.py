@@ -39,7 +39,6 @@ from control_plane.merge_train_github import (
 )
 from control_plane.dependency_update_review import (
     DEPENDENCY_UPDATE_NOTES,
-    dependency_update_policy,
     pure_dependency_update,
 )
 from control_plane.release_review_github import (
@@ -167,7 +166,7 @@ def _batch_owner_test_notes(
         if pure_dependency_update(
             detail,
             read=lambda path: client.transport.request(method="GET", path=path),
-            policy=dependency_update_policy(detail, store=client._branch_refresh_store),
+            store=client._branch_refresh_store,
         ):
             raw_labels = detail.get("labels", ())
             labels = (

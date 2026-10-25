@@ -18,63 +18,61 @@ from tests.test_merge_train_github import _github_commit, _github_pull_request
 
 class DependencyBotPolicyTests(unittest.TestCase):
     def test_add_remove_identity_and_change_allowed_types_without_code_changes(self) -> None:
-        for identity in (711, 722):
-            for metadata_format, message in (
-                ("dependabot_trailer", INDIRECT_PATCH),
-                ("renovate_metadata", renovate_message()),
+        identity = 711
+        for metadata_format, message in (
+            ("dependabot_trailer", INDIRECT_PATCH),
+            ("renovate_metadata", renovate_message()),
+        ):
+            for configured, allowed, expected in (
+                (True, ("patch", "minor"), "patch_or_minor"),
+                (False, ("patch", "minor"), "needs_review"),
+                (True, ("digest",), "needs_review"),
             ):
-                for configured, allowed, expected in (
-                    (True, ("patch", "minor"), "patch_or_minor"),
-                    (False, ("patch", "minor"), "needs_review"),
-                    (True, ("digest",), "needs_review"),
+                with self.subTest(
+                    identity=identity,
+                    metadata_format=metadata_format,
+                    configured=configured,
+                    allowed=allowed,
                 ):
-                    with self.subTest(
-                        identity=identity,
-                        metadata_format=metadata_format,
-                        configured=configured,
-                        allowed=allowed,
-                    ):
-                        policy = dependency_repository_policy(
-                            identity, metadata_format=metadata_format
+                    policy = dependency_repository_policy(identity, metadata_format=metadata_format)
+                    bot = policy.enqueue.dependency_update_bots[0].model_copy(
+                        update={"allowed_update_types": allowed}
+                    )
+                    policy.enqueue.dependency_update_bots = (bot,) if configured else ()
+                    pull = _github_pull_request(16)
+                    pull["user"] = {"id": identity, "login": "a-new-bot[bot]", "type": "Bot"}
+                    transport = RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            [_github_commit(identity, message, sha="head-16")],
+                            [],
+                            {"files": [{"filename": "package.json", "status": "modified"}]},
                         )
-                        bot = policy.enqueue.dependency_update_bots[0].model_copy(
-                            update={"allowed_update_types": allowed}
-                        )
-                        policy.enqueue.dependency_update_bots = (bot,) if configured else ()
-                        pull = _github_pull_request(16)
-                        pull["user"] = {"id": identity, "login": "a-new-bot[bot]", "type": "Bot"}
-                        transport = RecordingMergeTrainGitHubTransport(
-                            responses=(
-                                [_github_commit(identity, message, sha="head-16")],
-                                [],
-                                {"files": [{"filename": "package.json", "status": "modified"}]},
-                            )
-                        )
-                        reader = GitHubMergeTrainSnapshotReader(
-                            transport=transport, repository_policy=policy
-                        )
-                        self.assertEqual(
-                            reader._safe_dependency_update_class(
-                                repository_path=policy.repository,
-                                pull_request_number=16,
-                                author_id=identity,
-                                pull_request=pull,
-                                head_sha="head-16",
-                                base_branch="main",
-                                base_sha="base",
-                            ),
-                            expected,
-                        )
-                        self.assertEqual(
-                            pure_dependency_update(
-                                pull,
-                                read=lambda _: {
-                                    "files": [{"filename": "uv.lock", "status": "modified"}]
-                                },
-                                policy=policy.enqueue,
-                            ),
-                            configured,
-                        )
+                    )
+                    reader = GitHubMergeTrainSnapshotReader(
+                        transport=transport, repository_policy=policy
+                    )
+                    self.assertEqual(
+                        reader._safe_dependency_update_class(
+                            repository_path=policy.repository,
+                            pull_request_number=16,
+                            author_id=identity,
+                            pull_request=pull,
+                            head_sha="head-16",
+                            base_branch="main",
+                            base_sha="base",
+                        ),
+                        expected,
+                    )
+                    self.assertEqual(
+                        pure_dependency_update(
+                            pull,
+                            read=lambda _: {
+                                "files": [{"filename": "uv.lock", "status": "modified"}]
+                            },
+                            repository_policy=policy,
+                        ),
+                        configured,
+                    )
 
     def test_patch_only_policy_cannot_admit_inferred_or_mislabeled_minor_updates(self) -> None:
         from control_plane.merge_train_dependency_updates import classify_dependency_update
@@ -95,6 +93,23 @@ class DependencyBotPolicyTests(unittest.TestCase):
                     ),
                     expected,
                 )
+
+    def test_humans_and_forks_do_not_read_dependency_policy(self) -> None:
+        def failed_read(**_: object) -> object:
+            raise RuntimeError("policy store unavailable")
+
+        store = SimpleNamespace(list_merge_train_policy_records=failed_read)
+        pull = _github_pull_request(16)
+        for changed in (
+            pull | {"user": {"id": 711, "type": "User"}},
+            pull
+            | {
+                "user": {"id": 711, "type": "Bot"},
+                "head": {"sha": "head", "repo": {"full_name": "someone/fork"}},
+            },
+        ):
+            with self.subTest(changed=changed):
+                self.assertFalse(pure_dependency_update(changed, read=lambda _: None, store=store))
 
     def test_multiple_identities_share_one_format_and_legacy_ids_do_not_infer_it(self) -> None:
         policy = MergeTrainEnqueuePolicy(

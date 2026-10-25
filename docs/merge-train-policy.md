@@ -570,7 +570,8 @@ For example, this illustrative row enables an already trusted test identity:
 
 The legacy `dependency_update_github_user_ids` field stays readable for retained
 record and digest compatibility. It supplies no parser or admission authority.
-Existing records require an approved migration into the explicit table; an
+The managed proposal planner refuses new legacy ID entries while allowing
+existing ones to be preserved or removed. Existing records require an approved migration into the explicit table; an
 absent table withholds automatic admission. Ordinary checked Ready and trusted
 label admission remain supported while an admin reviews that migration.
 
@@ -593,6 +594,8 @@ required checks still gate the PR.
 
 The train and Client-note consumers resolve the same repository/base policy.
 Removing a bot also removes its automatic dependency-only Client exemption.
+Release checklist readers use the current policy too; recorded engineering notes
+remain readable, but a removed bot cannot supply a new inferred exemption.
 Both formats require a complete immutable same-repository dependency-only diff.
 `workspace.toml` qualifies only when complete immutable TOML documents differ
 solely in exact devkit/runtime ref pins; shared-addon and other changes keep

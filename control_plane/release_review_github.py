@@ -8,7 +8,6 @@ from urllib.parse import parse_qs, quote, urlsplit
 from control_plane.client_test_notes import _markdown_lines, change_client_review
 from control_plane.dependency_update_review import (
     DEPENDENCY_UPDATE_NOTES,
-    dependency_update_policy,
     pure_dependency_update,
 )
 from control_plane.client_test_notes import owner_test_notes as owner_test_notes
@@ -264,9 +263,7 @@ def read_release_changes(
                     or not title
                 ):
                     raise ValueError("GitHub pull request number or title is unavailable.")
-                dependency_only = pure_dependency_update(
-                    pull, read=read, policy=dependency_update_policy(pull, store=policy_store)
-                )
+                dependency_only = pure_dependency_update(pull, read=read, store=policy_store)
                 notes, preview_era_notes = release_test_notes(
                     owner_test_notes(pull.get("body") or ""), preview_hosts=preview_hosts
                 )

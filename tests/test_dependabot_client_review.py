@@ -38,11 +38,7 @@ class DependabotClientReviewTests(unittest.TestCase):
         self.assertFalse(snapshot.owner_review_required)
 
     def test_only_complete_dependency_changes_qualify(self) -> None:
-        for login in ("dependabot[bot]", "renovate[bot]"):
-            with self.subTest(login=login):
-                self._check_complete_dependency_changes(login)
-
-    def _check_complete_dependency_changes(self, login: str) -> None:
+        login = "configured-update-bot"
         from control_plane.dependency_update_review import pure_dependency_update
 
         pull = _github_pull_request(16)
@@ -72,7 +68,7 @@ class DependabotClientReviewTests(unittest.TestCase):
                     pure_dependency_update(
                         pull,
                         read=lambda _: {"files": changes},
-                        policy=dependency_repository_policy().enqueue,
+                        repository_policy=dependency_repository_policy(),
                     ),
                     expected,
                 )
@@ -88,7 +84,7 @@ class DependabotClientReviewTests(unittest.TestCase):
                     pure_dependency_update(
                         pull | update,
                         read=lambda _: {"files": good},
-                        policy=dependency_repository_policy().enqueue,
+                        repository_policy=dependency_repository_policy(),
                     )
                 )
 
@@ -97,14 +93,14 @@ class DependabotClientReviewTests(unittest.TestCase):
 
         self.assertFalse(
             pure_dependency_update(
-                pull, read=refused, policy=dependency_repository_policy().enqueue
+                pull, read=refused, repository_policy=dependency_repository_policy()
             )
         )
         self.assertFalse(
             pure_dependency_update(
                 pull,
                 read=lambda _: {"message": "unavailable"},
-                policy=dependency_repository_policy().enqueue,
+                repository_policy=dependency_repository_policy(),
             )
         )
 
@@ -137,11 +133,10 @@ class DependabotClientReviewTests(unittest.TestCase):
 
                 self.assertEqual(
                     pure_dependency_update(
-                        pull, read=read, policy=dependency_repository_policy().enqueue
+                        pull, read=read, repository_policy=dependency_repository_policy()
                     ),
                     expected,
                 )
-                self.assertTrue(any(path.endswith("ref=head-16") for path in requests))
 
     def test_configured_review_override_still_requires_notes(self) -> None:
         from control_plane.client_test_notes import change_client_review

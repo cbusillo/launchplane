@@ -1113,6 +1113,25 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         assert isinstance(replay.record.request, ManagedMergeTrainPolicyImportProposalInput)
         self.assertIsNone(replay.record.request.preparation_context)
 
+    def test_merge_train_policy_import_refuses_new_legacy_bot_ids(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FilesystemRecordStore(Path(temporary_directory))
+            active = build_test_merge_train_policy_record(record_id="active")
+            store.write_merge_train_policy_record(active)
+            payload = build_test_merge_train_policy_record(record_id="candidate").model_dump(
+                mode="json"
+            )
+            payload["policy"]["policies"][0]["enqueue"].update(
+                trusted_automation_github_user_ids=[711], dependency_update_github_user_ids=[711]
+            )
+            payload["policy_sha256"] = ""
+            candidate = MergeTrainPolicyRecord.model_validate(payload)
+            request = ManagedMergeTrainPolicyImportProposalInput(
+                record=candidate, reason="Configure a dependency bot"
+            )
+            with self.assertRaises(PrivilegedOperationPlannerError):
+                plan_managed_merge_train_policy_import(store, request)
+
     def test_merge_train_policy_import_planner_rejects_record_id_from_history(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             store = FilesystemRecordStore(Path(temporary_directory))

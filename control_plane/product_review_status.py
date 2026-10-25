@@ -33,7 +33,7 @@ from control_plane.github_app_identity import (
     revoke_installation_token,
 )
 from control_plane.client_test_notes import change_client_review
-from control_plane.dependency_update_review import dependency_update_policy, pure_dependency_update
+from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_review import (
     ProductReviewStore,
@@ -351,7 +351,7 @@ class OwnerReviewStatusPublisher:
         dependency_only = pure_dependency_update(
             payload,
             read=lambda path: self.api_request(path=path, token=token),
-            policy=dependency_update_policy(payload, store=policy_store),
+            store=policy_store,
         )
         return _PullRequestFacts(
             state=str(payload.get("state") or ""),

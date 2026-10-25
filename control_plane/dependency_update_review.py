@@ -46,15 +46,11 @@ def pure_dependency_update(
     pull_request: dict[str, object],
     *,
     read: Callable[[str], object],
-    policy: MergeTrainEnqueuePolicy | None = None,
+    store: object = None,
+    repository_policy: MergeTrainRepositoryPolicy | None = None,
 ) -> bool:
     user = pull_request.get("user")
-    if (
-        not isinstance(user, dict)
-        or policy is None
-        or policy.dependency_bot(user.get("id")) is None
-        or user.get("type") != "Bot"
-    ):
+    if not isinstance(user, dict) or user.get("type") != "Bot":
         return False
     head, base = pull_request.get("head"), pull_request.get("base")
     if not isinstance(head, dict) or not isinstance(base, dict):
@@ -74,6 +70,11 @@ def pure_dependency_update(
         or not isinstance(head_sha, str)
         or not head_sha
     ):
+        return False
+    policy = dependency_update_policy(
+        pull_request, store=store, repository_policy=repository_policy
+    )
+    if policy is None or policy.dependency_bot(user.get("id")) is None:
         return False
     path = "/repos/" + "/".join(quote(part, safe="") for part in name.split("/"))
     comparison = _safe_read(

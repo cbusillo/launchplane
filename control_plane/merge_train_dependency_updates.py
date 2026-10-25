@@ -72,7 +72,7 @@ def _renovate_updates(message: str) -> list[dict[str, str]]:
     return [{key: value or "" for key, value in update.items()} for update in updates]
 
 
-UPDATE_FORMAT_PARSERS: dict[str, Callable[[str], list[dict[str, str]]]] = {
+UPDATE_FORMAT_PARSERS: dict[DependencyUpdateFormat, Callable[[str], list[dict[str, str]]]] = {
     "dependabot_trailer": _dependabot_updates,
     "renovate_metadata": _renovate_updates,
 }
