@@ -103,7 +103,7 @@ class DependencyRefreshTests(unittest.TestCase):
                     result = (
                         next(comparisons)
                         if path.endswith(f"...{BASE}")
-                        else (next(change_comparisons, _change()) if changes else _change())
+                        else (next(change_comparisons) if changes else _change())
                     )
                     if isinstance(result, Exception):
                         raise result
@@ -121,7 +121,7 @@ class DependencyRefreshTests(unittest.TestCase):
                 return super().request(method=method, path=path, body=body)
 
         comparisons = iter(ancestry)
-        change_comparisons = iter(changes)
+        change_comparisons = iter((*changes, _change()))
         transport = Transport(responses=responses)
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))

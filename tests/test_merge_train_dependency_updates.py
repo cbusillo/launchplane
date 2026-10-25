@@ -1,7 +1,16 @@
 import json
 import unittest
 
-from control_plane.merge_train_dependency_updates import classify_dependency_update
+from control_plane.merge_train_dependency_updates import (
+    classify_dependency_update as classify_update,
+)
+
+
+def classify_dependency_update(
+    messages: list[str], *, author_login: str = "dependabot[bot]"
+) -> str:
+    return classify_update(messages, author_login=author_login)
+
 
 # Representative Dependabot commit shapes.
 INDIRECT_PATCH = """build(deps-dev): bump brace-expansion from 5.0.9 to 5.0.12 in /frontend

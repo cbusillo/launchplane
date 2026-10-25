@@ -572,8 +572,9 @@ other update types and missing or malformed evidence stay for agent review.
 
 Both bots require a complete immutable same-repository dependency-only diff.
 Manifest and lockfile paths use the existing file check; `workspace.toml`
-qualifies only when its complete patch changes exact commit `ref` pins and
-nothing else. Workflows, application code, renames from code and unavailable
+qualifies only when complete files read at both immutable commits differ
+solely in exact commit `ref` pins in `repos.devkit` or `repos.runtime`. Shared
+addon pins and other workspace changes keep Client review. Workflows, application code, renames from code and unavailable
 comparisons withhold admission. Renovate's own automerge stays disabled; only
 the train lands updates. The enqueue label still admits trusted changes through
 the ordinary review path. An empty `dependency_update_github_user_ids` list,

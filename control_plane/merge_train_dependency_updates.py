@@ -21,7 +21,7 @@ _VERSION = re.compile(
 
 
 def classify_dependency_update(
-    commit_messages: Sequence[str], *, author_login: str = "dependabot[bot]"
+    commit_messages: Sequence[str], *, author_login: str
 ) -> DependencyUpdateClass:
     read_updates = DEPENDENCY_UPDATE_BOTS.get(author_login)
     if not commit_messages or read_updates is None:

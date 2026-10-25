@@ -1,8 +1,10 @@
 """Provider evidence for engineering-only dependency changes."""
 
+import base64
 from collections.abc import Callable
 from pathlib import PurePosixPath
 import re
+import tomllib
 from urllib.parse import quote
 
 from control_plane.client_test_notes import NOTHING_TO_TEST
@@ -63,12 +65,9 @@ def pure_dependency_update(
     ):
         return False
     path = "/repos/" + "/".join(quote(part, safe="") for part in name.split("/"))
-    try:
-        comparison = read(f"{path}/compare/{quote(base_sha, safe='')}...{quote(head_sha, safe='')}")
-    except Exception as error:
-        if getattr(error, "rate_limited", False):
-            raise
-        return False
+    comparison = _safe_read(
+        read, f"{path}/compare/{quote(base_sha, safe='')}...{quote(head_sha, safe='')}"
+    )
     files = comparison.get("files") if isinstance(comparison, dict) else None
     # GitHub comparisons return at most 300 files, even across commit pages.
     if not isinstance(files, list) or not files or len(files) >= 300:
@@ -94,7 +93,11 @@ def pure_dependency_update(
                 or filename.startswith("/")
             ):
                 return False
-            if filename == "workspace.toml" and _workspace_pin_only(item):
+            if (
+                filename == "workspace.toml"
+                and item.get("status") == "modified"
+                and _workspace_pin_only(read=read, path=path, base_sha=base_sha, head_sha=head_sha)
+            ):
                 continue
             file = PurePosixPath(filename)
             if file.name not in _DEPENDENCY_FILES and not (
@@ -104,16 +107,52 @@ def pure_dependency_update(
     return True
 
 
-def _workspace_pin_only(item: dict[str, object]) -> bool:
-    patch = item.get("patch")
-    if item.get("status") != "modified" or not isinstance(patch, str):
-        return False
-    changes = [line for line in patch.splitlines() if line.startswith(("+", "-"))]
-    additions = sum(line.startswith("+") for line in changes)
-    deletions = sum(line.startswith("-") for line in changes)
-    return bool(
-        additions
-        and additions == deletions
-        and item.get("additions") == additions
-        and item.get("deletions") == deletions
-    ) and all(re.fullmatch(r'[+-]\s*ref = "[0-9a-f]{40}"', line) for line in changes)
+def _safe_read(read: Callable[[str], object], path: str) -> object:
+    try:
+        return read(path)
+    except Exception as error:
+        if getattr(error, "rate_limited", False):
+            raise
+        return None
+
+
+def _workspace_pin_only(
+    *, read: Callable[[str], object], path: str, base_sha: str, head_sha: str
+) -> bool:
+    documents = []
+    for revision in (base_sha, head_sha):
+        payload = _safe_read(read, f"{path}/contents/workspace.toml?ref={quote(revision, safe='')}")
+        if not isinstance(payload, dict) or payload.get("encoding") != "base64":
+            return False
+        content = payload.get("content")
+        if not isinstance(content, str):
+            return False
+        try:
+            decoded = base64.b64decode("".join(content.split()), validate=True)
+            if len(decoded) != payload.get("size"):
+                return False
+            documents.append(tomllib.loads(decoded.decode()))
+        except (ValueError, UnicodeDecodeError):
+            return False
+    changed = False
+    old, new = documents
+    for slot in ("devkit", "runtime"):
+        old_repos, new_repos = old.get("repos"), new.get("repos")
+        if not isinstance(old_repos, dict) or not isinstance(new_repos, dict):
+            return False
+        old_repo = old_repos.get(slot)
+        new_repo = new_repos.get(slot)
+        if not isinstance(old_repo, dict) or not isinstance(new_repo, dict):
+            continue
+        old_ref, new_ref = old_repo.get("ref"), new_repo.get("ref")
+        if old_ref == new_ref:
+            continue
+        if not all(
+            isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref)
+            for ref in (old_ref, new_ref)
+        ):
+            return False
+        changed = True
+        old_repo.pop("ref")
+        new_repo.pop("ref")
+    return changed and old == new

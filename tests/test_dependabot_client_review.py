@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from typing import Any, cast
 import unittest
+import base64
 
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
@@ -60,29 +61,6 @@ class DependabotClientReviewTests(unittest.TestCase):
                 [{"filename": "package.json", "status": "renamed", "previous_filename": "app.py"}],
                 False,
             ),
-            (
-                [
-                    {
-                        "filename": "workspace.toml",
-                        "status": "modified",
-                        "additions": 1,
-                        "deletions": 1,
-                        "patch": '-ref = "' + "a" * 40 + '"\n+ref = "' + "b" * 40 + '"',
-                    }
-                ],
-                True,
-            ),
-            (
-                [
-                    {
-                        "filename": "workspace.toml",
-                        "status": "modified",
-                        "patch": '-command = "old"\n+command = "new"',
-                    }
-                ],
-                False,
-            ),
-            ([{"filename": "workspace.toml", "status": "modified"}], False),
             ([], False),
             (good * 150, False),
             ([{"filename": "package.json"}], False),
@@ -108,6 +86,36 @@ class DependabotClientReviewTests(unittest.TestCase):
 
         self.assertFalse(pure_dependency_update(pull, read=refused))
         self.assertFalse(pure_dependency_update(pull, read=lambda _: {"message": "unavailable"}))
+
+    def test_workspace_only_exempts_devkit_runtime_pins_with_complete_immutable_files(self) -> None:
+        from control_plane.dependency_update_review import pure_dependency_update
+
+        for slot, extra, expected in (
+            ("devkit", "", True),
+            ("runtime", "", True),
+            ("shared_addons", "", False),
+            ("devkit", '\ncommand = "new"', False),
+        ):
+            with self.subTest(slot=slot, extra=extra):
+                old = f'[repos.{slot}]\nrepository = "example/tool"\nref = "' + "a" * 40 + '"'
+                new = old.replace("a" * 40, "b" * 40) + extra
+                pull = _github_pull_request(16)
+                pull["user"] = {"login": "renovate[bot]", "type": "Bot"}
+                requests: list[str] = []
+
+                def read(path: str) -> object:
+                    requests.append(path)
+                    if "/compare/" in path:
+                        return {"files": [{"filename": "workspace.toml", "status": "modified"}]}
+                    content = new if path.endswith("ref=head-16") else old
+                    return {
+                        "encoding": "base64",
+                        "content": base64.b64encode(content.encode()).decode(),
+                        "size": len(content.encode()),
+                    }
+
+                self.assertEqual(pure_dependency_update(pull, read=read), expected)
+                self.assertTrue(any(path.endswith("ref=head-16") for path in requests))
 
     def test_configured_review_override_still_requires_notes(self) -> None:
         from control_plane.client_test_notes import change_client_review
