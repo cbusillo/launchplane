@@ -88,10 +88,33 @@ the lock does not resolve different IP/name aliases into physical identity.
 
 ## Host and credential prerequisites
 
-The exact production instance needs `PRODUCTION_BACKUP_SSH_PRIVATE_KEY` and
-`PRODUCTION_BACKUP_SSH_KNOWN_HOSTS` stored in the `launchplane_worker` store with
-`context_instance` scope for that lane. The worker ignores workstation keys and ambient
-SSH configuration. The Linux worker keeps key material in anonymous memory-backed
+A capture credential belongs to its exact host, SSH user, guest kind and ID,
+PBS storage and snapshot prefix. Its `PRODUCTION_BACKUP_SSH_PRIVATE_KEY` and
+`PRODUCTION_BACKUP_SSH_KNOWN_HOSTS` records live in the
+`production_backup_capture` integration. Every active policy for that boundary
+uses the same records. The original lane remains their custody and rotation
+scope; it does not select which product may request a capture. App runtime
+secret resolution never reads this integration.
+
+Under the deployment migration lock, startup adopts an unambiguous configured
+pair from `launchplane_worker` using active policy and target metadata. Adoption
+changes only record and binding metadata. IDs, names, encrypted versions and
+original custody stay intact, and audit events retain the source lane.
+It never reads or copies encrypted versions. Ambiguous pairs, shared secret
+consumers and a source lane naming multiple boundaries are left unadopted and
+capture refuses until the ambiguity is resolved. The existing reviewed
+production worker-binding setup control also adopts a newly configured pair
+atomically with its receipt. Its review digest includes capture authority and
+credential metadata, so a concurrent policy or credential change needs a new
+review.
+
+Rotate the existing pair through product-config dry-run/apply in its original
+custody lane, with integration `production_backup_capture` and its existing name
+and binding key. Rotation preserves the guest boundary and binding identity;
+this path cannot create a guest credential or change its reach. Initial setup
+still stores a lane worker pair and uses the reviewed binding control to adopt
+it. Do not enter a second key for another product on the same boundary.
+The worker ignores workstation keys and ambient SSH configuration. The Linux worker keeps key material in anonymous memory-backed
 files with mode 0600, exposes them to SSH through its own procfs descriptors, and
 closes them on completion. It never writes the material to disk. A runtime
 without Linux memfd support fails closed. Strict host-key checking stays enabled.
@@ -136,7 +159,11 @@ listing. This proves capture and presence; it is not a full restore test or a
 PBS datastore-wide verification job. Driver-specific logical backup verification
 and recovery exercises remain separate evidence.
 
-Snapshot pruning runs only after both captures pass. It removes only names
+Snapshot pruning runs only after both captures pass. For a shared guest and
+prefix, it retains the highest count among all active policies, including a
+policy awaiting review renewal. Each deletion holds the authority read guard
+while recomputing that floor, so policy changes cannot race a prune.
+ It removes only names
 matching this provider's configured prefix and timestamp/hash format, preserves
 the just-created snapshot, and retains at least one snapshot even when retention
 is zero. Existing snapshots outside that format are kept. Retention failure is
@@ -332,3 +359,20 @@ Agents read proposal status through the same exact-lane proposal list, or replay
 the identical submission when its response was interrupted. The generic
 privileged-operation agent-summary route is reserved for its generic descriptors;
 the proposal helper does not poll it for backup proposals.
+
+## Capture-free proposal qualification
+
+`GET /v1/production-backup-authority` also returns the selected policy as
+`policy_configuration`, without provider coordinates or credentials, so a
+proposal can reuse current target IDs and retention rather than reconstructing
+configuration from documentation. Existing names-only helpers may omit this
+field from their public projection.
+
+`GET /v1/production-backup-authority/preflight` accepts an optional
+`proposal_id` for a saved pending backup-policy proposal. It verifies that the
+proposal belongs to the requested production lane, remains current, and has
+unchanged planning evidence, then resolves its proposed guest credentials.
+It executes only the boundary read and exact PBS storage-status check. It
+neither captures nor approves nor applies the policy. Its response reports the
+proposed policy revision and `capture_started: false`; mismatched or stale
+proposals refuse. Without a proposal ID, the route qualifies active authority.

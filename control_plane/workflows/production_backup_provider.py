@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext, AbstractContextManager
 import os
 import re
 import subprocess
@@ -80,6 +80,8 @@ def execute_production_backup_provider(
     checkpoint: Callable[[str], None] | None = None,
     record_progress: Callable[[dict[str, str]], None] | None = None,
     preflight_only: bool = False,
+    retention_count: Callable[[], int] | None = None,
+    retention_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> ProductionBackupGateWorkerResult:
     """Capture both policy operations through one exact forced-command boundary."""
     started_at = utc_now_timestamp()
@@ -251,12 +253,21 @@ def execute_production_backup_provider(
                 snapshots = _snapshot_names(
                     run([guest_command, "listsnapshot", source.guest_id]), prefix
                 )
-                delete_count = max(len(snapshots) - max(1, policy.fast_snapshot.retention_count), 0)
-                for name in [name for name in snapshots if name != snapshot][:delete_count]:
+                remaining = len(snapshots)
+                for name in [name for name in snapshots if name != snapshot]:
                     save_progress()
-                    if checkpoint is not None:
-                        checkpoint(stage)
-                    run([guest_command, "delsnapshot", source.guest_id, name])
+                    with retention_guard() if retention_guard else nullcontext():
+                        if checkpoint is not None:
+                            checkpoint(stage)
+                        keep = (
+                            retention_count()
+                            if retention_count
+                            else policy.fast_snapshot.retention_count
+                        )
+                        if remaining <= max(1, keep):
+                            break
+                        run([guest_command, "delsnapshot", source.guest_id, name])
+                        remaining -= 1
                 evidence["retention_status"] = "pass"
             except (OSError, ValueError, subprocess.TimeoutExpired) as error:
                 evidence["retention_status"] = "fail"

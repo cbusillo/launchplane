@@ -5,7 +5,10 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from control_plane import secrets as control_plane_secrets
+from control_plane.guest_capture_credentials import (
+    resolve_guest_capture_values,
+    shared_snapshot_retention,
+)
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_authority import (
     ProxmoxGuestBackupDestinationReference,
@@ -188,16 +191,16 @@ def _execute_shared_production_backup(
             raise ProductionBackupProviderError(error.code) from error
 
     check_effect("backup_preflight")
-    values = control_plane_secrets.resolve_lane_worker_secret_values(
-        context_name=binding.request.context,
-        instance_name=binding.request.instance,
-    )
+    assert isinstance(record_store, PostgresRecordStore)
+    values = resolve_guest_capture_values(record_store, binding)
     result = execute_production_backup_provider(
         binding,
         ssh_private_key=values.get(SSH_PRIVATE_KEY, ""),
         ssh_known_hosts=values.get(SSH_KNOWN_HOSTS, ""),
         checkpoint=check_effect,
         record_progress=record_progress,
+        retention_count=lambda: shared_snapshot_retention(record_store, binding),
+        retention_guard=record_store.production_backup_retention_guard,
     )
     return VeriReelProdBackupGateWorkerResult(
         status=result.status,

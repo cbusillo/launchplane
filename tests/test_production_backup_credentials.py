@@ -10,6 +10,11 @@ from unittest.mock import patch
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding, SecretVersion
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.production_backup_credentials import BACKUP_CREDENTIAL_KEYS
+from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
+from control_plane.contracts.privileged_operation import PrivilegedOperationLocalOperatorActor
+from control_plane.privileged_operation_service import create_typed_privileged_operation_plan
+from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
+from control_plane.contracts.guest_capture_boundary import GUEST_CAPTURE_INTEGRATION
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -95,13 +100,13 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.route = "/v1/products/example-product/environments/prod/backup-worker-bindings/apply"
         setup_memory_files(self)
 
-    def make_app(self, actions: tuple[str, ...]) -> FastAPI:
+    def make_app(self, actions: tuple[str, ...], product: str = "example-product") -> FastAPI:
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=_github_human_product_config_policy(
                 actions=actions,
-                product="example-product",
-                context="example-product",
+                product=product,
+                context=product,
                 instances=("prod",),
                 schema_version=2,
             ),
@@ -157,12 +162,15 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
                 (await self.post({**body, "reason": "Other reason"}, "rebind")).status_code, 409
             )
         for record in self.originals:
-            self.assertEqual(self.store.read_secret_record(record.secret_id), record)
+            adopted = self.store.read_secret_record(record.secret_id)
+            self.assertEqual(adopted.current_version_id, record.current_version_id)
+            self.assertIsNotNone(adopted.capture_boundary)
+            self.assertEqual(adopted.integration, GUEST_CAPTURE_INTEGRATION)
             self.assertEqual(len(self.store.list_secret_versions(secret_id=record.secret_id)), 1)
         self.assertEqual(
             set(
                 b.binding_key
-                for b in self.store.list_secret_bindings(integration="launchplane_worker")
+                for b in self.store.list_secret_bindings(integration=GUEST_CAPTURE_INTEGRATION)
             ),
             set(BACKUP_CREDENTIAL_KEYS),
         )
@@ -377,3 +385,108 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.status_code, 202, replay.text)
         self.assertTrue(replay.json()["replayed"])
         self.assertEqual(replay.json()["original_trace_id"], applied.json()["trace_id"])
+
+    async def test_other_product_preflight_uses_guest_credentials_without_copying(self) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "adopt")).status_code, 202)
+        payload = _profile().model_dump(mode="json")
+        payload["product"] = "other"
+        payload["lanes"][0]["context"] = "other"
+        self.store.write_product_profile_record(type(_profile()).model_validate(payload))
+        payload = _policy().model_dump(mode="json")
+        payload.update(
+            product="other", context="other", record_id="", policy_id="", policy_digest=""
+        )
+        self.store.write_production_backup_policy_record(type(_policy()).model_validate(payload))
+        host = BackupHost()
+        with (
+            patch("control_plane.secrets._decrypt_secret_value", return_value="fixture"),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            ),
+        ):
+            response = await _asgi_request(
+                self.make_app(("production_backup_authority.read",), product="other"),
+                "GET",
+                "/v1/production-backup-authority/preflight?product=other&context=other&instance=prod&promotion_action=generic_web_prod_promotion.execute",
+                headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["status"], "pass")
+        self.assertFalse(response.json()["result"]["capture_started"])
+        self.assertEqual(len(self.store.list_secret_records()), len(self.originals))
+        self.assertEqual(
+            [command[0] for command in host.commands], ["launchplane-backup-boundary", "pvesm"]
+        )
+
+    async def test_saved_pending_proposal_preflight_does_not_apply_policy(self) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "adopt")).status_code, 202)
+        current = _policy()
+        proposed = _policy(revision=2, supersedes_record_id=current.record_id)
+        proposal = create_typed_privileged_operation_plan(
+            record_store=self.store,
+            descriptor_id="production-backup-policy",
+            actor=PrivilegedOperationLocalOperatorActor(principal_sha256="a" * 64),
+            source_kind="agent_api",
+            source_event_id="preflight-proposal",
+            request=BackupPolicyProposalInput(
+                authority=ProductionBackupAuthorityWriteEnvelope(
+                    mode="dry_run",
+                    policy=proposed,
+                    expected_current_policy_record_id=current.record_id,
+                ),
+                reason="Qualify without capture",
+            ),
+            expires_in_seconds=3600,
+        ).record
+        host = BackupHost()
+        with (
+            patch("control_plane.secrets._decrypt_secret_value", return_value="fixture"),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            ),
+        ):
+            response = await _asgi_request(
+                self.app,
+                "GET",
+                f"/v1/production-backup-authority/preflight?product=example-product&context=example-product&instance=prod&promotion_action={current.promotion_action}&proposal_id={proposal.operation_id}",
+                headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["policy_record_id"], proposed.record_id)
+        self.assertEqual(response.json()["result"]["status"], "pass")
+        self.assertEqual(
+            self.store.list_production_backup_policy_records(status="active"), (current,)
+        )
+        self.assertEqual(
+            self.store.read_privileged_operation_record(proposal.operation_id).status, "planned"
+        )
+        self.assertEqual(
+            [command[0] for command in host.commands], ["launchplane-backup-boundary", "pvesm"]
+        )
+
+    async def test_canonical_bindings_offer_adoption_and_guest_readback(self) -> None:
+        for binding in self.store.list_secret_bindings():
+            key = next(
+                key
+                for key, identifier in self.selection.items()
+                if identifier == binding.binding_id
+            )
+            self.store.write_secret_binding(binding.model_copy(update={"binding_key": key}))
+        body = await self.reviewed()
+        self.assertEqual((await self.post(body, "canonical-adoption")).status_code, 202)
+        response = await _asgi_request(
+            self.app,
+            "GET",
+            self.route.removesuffix("/apply"),
+            headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            {item["binding_id"] for item in response.json()["result"]["credentials"]},
+            set(self.selection.values()),
+        )
+        dry = await self.post({"bindings": self.selection, "reason": "Already guest-owned"})
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.assertFalse(dry.json()["result"]["changed"])

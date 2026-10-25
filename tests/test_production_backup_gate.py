@@ -123,7 +123,7 @@ class ProductionBackupGateTests(unittest.TestCase):
         host = BackupHost(after_snapshot=revoke)
         with (
             patch(
-                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
                 return_value={
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "private",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "hosts",
@@ -227,7 +227,7 @@ class ProductionBackupGateTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
                 return_value={
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "private",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "hosts",
@@ -270,7 +270,7 @@ class ProductionBackupGateTests(unittest.TestCase):
         }
         with (
             patch(
-                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
                 return_value={
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "private",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "hosts",
@@ -313,7 +313,7 @@ class ProductionBackupGateTests(unittest.TestCase):
         )
         with (
             patch(
-                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
                 return_value={
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "worker-private",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "worker-hosts",
@@ -335,8 +335,8 @@ class ProductionBackupGateTests(unittest.TestCase):
                 lease_owner="test-worker",
             )
         worker_secrets.assert_called_once_with(
-            context_name=self.binding.request.context,
-            instance_name=self.binding.request.instance,
+            self.store,
+            self.binding,
         )
         self.assertEqual(provider.call_args.kwargs["ssh_private_key"], "worker-private")
         self.assertEqual(provider.call_args.kwargs["ssh_known_hosts"], "worker-hosts")
@@ -367,7 +367,7 @@ class ProductionBackupGateTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
                 return_value={
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "fixture-key",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "fixture-hosts",
@@ -431,6 +431,42 @@ class ProductionBackupGateTests(unittest.TestCase):
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "Real PostgreSQL test URL is required"
 )
 class ProductionBackupGatePostgresTests(unittest.TestCase):
+    def test_retention_guard_serializes_policy_changes_with_pruning(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            binding = _binding()
+            store.write_production_backup_target_record(binding.source_target)
+            store.write_production_backup_target_record(binding.destination_target)
+            store.write_production_backup_policy_record(binding.policy)
+            payload = binding.policy.model_dump(mode="json")
+            payload.update(
+                record_id="",
+                policy_digest="",
+                policy_revision=2,
+                supersedes_record_id=binding.policy.record_id,
+            )
+            payload["fast_snapshot"]["retention_count"] += 1
+            revised = type(binding.policy).model_validate(payload)
+            started = Event()
+
+            def revise() -> None:
+                started.set()
+                store.write_production_backup_policy_record(revised)
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                with store.production_backup_retention_guard():
+                    future = executor.submit(revise)
+                    self.assertTrue(started.wait(5))
+                    with self.assertRaises(FutureTimeoutError):
+                        future.result(timeout=0.1)
+                    self.assertEqual(
+                        store.list_production_backup_policy_records(status="active"),
+                        (binding.policy,),
+                    )
+                future.result(timeout=10)
+            self.assertEqual(
+                store.list_production_backup_policy_records(status="active"), (revised,)
+            )
+
     def test_source_lock_checkpoint_detects_connection_loss(self) -> None:
         with _store_for_fresh_head_database() as store:
             engine = create_engine(store.database_url)
@@ -466,7 +502,7 @@ class ProductionBackupGatePostgresTests(unittest.TestCase):
             with store.production_backup_source_lock(source_key) as acquired:
                 self.assertTrue(acquired)
                 with patch(
-                    "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values"
+                    "control_plane.workflows.production_backup_gate.resolve_guest_capture_values"
                 ) as runtime:
                     with self.assertRaisesRegex(
                         ProductionBackupProviderError, "backup_source_busy"

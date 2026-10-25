@@ -13,6 +13,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
 from control_plane.storage.postgres import _build_engine
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
     e8d2f6a0b4c7_drop_preview_enablement as retired_preview,
@@ -180,6 +181,11 @@ def migrate_schema(
                     raise RuntimeError(
                         "Launchplane schema migration did not reach a compatible revision."
                     )
+                store = PostgresRecordStore(database_url=database_url)
+                try:
+                    store.adopt_guest_capture_credentials()
+                finally:
+                    store.close()
                 return final_revision
             finally:
                 lock_connection.execute(
