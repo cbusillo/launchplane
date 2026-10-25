@@ -78,6 +78,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.witness_probe_failure = False
         self.paused = False
         self.clones = False
+        self.clone_copies_fail = False
         self.overlay = self.root / "runner-overlay"
         self.overlay.mkdir()
         self.volume_created_at = datetime.now(timezone.utc).isoformat()
@@ -165,6 +166,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         elif arguments[0] == "cp":
             self.assertTrue(self.paused)
             self.assertEqual(Path(arguments[-2]), self.source / "filestore")
+            if self.clone_copies_fail and arguments[2] == "--reflink=always":
+                return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"")
             shutil.copytree(arguments[-2], arguments[-1], dirs_exist_ok=True)
         elif arguments[:2] == ["docker", "cp"]:
             self.assertEqual(Path(arguments[2]), self.source / "database.dump")
@@ -482,6 +485,15 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             output = self.run_script()
         self.assertIn("clean_preview_snapshot_restored=true", output.splitlines())
         self.assertTrue(any(call[:3] == ["cp", "-a", "--reflink=always"] for call in self.calls))
+
+    def test_admitted_clone_fails_closed_instead_of_copying_in_full(self) -> None:
+        self.clones = True
+        self.clone_copies_fail = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        copies = [call[:3] for call in self.calls if call[:2] == ["cp", "-a"]]
+        self.assertEqual(copies, [["cp", "-a", "--reflink=always"]] * 2)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
 
     def test_existing_preview_data_and_staff_edits_are_never_overwritten(self) -> None:
         self.present = True

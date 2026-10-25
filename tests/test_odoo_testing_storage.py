@@ -560,7 +560,7 @@ class HostCapacityTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     namespace["storage_capacity"](spec, containers, budget)
 
-    def test_proven_filestore_clones_are_charged_near_zero_and_real_copies_in_full(self) -> None:
+    def test_staged_filestore_is_charged_once_and_proven_clones_as_free(self) -> None:
         import shutil
         import subprocess
 
@@ -578,10 +578,16 @@ class HostCapacityTests(unittest.TestCase):
 
         with TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            for name in ("data", "db", "overlay", "home"):
-                (root / name).mkdir()
+            for name in ("data/_data", "db/_data", "overlay", "home"):
+                (root / name).mkdir(parents=True)
             namespace["docker"] = lambda *arguments: json.dumps(
-                [{"Mountpoint": str(root / ("db" if arguments[-1].endswith("-db") else "data"))}]
+                [
+                    {
+                        "Mountpoint": str(
+                            root / ("db" if arguments[-1].endswith("-db") else "data") / "_data"
+                        )
+                    }
+                ]
             ).encode()
             spec: dict[str, Any] = {
                 "generation": {"namespace": "fixture", "source_mode": "ssh"},
@@ -611,11 +617,11 @@ class HostCapacityTests(unittest.TestCase):
                 patch("subprocess.run", side_effect=probe),
                 patch("time.sleep"),
             ):
-                self.assertFalse(admitted(110))
-                self.assertTrue(admitted(111))
+                self.assertFalse(admitted(70))
+                self.assertTrue(admitted(71))
                 spec["generation"]["clean_snapshot_enabled"] = True
-                self.assertFalse(admitted(160))
-                self.assertTrue(admitted(161))
+                self.assertFalse(admitted(120))
+                self.assertTrue(admitted(121))
                 clones = True
                 self.assertFalse(admitted(80))
                 self.assertTrue(admitted(81))

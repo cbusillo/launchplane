@@ -911,22 +911,9 @@ def restore_lock_path(namespace):
     return Path(tempfile.gettempdir()) / (namespace + "-copy.lock")
 
 
-def discard_abandoned_restore_staging(namespace):
-    for staging in restore_staging_root().iterdir():
-        if staging.is_symlink() or not staging.is_dir() or not re.fullmatch(r"lp-testing-[a-f0-9]{32}", staging.name):
-            continue
-        if staging.name == namespace:
-            shutil.rmtree(staging)
-            continue
-        descriptor = os.open(restore_lock_path(staging.name), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            continue
-        else:
-            shutil.rmtree(staging)
-        finally:
-            os.close(descriptor)
+def discard_interrupted_restore_staging(staging):
+    if staging.exists():
+        shutil.rmtree(staging)
 
 
 def unpause_runner_left_by_interrupted_landing(containers):
@@ -934,21 +921,15 @@ def unpause_runner_left_by_interrupted_landing(containers):
         docker("unpause", containers["script-runner"][0])
 
 
-def land_staged_filestore(spec, runner, staged, database, clone):
-    volume = json.loads(docker("volume", "inspect", spec["generation"]["namespace"] + "-data"))[0]
-    backing = Path(volume["Mountpoint"]).resolve(strict=True)
-    if clone is None:
-        clone = filestore_clone_proved(staged.parent, backing)
-    if not clone:
-        docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
-        docker("cp", str(staged) + "/.", runner + ":/volumes/data/filestore/" + database)
-        return
-    destination = backing / "filestore" / database
+def move_staged_filestore_into_volume(runner, staged, destination):
     docker("pause", runner)
     try:
         if destination.resolve() != destination:
             raise RuntimeError("Testing filestore is aliased")
-        copy_filestore(staged, destination, True)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            os.rename(destination, staged.parent / "replaced-filestore")
+        os.rename(staged, destination)
     finally:
         docker("unpause", runner)
 
@@ -1118,7 +1099,9 @@ def restore_main():
         files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
         staged_bytes = sum(item['size'] for item in files['chunks'])
         assembly_bytes = sum(capture[part]['size'] for part in ('database', 'filestore'))
-    discard_abandoned_restore_staging(namespace)
+    data_backing = Path(json.loads(docker("volume", "inspect", namespace + "-data"))[0]["Mountpoint"]).resolve(strict=True)
+    restore_staging = restore_staging_path(data_backing)
+    discard_interrupted_restore_staging(restore_staging)
     clones = {}
     if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes, clone_decisions=clones):
         raise RuntimeError('Testing storage capacity is insufficient')
@@ -1167,8 +1150,8 @@ def restore_main():
                 if source["ODOO_UPSTREAM_USER"] == "root"
                 else ["pg_dump", "-U", source["ODOO_UPSTREAM_DB_USER"], "-Fc", source["ODOO_UPSTREAM_DB_NAME"]]
             )
-            staging = restore_staging_root() / namespace
-            staging.mkdir(mode=0o700)
+            restore_staging.mkdir(mode=0o700)
+            staging = restore_staging
             dump = staging / "database.dump"
             with dump.open("xb") as output:
                 command([*ssh, destination, remote], stdout=output)
@@ -1181,7 +1164,7 @@ def restore_main():
             )
             command(["rsync", *rsync_options,
                 "-e", shlex.join(ssh), destination + ":" + path.rstrip("/") + "/", str(filestore) + "/"])
-            land_staged_filestore(spec, runner, filestore, database, clones.get('data'))
+            move_staged_filestore_into_volume(runner, filestore, data_backing / "filestore" / database)
             docker("cp", str(dump), runner + ":" + dump_path)
             docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
         uid = docker("exec", runner, "id", "-u").decode().strip()

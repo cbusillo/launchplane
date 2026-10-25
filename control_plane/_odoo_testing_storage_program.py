@@ -1,8 +1,7 @@
 """Fixed host maintenance library embedded behind the existing restore guard."""
 
 MAX_DISPOSALS_PER_PASS = 4
-RESTORE_STAGING_DIRECTORY = ".local/state/launchplane-testing-restore-staging"
-CLONE_PROBE_BYTES = 65536
+CLONE_PROBE_BYTES = 4 * 1024 * 1024
 TXG_SYNC_WAIT_SECONDS = 6
 
 STORAGE_MAINTENANCE_LIBRARY = r"""
@@ -13,12 +12,11 @@ import time
 import uuid
 
 
-def restore_staging_root():
-    root = Path.home() / __RESTORE_STAGING_DIRECTORY__
-    if root.resolve() != root.absolute():
-        raise RuntimeError('Restore staging is aliased')
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return root
+def restore_staging_path(data_mountpoint):
+    backing = Path(data_mountpoint).resolve(strict=True)
+    if backing.name != '_data':
+        raise RuntimeError('Testing data volume layout is unsupported')
+    return backing.parent / 'launchplane-restore-staging'
 
 
 def filestore_clone_proved(source_directory, target_directory):
@@ -82,9 +80,7 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         filestore_clone_source=None, clone_decisions=None):
     gen = spec['generation']
     decisions = {} if clone_decisions is None else clone_decisions
-    ssh_restore = host_staging_bytes is None and gen.get('source_mode', 'ssh') != 'container-export'
-    if ssh_restore:
-        filestore_clone_source = restore_staging_root()
+    filestore_charged_as_staging = host_staging_bytes is None and gen.get('source_mode', 'ssh') != 'container-export'
     # Group demands on the same actual backing filesystem. Comparing each
     # volume independently would admit two allocations against the same free bytes.
     required = {}
@@ -102,7 +98,9 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         name = spec.get('preview_volumes', {}).get(role, gen['namespace'] + suffix)
         volume = json.loads(docker('volume', 'inspect', name))[0]
         backings[role] = volume['Mountpoint']
-        if role == 'data' and filestore_clone_source is not None:
+        if role == 'data' and filestore_charged_as_staging:
+            size = 0
+        elif role == 'data' and filestore_clone_source is not None:
             decisions['data'] = filestore_clone_proved(filestore_clone_source, backings[role])
             if decisions['data']:
                 size = 0
@@ -114,11 +112,11 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
     if not upper:
         raise RuntimeError('Runner staging backing is unavailable')
     if runner_staging_bytes is None:
-        runner_staging_bytes = (budget['database_bytes'] if ssh_restore
+        runner_staging_bytes = (budget['database_bytes'] if filestore_charged_as_staging
             else max(assembly_bytes, budget['staging_bytes'] - staged_bytes))
     demand(upper, runner_staging_bytes)
-    if ssh_restore:
-        demand(filestore_clone_source, budget['staging_bytes'])
+    if filestore_charged_as_staging:
+        demand(restore_staging_path(backings['data']).parent, budget['staging_bytes'])
     elif host_staging_bytes is not None:
         demand(spec['staging_directory'], host_staging_bytes)
     if database_staging_bytes:
@@ -138,7 +136,6 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
 """
 STORAGE_MAINTENANCE_LIBRARY = (
     STORAGE_MAINTENANCE_LIBRARY.replace("__MAX_DISPOSALS__", str(MAX_DISPOSALS_PER_PASS))
-    .replace("__RESTORE_STAGING_DIRECTORY__", repr(RESTORE_STAGING_DIRECTORY))
     .replace("__CLONE_PROBE_BYTES__", str(CLONE_PROBE_BYTES))
     .replace("__TXG_SYNC_WAIT_SECONDS__", str(TXG_SYNC_WAIT_SECONDS))
 )

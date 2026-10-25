@@ -38,23 +38,22 @@ for the filestore.
 
 ## Storage
 
-An SSH refresh stages the source dump and filestore on disk under the host
-user's `~/.local/state/launchplane-testing-restore-staging/<namespace>`, never
-in `/tmp`, which may be a RAM disk. When the host proves it can clone from that
-staging into the testing volume, the filestore lands by `cp --reflink=auto`
-with the runner paused; otherwise the runner copy is used. A later restore
-removes staging left by a killed run once that run's namespace lock is free.
+An SSH refresh stages the source dump and filestore on disk in
+`launchplane-restore-staging` beside the testing data volume's `_data`
+directory, never in `/tmp`, which may be a RAM disk. The container cannot see
+that directory. Because it is on the volume's own filesystem, the filestore
+moves into the volume by rename, with the runner paused, and is never copied
+twice. The next restore removes staging that a killed run left behind;
+retiring the volume removes it too. Every child of a restore inherits its
+namespace lock, so staging is never removed while a child still runs.
 
-The space check charges each filestore copy in full unless the host proves a
-clone with a real `cp --reflink=always` probe between the same two
-filesystems; a proven clone is charged zero. This applies to staging into
-testing, testing into the snapshot, and the snapshot into a new preview. A copy
-admitted as a clone runs `cp --reflink=always` and fails rather than falling
-back to a full copy the check did not charge. Every child of a restore inherits
-its namespace lock, so staging is never discarded while a child still runs. The
-SSH runner is charged the dump, not the filestore. Database restores are always
-charged in full. On storage that cannot clone, every copy is still charged and
-refused when it does not fit.
+The space check charges the SSH filestore once, as staging, and the runner the
+dump. Copies from testing into the snapshot and from the snapshot into a new
+preview are charged zero only when a real `cp --reflink=always` probe between
+the same two filesystems succeeds; otherwise they are charged in full and
+refused when they do not fit. A copy admitted as a clone runs
+`cp --reflink=always` and fails rather than falling back to a full copy the
+check did not charge. Database restores are always charged in full.
 
 The newest qualified immutable database-backed capture is the preview source,
 separate from the current testing generation. Worker completion records it

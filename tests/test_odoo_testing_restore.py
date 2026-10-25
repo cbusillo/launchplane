@@ -22,7 +22,7 @@ from control_plane.dokploy.compose import (
 )
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
-from control_plane._odoo_testing_storage_program import RESTORE_STAGING_DIRECTORY
+from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -180,9 +180,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             "reserve_bytes": 1024,
         }
         self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.root)}}
-        source = self.root / (self.gen.namespace + "-data") / "filestore" / self.database
-        source.mkdir(parents=True)
-        (source / "attachment").write_bytes(b"clean attachment")
+        self.clones = True
+        source = self.data_backing / "filestore" / self.database
         original = self.command
         popen = subprocess.Popen
 
@@ -218,10 +217,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             )
         self.assertEqual(status, 0, output)
         self.assertIn("clean_testing_snapshot_completed=true", output.splitlines())
+        self.assertTrue(any(call[:3] == ["cp", "-a", "--reflink=always"] for call in self.calls))
         self.assertIn(["docker", "start", "web"], self.calls)
-        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"clean attachment")
+        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"production attachment")
         (source / "attachment").write_bytes(b"staff changed testing")
-        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"clean attachment")
+        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"production attachment")
         self.spec["copy_binding_sha256"] = "d" * 64
         self.calls.clear()
         with (
@@ -238,7 +238,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertNotEqual(status, 0, output)
         self.assertNotIn(["docker", "start", "web"], self.calls)
         self.assertFalse((snapshot.parent / self.spec["copy_binding_sha256"]).exists())
-        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"clean attachment")
+        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"production attachment")
 
     def test_attachment_refusal_reaches_schedule_readback_without_private_output(self) -> None:
         original = self.command
@@ -330,10 +330,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.tmp = self.root
         self.clones = False
-        self.clone_copies_fail = False
+        self.staged_inode = 0
         self.inherited_descriptors: list[list[int]] = []
         self.gen = generation()
         self.database = self.gen.namespace.replace("-", "_")
+        self.data_backing = self.root / (self.gen.namespace + "-data") / "_data"
         source = {
             "ODOO_UPSTREAM_HOST": "source.invalid",
             "ODOO_UPSTREAM_USER": "restore-reader",
@@ -368,8 +369,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.gate_hash = ""
         for suffix in ("data", "logs", "db"):
             name = self.gen.namespace + "-" + suffix
-            backing = self.root / name
-            backing.mkdir()
+            backing = self.root / name / "_data"
+            backing.mkdir(parents=True)
             self.volumes[name] = {
                 "Driver": "local",
                 "Options": {},
@@ -422,15 +423,13 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             if command[0] == "ssh":
                 kwargs["stdout"].write(b"fixture dump")
             else:
-                (Path(command[-1]) / "attachment").write_bytes(b"production attachment")
+                staged = Path(command[-1]) / "attachment"
+                staged.write_bytes(b"production attachment")
+                self.staged_inode = staged.stat().st_ino
         elif command[:2] == ["cp", "--reflink=always"]:
             if not self.clones:
                 return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"")
             shutil.copyfile(command[-2], command[-1])
-        elif command[:2] == ["cp", "-a"]:
-            if self.clone_copies_fail and command[2] == "--reflink=always":
-                return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"")
-            shutil.copytree(command[-2], command[-1], dirs_exist_ok=True)
         elif command[:2] == ["docker", "ps"]:
             result = "\n".join(self.containers).encode()
         elif command[:2] == ["docker", "inspect"]:
@@ -527,52 +526,19 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertTrue(staged.is_relative_to(self.root))
         self.assertFalse(staged.exists())
 
-    def test_staged_filestore_lands_by_host_clone_with_the_runner_paused(self) -> None:
-        self.clones = True
+    def test_staged_filestore_moves_into_testing_without_a_copy(self) -> None:
         status, output = self.run_program()
         self.assertEqual(status, 0, output)
-        landed = self.root / (self.gen.namespace + "-data") / "filestore" / self.database
-        self.assertEqual((landed / "attachment").read_bytes(), b"production attachment")
-        clone = next(
-            index
-            for index, call in enumerate(self.calls)
-            if call[:3] == ["cp", "-a", "--reflink=always"]
+        landed = self.data_backing / "filestore" / self.database / "attachment"
+        self.assertEqual(landed.stat().st_ino, self.staged_inode)
+        self.assertLess(
+            self.calls.index(["docker", "pause", "script-runner"]),
+            self.calls.index(["docker", "unpause", "script-runner"]),
         )
-        self.assertLess(self.calls.index(["docker", "pause", "script-runner"]), clone)
-        self.assertLess(clone, self.calls.index(["docker", "unpause", "script-runner"]))
         self.assertFalse(
             any(call[:2] == ["docker", "cp"] and "filestore" in call[2] for call in self.calls)
         )
-
-    def test_storage_that_cannot_clone_keeps_the_runner_copy(self) -> None:
-        status, output = self.run_program()
-        self.assertEqual(status, 0, output)
-        self.assertTrue(
-            any(call[:2] == ["docker", "cp"] and "filestore" in call[2] for call in self.calls)
-        )
-        self.assertFalse(any(call[:2] == ["cp", "-a"] for call in self.calls))
-        self.assertNotIn(["docker", "pause", "script-runner"], self.calls)
-
-    def test_admitted_clone_fails_closed_instead_of_copying_in_full(self) -> None:
-        self.spec["generation"]["drill_storage_budget"] = {
-            "database_bytes": 1024,
-            "filestore_bytes": 1024,
-            "staging_bytes": 1024,
-            "reserve_bytes": 1024,
-        }
-        self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.root)}}
-        self.clones = True
-        self.clone_copies_fail = True
-        status, output = self.run_program()
-        self.assertNotEqual(status, 0, output)
-        self.assertEqual(
-            len([call for call in self.calls if call[:3] == ["cp", "-a", "--reflink=always"]]), 2
-        )
-        self.assertFalse(any(call[:3] == ["cp", "-a", "--reflink=auto"] for call in self.calls))
-        self.assertFalse(
-            any(call[:2] == ["docker", "cp"] and "filestore" in call[2] for call in self.calls)
-        )
-        self.assertNotIn(["docker", "start", "web"], self.calls)
+        self.assertFalse(any(call[0] == "cp" for call in self.calls))
 
     def test_every_restore_child_process_holds_the_restore_lock(self) -> None:
         status, output = self.run_program()
@@ -594,22 +560,17 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         )
         self.assertLess(resumed, first_runner_exec)
 
-    def test_abandoned_restore_staging_is_removed_only_when_no_restore_holds_it(self) -> None:
-        import fcntl
-
-        root = self.root / RESTORE_STAGING_DIRECTORY
-        held = root / ("lp-testing-" + "1" * 32)
-        abandoned = root / ("lp-testing-" + "2" * 32)
-        for staging in (held, abandoned):
-            (staging / "filestore").mkdir(parents=True)
-            (staging / "filestore/attachment").write_bytes(b"production attachment")
-        lock = os.open(self.tmp / (held.name + "-copy.lock"), os.O_CREAT | os.O_RDWR, 0o600)
-        self.addCleanup(os.close, lock)
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    def test_interrupted_restore_staging_is_discarded_on_the_next_run(self) -> None:
+        library: dict[str, Any] = {}
+        exec(STORAGE_MAINTENANCE_LIBRARY, library)
+        staging = library["restore_staging_path"](self.data_backing)
+        (staging / "filestore").mkdir(parents=True)
+        (staging / "filestore/attachment").write_bytes(b"production attachment")
+        self.existing_database = True
+        self.resume_verified = True
         status, output = self.run_program()
         self.assertEqual(status, 0, output)
-        self.assertTrue((held / "filestore/attachment").exists())
-        self.assertFalse(abandoned.exists())
+        self.assertFalse(staging.exists())
 
     def test_new_copy_starts_without_performing_inline_disposal(self) -> None:
         previous = "lp_drill_" + "b" * 32
