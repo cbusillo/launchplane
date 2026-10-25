@@ -1113,24 +1113,43 @@ class PrivilegedOperationContractTests(unittest.TestCase):
         assert isinstance(replay.record.request, ManagedMergeTrainPolicyImportProposalInput)
         self.assertIsNone(replay.record.request.preparation_context)
 
-    def test_merge_train_policy_import_refuses_new_legacy_bot_ids(self) -> None:
-        with TemporaryDirectory() as temporary_directory:
-            store = FilesystemRecordStore(Path(temporary_directory))
-            active = build_test_merge_train_policy_record(record_id="active")
-            store.write_merge_train_policy_record(active)
-            payload = build_test_merge_train_policy_record(record_id="candidate").model_dump(
-                mode="json"
-            )
-            payload["policy"]["policies"][0]["enqueue"].update(
-                trusted_automation_github_user_ids=[711], dependency_update_github_user_ids=[711]
-            )
-            payload["policy_sha256"] = ""
-            candidate = MergeTrainPolicyRecord.model_validate(payload)
-            request = ManagedMergeTrainPolicyImportProposalInput(
-                record=candidate, reason="Configure a dependency bot"
-            )
-            with self.assertRaises(PrivilegedOperationPlannerError):
-                plan_managed_merge_train_policy_import(store, request)
+    def test_merge_train_policy_import_refuses_new_legacy_ids_but_allows_migration(self) -> None:
+        from tests.merge_train_policy_fixtures import dependency_bot_policy
+
+        for existing_legacy, keep_legacy in ((False, True), (True, True), (True, False)):
+            with (
+                self.subTest(existing_legacy=existing_legacy, keep_legacy=keep_legacy),
+                TemporaryDirectory() as directory,
+            ):
+                store = FilesystemRecordStore(Path(directory))
+                active_payload = build_test_merge_train_policy_record(
+                    record_id="active"
+                ).model_dump(mode="json")
+                active_payload["policy"]["policies"][0]["enqueue"].update(
+                    trusted_automation_github_user_ids=[711],
+                    dependency_update_github_user_ids=[711] if existing_legacy else [],
+                )
+                active_payload["policy_sha256"] = ""
+                active = MergeTrainPolicyRecord.model_validate(active_payload)
+                store.write_merge_train_policy_record(active)
+                payload = active.model_dump(mode="json")
+                payload.update(record_id="candidate", policy_sha256="")
+                payload["policy"]["policies"][0]["enqueue"].update(
+                    dependency_update_github_user_ids=[711] if keep_legacy else [],
+                    dependency_update_bots=[dependency_bot_policy(711).model_dump()],
+                )
+                request = ManagedMergeTrainPolicyImportProposalInput(
+                    record=MergeTrainPolicyRecord.model_validate(payload),
+                    reason="Configure a dependency bot",
+                )
+                if not existing_legacy:
+                    with self.assertRaises(PrivilegedOperationPlannerError):
+                        plan_managed_merge_train_policy_import(store, request)
+                    continue
+                evidence = plan_managed_merge_train_policy_import(store, request)
+                self.assertEqual(
+                    evidence.changed_policy_keys, (active.policy.policies[0].policy_key,)
+                )
 
     def test_merge_train_policy_import_planner_rejects_record_id_from_history(self) -> None:
         with TemporaryDirectory() as temporary_directory:

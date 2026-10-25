@@ -118,10 +118,8 @@ class DependabotClientReviewTests(unittest.TestCase):
                 new = old.replace("a" * 40, "b" * 40) + extra
                 pull = _github_pull_request(16)
                 pull["user"] = {"id": 49699333, "login": "any-bot", "type": "Bot"}
-                requests: list[str] = []
 
                 def read(path: str) -> object:
-                    requests.append(path)
                     if "/compare/" in path:
                         return {"files": [{"filename": "workspace.toml", "status": "modified"}]}
                     content = new if path.endswith("ref=head-16") else old
