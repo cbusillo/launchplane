@@ -37,7 +37,11 @@ from control_plane.merge_train_github import (
     _validated_model_update,
     _wait_for_branch_sha,
 )
-from control_plane.dependency_update_review import DEPENDENCY_UPDATE_NOTES, pure_dependency_update
+from control_plane.dependency_update_review import (
+    DEPENDENCY_UPDATE_NOTES,
+    dependency_update_policy,
+    pure_dependency_update,
+)
 from control_plane.release_review_github import (
     missing_owner_test_notes,
     nest_owner_test_notes,
@@ -161,7 +165,9 @@ def _batch_owner_test_notes(
         body = detail.get("body")
         notes = owner_test_notes(body if isinstance(body, str) else "")
         if pure_dependency_update(
-            detail, read=lambda path: client.transport.request(method="GET", path=path)
+            detail,
+            read=lambda path: client.transport.request(method="GET", path=path),
+            policy=dependency_update_policy(detail, store=client._branch_refresh_store),
         ):
             raw_labels = detail.get("labels", ())
             labels = (

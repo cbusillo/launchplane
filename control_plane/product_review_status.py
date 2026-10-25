@@ -33,7 +33,7 @@ from control_plane.github_app_identity import (
     revoke_installation_token,
 )
 from control_plane.client_test_notes import change_client_review
-from control_plane.dependency_update_review import pure_dependency_update
+from control_plane.dependency_update_review import dependency_update_policy, pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_review import (
     ProductReviewStore,
@@ -185,7 +185,10 @@ class OwnerReviewStatusPublisher:
                     )
                     return None
                 facts = self._pull_request_facts(
-                    repository=repository, pull_request_number=pull_request_number, token=token
+                    repository=repository,
+                    pull_request_number=pull_request_number,
+                    token=token,
+                    policy_store=store,
                 )
             except Exception:
                 _LOGGER.warning(
@@ -317,7 +320,7 @@ class OwnerReviewStatusPublisher:
                 )
 
     def _pull_request_facts(
-        self, *, repository: str, pull_request_number: int, token: str
+        self, *, repository: str, pull_request_number: int, token: str, policy_store: object = None
     ) -> _PullRequestFacts:
         payload = self.api_request(
             path=f"/repos/{_repository_path(repository)}/pulls/{pull_request_number}",
@@ -346,7 +349,9 @@ class OwnerReviewStatusPublisher:
             else ""
         )
         dependency_only = pure_dependency_update(
-            payload, read=lambda path: self.api_request(path=path, token=token)
+            payload,
+            read=lambda path: self.api_request(path=path, token=token),
+            policy=dependency_update_policy(payload, store=policy_store),
         )
         return _PullRequestFacts(
             state=str(payload.get("state") or ""),

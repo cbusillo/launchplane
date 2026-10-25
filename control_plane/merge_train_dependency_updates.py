@@ -1,14 +1,9 @@
-"""Classify a dependency-update pull request from its commit messages.
-
-A pull request qualifies for label-free merge-train admission only when every
-updated dependency moves within one major version. Anything the messages do not
-prove, including a missing or unparseable version, is left for agent review.
-"""
-
 import json
 import re
 from collections.abc import Callable, Sequence
 from typing import Literal
+
+from control_plane.contracts.merge_train_policy import DependencyUpdateFormat, DependencyUpdateType
 
 DependencyUpdateClass = Literal["patch_or_minor", "needs_review"]
 
@@ -21,14 +16,19 @@ _VERSION = re.compile(
 
 
 def classify_dependency_update(
-    commit_messages: Sequence[str], *, author_login: str
+    commit_messages: Sequence[str],
+    *,
+    metadata_format: DependencyUpdateFormat,
+    allowed_update_types: Sequence[DependencyUpdateType],
 ) -> DependencyUpdateClass:
-    read_updates = DEPENDENCY_UPDATE_BOTS.get(author_login)
+    read_updates = UPDATE_FORMAT_PARSERS.get(metadata_format)
     if not commit_messages or read_updates is None:
         return "needs_review"
     for message in commit_messages:
         updates = read_updates(message)
-        if not updates or not all(_update_is_patch_or_minor(update) for update in updates):
+        if not updates or not all(
+            _update_qualifies(update, allowed_update_types) for update in updates
+        ):
             return "needs_review"
     return "patch_or_minor"
 
@@ -37,19 +37,20 @@ def _dependabot_updates(message: str) -> list[dict[str, str]]:
     trailer = _TRAILER.search(message)
     if trailer is None:
         return []
-    return [
-        {
-            "depName": name,
-            "updateType": "major"
-            if fields.get("update-type") == "version-update:semver-major"
-            else "patch",
-            "currentVersion": _previous_version(
-                message, name=name, new_version=fields.get("dependency-version", "")
-            ),
-            "newVersion": fields.get("dependency-version", ""),
-        }
-        for name, fields in _trailer_entries(trailer.group("body"))
-    ]
+    updates = []
+    for name, fields in _trailer_entries(trailer.group("body")):
+        new = fields.get("dependency-version", "")
+        old = _previous_version(message, name=name, new_version=new)
+        declared = fields.get("update-type", "").removeprefix("version-update:semver-")
+        updates.append(
+            {
+                "depName": name,
+                "updateType": declared or _version_update_type(old, new),
+                "currentVersion": old,
+                "newVersion": new,
+            }
+        )
+    return updates
 
 
 def _renovate_updates(message: str) -> list[dict[str, str]]:
@@ -71,15 +72,17 @@ def _renovate_updates(message: str) -> list[dict[str, str]]:
     return [{key: value or "" for key, value in update.items()} for update in updates]
 
 
-DEPENDENCY_UPDATE_BOTS: dict[str, Callable[[str], list[dict[str, str]]]] = {
-    "dependabot[bot]": _dependabot_updates,
-    "renovate[bot]": _renovate_updates,
+UPDATE_FORMAT_PARSERS: dict[str, Callable[[str], list[dict[str, str]]]] = {
+    "dependabot_trailer": _dependabot_updates,
+    "renovate_metadata": _renovate_updates,
 }
 _DIGEST = re.compile(r"(?:[0-9a-f]{40}|(?:sha256:)?[0-9a-f]{64})")
 
 
-def _update_is_patch_or_minor(update: dict[str, str]) -> bool:
-    if not update.get("depName"):
+def _update_qualifies(
+    update: dict[str, str], allowed_update_types: Sequence[DependencyUpdateType]
+) -> bool:
+    if not update.get("depName") or update.get("updateType") not in allowed_update_types:
         return False
     if update.get("updateType") == "digest":
         old_value, new_value = update.get("currentValue", ""), update.get("newValue", "")
@@ -89,9 +92,19 @@ def _update_is_patch_or_minor(update: dict[str, str]) -> bool:
             and _DIGEST.fullmatch(update.get("currentDigest", ""))
             and _DIGEST.fullmatch(update.get("newDigest", ""))
         )
-    return update.get("updateType") in {"patch", "minor"} and _within_major(
-        update.get("currentVersion", ""), update.get("newVersion", "")
-    )
+    old, new = update.get("currentVersion", ""), update.get("newVersion", "")
+    return update.get("updateType") == _version_update_type(old, new) and _within_major(old, new)
+
+
+def _version_update_type(old_version: str, new_version: str) -> str:
+    old, new = _VERSION.match(old_version), _VERSION.match(new_version)
+    if old is None or new is None:
+        return ""
+    if old.group("major") != new.group("major"):
+        return "major"
+    if (old.group("minor") or "0") != (new.group("minor") or "0"):
+        return "minor"
+    return "patch"
 
 
 def _trailer_entries(body: str) -> list[tuple[str, dict[str, str]]]:

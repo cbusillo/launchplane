@@ -8,7 +8,14 @@ import tomllib
 from urllib.parse import quote
 
 from control_plane.client_test_notes import NOTHING_TO_TEST
-from control_plane.merge_train_dependency_updates import DEPENDENCY_UPDATE_BOTS
+from control_plane.contracts.merge_train_policy import (
+    MergeTrainEnqueuePolicy,
+    MergeTrainRepositoryPolicy,
+)
+from control_plane.merge_train_policy_source import (
+    MergeTrainPolicyStoreMissingError,
+    resolve_merge_train_policy_record,
+)
 
 DEPENDENCY_UPDATE_NOTES = f"{NOTHING_TO_TEST}: Automated dependency manifest and lockfile update."
 _DEPENDENCY_FILES = frozenset(
@@ -36,12 +43,16 @@ _DEPENDENCY_FILES = frozenset(
 
 
 def pure_dependency_update(
-    pull_request: dict[str, object], *, read: Callable[[str], object]
+    pull_request: dict[str, object],
+    *,
+    read: Callable[[str], object],
+    policy: MergeTrainEnqueuePolicy | None = None,
 ) -> bool:
     user = pull_request.get("user")
     if (
         not isinstance(user, dict)
-        or user.get("login") not in DEPENDENCY_UPDATE_BOTS
+        or policy is None
+        or policy.dependency_bot(user.get("id")) is None
         or user.get("type") != "Bot"
     ):
         return False
@@ -156,3 +167,34 @@ def _workspace_pin_only(
         old_repo.pop("ref")
         new_repo.pop("ref")
     return changed and old == new
+
+
+def dependency_update_policy(
+    pull_request: dict[str, object],
+    *,
+    store: object = None,
+    repository_policy: MergeTrainRepositoryPolicy | None = None,
+) -> MergeTrainEnqueuePolicy | None:
+    base = pull_request.get("base")
+    if not isinstance(base, dict):
+        return None
+    repository = base.get("repo")
+    if not isinstance(repository, dict):
+        return None
+    targets: tuple[MergeTrainRepositoryPolicy, ...]
+    if repository_policy is not None:
+        targets = (repository_policy,)
+    else:
+        try:
+            targets = resolve_merge_train_policy_record(store).policy.policies
+        except MergeTrainPolicyStoreMissingError:
+            return None
+    return next(
+        (
+            target.enqueue
+            for target in targets
+            if target.repository.casefold() == str(repository.get("full_name") or "").casefold()
+            and target.base_branch == base.get("ref")
+        ),
+        None,
+    )

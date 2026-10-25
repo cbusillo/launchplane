@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_repository_policy
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -127,10 +128,12 @@ class DependencyRefreshTests(unittest.TestCase):
             store = FilesystemRecordStore(state_dir=Path(directory))
             for record in records:
                 store.write_merge_train_branch_refresh_record(record)
-            snapshot = GitHubMergeTrainClient(
+            client = GitHubMergeTrainClient(
                 transport=transport,
                 branch_refresh_store=store if use_store else None,
-            ).read_merge_train_snapshot(repository=REPOSITORY, base_branch="main")
+            )
+            client.begin_snapshot_pass(policy=dependency_repository_policy(BOT_ID), read_only=False)
+            snapshot = client.read_merge_train_snapshot(repository=REPOSITORY, base_branch="main")
         return snapshot.pull_requests[0].dependency_update_class
 
     def test_recorded_refresh_preserves_patch_admission(self) -> None:

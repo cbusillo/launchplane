@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -541,7 +542,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
         policy_payload["policies"][0]["enqueue"].update(
             {
                 "trusted_automation_github_user_ids": [bot_id],
-                "dependency_update_github_user_ids": [bot_id],
+                "dependency_update_bots": [dependency_bot_policy(bot_id).model_dump()],
             }
         )
         policy_record = MergeTrainPolicyRecord.model_validate(
@@ -1003,7 +1004,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
         policy_record = build_test_merge_train_policy_record(repository=REPOSITORY)
         policy_payload = policy_record.model_dump(mode="json")
         enqueue = policy_payload["policy"]["policies"][0]["enqueue"]
-        enqueue["dependency_update_github_user_ids"] = [42]
+        enqueue["dependency_update_bots"] = [dependency_bot_policy(42).model_dump()]
         enqueue["trusted_automation_github_user_ids"] = [42]
         policy_payload["policy_sha256"] = ""
         policy_record = MergeTrainPolicyRecord.model_validate(policy_payload)

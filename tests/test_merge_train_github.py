@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_repository_policy
 import unittest
 import json
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -4313,7 +4314,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
 
                 snapshot = GitHubMergeTrainSnapshotReader(
-                    transport=transport
+                    transport=transport, repository_policy=dependency_repository_policy()
                 ).read_merge_train_snapshot(
                     repository="cbusillo/sellyouroutboard", base_branch="main"
                 )
@@ -4346,7 +4347,15 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                             {"files": [{"filename": filename, "status": "modified"}]},
                         )
                     )
-                    reader = GitHubMergeTrainSnapshotReader(transport=transport)
+                    reader = GitHubMergeTrainSnapshotReader(
+                        transport=transport,
+                        repository_policy=dependency_repository_policy(
+                            123,
+                            metadata_format="dependabot_trailer"
+                            if login == "dependabot[bot]"
+                            else "renovate_metadata",
+                        ),
+                    )
                     result = reader._safe_dependency_update_class(
                         repository_path="cbusillo/sellyouroutboard",
                         pull_request_number=16,

@@ -7,9 +7,23 @@ from control_plane.merge_train_dependency_updates import (
 
 
 def classify_dependency_update(
-    messages: list[str], *, author_login: str = "dependabot[bot]"
+    messages: list[str],
+    *,
+    metadata_format: str = "dependabot_trailer",
+    allowed_update_types: tuple[str, ...] = ("patch", "minor", "digest"),
 ) -> str:
-    return classify_update(messages, author_login=author_login)
+    from control_plane.contracts.merge_train_policy import MergeTrainDependencyBotPolicy
+
+    bot = MergeTrainDependencyBotPolicy.model_validate(
+        {
+            "github_user_id": 123,
+            "metadata_format": metadata_format,
+            "allowed_update_types": allowed_update_types,
+        }
+    )
+    return classify_update(
+        messages, metadata_format=bot.metadata_format, allowed_update_types=bot.allowed_update_types
+    )
 
 
 # Representative Dependabot commit shapes.
@@ -187,7 +201,7 @@ class RenovateClassificationTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.assertEqual(
                     classify_dependency_update(
-                        [renovate_message(**changes)], author_login="renovate[bot]"
+                        [renovate_message(**changes)], metadata_format="renovate_metadata"
                     ),
                     expected,
                 )
@@ -207,13 +221,10 @@ class RenovateClassificationTests(unittest.TestCase):
         ):
             with self.subTest(messages=messages):
                 self.assertEqual(
-                    classify_dependency_update(messages, author_login="renovate[bot]"),
+                    classify_dependency_update(messages, metadata_format="renovate_metadata"),
                     "needs_review",
                 )
         self.assertEqual(
-            classify_dependency_update([safe], author_login="someone[bot]"), "needs_review"
-        )
-        self.assertEqual(
-            classify_dependency_update([INDIRECT_PATCH], author_login="renovate[bot]"),
+            classify_dependency_update([INDIRECT_PATCH], metadata_format="renovate_metadata"),
             "needs_review",
         )
