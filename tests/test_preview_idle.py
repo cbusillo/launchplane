@@ -231,12 +231,10 @@ class PreviewIdleOperationTests(unittest.TestCase):
             verify_status="pass",
             runtime_identity=self.identity,
             anchor_summary=PreviewPullRequestSummary(
-                **{
-                    "repo": self.profile.repository,
-                    "pr_number": 1,
-                    "head_sha": self.identity.source_git_ref,
-                    "pr_url": self.preview.anchor_pr_url,
-                }
+                repo=self.profile.repository,
+                pr_number=1,
+                head_sha=self.identity.source_git_ref,
+                pr_url=self.preview.anchor_pr_url,
             ),
         )
         self.store.write_preview_generation_record(self.generation)
