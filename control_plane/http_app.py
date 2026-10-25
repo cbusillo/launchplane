@@ -11126,6 +11126,13 @@ def create_launchplane_fastapi_app(
                 code="odoo_target_replacement_current_artifact_changed",
                 message=str(error),
             ) from error
+        except TestingRebuildRefused as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+            ) from error
         except OdooTargetReplacementApplyIdempotencyKeyReusedError as error:
             raise _launchplane_http_error(
                 status_code=409,

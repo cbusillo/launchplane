@@ -282,6 +282,32 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             ).status,
             "cancelled",
         )
+        from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
+
+        profile = self.store.read_product_profile_record(self.product)
+        profile.preview.clean_testing_snapshot = True
+        testing = next(lane for lane in profile.lanes if lane.instance == "testing")
+        testing.odoo_testing_drill_storage = None
+        self.store.write_product_profile_record(profile)
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        for mode in ("production_restore", "upstream_restore"):
+            with self.subTest(source=mode):
+                refused = await request(
+                    app,
+                    "POST",
+                    ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+                    headers={"Authorization": "Bearer fixture-operator", "Idempotency-Key": mode},
+                    payload={
+                        "product": self.product,
+                        "replacement": replacement.model_copy(
+                            update={"data_source_mode": mode}
+                        ).model_dump(mode="json"),
+                    },
+                )
+                self.assertEqual(refused.status_code, 409, refused.text)
+                self.assertEqual(refused.json()["error"]["code"], TESTING_STORAGE_BUDGET_REQUIRED)
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
 
     async def test_native_preflight_exposes_fixed_checkpoint_without_private_exception(
         self,
