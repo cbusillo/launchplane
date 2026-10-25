@@ -130,9 +130,8 @@ consume the durable write-intent record as evidence, but the record is not a
 bearer capability: execution routes must revalidate the intent family, mode,
 allowed status, safe-to-execute decision, product, context, route action,
 freshness, and any route-specific source or idempotency binding before mutating.
-For example, Every Code rerun execution consumes an approved `every_code_rerun`
-record and still requires `every_code_work_request.rerun` authorization before
-requeueing the work request.
+Historical Every Code rerun evaluations remain readable, but the retired
+execution route no longer consumes them or requeues work.
 
 ### Reconciled target (not active)
 
