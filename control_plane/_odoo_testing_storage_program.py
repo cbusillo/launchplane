@@ -104,7 +104,7 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         free = stat.f_bavail * stat.f_frsize
         if size or keep_reserve:
             required[backing] = required.get(backing, 0) + size
-        available[backing] = min(available.get(backing, free), free)
+            available[backing] = min(available.get(backing, free), free)
     backings = {}
     for role, suffix, size in (('database', '-db', budget['database_bytes']), ('data', '-data', budget['filestore_bytes'])):
         name = spec.get('preview_volumes', {}).get(role, gen['namespace'] + suffix)

@@ -3801,6 +3801,13 @@ class RehearsalHostSafetyTests(unittest.TestCase):
     def test_capacity_groups_devices_and_reserves_nonroot_available_bytes_once(self) -> None:
         from types import SimpleNamespace
 
+        real_read = Path.read_text
+
+        def read(path: Path, *args: Any, **kwargs: Any) -> str:
+            return "" if path == Path("/proc/self/mountinfo") else real_read(path, *args, **kwargs)
+
+        self.enterContext(patch.object(Path, "read_text", read))
+
         spec, root, containers = self.storage_fixture(
             {
                 "database_bytes": 40,
