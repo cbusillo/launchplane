@@ -9,6 +9,7 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+from control_plane import http_error_evidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -231,7 +232,9 @@ class ProductionRecipientTests(unittest.TestCase):
             return self.provider["new-recipient"]
         self.fail(f"Unexpected provider effect {path}")
 
-    def inspect_resources(self, root: Path, record: Any, *, prepare: bool, checkpoint: Any) -> None:
+    def inspect_resources(
+        self, root: Path, record: Any, *, prepare: bool, checkpoint: Any, materialize: bool = False
+    ) -> None:
         checkpoint("prepare_resources" if prepare else "inspect_resources")
         self.assertNotIn("old-database", record.volumes.values())
         self.assertNotIn("old-config", record.volumes.values())
@@ -399,6 +402,36 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertEqual(self.effects, effects)
         self.assert_old_preserved()
 
+    def test_configured_recipient_without_materialized_source_continues_original_key(self) -> None:
+        materialized: dict[str, str] = {}
+
+        def prepare_source(
+            root: Path, record: Any, *, prepare: bool, checkpoint: Any, materialize: bool = False
+        ) -> None:
+            self.inspect_resources(root, record, prepare=prepare, checkpoint=checkpoint)
+            document = json.loads(record.compose_source)
+            for volume in document["volumes"].values():
+                volume["external"] = True
+            if materialize:
+                self.assertFalse(prepare)
+                materialized[record.target_id] = json.dumps(document)
+
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=lambda **kwargs: materialized.get(kwargs["compose_id"], "null"),
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+            effects = list(self.effects)
+            with patch(
+                "control_plane.production_recipient.inspect_resources", side_effect=prepare_source
+            ):
+                self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assertEqual(self.effects, effects)
+        saved = custody(self.store, self.product, self.context)
+        assert saved is not None
+        self.assertTrue(saved.qualified_at)
+        self.assert_old_preserved()
+
     def test_changed_authority_or_review_never_creates_recipient(self) -> None:
         changed = self.profile.model_copy(update={"updated_at": "2026-10-15T11:00:00Z"})
         self.store.write_product_profile_record(changed)
@@ -413,11 +446,28 @@ class ProductionRecipientTests(unittest.TestCase):
             document["services"]["database"]["deploy"]["resources"]["limits"]["cpus"] = "8"
             return json.dumps(document)
 
-        with patch(
-            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
-            side_effect=wrong_render,
+        with (
+            patch(
+                "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+                side_effect=wrong_render,
+            ),
+            self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs,
         ):
             self.assertEqual(self.run_operation().response_status_code, 409)
+            effects = list(self.effects)
+            apply_logs = list(logs.records)
+            logs.records.clear()
+            with patch("control_plane.production_recipient.inspect_resources") as host_check:
+                self.assertEqual(self.run_operation().response_status_code, 409)
+            host_check.assert_not_called()
+            self.assertEqual(self.effects, effects)
+        self.assertTrue(apply_logs)
+        self.assertTrue(logs.records)
+        for entry in [*apply_logs, *logs.records]:
+            evidence = json.loads(entry.getMessage())
+            self.assertEqual(evidence["trace_id"], self.adapter.trace_id)
+            self.assertTrue(evidence["sites"])
+            self.assertNotIn(self.values["DB_PASSWORD"], entry.getMessage())
         saved = custody(self.store, self.product, self.context)
         assert saved is not None
         self.assertFalse(saved.qualified_at)
