@@ -50,10 +50,12 @@ def register_testing_address_routes(
     ) -> AcceptedEvidenceResponse:
         trace = dependencies.next_trace_id()
 
-        def refuse(status: int, code: str, message: str) -> NoReturn:
+        def refuse(
+            status: int, code: str, message: str, *, cause: BaseException | None = None
+        ) -> NoReturn:
             raise dependencies.http_error(
                 status_code=status, trace_id=trace, code=code, message=message
-            )
+            ) from cause
 
         if not director_agent_identity(identity):
             refuse(
@@ -182,17 +184,25 @@ def register_testing_address_routes(
                 in_progress_message="Testing address amendment is running under its original key.",
                 reconcile_message="Testing address outcome needs observation with the original plan and key.",
             )
-        except NativeSourceAuthorizationDenied:
+        except NativeSourceAuthorizationDenied as error:
             refuse(
                 403,
                 "authorization_denied",
                 "The existing provider identity denied testing address observation. Preserve the original request, plan and key.",
+                cause=error,
             )
-        except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
+        except (
+            ValueError,
+            FileNotFoundError,
+            RuntimeError,
+            OSError,
+            click.ClickException,
+        ) as error:
             refuse(
                 409,
                 "testing_address_unverified",
                 "The testing address is unverified. Preserve the original plan and key; same-key cancellation can restore an unpublished route without clearing retained operation fences.",
+                cause=error,
             )
 
     app.add_api_route(
