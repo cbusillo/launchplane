@@ -1120,6 +1120,26 @@ process.on('beforeExit', () => {{
                 },
             )
 
+    def test_mapped_outputs_survive_an_unexpected_status(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "github-output"
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/service/stored-record-snapshot",
+                    "method": "GET",
+                    "expected-status": "200",
+                    "output-paths": "error_message=result.error_message",
+                    "log-response-body": "false",
+                },
+                environment={"TEST_STATUS": "503", "TEST_ERROR_MESSAGE": "safe-diagnostic"},
+                output_path=output_path,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("safe-diagnostic", result.stderr)
+            self.assertIn("safe-diagnostic", output_path.read_text(encoding="utf-8"))
+
     def test_can_write_response_file_without_logging_response_body(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             response_output_path = Path(temporary_directory) / "result.json"

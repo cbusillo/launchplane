@@ -49,6 +49,12 @@ can still refuse visibly. Retaining full copies in the authority store supports
 audit and historical readers; the export neither deletes history nor changes
 policy writes, rollback or privileged-operation records. Identical proposals
 and unchanged managed reconciliation do not write new policy revisions.
+Because each revision repeats most rules of the one before, an array item such
+as a rule is scrubbed once per export and reused wherever the same source item
+recurs under the same schema; the cache key is a digest, not the source text.
+Scrubbing cost therefore follows distinct content rather than revision count.
+Every row is still exported, and its source digest check and scrubbed digest
+recomputation still run per row.
 
 Managed-secret, runtime-value, provider, session, worker and all other tables
 are excluded, including encrypted secret values. Identity strings and numbers,
@@ -120,7 +126,10 @@ credential helper. Qualification and the mandatory gate use the same temporary j
 authentication file and fresh Docker context; the existing image-build login is unchanged. Verify
 that this context reaches the actual deployment runner's intended Docker daemon.
 A passing rehearsal on a different daemon cannot qualify that runner. The job
-summary retains the safe result, never the snapshot.
+summary retains the safe result, never the snapshot. When the export refuses,
+its value-free `records.snapshot_failure` projection (reason, family and budget
+counters) is mapped to a step output before cleanup deletes the response file,
+and the retention step prints it to the job log and summary.
 
 Snapshots expire after five minutes. The shared workflow wrapper bounds image
 pulls and the complete rehearsal to 240 seconds, then allows 15 seconds before

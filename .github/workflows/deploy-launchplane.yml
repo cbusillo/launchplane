@@ -333,6 +333,7 @@ jobs:
           expected-status: "200"
           timeout-ms: "30000"
           response-output-file: ${{ runner.temp }}/launchplane-stored-record-snapshot.json
+          output-paths: error_message=records.snapshot_failure
           log-response-body: "false"
 
       - name: Preflight candidate against stored records
@@ -354,7 +355,11 @@ jobs:
         if: always()
         env:
           PREFLIGHT_OUTCOME: ${{ steps.stored_record_preflight.outcome }}
+          SNAPSHOT_FAILURE: ${{ steps.stored_record_snapshot.outputs.error_message }}
         run: |
+          if [[ -n "$SNAPSHOT_FAILURE" ]]; then
+            printf 'Stored-record snapshot failure: %s\n' "$SNAPSHOT_FAILURE" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           printf 'Stored-record rehearsal: %s\n' "$PREFLIGHT_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
           if [[ -f "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json" ]]; then
             cat "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json" >> "$GITHUB_STEP_SUMMARY"
@@ -1644,6 +1649,7 @@ jobs:
           LAUNCHPLANE_PREFLIGHT_OWNER: github-actions:${{ github.run_id }}:${{ github.run_attempt }}:${{ github.job }}
         run: bash scripts/deploy/authenticate-preflight-registry.sh
       - name: Read scrubbed Launchplane stored records
+        id: stored_record_snapshot
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         timeout-minutes: 1
         with:
@@ -1654,6 +1660,7 @@ jobs:
           expected-status: "200"
           timeout-ms: "30000"
           response-output-file: ${{ runner.temp }}/launchplane-stored-record-snapshot.json
+          output-paths: error_message=records.snapshot_failure
           log-response-body: "false"
       - name: Qualify isolated candidate on deploy runner
         id: preflight
@@ -1672,7 +1679,11 @@ jobs:
         if: always()
         env:
           PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
+          SNAPSHOT_FAILURE: ${{ steps.stored_record_snapshot.outputs.error_message }}
         run: |
+          if [[ -n "$SNAPSHOT_FAILURE" ]]; then
+            printf 'Stored-record snapshot failure: %s\n' "$SNAPSHOT_FAILURE" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           printf 'Stored-record rehearsal: %s\n' "$PREFLIGHT_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
           if [[ -f "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json" ]]; then
             cat "$RUNNER_TEMP/launchplane-stored-record-preflight-result.json" >> "$GITHUB_STEP_SUMMARY"
