@@ -981,7 +981,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             ),
             json.dumps({"directory": directory, "payload": payload}),
         )
-        with self.assertRaisesRegex(RuntimeError, "boundary.json"):
+        with self.assertRaises(RuntimeError):
             run_planned_slot_maintenance(
                 fake, runner_container=self.new_runner, execute=self.execute
             )

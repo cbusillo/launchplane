@@ -244,7 +244,7 @@ class WebsiteProviderAdapterTests(unittest.TestCase):
             SlotWriterContainer(
                 writer=writer,
                 slot_id=slot.slot_id,
-                container=slot.slot_id + "-" + writer.writer_id,
+                container=slot.slot_id + ("-web" if writer.kind == "web" else "-scheduler"),
                 image=slot.image,
             )
             for slot in (self.plan.old, self.plan.new)
@@ -252,11 +252,13 @@ class WebsiteProviderAdapterTests(unittest.TestCase):
         )
         running = {target.container: True for target in targets}
         images = {target.container: target.image for target in targets}
+        effects: list[tuple[str, str]] = []
 
         def execute(argv: tuple[str, ...], _stdin: str | None) -> str:
             container = argv[-1]
-            if argv[1] == "stop":
-                running[container] = False
+            if argv[1] in {"stop", "start"}:
+                effects.append((argv[1], container))
+                running[container] = argv[1] == "start"
                 return ""
             return json.dumps(
                 [{"Config": {"Image": images[container]}, "State": {"Running": running[container]}}]
@@ -268,6 +270,7 @@ class WebsiteProviderAdapterTests(unittest.TestCase):
         observations = writers.fence(self.site, rollback_pause_identity("release-pause"))
         self.assertTrue(observations)
         self.assertFalse(any(running.values()))
+        self.assertCountEqual(effects, [("stop", container) for container in running])
         for target in targets:
             if target.writer.kind == "web":
                 self.assertFalse(running[target.container])
@@ -277,3 +280,12 @@ class WebsiteProviderAdapterTests(unittest.TestCase):
                 for item in observations
             )
         )
+        for slot in (self.plan.new, self.plan.old):
+            effects.clear()
+            owners = writers.handoff(slot)
+            self.assertEqual(dict(owners), {writer.writer_id: 1 for writer in self.plan.writers})
+            self.assertEqual(len(effects), len(set(effects)))
+            self.assertEqual(
+                {container for container, active in running.items() if active},
+                {target.container for target in targets if target.slot_id == slot.slot_id},
+            )

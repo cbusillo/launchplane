@@ -24,7 +24,11 @@ from control_plane.dokploy.slot_startup_authority import (
     read_authority,
 )
 from control_plane.dokploy.slot_website_settings import StartupSettingsReadback
-from control_plane.dokploy.slot_writers import ContainerSlotWriters, SlotWriterContainer
+from control_plane.dokploy.slot_writers import (
+    ContainerSlotWriters,
+    SlotWriterContainer,
+    physical_writer_targets,
+)
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 
 
@@ -138,6 +142,10 @@ class _Project:
     services: tuple[tuple[SlotWriterContainer, str], ...]
 
     @property
+    def physical_services(self) -> tuple[tuple[SlotWriterContainer, str], ...]:
+        return tuple({service: (writer, service) for writer, service in self.services}.values())
+
+    @property
     def argv(self) -> tuple[str, ...]:
         return self.authority.argv
 
@@ -213,7 +221,7 @@ class DokploySlotStartup:
 
     def _refresh_project(self, project: _Project) -> None:
         replacements = {}
-        for writer, service in project.services:
+        for writer, service in project.physical_services:
             containers = self._containers(project, service)
             if len(containers) != 1:
                 raise ValueError(
@@ -222,11 +230,16 @@ class DokploySlotStartup:
             target = replace(writer, container=containers[0])
             if self.writers.active_jobs(target) != 0:
                 raise ValueError("recreated writer has active database jobs")
-            replacements[writer.writer] = target
-        self.writers.targets = tuple(
-            replacements[target.writer] if target.slot_id == project.slot.slot_id else target
+            replacements[service] = target.container
+        services = {writer.writer: service for writer, service in project.services}
+        refreshed = tuple(
+            replace(target, container=replacements[services[target.writer]])
+            if target.slot_id == project.slot.slot_id
+            else target
             for target in self.writers.targets
         )
+        physical_writer_targets(self.writers.plan, refreshed)
+        self.writers.targets = refreshed
 
     def _projects(self, plan: OdooCutoverPlan, *, fenced: bool) -> tuple[_Project, ...]:
         if self.writers.plan != plan:
@@ -255,10 +268,13 @@ class DokploySlotStartup:
             else:
                 authorities = []
                 services = []
+                observations = {}
                 for writer in writers:
-                    observed = json.loads(
-                        self.execute(("docker", "inspect", writer.container), None)
-                    )
+                    if writer.container not in observations:
+                        observations[writer.container] = json.loads(
+                            self.execute(("docker", "inspect", writer.container), None)
+                        )
+                    observed = observations[writer.container]
                     if not isinstance(observed, list) or len(observed) != 1:
                         raise ValueError("startup container inventory is ambiguous")
                     labels = observed[0]["Config"].get("Labels", {})
@@ -293,7 +309,6 @@ class DokploySlotStartup:
                 or {service.writer_id for service in authority.services}
                 != {writer.writer_id for writer in plan.writers}
                 or len(authority.services) != len(plan.writers)
-                or len({service.service for service in authority.services}) != len(plan.writers)
             ):
                 raise ValueError("durable Compose authority differs from admitted writers/project")
             services_by_writer = {
@@ -304,6 +319,14 @@ class DokploySlotStartup:
                 authority,
                 tuple((writer, services_by_writer[writer.writer.writer_id]) for writer in writers),
             )
+            containers_by_service: dict[str, str] = {}
+            services_by_container: dict[str, str] = {}
+            for writer, service in project.services:
+                if (
+                    containers_by_service.setdefault(service, writer.container) != writer.container
+                    or services_by_container.setdefault(writer.container, service) != service
+                ):
+                    raise ValueError("physical writer and Compose service bindings disagree")
             self._validate_config(project)
             if fenced:
                 self._refresh_project(project)
@@ -318,7 +341,7 @@ class DokploySlotStartup:
                 None,
             )
         )
-        for _, service in project.services:
+        for _, service in project.physical_services:
             definition = raw["services"][service]
             if definition.get("image") != project.slot.image:
                 raise ValueError("Compose writer image differs from the immutable release")
@@ -358,10 +381,11 @@ class DokploySlotStartup:
         projects = self._projects(plan, fenced=False)
         inventory = []
         for project in projects:
-            for writer, service in project.services:
-                containers = self._containers(project, service)
+            for writer, _ in project.services:
                 if active_jobs(project.slot, writer.writer) != 0:
                     raise ValueError("logical writer database jobs are not drained")
+            for _, service in project.physical_services:
+                containers = self._containers(project, service)
                 inventory.append((project, service, containers))
         self._validate_intent(plan, slot, intent)
         self.preflight(plan)
@@ -480,7 +504,7 @@ class DokploySlotStartup:
             if str(readback.get("env") or "") != desired:
                 raise ValueError("provider startup payload readback differs")
             self._file(project, intent, apply=True)
-            services = tuple(service for _, service in project.services)
+            services = tuple(service for _, service in project.physical_services)
             try:
                 self.execute(
                     project.argv

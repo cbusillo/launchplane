@@ -46,6 +46,18 @@ def render_odoo_app_slot_compose(
         f'while [ "$(cat {marker} 2>/dev/null)" != "{expected}" ]; do sleep 1; done; '
         "exec /venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
     )
+    scheduler = (
+        f'while [ "$(cat {marker} 2>/dev/null)" != "{expected}" ]; do sleep 1; done; '
+        "exec /venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf "
+        f"--scheduler --ready-file {marker} --ready-token {expected}"
+    )
+    environment = {
+        "ODOO_MAX_CRON_THREADS": "0",
+        "ODOO_DB_NAME": plan.new.binding.database,
+        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": json.dumps(
+            slot_runtime_identity(plan, plan.new.runtime_identity), sort_keys=True
+        ),
+    }
     base = {
         "image": plan.new.image,
         "pull_policy": "always",
@@ -55,19 +67,18 @@ def render_odoo_app_slot_compose(
         "volumes": ["data:/volumes/data"],
         "labels": {"traefik.enable": "false"},
         "healthcheck": {"disable": True},
-        "environment": {
-            "ODOO_MAX_CRON_THREADS": "0",
-            "ODOO_DB_NAME": plan.new.binding.database,
-            "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": json.dumps(
-                slot_runtime_identity(plan, plan.new.runtime_identity), sort_keys=True
-            ),
-        },
+        "environment": environment,
         "entrypoint": ["/bin/sh", "-c"],
     }
     return json.dumps(
         {
             "services": {
                 "web": {**base, "command": web.replace("$", "$$")},
+                "scheduler": {
+                    **base,
+                    "environment": {**environment, "ODOO_MAX_CRON_THREADS": "1"},
+                    "command": scheduler.replace("$", "$$"),
+                },
                 "script-runner": {**base, "command": "exec sleep infinity"},
             },
             "volumes": {"data": {"external": True, "name": data_volume}},
