@@ -163,18 +163,6 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         profiles = (
             LaunchplaneProductProfileRecord.model_validate(secrets),
             LaunchplaneProductProfileRecord.model_validate(drill),
-            LaunchplaneProductProfileRecord.model_validate(
-                {
-                    "schema_version": secrets["schema_version"],
-                    "product": "retired-site",
-                    "display_name": "Retired",
-                    "repository": "cbusillo/retired-site",
-                    "lifecycle_state": "retired",
-                    "classification": "out_of_scope",
-                    "updated_at": secrets["updated_at"],
-                    "source": "test",
-                }
-            ),
             transport,
             _dns_profile().model_copy(update={"product": "dns-expectations"}),
         )

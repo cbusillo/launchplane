@@ -52,18 +52,6 @@ class ProductProfileChangedError(ValueError):
     """The stored product profile no longer matches the compare-and-write snapshot."""
 
 
-class ProductClassificationChangeError(ValueError):
-    code = "product_classification_change_blocked"
-
-
-class NonruntimeClientUnsupportedError(ValueError):
-    code = "nonruntime_client_unsupported"
-    message = "Active non-runtime products require a recorded Client and authorized-admin attestation of Director standing through director_standing acceptance; other-Client review is unsupported here."
-
-    def __init__(self) -> None:
-        super().__init__(self.message)
-
-
 class ProductImageProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -738,21 +726,12 @@ ReleaseOnAcceptance = Literal["held", "promote", "promote_with_rollback_drill", 
 APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION = 2
 CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION = APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION
 
-RepoProductClassification = Literal[
-    "managed_runtime", "active_awareness", "support_dependency", "out_of_scope"
-]
-
 
 class LaunchplaneProductProfileRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION, ge=1)
     lifecycle_state: ProductLifecycleState = "active"
-    classification: RepoProductClassification = Field(
-        default="managed_runtime",
-        exclude_if=lambda value: value == "managed_runtime",
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
     # A bounded agent attestation records a fact, never a production bootstrap exemption.
@@ -807,33 +786,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneProductProfileRecord":
-        if self.is_managed_runtime:
-            if not self.driver_id.strip():
-                raise ValueError("product profile requires driver_id")
-            if "image" not in self.model_fields_set:
-                raise ValueError("managed runtime product profile requires image")
-        else:
-            from control_plane.contracts.repository_inventory import normalize_repository
-
-            if self.is_active and (
-                not self.owner.is_set or self.release_on_acceptance != "director_standing"
-            ):
-                raise NonruntimeClientUnsupportedError()
-            self.driver_id = self.driver_id.strip()
-            self.repository = normalize_repository(self.repository, "repository")
-            if (
-                self.driver_id
-                or self.image != ProductImageProfile()
-                or self.lanes
-                or self.historical_contexts
-                or self.runtime_port
-                or self.health_path.strip()
-                or self.preview != ProductPreviewProfile()
-                or self.expected_config != ProductExpectedConfigProfile()
-                or self.promotion_workflow != ProductPromotionWorkflowProfile()
-                or self.odoo_business_hours is not None
-            ):
-                raise ValueError("Non-runtime products cannot declare runtime configuration.")
+        if not self.driver_id.strip():
+            raise ValueError("product profile requires driver_id")
+        if "image" not in self.model_fields_set:
+            raise ValueError("managed runtime product profile requires image")
         if self.driver_id == "odoo" and any(
             requirement.external_provider is not None
             and requirement.binding_key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
@@ -953,10 +909,6 @@ class LaunchplaneProductProfileRecord(BaseModel):
     def is_active(self) -> bool:
         return self.lifecycle_state == "active"
 
-    @property
-    def is_managed_runtime(self) -> bool:
-        return self.classification == "managed_runtime"
-
     def odoo_replacement_proof_required(self, lane: ProductLaneProfile) -> bool:
         return lane.odoo_data_policy.destructive_replacement_proof_required or (
             self.production_use == "live" and lane.instance == "prod"
@@ -1019,20 +971,6 @@ def product_profiles_share_repository(
     return first.repository.strip().lower() == second.repository.strip().lower() or (
         bool(first.repository_id) and first.repository_id == second.repository_id
     )
-
-
-def validate_product_profile_classification_transition(
-    *,
-    existing_profile: LaunchplaneProductProfileRecord | None,
-    replacement_profile: LaunchplaneProductProfileRecord,
-) -> None:
-    if (
-        existing_profile is not None
-        and existing_profile.classification != replacement_profile.classification
-    ):
-        raise ProductClassificationChangeError(
-            "Product classification cannot change on an existing profile."
-        )
 
 
 def validate_product_profile_history_transition(

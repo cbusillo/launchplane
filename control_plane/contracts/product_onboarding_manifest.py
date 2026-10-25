@@ -4,11 +4,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.product_profile_record import (
-    LaunchplaneProductProfileRecord,
-    RepoProductClassification,
-    ProductImageProfile,
-    ProductOwnerProfile,
-    ReleaseOnAcceptance,
     ProductOdooLaneDataPolicy,
     ProductOdooPrelaunchRebuildPolicy,
     ProductOdooStableBootstrapPolicy,
@@ -153,9 +148,6 @@ class ProductOnboardingManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    classification: RepoProductClassification = Field(
-        default="managed_runtime", exclude_if=lambda value: value == "managed_runtime"
-    )
     product: str
     display_name: str
     repository: str
@@ -163,12 +155,6 @@ class ProductOnboardingManifest(BaseModel):
     repository_owner_id: str = ""
     default_branch: str = "main"
     driver_id: str = "generic-web"
-    owner: ProductOwnerProfile = Field(
-        default_factory=ProductOwnerProfile, exclude_if=lambda value: not value.is_set
-    )
-    release_on_acceptance: ReleaseOnAcceptance = Field(
-        default="held", exclude_if=lambda value: value == "held"
-    )
     image_repository: str = ""
     runtime_port: int = Field(default=0, ge=0, le=65535)
     health_path: str = ""
@@ -195,8 +181,6 @@ class ProductOnboardingManifest(BaseModel):
         if not isinstance(data, dict):
             return data
         updated = dict(data)
-        if updated.get("classification", "managed_runtime") != "managed_runtime":
-            updated.setdefault("driver_id", "")
         if "dokploy_targets" in updated:
             raise ValueError(
                 "product onboarding manifest uses obsolete dokploy_targets; use provider_targets"
@@ -208,44 +192,6 @@ class ProductOnboardingManifest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_manifest(self) -> "ProductOnboardingManifest":
-        if self.classification != "managed_runtime":
-            profile = LaunchplaneProductProfileRecord(
-                classification=self.classification,
-                product=self.product,
-                display_name=self.display_name,
-                repository=self.repository,
-                repository_id=self.repository_id,
-                repository_owner_id=self.repository_owner_id,
-                default_branch=self.default_branch,
-                driver_id=self.driver_id,
-                image=ProductImageProfile(repository=self.image_repository),
-                runtime_port=self.runtime_port,
-                health_path=self.health_path,
-                historical_contexts=self.historical_contexts,
-                preview=ProductPreviewProfile.model_validate(self.preview.model_dump(mode="json")),
-                promotion_workflow=self.promotion_workflow,
-                expected_config=self.product_expected_config_profile(),
-                updated_at=self.updated_at or "planned",
-                source=self.source_label,
-                owner=self.owner,
-                release_on_acceptance=self.release_on_acceptance,
-            )
-            if (
-                self.lanes
-                or self.provider_targets
-                or self.runtime_environments
-                or self.secret_bindings
-            ):
-                raise ValueError("Non-runtime onboarding cannot create runtime resources.")
-            self.repository = profile.repository
-            self.repository_id = profile.repository_id
-            self.repository_owner_id = profile.repository_owner_id
-            self.default_branch = profile.default_branch
-            return self
-        if self.owner.is_set or self.release_on_acceptance != "held":
-            raise ValueError(
-                "Runtime onboarding records Client and acceptance through their bounded settings."
-            )
         if not self.product.strip():
             raise ValueError("product onboarding manifest requires product")
         if not self.display_name.strip():

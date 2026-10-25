@@ -29,6 +29,9 @@ from control_plane.storage.migrations.versions import (
     f1b5d9a3c7e0_join_public_host_fences as public_host_join,
     f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
     f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
+    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
+    a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
+    a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -70,12 +73,19 @@ class SchemaMigrationTests(unittest.TestCase):
 
         self.assertFalse(application_logger.disabled)
 
-    def test_compatibility_image_adds_topics_to_future_schema_without_activating_held_drop(
+    def test_release_archive_joins_every_applied_branch_without_activating_held_drop(
         self,
     ) -> None:
         for revision, target in (
-            (public_host_fences.revision, topics_hostnames.revision),
-            (public_host_join.revision, compatibility_join.revision),
+            (retired_delivery.revision, archive_retirement_join.revision),
+            (retirement_join.revision, archive_retirement_join.revision),
+            (topics_join.revision, archive_retirement_join.revision),
+            (public_host_fences.revision, archive_hostnames_join.revision),
+            (topics_hostnames.revision, archive_hostnames_join.revision),
+            (public_host_join.revision, archive_compatibility_join.revision),
+            (compatibility_join.revision, archive_compatibility_join.revision),
+            (discussion_topics.revision, SCHEMA_MIGRATION_TARGET_REVISION),
+            (retired_preview.revision, SCHEMA_MIGRATION_TARGET_REVISION),
         ):
             with self.subTest(revision=revision):
                 self.assertEqual(schema_migration_action(current_revision=revision), "upgrade")
@@ -85,16 +95,30 @@ class SchemaMigrationTests(unittest.TestCase):
                     ),
                     target,
                 )
-        for revision in (topics_hostnames.revision, compatibility_join.revision):
+        for revision in (
+            archive_retirement_join.revision,
+            archive_hostnames_join.revision,
+            archive_compatibility_join.revision,
+        ):
             with self.subTest(revision=revision):
                 self.assertEqual(
                     schema_migration_action(current_revision=revision), "compatible_ahead"
                 )
 
-    def test_delivery_preview_join_preserves_current_approved_topics_route(self) -> None:
+    def test_explicit_delivery_request_after_archive_joins_both_paths(self) -> None:
+        for target in (retired_delivery.revision, retirement_join.revision, topics_join.revision):
+            with self.subTest(target=target):
+                self.assertEqual(
+                    schema_migration_target(
+                        current_revision=SCHEMA_MIGRATION_TARGET_REVISION, target_revision=target
+                    ),
+                    archive_retirement_join.revision,
+                )
+
+    def test_delivery_preview_join_preserves_explicit_topics_route(self) -> None:
         for current, target in (
-            (retired_delivery.revision, SCHEMA_MIGRATION_TARGET_REVISION),
-            (SCHEMA_MIGRATION_TARGET_REVISION, retired_delivery.revision),
+            (retired_delivery.revision, discussion_topics.revision),
+            (discussion_topics.revision, retired_delivery.revision),
             (retired_delivery.revision, retired_preview.revision),
             (retired_preview.revision, retired_delivery.revision),
             (retirement_join.revision, discussion_topics.revision),
@@ -121,7 +145,11 @@ class SchemaMigrationTests(unittest.TestCase):
         )
 
     def test_hostname_only_database_does_not_infer_delivery_drop_approval(self) -> None:
-        for current in (public_host_fences.revision, topics_hostnames.revision):
+        for current in (
+            public_host_fences.revision,
+            topics_hostnames.revision,
+            archive_hostnames_join.revision,
+        ):
             for revision in (
                 retired_delivery.revision,
                 retirement_join.revision,
