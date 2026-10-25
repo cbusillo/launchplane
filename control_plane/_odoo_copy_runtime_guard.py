@@ -25,10 +25,31 @@ VOLUME_BACKING_INSPECTION_LIBRARY = (
     + readback_predicate_library()
     + inspect.getsource(CopyReadbackRefused)
     + r"""
+import subprocess
+
 
 def copy_readback_failure_frame(error: Exception, predicate: str = ReadbackPredicate.NATIVE_READ) -> dict[str, str]:
     return {'type': 'failed', 'predicate': error.predicate if isinstance(error, CopyReadbackRefused) else predicate,
         'kind': 'refused' if isinstance(error, CopyReadbackRefused) else 'unavailable'}
+
+
+def foreign_volume_inventory(containers, own):
+    names = {mount['Name'] for container in containers if container.get('Id') not in own
+        for mount in container.get('Mounts', []) if mount.get('Type') == 'volume' and mount.get('Name')}
+    if not names:
+        return {}
+    result = subprocess.run(['docker', 'volume', 'inspect', *sorted(names)], capture_output=True,
+        timeout=30, pass_fds=globals().get('inherited_lock_descriptors', ()))
+    if result.returncode and not (result.stderr.strip() and all(
+        re.fullmatch(r'Error response from daemon: (?:volume .+ not found|no such volume: .+)', line, re.IGNORECASE)
+        for line in result.stderr.decode().splitlines() if line.strip())):
+        raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
+    rows = json.loads(result.stdout)
+    found = {row.get('Name'): row for row in rows}
+    if len(found) != len(rows) or not set(found) <= names or not result.returncode and set(found) != names:
+        raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
+    return found
+
 
 def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=None, require_distinct=False):
     paths, identities, backings = [], set(), {}
@@ -51,6 +72,7 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
         identities.add(identity)
         paths.append(backing)
         backings[name] = {"path": str(backing), "device": identity[0], "inode": identity[1]}
+    foreign_volumes = foreign_volume_inventory(all_containers, own)
     for container in all_containers:
         if container.get("Id") in own:
             continue
@@ -59,8 +81,13 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
                 continue
             source_paths = [Path(mount['Source'])]
             if mount.get('Type') == 'volume' and mount.get('Name'):
-                foreign = json.loads(docker('volume', 'inspect', mount['Name']))[0]
-                source_paths = volume_storage_paths(foreign)
+                foreign = foreign_volumes.get(mount['Name'])
+                if foreign is None:
+                    continue
+                try:
+                    source_paths = volume_storage_paths(foreign)
+                except (RuntimeError, KeyError, TypeError):
+                    raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
             source_paths = [path.resolve(strict=False) for path in source_paths]
             if any(source_path == path or source_path.is_relative_to(path)
                    or (mount.get("RW", True) and path.is_relative_to(source_path))

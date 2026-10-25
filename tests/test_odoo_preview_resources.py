@@ -127,6 +127,15 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         self.containers["production"] = {"Config": {"Labels": {}}, "Mounts": [mount]}
         self.assertEqual(self.run_program()[0], 1)
 
+    def test_pending_allocation_allows_only_its_missing_overlay(self) -> None:
+        self.spec["volumes"].append("preview-data-filestore")
+        self.spec["pending_filestore"] = "preview-data-filestore"
+        self.assertEqual(self.run_program()[0], 0)
+        self.volumes.pop("preview-db")
+        self.assertEqual(self.run_program()[0], 1)
+        self.spec["pending_filestore"] = "preview-db"
+        self.assertEqual(self.run_program()[0], 1)
+
     def test_overlay_ownership_includes_hidden_writable_backing(self) -> None:
         project = self.spec["project"]
         data = self.volumes["preview-data"]

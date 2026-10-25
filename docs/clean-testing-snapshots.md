@@ -103,9 +103,12 @@ SQL witness prove an owned attempt that never opened to a user. An incomplete
 legacy attempt whose database holds its exact restore witness resumes on its
 existing filestore, preserving attachments written during that attempt. Other
 owned incomplete legacy attempts can restart with an overlay without copying
-the filestore again. A declared overlay that is missing refuses deployment;
-only an exact incomplete allocation receipt permits reconstructing it before
-the database has its completed restore witness. Later deploys retain an existing
+the filestore again. A declared overlay that is missing refuses deployment when
+the database or writable filestore could contain retained preview data.
+An empty target can resume allocation after its compose was persisted, including
+an interruption before the first receipt. An owned incomplete allocation can
+reconstruct its overlay before the database has its completed restore witness.
+Later deploys retain an existing
 overlay and its original source, even when the newest snapshot changes.
 
 Admission charges the database, dump staging and existing reserve against real
@@ -184,7 +187,9 @@ Existing Client-used previews remain protected.
 Snapshot bytes remain in private host custody, independently of testing or
 preview volume retirement. Cleanup keeps the published source and its predecessor,
 unexpired issued preview plans, active or uncertain preview operations, and
-incomplete host restore attempts. Every overlay volume also pins its lower
+incomplete host restore attempts. Completed overlay attempts keep the same pin
+until their original backing volumes are retired, preserving the lower even
+after an interrupted teardown removes the overlay volume. Every overlay volume also pins its lower
 snapshot by its validated snapshot label, including completed or sleeping previews and volumes without running
 containers. Preparation creates that pin under the shared snapshot lock before
 deployment. Preview retirement removes the overlay and private writable backing

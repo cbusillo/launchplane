@@ -1776,6 +1776,7 @@ def _execute_refresh(
                     instance=plan.preview_slug,
                     environment=request.environment_values,
                     checkpoint=provider_lease_check or (lambda: None),
+                    pending_filestore=restore_clean_snapshot and filestore is not None,
                 )
 
         qualify_resources()

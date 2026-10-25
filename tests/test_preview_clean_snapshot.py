@@ -17,6 +17,8 @@ from unittest.mock import Mock, patch
 import yaml
 
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
+from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
@@ -441,7 +443,88 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
                 }
             )
+            self.assertTrue(self.source.is_dir())
+            for path in self.volumes.values():
+                shutil.rmtree(path)
+            self.volumes.clear()
+            library["retire_clean_snapshots"](
+                {
+                    "copy_binding_sha256": "c" * 64,
+                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+                }
+            )
         self.assertFalse(self.source.exists())
+
+    def test_preparation_uses_docker_full_container_identities(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        command = self.command
+        identities = {role: hashlib.sha256(role.encode()).hexdigest() for role in self.containers}
+
+        def realistic_ids(
+            arguments: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            if arguments[:2] == ["docker", "ps"]:
+                width = 64 if "--no-trunc" in arguments else 12
+                return subprocess.CompletedProcess(
+                    arguments,
+                    0,
+                    stdout="\n".join(value[:width] for value in identities.values()).encode(),
+                    stderr=b"",
+                )
+            if arguments[:2] == ["docker", "inspect"]:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    0,
+                    stdout=json.dumps(
+                        [
+                            {**container, "Id": identities[role]}
+                            for role, container in self.containers.items()
+                            if any(
+                                identities[role].startswith(identifier)
+                                for identifier in arguments[2:]
+                            )
+                        ]
+                    ).encode(),
+                    stderr=b"",
+                )
+            if arguments[:2] == ["docker", "exec"]:
+                arguments = list(arguments)
+                arguments[3] = next(
+                    role for role, identity in identities.items() if identity == arguments[3]
+                )
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=realistic_ids):
+            self.assertEqual(
+                self.prepare_filestore(snapshot=self.snapshot, apply=False)["type"], "complete"
+            )
+
+    def test_declared_overlay_before_first_allocation_can_resume(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        result = self.prepare_filestore(snapshot=self.snapshot, require_existing=True)
+        self.assertEqual(result["type"], "complete")
+        self.assertIsNotNone(result["declaration"])
+
+    def test_fresh_generation_preserves_surviving_upper_before_any_data_changes(self) -> None:
+        attachment = self.private / "upper" / "staff-attachment"
+        attachment.write_bytes(b"staff writes")
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        self.calls.clear()
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"], "failed"
+        )
+        self.assertFalse(
+            (self.source.parent / "preview-attempts").exists()
+            and list((self.source.parent / "preview-attempts").glob("*.json"))
+        )
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+        self.assertEqual(attachment.read_bytes(), b"staff writes")
 
     def test_preparation_preserves_legacy_database_and_filestore(self) -> None:
         self.volumes.pop("preview-data-filestore")
@@ -562,6 +645,61 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_script()
         self.assertNotIn(["docker", "stop", "web"], self.calls)
+
+    def test_foreign_volume_readback_batches_and_preserves_consumer_checks(self) -> None:
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
+        exec(VOLUME_BACKING_INSPECTION_LIBRARY, library)
+        foreign = {
+            "Id": "foreign",
+            "Mounts": [
+                {"Type": "volume", "Name": name, "Source": str(self.root / name)}
+                for name in ("foreign-a", "foreign-b")
+            ],
+        }
+        cases: tuple[tuple[list[dict[str, Any]], bytes, ReadbackPredicate | None], ...] = (
+            (
+                [],
+                b"Error response from daemon: volume foreign-a not found\nError response from daemon: volume foreign-b not found\n",
+                None,
+            ),
+            ([], b"daemon unavailable\n", ReadbackPredicate.BACKING_STORAGE),
+            (
+                [
+                    {"Name": "foreign-a", "Mountpoint": "", "Options": {}},
+                    {"Name": "foreign-b", "Mountpoint": str(self.root), "Options": {}},
+                ],
+                b"",
+                ReadbackPredicate.BACKING_STORAGE,
+            ),
+            (
+                [
+                    {
+                        "Name": "foreign-a",
+                        "Mountpoint": str(self.root / "alias"),
+                        "Options": {"device": str(self.data)},
+                    },
+                    {"Name": "foreign-b", "Mountpoint": str(self.root), "Options": {}},
+                ],
+                b"",
+                ReadbackPredicate.STORAGE_CONSUMERS,
+            ),
+        )
+        for rows, stderr, predicate in cases:
+            with self.subTest(predicate=predicate):
+                result = subprocess.CompletedProcess(
+                    [], int(bool(stderr)), stdout=json.dumps(rows).encode(), stderr=stderr
+                )
+                with patch("subprocess.run", return_value=result) as batch:
+                    if predicate is None:
+                        self.assertIn(
+                            "preview-data",
+                            library["inspect_volume_backings"]({"preview-data"}, [foreign], set()),
+                        )
+                    else:
+                        with self.assertRaises(library["CopyReadbackRefused"]) as refused:
+                            library["inspect_volume_backings"]({"preview-data"}, [foreign], set())
+                        self.assertEqual(refused.exception.predicate, predicate)
+                batch.assert_called_once()
 
     def test_private_preview_render_passes_snapshot_runtime_inspection(self) -> None:
         rendered = yaml.safe_load(
@@ -1028,6 +1166,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             library["retire_clean_snapshots"](spec)
             self.assertTrue(self.source.is_dir())
             payload["completed"] = True
+            payload.pop("overlay_filestore", None)
             attempt.write_text(json.dumps(payload))
             library["retire_clean_snapshots"](spec)
         self.assertFalse(self.source.exists())
@@ -1046,6 +1185,11 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             library["retire_clean_snapshots"](spec)
             self.assertTrue(self.source.exists())
             self.volumes.pop("preview-data-filestore")
+            library["retire_clean_snapshots"](spec)
+            self.assertTrue(self.source.exists())
+            for path in self.volumes.values():
+                shutil.rmtree(path)
+            self.volumes.clear()
             library["retire_clean_snapshots"](spec)
         self.assertFalse(self.source.exists())
 

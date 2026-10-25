@@ -44,6 +44,7 @@ def require_existing_preview_resources(
     environment: dict[str, str],
     checkpoint: Callable[[], None],
     operation: OdooPreviewRuntimeOperation = "refresh",
+    pending_filestore: bool = False,
 ) -> str:
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=compose_id
@@ -69,6 +70,9 @@ def require_existing_preview_resources(
         "project": project,
         "volumes": volumes,
         "operation": operation,
+        "pending_filestore": environment["ODOO_DATA_VOLUME"] + "-filestore"
+        if pending_filestore
+        else "",
     }
     encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
     digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
@@ -359,7 +363,12 @@ def main():
         paths[name] = path
 
     destroying = spec.get("operation") == "destroy"
-    existing_names = set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) if destroying else names
+    pending = spec.get('pending_filestore')
+    if pending and (pending not in names or not pending.endswith('-filestore')):
+        raise RuntimeError('Invalid pending preview filestore')
+    existing_names = set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) if destroying or pending else names
+    if not destroying and names - existing_names - {pending}:
+        raise RuntimeError('Preview storage is missing')
     for name in names:
         if name in existing_names:
             add_volume(name)

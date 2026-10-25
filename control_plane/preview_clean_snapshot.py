@@ -174,6 +174,8 @@ def restore_preview_snapshot(containers, source_lock):
         raise RuntimeError('Preview overlay differs from its retained snapshot')
     if (present == '0' or restart) and overlay is None:
         raise RuntimeError('A new snapshot preview requires its overlay filestore')
+    if present == '0' and not owned_unreleased:
+        require_unused_preview_upper(overlay[3])
     if (present == '0' or restart) and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
         containers, {**snapshot['storage_budget'], 'filestore_bytes': 0},
         runner_staging_bytes=(path / 'database.dump').stat().st_size, host_staging_bytes=0):
@@ -188,7 +190,7 @@ def restore_preview_snapshot(containers, source_lock):
         docker('exec', containers['database'][0], 'sh', '-c', 'dropdb --if-exists --force -U "$POSTGRES_USER" -- "$1"', '_', database)
         present = '0'
     if present == '0':
-        write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False})
+        write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False, 'overlay_filestore': True})
         if owned_unreleased:
             docker('stop', runner)
             legacy = Path(volume['Mountpoint']) / 'filestore' / database
@@ -234,7 +236,7 @@ def restore_preview_snapshot(containers, source_lock):
             stdin=spec['readback_program'].encode()).decode()
         if 'integration_readback_ok=true' not in readback.splitlines():
             raise RuntimeError('Snapshot preview connection readback failed')
-        write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': True})
+        write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': True, 'overlay_filestore': overlay is not None})
         docker(*arguments, runner, 'python3', '-I', '-c',
             "import hashlib,os;from pathlib import Path;Path(" + repr(spec['web_gate_path']) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+chr(10)+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
         docker('start', containers['web'][0])

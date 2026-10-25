@@ -135,7 +135,7 @@ def retire_clean_snapshot_bytes(spec, root):
                 if attempt.is_symlink() or not attempt.is_file() or attempt.stat().st_size > 8192:
                     raise RuntimeError('Snapshot reader custody is unavailable')
                 payload = json.loads(attempt.read_text())
-                if not isinstance(payload, dict) or not isinstance(payload.get('snapshot'), dict) or not isinstance(payload.get('binding'), dict) or not isinstance(payload.get('completed', False), bool):
+                if not isinstance(payload, dict) or not isinstance(payload.get('snapshot'), dict) or not isinstance(payload.get('binding'), dict) or not isinstance(payload.get('completed', False), bool) or not isinstance(payload.get('overlay_filestore', False), bool):
                     raise RuntimeError('Snapshot reader custody is unavailable')
                 binding = payload['binding']
                 expected_name = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest() + '.json'
@@ -159,7 +159,7 @@ def retire_clean_snapshot_bytes(spec, root):
                     if retired:
                         attempt.unlink()
                         continue
-                if not payload.get('completed'):
+                if not payload.get('completed') or payload.get('overlay_filestore'):
                     pinned.add(payload['snapshot']['snapshot_id'])
         for snapshot in spec.get('clean_snapshot_retirements', []):
             snapshot_id = snapshot['snapshot_id']

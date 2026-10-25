@@ -89,6 +89,16 @@ def volume_storage_paths(volume):
     return [Path(path) for path in paths]
 
 
+def require_unused_preview_upper(private):
+    for directory in (private, private / 'upper', private / 'work'):
+        if directory.is_symlink() or directory.exists() and (
+            directory.resolve(strict=True) != directory.absolute() or not directory.is_dir()):
+            raise RuntimeError('Preview filestore writable custody is aliased')
+    upper = private / 'upper'
+    if upper.exists() and any(upper.iterdir()):
+        raise RuntimeError('Preserve preview filestore without an owned unreleased attempt')
+
+
 def preview_attempt_binding(project, database, volumes, snapshot):
     binding = {'compose_project': project, 'database_name': database, 'preview_volumes': volumes,
         **{key: snapshot[key] for key in ('server_id', 'product', 'context')}, 'volume_backings': {}}
@@ -255,10 +265,10 @@ def prepare_locked(spec, root):
                 'labels': {'io.launchplane.preview-snapshot': volume['Labels']['io.launchplane.preview-snapshot']}}
         previous = read_prepared_attempt(spec, root, names)
         owned = previous is not None and previous.get('completed') is False
-        if spec.get('require_existing') and not owned:
+        if previous is not None and previous.get('completed'):
             raise RuntimeError('Retained preview overlay is missing')
         snapshot = previous['snapshot'] if owned else spec['snapshot']
-        identifiers = preview_docker_text('ps', '-aq').splitlines()
+        identifiers = preview_docker_text('ps', '-aq', '--no-trunc').splitlines()
         containers = []
         if identifiers:
             result = subprocess.run(['docker', 'inspect', *identifiers], capture_output=True,
@@ -284,6 +294,8 @@ def prepare_locked(spec, root):
             present = result.stdout.decode().strip()
             if present == '1':
                 if not owned:
+                    if spec.get('require_existing'):
+                        raise RuntimeError('Retained preview overlay is missing')
                     return None
                 table = preview_database_value(container['Id'], database, '', b"SELECT to_regclass('public.ir_config_parameter') IS NOT NULL;\n")
                 if table not in {'t', 'f'}:
@@ -302,6 +314,8 @@ def prepare_locked(spec, root):
         filestore = Path(data['Mountpoint']) / 'filestore'
         if filestore.is_symlink() or filestore.exists() and any(filestore.iterdir()) and not owned:
             raise RuntimeError('Preserve an existing preview filestore')
+        if not owned:
+            require_unused_preview_upper(private)
         if not lower.is_dir():
             raise RuntimeError('Preview snapshot source is unavailable')
         receipt_path = lower.parent / 'receipt.json'
@@ -332,7 +346,7 @@ def prepare_locked(spec, root):
         if attempts.resolve(strict=True) != attempts.absolute():
             raise RuntimeError('Preview restore attempt custody is aliased')
         witness = hashlib.sha256(json.dumps(['preview-restore-v1', attempt_id, snapshot['snapshot_id']]).encode()).hexdigest()
-        write_snapshot_receipt(attempts / (attempt_id + '.json'), {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False})
+        write_snapshot_receipt(attempts / (attempt_id + '.json'), {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False, 'overlay_filestore': True})
         for directory in (private, private / 'upper', private / 'work'):
             directory.mkdir(mode=0o700, exist_ok=True)
             if directory.resolve(strict=True) != directory.absolute():
