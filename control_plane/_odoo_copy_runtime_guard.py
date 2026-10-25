@@ -82,6 +82,7 @@ def inspect_copy_runtime(spec, *, expected_instance):
             raise CopyReadbackRefused(ReadbackPredicate.MOUNTS)
         volumes = set(names.values())
     containers = {}
+    optional_services = {'pre-switch-web'} if expected_instance == 'rehearsal' else set()
     all_containers = []
     for identifier in docker("ps", "-aq").decode().splitlines():
         container = one_inspection(identifier)
@@ -89,12 +90,14 @@ def inspect_copy_runtime(spec, *, expected_instance):
         labels = container.get("Config", {}).get("Labels") or {}
         if labels.get("com.docker.compose.project") == project:
             service = labels.get("com.docker.compose.service")
-            if service not in {"web", "database", "script-runner"} or service in containers:
+            if service not in {"web", "database", "script-runner"} | optional_services or service in containers:
                 raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
             containers[service] = (identifier, container)
-    if set(containers) != {"web", "database", "script-runner"}:
+    if set(containers) - optional_services != {"web", "database", "script-runner"}:
         raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
     for service, (identifier, container) in containers.items():
+        if service == 'pre-switch-web' and container.get('State',{}).get('Running') is not False and not spec.get('candidate_may_run'):
+            raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
         configuration = container["Config"]
         if container.get("HostConfig", {}).get("Privileged") or container.get("HostConfig", {}).get("NetworkMode") == "host" or container.get("HostConfig", {}).get("PidMode") not in (None, "", "private"):
             raise CopyReadbackRefused(ReadbackPredicate.CAPABILITIES)
@@ -133,6 +136,8 @@ def inspect_copy_runtime(spec, *, expected_instance):
             if expected_instance == 'preview' and (network.get('Labels') or {}).get('com.docker.compose.project') != project:
                 raise CopyReadbackRefused(ReadbackPredicate.NETWORK)
     data_networks = set(containers["database"][1]["NetworkSettings"]["Networks"])
+    if 'pre-switch-web' in containers and set(containers['pre-switch-web'][1]['NetworkSettings']['Networks']) != data_networks:
+        raise CopyReadbackRefused(ReadbackPredicate.NETWORK_REACH)
     if set(containers["script-runner"][1]["NetworkSettings"]["Networks"]) != data_networks or set(containers["web"][1]["NetworkSettings"]["Networks"]) != data_networks | ({"dokploy-network"} if expected_instance in {"testing", "preview"} else set()):
         raise CopyReadbackRefused(ReadbackPredicate.NETWORK_REACH)
     if expected_instance in {'rehearsal', 'preview'}:

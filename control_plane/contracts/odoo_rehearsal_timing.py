@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.odoo_rehearsal_business_validation import BusinessValidationReceipt
+
 if TYPE_CHECKING:
     from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 
@@ -18,6 +20,7 @@ TimingBoundary = Literal[
     "module_update_completed",
     "before_web",
     "web_started",
+    "pre_switch_verified",
     "private_switch_verified",
     "product_started",
     "receipt_observed",
@@ -33,6 +36,9 @@ class RehearsalPhaseTiming(BaseModel):
     attempt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     final_source_witness_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     observed: dict[TimingBoundary, str]
+    pre_switch_validation: BusinessValidationReceipt | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def utc(self) -> Self:
@@ -41,6 +47,13 @@ class RehearsalPhaseTiming(BaseModel):
             for value in self.observed.values()
         ):
             raise ValueError("Phase timings require actual UTC observations.")
+        if self.pre_switch_validation is not None and (
+            self.action not in {"simulate-final", "rebuild-final"}
+            or self.pre_switch_validation.attempt_sha256 != self.attempt_sha256
+            or not self.pre_switch_validation.passed
+            or "pre_switch_verified" not in self.observed
+        ):
+            raise ValueError("Pre-switch timing requires its passing, bound business receipt.")
         return self
 
 
@@ -50,7 +63,7 @@ def measured_rehearsal_window(record: OdooUpgradeRehearsalRecord) -> dict[str, o
         "lower_bound_seconds": None,
         "upper_bound_seconds": None,
         "dispatch_gap_seconds": None,
-        "unavailable": {"T4": "no_distinct_pre_switch_step"},
+        "unavailable": {"T4": "pre_switch_verification_unavailable"},
         "writer_drain": "not_executed_non_running_source",
         "reasons": [],
     }
@@ -89,6 +102,13 @@ def measured_rehearsal_window(record: OdooUpgradeRehearsalRecord) -> dict[str, o
     )
     if business is None:
         return unavailable("commit_timing_unavailable")
+    verification = simulation.pre_switch_validation
+    t4_verified = verification is not None and all(
+        getattr(verification, key) == getattr(receipt, key)
+        for key in ("product", "rehearsal_id", "artifact_id", "source_commit", "database")
+    )
+    if t4_verified:
+        result["unavailable"] = {}
     try:
         stamps = [
             datetime.fromisoformat(simulation.observed[key])
@@ -102,6 +122,8 @@ def measured_rehearsal_window(record: OdooUpgradeRehearsalRecord) -> dict[str, o
             )
         ]
         stamps.insert(1, copy.captured_at)
+        if t4_verified:
+            stamps.insert(5, datetime.fromisoformat(simulation.observed["pre_switch_verified"]))
         stamps.extend(
             datetime.fromisoformat(business.observed[key])
             for key in ("product_started", "receipt_observed")
@@ -112,6 +134,7 @@ def measured_rehearsal_window(record: OdooUpgradeRehearsalRecord) -> dict[str, o
         return unavailable("clock_nonmonotonic")
     return {
         **result,
+        "complete": t4_verified,
         "lower_bound_seconds": (stamps[-2] - stamps[0]).total_seconds(),
         "upper_bound_seconds": (stamps[-1] - stamps[0]).total_seconds(),
         "dispatch_gap_seconds": (stamps[-2] - stamps[-3]).total_seconds(),

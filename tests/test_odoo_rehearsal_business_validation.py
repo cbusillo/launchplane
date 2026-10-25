@@ -710,6 +710,16 @@ class BusinessValidationHostTests(unittest.TestCase):
         import shutil
 
         shutil.rmtree(self.root / self.plan["database"])
+        pre_switch = receipt({**self.plan, "attempt_sha256": "d" * 64})
+        self.spec["record"]["phase_timings"] = [
+            {"action": "simulate-final", "pre_switch_validation": receipt(self.plan)},
+            {"action": "rebuild-final", "pre_switch_validation": pre_switch},
+        ]
+        result = self.host["snapshot"](self.spec, self.root, self.containers, self.plan["database"])
+        self.assertEqual(
+            result["business_validation_sha256"], canonical_json_sha256([pre_switch, *history])
+        )
+        shutil.rmtree(self.root / self.plan["database"])
         history.append({"passed": False})
         self.host["bounded_capture"].reset_mock()
         with self.assertRaises(RuntimeError):

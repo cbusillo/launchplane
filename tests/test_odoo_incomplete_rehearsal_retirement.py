@@ -2049,6 +2049,9 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             copy_runner=upgrade,
             before_web=Mock(),
             private_health=Mock(),
+            verify_before_switch=Mock(
+                side_effect=lambda spec, root, containers, database: containers
+            ),
             rehearsal_storage_capacity=Mock(return_value=True),
             capture=Mock(side_effect=AssertionError("No source recapture")),
         )
