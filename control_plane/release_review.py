@@ -565,7 +565,7 @@ def build_release_review(
                 ),
             }
         )
-    blockers = checklist_blockers(checklist)
+    blockers = checklist_blockers(checklist, profile=profile)
     complete = not blockers
     approved = bool(latest_decision and latest_decision.release_issue_url) and (
         bool(latest_decision and latest_decision.decision == "overridden")
@@ -641,11 +641,13 @@ def build_release_review(
     )
 
 
-def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
+def checklist_blockers(
+    checklist: ReleaseChecklist, *, profile: LaunchplaneProductProfileRecord
+) -> tuple[str, ...]:
     blockers = []
     if not checklist.owner_github_id:
         blockers.append("No Client set for this product.")
-    if not checklist.testing_url:
+    if not checklist.testing_url and profile.public_website != "none":
         blockers.append("The testing site URL is unavailable.")
     groups = [("", checklist.items, checklist.untracked_commits)] + [
         (f"{source.repository} ", source.items, source.untracked_commits)

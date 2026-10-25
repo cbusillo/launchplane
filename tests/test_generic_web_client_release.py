@@ -1659,6 +1659,49 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
         )
 
+    def test_private_standing_release_needs_no_website_and_still_waits_for_backup(self) -> None:
+        private = self.profile.model_copy(
+            update={
+                "public_website": "none",
+                "lanes": tuple(
+                    lane.model_copy(update={"base_url": "", "health_url": ""})
+                    for lane in self.profile.lanes
+                ),
+            }
+        )
+        private = type(private).model_validate(private.model_dump())
+        self.store.write_product_profile_record(private)
+        self.switch("director_standing")
+        self.assertTrue(self.review().checklist_complete)
+        self.advance()
+        decision = self.store.list_release_review_decision_records(product=private.product)[0]
+        self.assertEqual(decision.acceptance_source, "director_standing")
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        self.capture()
+        self.advance()
+        self.assertEqual(
+            self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
+        )
+
+    def test_website_standing_release_without_testing_url_stays_blocked(self) -> None:
+        website = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"base_url": "", "health_url": ""})
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(website)
+        self.switch("director_standing")
+        self.assertFalse(self.review().checklist_complete)
+        self.advance()
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=website.product), ()
+        )
+        self.publish.assert_not_called()
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
     def test_standing_release_drills_once_then_promotes_the_next_candidate(self) -> None:
         from tests.support.lane_builds import LaneBuildGitHub
 
