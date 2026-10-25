@@ -350,6 +350,12 @@ def execute_odoo_post_deploy(
     )
     if fresh_testing_generation is not None:
         rendering_record = fresh_testing_override_record(rendering_record, fresh_testing_generation)
+    if request.instance == "testing":
+        from control_plane.testing_address_storage import amended_testing_maintenance_overrides
+
+        rendering_record = amended_testing_maintenance_overrides(
+            record_store, request.context, rendering_record
+        )
 
     try:
         accepted_settings: OdooWebsiteSettingsIntent | None = None

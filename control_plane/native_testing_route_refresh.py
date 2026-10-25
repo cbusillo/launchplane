@@ -43,6 +43,7 @@ from control_plane.testing_publication_storage import (
     read_snapshot,
 )
 from control_plane.testing_serving_copy import published_testing_copy
+from control_plane.testing_address_storage import effective_testing_route
 
 
 def plan_native_testing_route_refresh(
@@ -67,7 +68,7 @@ def plan_native_testing_route_refresh(
             raise ValueError("Testing binding changed during observation.")
         profile = store.read_product_profile_record(current.product)
         candidate = publication.plan.candidate
-        route = publication.plan.route
+        route = effective_testing_route(store, publication)
         if snapshot.inventory is None or snapshot.inventory.runtime_identity is None:
             raise ValueError("The current testing build identity is unavailable.")
         host, token = source.read_dokploy_config(
@@ -97,6 +98,7 @@ def plan_native_testing_route_refresh(
             product=current.product,
             context=current.context,
             public_host=route.host,
+            public_aliases=route.aliases,
             entrypoints=route.public_entrypoints,
             old_runtime_identity=snapshot.inventory.runtime_identity,
         )

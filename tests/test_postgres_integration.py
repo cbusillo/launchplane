@@ -15410,6 +15410,31 @@ class RealPostgresTestingCandidateTests(unittest.TestCase):
         fixture.test_lost_creation_reply_preserves_old_copy_and_never_repeats_effect()
 
 
+class RealPostgresTestingAddressTests(unittest.TestCase):
+    def test_canonical_publication_and_original_key_recovery(self) -> None:
+        from tests import test_testing_address as address_tests
+
+        cases = (
+            address_tests.TestingAddressTests.test_canonical_amendment_preserves_copy_and_original_receipts,
+            address_tests.TestingAddressTests.test_health_refusal_rolls_back_every_canonical_record,
+            address_tests.TestingAddressTests.test_expiry_during_canonical_transaction_rolls_back_every_record,
+            address_tests.TestingAddressTests.test_lost_metadata_reply_completes_from_committed_receipt,
+            address_tests.TestingAddressTests.test_lost_route_reply_recovers_original_attempt_before_canonical_publication,
+            address_tests.TestingAddressTests.test_original_key_cancellation_restores_route_after_profile_changes,
+            address_tests.TestingAddressTests.test_lost_inverse_reply_settles_before_cancellation_completes,
+            address_tests.TestingAddressTests.test_http_original_key_cancellation,
+        )
+        for case in cases:
+            with self.subTest(case=case.__name__), _head_postgres_database() as url:
+                fixture = address_tests.TestingAddressTests()
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    case(fixture)
+                finally:
+                    fixture.doCleanups()
+
+
 class RealPostgresTestingPublicationTests(unittest.TestCase):
     @contextmanager
     def checkpoint_fixture(self) -> Iterator[testing_rebuild_tests.TestingRebuildTests]:
