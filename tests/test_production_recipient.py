@@ -232,7 +232,9 @@ class ProductionRecipientTests(unittest.TestCase):
             return self.provider["new-recipient"]
         self.fail(f"Unexpected provider effect {path}")
 
-    def inspect_resources(self, root: Path, record: Any, *, prepare: bool, checkpoint: Any) -> None:
+    def inspect_resources(
+        self, root: Path, record: Any, *, prepare: bool, checkpoint: Any, materialize: bool = False
+    ) -> None:
         checkpoint("prepare_resources" if prepare else "inspect_resources")
         self.assertNotIn("old-database", record.volumes.values())
         self.assertNotIn("old-config", record.volumes.values())
@@ -403,12 +405,15 @@ class ProductionRecipientTests(unittest.TestCase):
     def test_configured_recipient_without_materialized_source_continues_original_key(self) -> None:
         materialized: dict[str, str] = {}
 
-        def prepare_source(root: Path, record: Any, *, prepare: bool, checkpoint: Any) -> None:
+        def prepare_source(
+            root: Path, record: Any, *, prepare: bool, checkpoint: Any, materialize: bool = False
+        ) -> None:
             self.inspect_resources(root, record, prepare=prepare, checkpoint=checkpoint)
             document = json.loads(record.compose_source)
             for volume in document["volumes"].values():
                 volume["external"] = True
-            if prepare:
+            if materialize:
+                self.assertFalse(prepare)
                 materialized[record.target_id] = json.dumps(document)
 
         with patch(
@@ -452,7 +457,9 @@ class ProductionRecipientTests(unittest.TestCase):
             effects = list(self.effects)
             apply_logs = list(logs.records)
             logs.records.clear()
-            self.assertEqual(self.run_operation().response_status_code, 409)
+            with patch("control_plane.production_recipient.inspect_resources") as host_check:
+                self.assertEqual(self.run_operation().response_status_code, 409)
+            host_check.assert_not_called()
             self.assertEqual(self.effects, effects)
         self.assertTrue(apply_logs)
         self.assertTrue(logs.records)

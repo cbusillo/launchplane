@@ -89,6 +89,10 @@ class RecipientAuthorityChanged(ValueError):
     """Successful authority or provider comparisons proved the review outdated."""
 
 
+class RecipientSourceNotMaterialized(ValueError):
+    pass
+
+
 def require_readable_provider_payload(payload: dict[str, Any], *, prepared: bool = False) -> None:
     """A partial/error object cannot establish a changed provider projection.
 
@@ -705,11 +709,12 @@ class ProductionRecipientAdapter:
     def verify(self, record: ProductionRecipientRecord, *, published: bool = False) -> None:
         expected, values = self.verify_configuration(record, published=published)
         host, token = source.read_dokploy_config(control_plane_root=self.root)
-        actual = read_provider_compose(
-            compose.fetch_dokploy_converted_compose_file(
-                host=host, token=token, compose_id=record.target_id
-            )
+        converted = compose.fetch_dokploy_converted_compose_file(
+            host=host, token=token, compose_id=record.target_id
         )
+        if converted.strip() == "null":
+            raise RecipientSourceNotMaterialized("The recipient source is not materialized.")
+        actual = read_provider_compose(converted)
         actual.pop("name", None)
         for name, service in actual.get("services", {}).items():
             labels = service.pop("labels", {})
@@ -885,6 +890,8 @@ class ProductionRecipientAdapter:
                     and provider_binding_digest(unused) == record.before_configuration_sha256
                 ):
                     return ProviderObservation("absent", retry_safe=True)
+                if not isinstance(error, RecipientSourceNotMaterialized):
+                    return ProviderObservation("unknown")
                 self.verify_configuration(record)
                 return ProviderObservation("absent", retry_safe=True)
             if not record.qualified_at:
@@ -1050,7 +1057,9 @@ class ProductionRecipientAdapter:
                     app_name=app_name,
                     before_configuration_sha256=provider_binding_digest(fresh),
                 )
-            inspect_resources(self.root, record, prepare=True, checkpoint=checkpoint)
+            inspect_resources(
+                self.root, record, prepare=not configured, materialize=True, checkpoint=checkpoint
+            )
             if record.request.upstreams:
                 from control_plane.production_recipient_host import (
                     run_recipient_program,

@@ -18,6 +18,8 @@ from httpx2 import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
 from control_plane.action_effects import action_effect
+from control_plane.dokploy.api import JsonObject
+from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
 from control_plane.contracts.production_recipient import (
     ProductionRecipientPlan,
     RecipientRecoveryRequest,
@@ -30,6 +32,7 @@ from control_plane.production_recipient import ROUTE, plan
 from control_plane.production_recipient_resources import (
     RESOURCE_LIBRARY,
     RESOURCE_PROGRAM,
+    inspect_resources,
     resource_spec,
 )
 from control_plane.service_auth import (
@@ -53,6 +56,7 @@ class HostProgramTests(unittest.TestCase):
         self.addCleanup(recipient.doCleanups)
         record = recipient.adapter.current()
         record = record.model_copy(update={"app_name": record.namespace})
+        self.record = record
         self.spec: dict[str, Any] = {**resource_spec(record), "prepare": True}
 
     def run_program(self) -> tuple[int, str]:
@@ -97,14 +101,18 @@ class HostProgramTests(unittest.TestCase):
         namespace: dict[str, Any] = {}
         exec(compile(RESOURCE_LIBRARY, "<production-resources>", "exec"), namespace)
         namespace["COMPOSE_ROOT"] = self.fixture.root
-        spec = {**self.spec, "compose_source": json.dumps({"services": {"app": {}}})}
+        spec = {
+            **self.spec,
+            "materialize": True,
+            "compose_source": json.dumps({"services": {"app": {}}}),
+        }
         directory = self.fixture.root / spec["project"] / "code"
         path = directory / "docker-compose.yml"
         with redirect_stdout(io.StringIO()):
             namespace["qualify_source"](spec)
             unrelated = directory / ".env"
             unrelated.write_text("preserved")
-            namespace["qualify_source"]({**spec, "prepare": False})
+            namespace["qualify_source"]({**spec, "materialize": False})
             self.assertEqual(path.read_text(), spec["compose_source"])
             self.assertEqual(unrelated.read_text(), "preserved")
             path.write_text("foreign source")
@@ -118,8 +126,51 @@ class HostProgramTests(unittest.TestCase):
             self.assertEqual(unrelated.read_text(), "preserved")
             path.unlink()
             with self.assertRaises(ValueError):
-                namespace["qualify_source"]({**spec, "prepare": False})
+                namespace["qualify_source"]({**spec, "materialize": False})
             self.assertFalse(path.exists())
+
+    def test_materialized_source_evidence_survives_the_schedule_marker_reader(self) -> None:
+        namespace: dict[str, Any] = {}
+        exec(compile(RESOURCE_LIBRARY, "<production-resources>", "exec"), namespace)
+        namespace["COMPOSE_ROOT"] = self.fixture.root
+        document = json.loads(self.record.compose_source)
+        for volume in document["volumes"].values():
+            volume["external"] = True
+        spec = {**self.spec, "materialize": True, "compose_source": json.dumps(document)}
+        output = io.StringIO()
+        with (
+            patch.object(
+                sys, "argv", ["program", base64.b64encode(json.dumps(spec).encode()).decode()]
+            ),
+            patch("subprocess.run", side_effect=self.fixture.docker),
+            patch("socket.socket", return_value=Mock()),
+            redirect_stdout(output),
+        ):
+            namespace["main"]()
+        evidence = extract_odoo_post_deploy_readback_markers(
+            cast(JsonObject, {"logs": output.getvalue().splitlines()})
+        )
+        with (
+            patch(
+                "control_plane.production_recipient_resources.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture-token"),
+            ),
+            patch(
+                "control_plane.production_recipient_resources.api.fetch_dokploy_target_payload",
+                return_value={"serverId": self.record.request.destination_server_id},
+            ),
+            patch(
+                "control_plane.production_recipient_resources.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("dokploy-server", "lookup", "", "server"),
+            ),
+            patch(
+                "control_plane.production_recipient_resources.post_deploy.run_manual_data_schedule",
+                return_value=evidence,
+            ),
+        ):
+            inspect_resources(
+                self.fixture.root, self.record, prepare=True, materialize=True, checkpoint=Mock()
+            )
 
     def test_missing_or_foreign_or_needed_volume_is_not_adopted_or_deleted(self) -> None:
         self.spec["prepare"] = False

@@ -1,7 +1,6 @@
 """Fixed host program for new empty production-recipient resources only."""
 
 import base64
-import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -27,6 +26,7 @@ def inspect_resources(
     record: ProductionRecipientRecord,
     *,
     prepare: bool,
+    materialize: bool = False,
     checkpoint: Callable[[str], None],
 ) -> None:
     host, token = source.read_dokploy_config(control_plane_root=root)
@@ -42,13 +42,12 @@ def inspect_resources(
         compose_name=record.namespace,
         target_payload=payload,
     )
-    spec = resource_spec(record)
     template = json.loads(record.compose_source)
     for volume in template["volumes"].values():
         volume["external"] = True
-    compose_source = json.dumps(template)
+    spec = {**resource_spec(record), "compose_source": json.dumps(template)}
     encoded = base64.b64encode(
-        json.dumps({**spec, "prepare": prepare, "compose_source": compose_source}).encode()
+        json.dumps({**spec, "prepare": prepare, "materialize": materialize}).encode()
     ).decode()
     evidence = post_deploy.run_manual_data_schedule(
         host=host,
@@ -84,11 +83,6 @@ def inspect_resources(
         "production_recipient_resources_sha256"
     ) != canonical_json_sha256(spec):
         raise ValueError("Recipient storage and ports were not qualified on their actual host.")
-    if (
-        evidence.get("production_recipient_source_sha256")
-        != hashlib.sha256(compose_source.encode()).hexdigest()
-    ):
-        raise ValueError("Recipient source was not qualified on its actual host.")
 
 
 RESOURCE_LIBRARY = r"""
@@ -102,14 +96,14 @@ def qualify_source(spec):
     for parent in (COMPOSE_ROOT, directory.parent, directory):
         if parent.is_symlink() or any(path.is_symlink() for path in parent.parents):
             raise ValueError("invalid source path")
-        if spec["prepare"] and parent != COMPOSE_ROOT:
+        if spec["materialize"] and parent != COMPOSE_ROOT:
             parent.mkdir(exist_ok=True, mode=0o700)
         if not parent.is_dir():
             raise ValueError("missing source directory")
     path = directory / "docker-compose.yml"
     if path.is_symlink():
         raise ValueError("invalid source file")
-    if not path.exists() and spec["prepare"]:
+    if not path.exists() and spec["materialize"]:
         with tempfile.NamedTemporaryFile(mode="w", dir=directory, prefix=".lp-source-") as output:
             output.write(spec["compose_source"])
             output.flush()
@@ -120,9 +114,8 @@ def qualify_source(spec):
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-    if not path.is_file() or path.read_text() != spec["compose_source"]:
+    if not path.is_file() or path.read_bytes() != spec["compose_source"].encode("utf-8"):
         raise ValueError("recipient source differs")
-    print("production_recipient_source_sha256=" + hashlib.sha256(path.read_bytes()).hexdigest())
 
 def docker(*args):
     result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=60)
@@ -218,7 +211,7 @@ def main():
             listener.close()
     if "compose_source" in spec:
         qualify_source(spec)
-    binding = {key:value for key,value in spec.items() if key not in {"prepare", "compose_source"}}
+    binding = {key:value for key,value in spec.items() if key not in {"prepare", "materialize"}}
     print("production_recipient_resources_sha256=" + hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
     print("production_recipient_resources_ok=true")
     return paths
