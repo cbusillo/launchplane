@@ -53,19 +53,23 @@ surface does not become a second implementation authority.
 
 ### Testing application endpoints
 
-Ordinary testing application deploys use the preview adapter's DNS round-robin
-default when the provider has no explicit Swarm endpoint specification and
+Guarded ordinary testing application deploys use the preview adapter's DNS
+round-robin default when the provider has no explicit Swarm endpoint specification and
 confirms an empty published-port list. This avoids depending on Swarm's virtual
 IP load balancer for a service reached through the existing HTTP proxy. Explicit
 endpoint specifications, published or unknown ports, and production applications
 keep their existing configuration.
+Callers without the existing provider-mutation checkpoint also keep their
+configuration, including the separate cutover adapter.
 
 The adapter persists and reads back the endpoint specification before saving
 the image or triggering deployment. A mismatch stops the deploy. The supported
 target inspection reports only the configured endpoint mode and port count;
 missing or unrecognized configuration remains unknown. Reading this diagnostic
-does not change the running service. A later deploy remains a separate operation
-under its existing authorization and lane holds.
+does not change the running service. Only `provider_default` with `port_count: 0`
+qualifies a target for this default. Recovery still requires the deployed
+service's proxied health and runtime identity to pass. A later deploy remains a
+separate operation under its existing authorization and lane holds.
 
 ### Environment wire formats
 

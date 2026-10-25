@@ -6,6 +6,7 @@ import click
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
 from control_plane.workflows.dokploy_deploy import (
     _canonical_registry_host,
     _docker_image_registry_host,
@@ -23,6 +24,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
         ports: object = None,
         persist: bool = True,
         allow_update: bool = True,
+        checkpointed: bool = True,
     ) -> list[str]:
         from control_plane.dokploy.application_endpoint import application_endpoint_spec
 
@@ -83,7 +85,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
                     target_type="application", target_id="app-fixture", target_name="fixture"
                 ),
                 deploy_timeout_seconds=10,
-                before_provider_mutation=before_provider_mutation,
+                before_provider_mutation=before_provider_mutation if checkpointed else None,
                 effect_started=lambda: events.append("effect_started"),
             )
         return events
@@ -119,7 +121,7 @@ class DokployDeployRegistryTests(unittest.TestCase):
                     )
 
     def test_testing_endpoint_readback_failure_stops_image_and_deploy(self) -> None:
-        with self.assertRaisesRegex(ValueError, "endpoint.*readback"):
+        with self.assertRaises(TestingInputSafetyRefused):
             self._deploy_application_endpoint(instance="testing", ports=[], persist=False)
         self.assertNotIn("/api/application.saveDockerProvider", self.endpoint_events)
         self.assertNotIn("deploy", self.endpoint_events)
@@ -128,6 +130,10 @@ class DokployDeployRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checkpoint refusal"):
             self._deploy_application_endpoint(instance="testing", ports=[], allow_update=False)
         self.assertEqual(self.endpoint_events, ["checkpoint:target_update"])
+
+    def test_uncheckpointed_testing_deploy_keeps_existing_endpoint(self) -> None:
+        events = self._deploy_application_endpoint(instance="testing", ports=[], checkpointed=False)
+        self.assertNotIn("/api/application.update", events)
 
     def test_compose_encoding_refuses_before_effect_checkpoint_or_write(self) -> None:
         from unittest.mock import Mock

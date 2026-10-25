@@ -389,7 +389,9 @@ def execute_dokploy_artifact_deploy(
         runtime_environment=runtime_environment,
         retired_runtime_keys=retired_runtime_keys,
         runtime_verified=runtime_verified,
-        testing_application=ship_request.instance == "testing",
+        testing_application=(
+            ship_request.instance == "testing" and before_provider_mutation is not None
+        ),
     )
     if before_provider_mutation is not None:
         before_provider_mutation("deploy_trigger")
