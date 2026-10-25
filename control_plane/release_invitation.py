@@ -1160,19 +1160,19 @@ def publish_release_invitation(
                 why_now = "" if notification_links else ENGINEERING_WHY_NOW
             display_time = _display_time()
             action = (
-                "check the changes in the testing version, then press **Accept** or **Request changes**."
+                "check the changes on the testing site, then press **Accept** or **Request changes**."
                 if client_changes
                 else "there is nothing new to test. Read the release summary, then press **Accept** or **Request changes**."
             )
             if settings_key:
                 action = (
                     "review the prepared website settings on the release page"
-                    + (" and check the changes in the testing version" if client_changes else "")
+                    + (" and check the changes on the testing site" if client_changes else "")
                     + ", then press **Accept** or **Request changes**."
                 )
             body = (
                 f"{request_marker}\n{marker}\n{receipts}\n\n"
-                "**Release review**: do these changes work, so they can go live?\n\n"
+                "**Release review** — is the site working with these changes, so they can go live?\n\n"
                 f"Hi {client},\n\n"
                 + (f"{why_now}\n\n" if why_now else "")
                 + f"{heading}:\n"

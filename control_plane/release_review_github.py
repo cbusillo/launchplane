@@ -66,7 +66,7 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
         if not preview and not per_pr_review:
             return match[0]
         changed = True
-        return "\nCheck this in the testing version.\n"
+        return "\nCheck this on the testing site.\n"
 
     def remove_process(match: re.Match[str]) -> str:
         nonlocal changed
