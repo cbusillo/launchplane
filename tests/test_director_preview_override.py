@@ -75,6 +75,120 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         replay = await self.post()
         self.assertEqual(replay.status_code, 202, replay.text)
 
+    def prepare_testing_storage_update(self) -> None:
+        self.after = self.before.model_dump(mode="json")
+        lane = next(lane for lane in self.after["lanes"] if lane["instance"] == "testing")
+        lane["odoo_testing_drill_storage"] = {
+            "database_bytes": 10,
+            "filestore_bytes": 20,
+            "staging_bytes": 30,
+            "reserve_bytes": 40,
+        }
+
+    async def test_director_records_testing_capacity_under_the_snapshot_hold_and_replays(
+        self,
+    ) -> None:
+        self.before.preview.clean_testing_snapshot = True
+        self.store.write_product_profile_record(self.before)
+        self.headers["If-Match"] = f'"{product_profile_record_sha256(self.before)}"'
+        self.prepare_testing_storage_update()
+        accepted = await self.post()
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        expected = LaunchplaneProductProfileRecord.model_validate(self.after)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), expected)
+        changed = expected.model_copy(update={"display_name": "Later name"})
+        self.store.write_product_profile_record(changed)
+        replay = await self.post()
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), changed)
+
+    async def test_testing_capacity_update_preserves_existing_retention_bindings(self) -> None:
+        self.prepare_snapshot_opt_in()
+        self.prepare_testing_storage_update()
+        budget = self.before.lanes[0].odoo_testing_drill_storage
+        assert budget is not None
+        self.after["lanes"][0]["odoo_testing_drill_storage"]["filestore_bytes"] += 1
+        self.after["lanes"][0]["odoo_testing_drill_storage"]["retained_copy_bindings"] = list(
+            budget.retained_copy_bindings
+        )
+        response = await self.post()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            self.store.read_product_profile_record(self.before.product),
+            LaunchplaneProductProfileRecord.model_validate(self.after),
+        )
+
+    async def test_testing_capacity_refuses_retention_and_mixed_authority_changes(self) -> None:
+        self.prepare_testing_storage_update()
+        variants = []
+        for field, value in (
+            ("display_name", "Other"),
+            ("repository", "example/other"),
+            ("production_use", "live"),
+        ):
+            variants.append({**deepcopy(self.after), field: value})
+        for lane_field, lane_value in (
+            ("odoo_testing_drill_enabled", True),
+            ("base_url", "https://other.example.test"),
+        ):
+            changed = deepcopy(self.after)
+            changed["lanes"][0][lane_field] = lane_value
+            variants.append(changed)
+        retention = deepcopy(self.after)
+        retention["lanes"][0]["odoo_testing_drill_storage"]["retained_copy_bindings"] = ["a" * 64]
+        variants.append(retention)
+        snapshot = deepcopy(self.after)
+        snapshot["preview"]["clean_testing_snapshot"] = True
+        variants.append(snapshot)
+        for payload in variants:
+            with self.subTest(payload=payload):
+                refused = await self.post(payload)
+                self.assertEqual(refused.status_code, 403, refused.text)
+                self.assertEqual(
+                    self.store.read_product_profile_record(self.before.product), self.before
+                )
+        self.prepare_snapshot_opt_in()
+        self.prepare_testing_storage_update()
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
+
+    async def test_testing_capacity_requires_conditional_review_and_director_identity(self) -> None:
+        self.prepare_testing_storage_update()
+        for header in ("If-Match", "Idempotency-Key"):
+            with self.subTest(header=header):
+                value = self.headers.pop(header)
+                refused = await self.post()
+                self.headers[header] = value
+                self.assertEqual(refused.status_code, 400, refused.text)
+        self.headers["If-Match"] = '"stale"'
+        with scoped_agent_transport():
+            scoped = await self.post()
+        self.assertEqual(scoped.status_code, 403, scoped.text)
+        stale = await self.post()
+        self.assertEqual(stale.status_code, 412, stale.text)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
+
+    async def test_testing_capacity_refuses_inactive_or_non_odoo_products(self) -> None:
+        original = self.before
+        for change in (
+            {
+                "lifecycle_state": "retired",
+                "preview": original.preview.model_copy(update={"enabled": False}),
+            },
+            {"driver_id": "generic-web"},
+        ):
+            with self.subTest(change=change):
+                self.before = original.model_copy(update=change)
+                self.store.write_product_profile_record(self.before)
+                self.headers["If-Match"] = f'"{product_profile_record_sha256(self.before)}"'
+                self.prepare_testing_storage_update()
+                response = await self.post()
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(
+                    self.store.read_product_profile_record(self.before.product), self.before
+                )
+
     def prepare_snapshot_opt_in(self) -> None:
         current = self.before.model_dump(mode="json")
         current["lanes"][0]["odoo_testing_drill_storage"] = {
