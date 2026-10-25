@@ -372,7 +372,8 @@ reservation. The webhook request never waits on a deploy.
     the verified build's run id and attempt (or `destroy`), and the preview's
     current lifecycle state, so a repeated reconcile replays it.
     Reconciliation reuses the retained issued plan for the same target binding,
-    including an existing successor, while it is valid or already completed.
+    including an existing successor, while it is valid or completed without
+    being superseded. Superseded attempts are followed to their successor.
     Changed bindings and expired unfinished plans receive a deterministic
     successor derived from the retained operation. That successor still requires
     the existing executor exclusion, original observation, grace, quiescence and
