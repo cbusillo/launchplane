@@ -235,9 +235,12 @@ def application_container(containers, binding, proxy_networks):
     for item in containers:
         if item['Id']!=container['Id'] and binding['name'].casefold() in proxy_dns_names(item,proxy_networks):
             raise RuntimeError('Application private name is shared')
-    if (json.loads(docker('service','inspect',binding['name']))[0]!=service or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
-        or read_service_ids()!=service_ids):
+    if json.loads(docker('service','inspect',binding['name']))[0]!=service:
         raise RuntimeError('Application service changed during route observation')
+    if docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers:
+        raise RuntimeError('Application task inventory changed during route observation')
+    if read_service_ids()!=service_ids:
+        raise RuntimeError('Application service inventory changed during route observation')
     return container,identity,shared
 
 def retained_application_backend(containers, binding, proxy_networks):
@@ -378,13 +381,18 @@ def retained_application_backend(containers, binding, proxy_networks):
     for container in containers:
         if container not in owned and binding['name'].casefold() in proxy_dns_names(container,proxy_networks):
             raise RuntimeError('Application private name is shared')
-    if (json.loads(docker('service','inspect',binding['name']))[0]!=service
-        or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
-        or read_service_ids()!=service_ids
-        or sorted(docker('ps','-aq','--no-trunc').decode().splitlines())!=sorted(item['Id'] for item in containers)
-        or any(json.loads(docker('inspect',item['Id']))!=[item] for item in owned)
-        or single_local_swarm_node(docker)!=local_nodes):
-        raise RuntimeError('Retained inventory changed during route observation')
+    if json.loads(docker('service','inspect',binding['name']))[0]!=service:
+        raise RuntimeError('Retained service changed during route observation')
+    if docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers:
+        raise RuntimeError('Retained task inventory changed during route observation')
+    if read_service_ids()!=service_ids:
+        raise RuntimeError('Retained service inventory changed during route observation')
+    if sorted(docker('ps','-aq','--no-trunc').decode().splitlines())!=sorted(item['Id'] for item in containers):
+        raise RuntimeError('Retained container inventory changed during route observation')
+    if any(json.loads(docker('inspect',item['Id']))!=[item] for item in owned):
+        raise RuntimeError('Retained container changed during route observation')
+    if single_local_swarm_node(docker)!=local_nodes:
+        raise RuntimeError('Retained node inventory changed during route observation')
     return identity,sorted(set(['http://'+binding['name']+':'+str(binding['port']),*exact_endpoints])),service['ID'],template_sha256
 
 def read_fence(proxy_id, name, filesystem):

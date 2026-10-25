@@ -1907,6 +1907,55 @@ class ApplicationFlowTests(unittest.TestCase):
         with patch.object(self, "docker", side_effect=change_scope), self.assertRaises(ValueError):
             self.adapter.route_admission(record)
 
+        from control_plane.dokploy.native_copy_stream import NativeProgramFailed
+
+        native = routing.command
+        changed_sites = []
+        changes = ("tasks", "containers", "owned-container")
+        for change in changes:
+            with self.subTest(snapshot_change=change):
+                reset()
+                reads: dict[str, int] = {}
+                injected = []
+
+                def change_snapshot(arguments: list[str], **kwargs: Any) -> Any:
+                    result = native(arguments, **kwargs)
+                    selected = (
+                        "tasks"
+                        if arguments[1:3] == ["service", "ps"]
+                        else "containers"
+                        if arguments[1:3] == ["ps", "-aq"]
+                        else "owned-container"
+                        if arguments[1:] == ["inspect", "old-app-container"]
+                        else ""
+                    )
+                    reads[selected] = reads.get(selected, 0) + 1
+                    if selected == change and reads[selected] == (
+                        1 if selected == "owned-container" else 2
+                    ):
+                        injected.append(True)
+                        if selected == "owned-container":
+                            containers = json.loads(result.stdout)
+                            containers[0]["State"]["Health"] = {
+                                "Log": [{"Output": "private-retained-health-output"}]
+                            }
+                            result.stdout = json.dumps(containers).encode()
+                        else:
+                            result.stdout += b"\nnew-inventory-member"
+                    return result
+
+                with (
+                    patch.object(routing, "command", side_effect=change_snapshot),
+                    self.assertRaises(NativeProgramFailed) as raised,
+                ):
+                    self.adapter.route_admission(record)
+                self.assertTrue(injected)
+                self.assertTrue(raised.exception.program_sites)
+                changed_sites.append(raised.exception.program_sites[-1])
+                self.assertNotIn("private-retained-health-output", str(raised.exception))
+                self.assertEqual(routing.effect_count, 0)
+        self.assertEqual(len(set(changed_sites)), len(changes))
+
     def unfinished_private_forward(self, problem: str) -> tuple[Any, Any, Any]:
         """Stop the actual original child at a positively undispatched boundary."""
         import fcntl
