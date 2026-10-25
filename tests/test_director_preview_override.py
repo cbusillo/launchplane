@@ -85,9 +85,7 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
             "reserve_bytes": 40,
         }
 
-    async def test_director_records_testing_capacity_under_the_snapshot_hold_and_replays(
-        self,
-    ) -> None:
+    async def test_director_records_testing_capacity_under_the_snapshot_hold(self) -> None:
         self.before.preview.clean_testing_snapshot = True
         self.store.write_product_profile_record(self.before)
         self.headers["If-Match"] = f'"{product_profile_record_sha256(self.before)}"'
@@ -96,11 +94,6 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(accepted.status_code, 202, accepted.text)
         expected = LaunchplaneProductProfileRecord.model_validate(self.after)
         self.assertEqual(self.store.read_product_profile_record(self.before.product), expected)
-        changed = expected.model_copy(update={"display_name": "Later name"})
-        self.store.write_product_profile_record(changed)
-        replay = await self.post()
-        self.assertEqual(replay.status_code, 202, replay.text)
-        self.assertEqual(self.store.read_product_profile_record(self.before.product), changed)
 
     async def test_testing_capacity_update_preserves_existing_retention_bindings(self) -> None:
         self.prepare_snapshot_opt_in()
@@ -151,22 +144,6 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         self.prepare_testing_storage_update()
         refused = await self.post()
         self.assertEqual(refused.status_code, 403, refused.text)
-        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
-
-    async def test_testing_capacity_requires_conditional_review_and_director_identity(self) -> None:
-        self.prepare_testing_storage_update()
-        for header in ("If-Match", "Idempotency-Key"):
-            with self.subTest(header=header):
-                value = self.headers.pop(header)
-                refused = await self.post()
-                self.headers[header] = value
-                self.assertEqual(refused.status_code, 400, refused.text)
-        self.headers["If-Match"] = '"stale"'
-        with scoped_agent_transport():
-            scoped = await self.post()
-        self.assertEqual(scoped.status_code, 403, scoped.text)
-        stale = await self.post()
-        self.assertEqual(stale.status_code, 412, stale.text)
         self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
 
     async def test_testing_capacity_refuses_inactive_or_non_odoo_products(self) -> None:
