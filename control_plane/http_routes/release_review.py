@@ -331,7 +331,11 @@ def register_release_review_routes(
             viewer_is_owner=viewer_is_owner,
             can_override=can_override(profile, identity),
             review=review,
-            release_request=profile.release_request,
+            release_request=(
+                profile.release_request
+                if director_agent_identity(identity) or can_override(profile, identity)
+                else None
+            ),
             release_on_acceptance=release_start_for_acceptance(store=store, profile=profile)
             or "held",
             live_site_url=prod_lane.base_url if prod_lane is not None else "",

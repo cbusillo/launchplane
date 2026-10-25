@@ -210,8 +210,11 @@ to promote.
 The pending decision is stored in the product record's optional `release_request`
 field, with its actor, reason, source, reference, time, reviewed lane versions,
 checklist digest and preceding Client decision. Compare-and-write preserves
-concurrent profile edits. A retry of the same reviewed release preserves the
-original decision and reason. The worker sends and maintains invitations only
+concurrent profile edits. The general profile upsert preserves an omitted
+request and refuses changed request data; request provenance comes only from the
+bounded request route. Full request metadata is visible to admins and Director
+agents on release-review reads; the Client receives the invitation's reason.
+A retry of the same reviewed release preserves the original decision and reason. The worker sends and maintains invitations only
 from that saved decision. A changed checklist, lane version, repository, Client
 or intervening Client decision cannot renew it. Deciding the next release uses
 this same operation again; merges never record the decision themselves.

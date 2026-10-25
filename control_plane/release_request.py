@@ -19,6 +19,25 @@ from control_plane.release_review import ReleaseReviewStore
 from control_plane.storage.postgres import ProductProfileCompareWriteResult
 
 
+def release_request_id(
+    profile: LaunchplaneProductProfileRecord,
+    checklist_digest: str,
+    client_decision_record_id: str,
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            (
+                profile.product,
+                profile.repository,
+                profile.owner.github_id,
+                checklist_digest,
+                client_decision_record_id,
+            ),
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
 def record_release_request(
     *,
     store: ReleaseReviewStore,
@@ -41,18 +60,7 @@ def record_release_request(
         ):
             raise ValueError("An accepted release is still in progress.")
         client_decision_id = client_decision.record_id if client_decision else ""
-        record_id = hashlib.sha256(
-            json.dumps(
-                (
-                    profile.product,
-                    profile.repository,
-                    profile.owner.github_id,
-                    review.checklist_digest,
-                    client_decision_id,
-                ),
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
+        record_id = release_request_id(profile, review.checklist_digest, client_decision_id)
         if profile.release_request is not None and profile.release_request.record_id == record_id:
             return profile
         now = datetime.now(UTC).isoformat()

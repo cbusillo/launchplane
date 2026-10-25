@@ -130,6 +130,22 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
+    async def test_client_review_hides_internal_request_provenance(self) -> None:
+        with patch("control_plane.release_request.publish_release_invitation", return_value=True):
+            opened = await self.request_release(reason="Release the agreed work.")
+        self.assertEqual(opened.status_code, 200, opened.text)
+        self.assertIsNotNone(self.store.read_product_profile_record("example-site").release_request)
+        for actor, github_id, visible in (("site-owner", 9001, False), ("operator", 9003, True)):
+            with self.subTest(actor=actor):
+                session = self.sessions.issue(_human(login=actor, github_id=github_id))
+                read = await _asgi_get(
+                    self.app,
+                    "/v1/release-review?product=example-site",
+                    headers={"Cookie": self.sessions.session_cookie_header(session)},
+                )
+                self.assertEqual(read.status_code, 200, read.text)
+                self.assertEqual("release_request" in read.json(), visible)
+
     async def test_agent_requests_require_a_recorded_decision_and_preserve_it_on_delivery_failure(
         self,
     ) -> None:

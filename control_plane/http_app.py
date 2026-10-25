@@ -397,6 +397,7 @@ from control_plane.release_review import (
 from control_plane.release_review_record import publish_release_decision
 from control_plane.release_invitation import adopt_release_invitation
 from control_plane.release_request import request_release_review
+from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
 from control_plane.github_app_webhook import GITHUB_APP_WEBHOOK_ROUTE
 from control_plane.provider_operations import (
@@ -13812,7 +13813,7 @@ def create_launchplane_fastapi_app(
         if existing_profile is not None:
             preserved_fields = {
                 field: getattr(existing_profile, field)
-                for field in ("odoo_business_hours", "production_use_authority")
+                for field in ("odoo_business_hours", "production_use_authority", "release_request")
                 if field not in raw_payload
             }
             try:
@@ -13864,6 +13865,15 @@ def create_launchplane_fastapi_app(
                         "or testing storage requirements."
                     ),
                 )
+        if profile.release_request != (
+            existing_profile.release_request if existing_profile is not None else None
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="release_request_bounded_apply_required",
+                message=f"Record release requests through POST {RELEASE_REQUEST_ROUTE}.",
+            )
         if profile.odoo_business_hours != (
             existing_profile.odoo_business_hours if existing_profile else None
         ):

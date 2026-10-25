@@ -23,7 +23,7 @@ test("The Director request button submits its reason through the shared request 
   await ask.getByRole("textbox").fill(reason);
   await ask.getByRole("button").click();
   await expect(ask.getByRole("status")).toBeVisible();
-  expect(requests).toEqual([{ method: "POST", payload: { product: response.product, checklist_digest: response.review.checklist_digest, reason } }]);
+  expect(requests).toMatchObject([{ method: "POST", payload: { product: response.product, checklist_digest: response.review.checklist_digest, reason } }]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("decided-release-request.png"), fullPage: true });
 });

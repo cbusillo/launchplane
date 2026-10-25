@@ -318,7 +318,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && hasChanges && !activeHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
         <h3>Ask {client} to review this release now</h3>
-        <p>Ask {client} to review when you decide this release is needed. Include your reason in plain words; nothing goes live until {client} accepts it. If {client} was already asked about this release, the existing request and its reason stay unchanged.</p>
+        <p>Ask {client} to review when you decide this release is needed. Include your reason in plain words; nothing goes live until {client} accepts it. If this review is unchanged, the existing request and its reason stay unchanged.</p>
         <label><span>Why this release is needed</span><textarea value={requestReason} maxLength={1000} disabled={busy} onChange={event => setRequestReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
           <button className="button" type="button" disabled={busy || incomplete || !requestReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>

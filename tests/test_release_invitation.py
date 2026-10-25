@@ -2,7 +2,6 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 import io
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -77,7 +76,7 @@ from control_plane.release_invitation import (
     ADOPTED_ORIGINAL_PREFIX,
 )
 from control_plane.release_review import ReleaseReviewStore, build_release_review, release_version
-from control_plane.release_request import record_release_request
+from control_plane.release_request import record_release_request, release_request_id
 from control_plane.release_invitation_changes import (
     ReleaseInvitationNotesUnavailable,
     ReleaseInvitationProvenanceUnavailable,
@@ -1964,16 +1963,17 @@ class ReleaseInvitationTests(unittest.TestCase):
             )
         last_decision = _last_client_decision(cast(ReleaseReviewStore, self.store), self.profile)
         client_decision_id = last_decision.record_id if last_decision else ""
-        request_id = hashlib.sha256(
-            (
-                (request_digest or self.review.checklist_digest)
-                + production.model_dump_json()
-                + candidate.model_dump_json()
-                + client_decision_id
-            ).encode()
-        ).hexdigest()
+        request_id = release_request_id(
+            self.profile, request_digest or self.review.checklist_digest, client_decision_id
+        )
         request = self.profile.release_request
-        if request is None or request.record_id != request_id or request_digest:
+        if (
+            request is None
+            or request.record_id != request_id
+            or request.production != production
+            or request.candidate != candidate
+            or request_digest
+        ):
             request = ReleaseRequestDecisionRecord(
                 record_id=request_id,
                 product=self.profile.product,
