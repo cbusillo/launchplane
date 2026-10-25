@@ -16,7 +16,7 @@ from control_plane.build_provenance import VerifiedBuildArtifact
 from control_plane.contracts.artifact_identity import ArtifactSourceBuild
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_routes import testing_rebuild as routes
-from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.http_routes.mutation_support import idempotency_scope, request_fingerprint
 from control_plane import testing_rebuild_preflight as preflight
 from control_plane import odoo_target_replacement_apply_http as admission
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -355,6 +355,105 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertTrue(response.json()["trace_id"])
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
+
+    async def test_director_reads_preserve_original_binding_and_mutation_guards(self) -> None:
+        from control_plane.service_auth import (
+            BearerIdentityConfig,
+            configured_local_operator_identity,
+            configured_terminal_agent_identity,
+        )
+        from tests.support.auth import scoped_agent_transport
+
+        for kind, configure in (
+            ("local_operator", configured_local_operator_identity),
+            ("terminal_agent", configured_terminal_agent_identity),
+        ):
+            with self.subTest(transport=kind):
+                config = BearerIdentityConfig.model_validate(
+                    {
+                        f"{kind}_{field}": value
+                        for field, value in (
+                            ("token", "fixture-director"),
+                            ("subject", "fixture-agent"),
+                            ("token_label", kind),
+                        )
+                    }
+                )
+                identity = configure(config)
+                assert identity is not None
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=self.policy,
+                    bearer_identity_config=config,
+                    record_store_factory=lambda: self.store,
+                    control_plane_root_path=self.fixture.root,
+                )
+                scope = idempotency_scope(identity)
+                original = self.fixture.operation.model_copy(
+                    update={
+                        "operation_id": self.fixture.operation.operation_id + "-" + kind,
+                        "status": "fail",
+                        "phase": "failed",
+                        "error_message": "Fixture completed without a candidate",
+                        "finished_at": self.fixture.operation.updated_at,
+                        "idempotency_scope": scope,
+                        "idempotency_key": kind,
+                        "request_fingerprint": request_fingerprint(
+                            {"product": self.product, **self.payload}
+                        ),
+                    }
+                )
+                self.store.write_odoo_stable_target_replacement_operation_record(original)
+                before = self.store.list_odoo_stable_target_replacement_operation_records()
+                headers = {"Authorization": "Bearer fixture-director", "Idempotency-Key": kind}
+                bound = {**self.payload, "original_scope": scope}
+                operation_path = self.url + "/operations/" + original.operation_id
+                for method, path, payload in (
+                    ("GET", self.url + "/inputs", None),
+                    ("GET", operation_path, None),
+                    ("POST", self.url + "/lookup", bound),
+                ):
+                    observed = await request(app, method, path, headers=headers, payload=payload)
+                    self.assertEqual(observed.status_code, 200, observed.text)
+                    if method == "GET" and path.endswith("inputs"):
+                        self.assertEqual(observed.json()["original_scope"], scope)
+                    with scoped_agent_transport():
+                        refused = await request(app, method, path, headers=headers, payload=payload)
+                    self.assertEqual(refused.status_code, 403, refused.text)
+                for change, status in (
+                    ({"reason": "other intent"}, 409),
+                    ({"original_scope": "another-actor"}, 403),
+                ):
+                    refused = await request(
+                        app,
+                        "POST",
+                        self.url + "/lookup",
+                        headers=headers,
+                        payload={**bound, **change},
+                    )
+                    self.assertEqual(refused.status_code, status, refused.text)
+                foreign = await request(
+                    app,
+                    "GET",
+                    operation_path.replace(self.product, "other-product"),
+                    headers=headers,
+                )
+                self.assertEqual(foreign.status_code, 404, foreign.text)
+                for path in (self.url, self.url + "/settle"):
+                    refused = await request(app, "POST", path, headers=headers, payload=bound)
+                    self.assertEqual(refused.status_code, 403, refused.text)
+                with patch(
+                    "control_plane.http_routes.testing_rebuild.read_active_authz_policy_record",
+                    side_effect=LookupError,
+                ):
+                    refused = await request(app, "GET", self.url + "/inputs", headers=headers)
+                self.assertEqual(refused.status_code, 503, refused.text)
+                self.assertEqual(
+                    self.store.list_odoo_stable_target_replacement_operation_records(), before
+                )
+                with self.assertRaises(FileNotFoundError):
+                    self.store.read_artifact_manifest(self.manifest.artifact_id)
+                self.assertEqual(self.fixture.effects, [])
 
     async def test_read_only_preflight_does_not_admit_artifact_or_candidate(self) -> None:
         before = self.store.list_odoo_stable_target_replacement_operation_records()

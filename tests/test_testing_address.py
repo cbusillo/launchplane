@@ -291,6 +291,61 @@ class TestingAddressTests(unittest.TestCase):
             self.assertEqual(response.status_code, 403, response.text)
             planner.assert_not_called()
 
+    def test_http_refusal_logs_sanitized_cause_with_response_trace(self) -> None:
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+        from control_plane.testing_address import ROUTE
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.fixture.fixture.root,
+        )
+        private = "private-provider-error-sentinel"
+        failures = (
+            (ValueError(private), 409),
+            (
+                NativeSourceAuthorizationDenied(private),
+                403,
+            ),
+        )
+        before = self.fixture.current()
+        for failure, status in failures:
+            with (
+                self.subTest(status=status),
+                patch(
+                    "control_plane.http_routes.testing_address.plan_testing_address",
+                    side_effect=failure,
+                ),
+                self.assertLogs("control_plane.http_error_evidence", level="WARNING") as captured,
+            ):
+                response = asyncio.run(
+                    request(
+                        app,
+                        "POST",
+                        ROUTE.format(product=self.product),
+                        headers={"Authorization": "Bearer local-operator-token"},
+                        payload={
+                            "context": self.context,
+                            "retirement_operation_id": self.operation.operation_id,
+                            "reservation_operation_id": self.operation.operation_id,
+                            "hostname": self.hostname,
+                            "reason": "Restore canonical testing hostname",
+                        },
+                    )
+                )
+            self.assertEqual(response.status_code, status, response.text)
+            evidence = json.loads(captured.records[0].getMessage())
+            self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
+            self.assertTrue(evidence["sites"])
+            self.assertNotIn(private, response.text + " ".join(captured.output))
+            self.assertEqual(self.fixture.current(), before)
+
     def test_changed_original_custody_refuses_without_releasing_it(self) -> None:
         self.store.write_odoo_stable_target_replacement_operation_record(
             self.operation.model_copy(
