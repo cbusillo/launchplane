@@ -85,12 +85,12 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
     # volume independently would admit two allocations against the same free bytes.
     required = {}
     available = {}
-    def demand(path, size):
+    def demand(path, size, keep_reserve=False):
         path = Path(path).resolve(strict=True)
         device = path.stat().st_dev
         stat = os.statvfs(path)
         free = stat.f_bavail * stat.f_frsize
-        if size:
+        if size or keep_reserve:
             required[device] = required.get(device, 0) + size
         available[device] = min(available.get(device, free), free)
     backings = {}
@@ -98,13 +98,14 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         name = spec.get('preview_volumes', {}).get(role, gen['namespace'] + suffix)
         volume = json.loads(docker('volume', 'inspect', name))[0]
         backings[role] = volume['Mountpoint']
+        cloned = False
         if role == 'data' and filestore_charged_as_staging:
             size = 0
         elif role == 'data' and filestore_clone_source is not None:
-            decisions['data'] = filestore_clone_proved(filestore_clone_source, backings[role])
-            if decisions['data']:
+            decisions['data'] = cloned = filestore_clone_proved(filestore_clone_source, backings[role])
+            if cloned:
                 size = 0
-        demand(backings[role], size)
+        demand(backings[role], size, keep_reserve=cloned)
     # SSH capture stages on the host; native capture/assembly stages in the
     # runner's writable layer. Require known backing rather than guessing overlay space.
     driver = containers['script-runner'][1].get('GraphDriver', {})

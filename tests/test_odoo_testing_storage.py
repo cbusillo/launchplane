@@ -627,6 +627,69 @@ class HostCapacityTests(unittest.TestCase):
                 self.assertTrue(admitted(81))
             self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
 
+    def test_a_cloned_filestore_still_needs_the_reserve_on_its_own_filesystem(self) -> None:
+        import shutil
+        import subprocess
+
+        namespace: dict[str, Any] = {"json": json, "inherited_lock_descriptors": ()}
+        exec(STORAGE_MAINTENANCE_LIBRARY, namespace)
+
+        def probe(arguments: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+            shutil.copyfile(arguments[-2], arguments[-1])
+            return subprocess.CompletedProcess(arguments, 0)
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for name in ("data", "db", "overlay", "snapshot"):
+                (root / name).mkdir()
+            namespace["docker"] = lambda *arguments: json.dumps(
+                [{"Mountpoint": str(root / arguments[-1])}]
+            ).encode()
+            spec = {
+                "generation": {"namespace": "preview"},
+                "preview_volumes": {"data": "data", "database": "db"},
+                "staging_directory": str(root / "snapshot"),
+            }
+            containers = {
+                "script-runner": (
+                    "runner",
+                    {"GraphDriver": {"Data": {"UpperDir": str(root / "overlay")}}},
+                )
+            }
+            budget = {
+                "database_bytes": 10,
+                "filestore_bytes": 40,
+                "staging_bytes": 50,
+                "reserve_bytes": 5,
+            }
+            real_stat = Path.stat
+
+            def device(path: Path, **kwargs: Any) -> Any:
+                metadata = real_stat(path, **kwargs)
+                if path.is_relative_to(root / "data"):
+                    return SimpleNamespace(st_dev=metadata.st_dev + 1, st_mode=metadata.st_mode)
+                return metadata
+
+            def free(path: Any) -> SimpleNamespace:
+                available = 1 if Path(path).is_relative_to(root / "data") else 1000
+                return SimpleNamespace(f_bavail=available, f_frsize=1)
+
+            with (
+                patch("pathlib.Path.stat", autospec=True, side_effect=device),
+                patch.object(os, "statvfs", side_effect=free),
+                patch("subprocess.run", side_effect=probe),
+            ):
+                self.assertFalse(
+                    namespace["storage_capacity"](
+                        spec,
+                        containers,
+                        budget,
+                        runner_staging_bytes=1,
+                        host_staging_bytes=0,
+                        filestore_clone_source=root / "snapshot",
+                    )
+                )
+
     def test_filestore_permission_failure_is_recorded_per_copy(self) -> None:
         from datetime import timedelta
 
