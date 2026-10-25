@@ -46,8 +46,7 @@ from tests import test_generic_web_client_release as release_fixtures
 
 
 class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
-    @scoped_agent_test
-    async def test_continuation_requires_existing_scope_and_preserves_original_release(
+    async def test_director_continuation_preserves_acceptance_without_capture_permission(
         self,
     ) -> None:
         fixture = release_fixtures.GenericWebClientReleaseTests("runTest")
@@ -63,7 +62,7 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                     products=(fixture.profile.product,),
                     contexts=(fixture.context,),
                     instances=("prod",),
-                    actions=("product_environment.read", "production_backup_gate.execute"),
+                    actions=("product_environment.read",),
                 ),
             ),
         )
@@ -81,45 +80,46 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
         path = f"/v1/products/{fixture.profile.product}/releases/{accepted.record_id}/backup-continuation"
         body: dict[str, object] = {"reason": "Capture enrollment is qualified"}
         with patch(
-            "control_plane.client_release_backup_continuation.resolve_guest_capture_values",
-            return_value={},
+            "control_plane.client_release_backup_continuation.guest_capture_metadata",
+            return_value=(),
         ):
             denied = await request(app, "POST", path, payload=body)
             self.assertIn(denied.status_code, (401, 403))
             headers = {"Authorization": "Bearer local-operator-token"}
             planned = await request(app, "POST", path, headers=headers, payload=body)
             self.assertEqual(planned.status_code, 200, planned.text)
+            self.assertTrue(planned.json()["apply_authorized"])
             self.assertEqual(
                 fixture.store.read_verireel_prod_backup_gate_operation_record(operation_id).status,
                 "fail",
             )
             body.update(apply=True, expected_digest=planned.json()["review_digest"])
-            read_only_policy = policy.model_copy(
-                update={
-                    "local_operators": (
-                        policy.local_operators[0].model_copy(
-                            update={
-                                "actions": ("product_environment.read",),
-                            }
-                        ),
-                    ),
-                }
+            direct_backup = fixture.store.read_verireel_prod_backup_gate_operation_record(
+                operation_id
+            ).request.model_dump(mode="json")
+            direct_backup["backup_record_id"] = "unaccepted-capture"
+            denied_capture = await request(
+                app,
+                "POST",
+                "/v1/production-backup-gates",
+                headers={**headers, "Idempotency-Key": "forbidden-direct-capture"},
+                payload=direct_backup,
             )
-            restricted_app = create_launchplane_fastapi_app(
-                verifier=_RejectingVerifier(),
-                bearer_identity_config=_local_operator_bearer_config(),
-                authz_policy=read_only_policy,
-                record_store_factory=lambda: fixture.store,
-                control_plane_root_path=fixture.root,
-            )
-            denied_apply = await request(
-                restricted_app, "POST", path, headers=headers, payload=body
-            )
-            self.assertEqual(denied_apply.status_code, 403, denied_apply.text)
+            self.assertEqual(denied_capture.status_code, 403, denied_capture.text)
+            fixture.switch("held")
+            held = await request(app, "POST", path, headers=headers, payload=body)
+            self.assertEqual(held.status_code, 409, held.text)
+            self.assertEqual(held.json()["error"]["code"], "release_acceptance_no_longer_current")
             self.assertEqual(
                 fixture.store.read_verireel_prod_backup_gate_operation_record(operation_id).status,
                 "fail",
             )
+            fixture.switch("promote_with_rollback_drill")
+            refreshed = await request(
+                app, "POST", path, headers=headers, payload={"reason": body["reason"]}
+            )
+            self.assertEqual(refreshed.status_code, 200, refreshed.text)
+            body["expected_digest"] = refreshed.json()["review_digest"]
             human_session = sessions.issue(_github_human_identity(role="read_only"))
             for product in (fixture.profile.product, "missing-product"):
                 human_headers = _browser_mutation_headers(sessions, human_session)
@@ -143,6 +143,112 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
             accepted,
         )
+
+    @scoped_agent_test
+    async def test_ordinary_reader_cannot_continue_even_with_capture_permission(self) -> None:
+        fixture = release_fixtures.GenericWebClientReleaseTests("runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        accepted, operation_id = fixture.stopped_precapture_backup()
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            bearer_identity_config=_local_operator_bearer_config(),
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-read",),
+                        products=(fixture.profile.product,),
+                        contexts=(fixture.context,),
+                        instances=("prod",),
+                        actions=("product_environment.read", "production_backup_gate.execute"),
+                    ),
+                ),
+            ),
+            record_store_factory=lambda: fixture.store,
+            control_plane_root_path=fixture.root,
+        )
+        path = f"/v1/products/{fixture.profile.product}/releases/{accepted.record_id}/backup-continuation"
+        headers = {"Authorization": "Bearer local-operator-token"}
+        with patch(
+            "control_plane.client_release_backup_continuation.guest_capture_metadata",
+            return_value=(),
+        ):
+            planned = await request(
+                app,
+                "POST",
+                path,
+                headers=headers,
+                payload={"reason": "Capture enrollment qualified"},
+            )
+            self.assertEqual(planned.status_code, 200, planned.text)
+            self.assertFalse(planned.json()["apply_authorized"])
+            denied = await request(
+                app,
+                "POST",
+                path,
+                headers=headers,
+                payload={
+                    "reason": "Capture enrollment qualified",
+                    "apply": True,
+                    "expected_digest": planned.json()["review_digest"],
+                },
+            )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(denied.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(
+            fixture.store.read_verireel_prod_backup_gate_operation_record(operation_id).status,
+            "fail",
+        )
+
+    async def test_director_terminal_continuation_uses_the_original_acceptance(self) -> None:
+        fixture = release_fixtures.GenericWebClientReleaseTests("runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        accepted, operation_id = fixture.stopped_precapture_backup()
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            bearer_identity_config=BearerIdentityConfig(
+                terminal_agent_token="director-terminal-token",
+                terminal_agent_subject="director-terminal",
+                terminal_agent_token_label="director-terminal",
+            ),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: fixture.store,
+            control_plane_root_path=fixture.root,
+        )
+        path = f"/v1/products/{fixture.profile.product}/releases/{accepted.record_id}/backup-continuation"
+        headers = {"Authorization": "Bearer director-terminal-token"}
+        with patch(
+            "control_plane.client_release_backup_continuation.guest_capture_metadata",
+            return_value=(),
+        ):
+            planned = await request(
+                app,
+                "POST",
+                path,
+                headers=headers,
+                payload={"reason": "Capture enrollment qualified"},
+            )
+            self.assertEqual(planned.status_code, 200, planned.text)
+            self.assertTrue(planned.json()["apply_authorized"])
+            applied = await request(
+                app,
+                "POST",
+                path,
+                headers=headers,
+                payload={
+                    "reason": "Capture enrollment qualified",
+                    "apply": True,
+                    "expected_digest": planned.json()["review_digest"],
+                },
+            )
+        self.assertEqual(applied.status_code, 200, applied.text)
+        current = fixture.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        assert current.authorization is not None
+        self.assertEqual(current.authorization.release_decision_record_id, accepted.record_id)
+        self.assertEqual(current.status, "pending")
 
     async def test_legacy_capture_route_cannot_enqueue_an_operation(self) -> None:
         with TemporaryDirectory() as directory:

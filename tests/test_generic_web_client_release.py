@@ -305,8 +305,8 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self, accepted: ReleaseReviewDecisionRecord, *, digest: str = "", apply: bool = False
     ) -> Any:
         with patch(
-            "control_plane.client_release_backup_continuation.resolve_guest_capture_values",
-            return_value={},
+            "control_plane.client_release_backup_continuation.guest_capture_metadata",
+            return_value=(),
         ):
             return continue_release_backup(
                 store=self.store,
@@ -431,6 +431,26 @@ class GenericWebClientReleaseTests(unittest.TestCase):
 
     def test_precapture_continuation_refuses_changed_authority_and_acceptance(self) -> None:
         accepted, operation_id = self.stopped_precapture_backup()
+        original = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        assert original.authorization is not None
+        self.store.write_verireel_prod_backup_gate_operation_record(
+            original.model_copy(
+                update={
+                    "authorization": original.authorization.model_copy(
+                        update={
+                            "caller": original.authorization.caller.model_copy(
+                                update={
+                                    "github_id": original.authorization.caller.github_id + 1,
+                                }
+                            ),
+                        }
+                    ),
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.continue_backup(accepted)
+        self.store.write_verireel_prod_backup_gate_operation_record(original)
         plan = self.continue_backup(accepted)
         self.switch("held")
         with self.assertRaises(ValueError):

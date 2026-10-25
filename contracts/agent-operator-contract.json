@@ -48,7 +48,7 @@
       {
         "idempotency": "body",
         "identity_dependencies": [
-          "read_operator_mutation_identity"
+          "read_browser_mutation_identity"
         ],
         "method": "POST",
         "modes": [
@@ -67,7 +67,7 @@
         "reviewed_evidence": [
           "expected_digest"
         ],
-        "schema_fingerprint_sha256": "9569d3fdc070478bc7569de0d154d3f6442d8758f8590b676d6aadffac896dc1",
+        "schema_fingerprint_sha256": "58db8a0b3f3df37db61c4601e028c49feebe958c318d45a43a250598dfdd4382",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1162,8 +1162,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "4f7250b2bf219d94e2771eb70988f19301d0bf91"
+    "source_commit_sha": "9c40c6ad89a36b6f9bdc8b10c3c05b4929bdd6b2"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "846c52a7968490dec7bd21b0666170b79b7347f1197e2e449a0f3696dffdfe77"
+  "semantic_digest_sha256": "add374185c8f7019ba5b0032939043da091942a4523f6ac54b2574921797f632"
 }

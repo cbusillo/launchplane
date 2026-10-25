@@ -12,12 +12,13 @@ from control_plane.client_release import (
     _require_current_release,
     client_release_step_operation_id,
     client_release_steps,
+    client_release_grant_allows,
     read_client_release_step_views,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
-from control_plane.guest_capture_credentials import resolve_guest_capture_values
+from control_plane.guest_capture_credentials import guest_capture_metadata
 from control_plane.odoo_business_hours import require_release_window
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import resolve_production_backup_binding
@@ -26,6 +27,13 @@ from control_plane.workflows.ship import utc_now_timestamp
 BACKUP_CONTINUATION_ROUTE = (
     "/v1/products/{product}/releases/{decision_record_id}/backup-continuation"
 )
+BACKUP_CONTINUATION_ACTION = "client_release_backup.continue"
+
+
+class BackupContinuationRefused(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class BackupContinuationReview(BaseModel):
@@ -45,6 +53,7 @@ class BackupContinuationResult(BaseModel):
     review_digest: str
     status: Literal["ready", "queued", "replayed"]
     provider_mutation: bool = False
+    apply_authorized: bool = False
 
 
 def require_precapture_failure(operation: VeriReelProdBackupGateOperationRecord) -> None:
@@ -59,7 +68,7 @@ def require_precapture_failure(operation: VeriReelProdBackupGateOperationRecord)
         or operation.cancellation is not None
         or not operation.finished_at
     ):
-        raise ValueError("backup_capture_outcome_not_proven_absent")
+        raise BackupContinuationRefused("backup_capture_outcome_not_proven_absent")
 
 
 def _has_continuation_receipt(
@@ -73,7 +82,7 @@ def _has_continuation_receipt(
     while prior.previous_attempt is not None:
         if prior.continuation_digest == review.expected_digest:
             if prior.continuation_reason != review.reason or prior.continuation_actor != actor:
-                raise ValueError("backup_continuation_replay_conflict")
+                raise BackupContinuationRefused("backup_continuation_replay_conflict")
             return True
         prior = prior.previous_attempt
     return False
@@ -94,10 +103,10 @@ def continue_release_backup(
     )
     profile = store.read_product_profile_record(product)
     if decision.product != product or profile.driver_id != "generic-web":
-        raise ValueError("backup_continuation_scope_invalid")
+        raise BackupContinuationRefused("backup_continuation_scope_invalid")
     steps = client_release_steps(decision.release_start)
     if not steps or steps[0].kind != "backup":
-        raise ValueError("backup_continuation_scope_invalid")
+        raise BackupContinuationRefused("backup_continuation_scope_invalid")
     operation_id = client_release_step_operation_id(
         profile=profile, decision=decision, step=steps[0]
     )
@@ -113,10 +122,10 @@ def continue_release_backup(
     require_precapture_failure(operation)
     assert operation.binding is not None
     if _covering_decision(store, product, decision_record_id=decision_record_id) is None:
-        raise ValueError("release_acceptance_no_longer_current")
+        raise BackupContinuationRefused("release_acceptance_no_longer_current")
     views = read_client_release_step_views(store=store, profile=profile, decision=decision)
     if any(view.status != "not_started" for view in views[1:]):
-        raise ValueError("later_release_step_already_started")
+        raise BackupContinuationRefused("later_release_step_already_started")
     try:
         _require_current_release(store, root, profile, decision)
         require_release_window(
@@ -125,27 +134,24 @@ def continue_release_backup(
         if decision.release_start == "promote_with_rollback_drill":
             _generic_web_drill_target(store, profile, decision)
     except ClientReleaseNotReady as error:
-        raise ValueError("release_evidence_not_current") from error
+        raise BackupContinuationRefused("release_evidence_not_current") from error
     authorization = operation.authorization
     if (
         authorization is None
         or authorization.grant != "client_release_acceptance"
-        or authorization.release_decision_record_id != decision_record_id
-        or authorization.product != product
-        or operation.context != authorization.context
-        or operation.instance != "prod"
+        or not client_release_grant_allows(store, authorization)
     ):
-        raise ValueError("backup_acceptance_provenance_invalid")
+        raise BackupContinuationRefused("backup_acceptance_provenance_invalid")
     binding = resolve_production_backup_binding(store, operation.binding.request)
     if binding != operation.binding:
-        raise ValueError("backup_authority_changed")
-    resolve_guest_capture_values(store, binding)
+        raise BackupContinuationRefused("backup_authority_changed")
+    guest_capture_metadata(store, binding)
     backup = store.read_backup_gate_record(operation.backup_record_id)
     if backup.status != "fail" or backup.evidence != {
         **operation.progress_evidence,
         "error_message": operation.error_message,
     }:
-        raise ValueError("backup_evidence_changed")
+        raise BackupContinuationRefused("backup_evidence_changed")
     digest = hashlib.sha256(
         json.dumps(
             {
@@ -161,7 +167,7 @@ def continue_release_backup(
     ).hexdigest()
     if review.apply:
         if review.expected_digest != digest:
-            raise ValueError("backup_continuation_review_changed")
+            raise BackupContinuationRefused("backup_continuation_review_changed")
         now = utc_now_timestamp()
         resumed = operation.model_copy(
             update={
@@ -190,7 +196,7 @@ def continue_release_backup(
         ):
             current = store.read_verireel_prod_backup_gate_operation_record(operation_id)
             if not _has_continuation_receipt(current, review, actor):
-                raise ValueError("backup_continuation_review_changed")
+                raise BackupContinuationRefused("backup_continuation_review_changed")
             return BackupContinuationResult(
                 trace_id=trace_id,
                 decision_record_id=decision_record_id,
