@@ -15,7 +15,19 @@ from control_plane.contracts.disposable_lane import (
 )
 
 
-RESOURCE_KEYS = ("ODOO_DATA_VOLUME", "ODOO_DB_VOLUME", "ODOO_LOG_VOLUME")
+PREVIEW_RESOURCE_SUFFIXES = (
+    ("ODOO_DB_NAME", "db"),
+    ("ODOO_DATA_VOLUME", "data"),
+    ("ODOO_DB_VOLUME", "db_volume"),
+    ("ODOO_LOG_VOLUME", "logs"),
+)
+RESOURCE_KEYS = tuple(key for key, _ in PREVIEW_RESOURCE_SUFFIXES if key.endswith("_VOLUME"))
+
+
+def preview_resource_environment(compose_name: str) -> dict[str, str]:
+    identifier = re.sub(r"[^a-zA-Z0-9]+", "_", compose_name.strip()).strip("_").lower()
+    identifier = identifier or "odoo_preview"
+    return {key: f"{identifier}_{suffix}" for key, suffix in PREVIEW_RESOURCE_SUFFIXES}
 
 
 def require_existing_preview_resources(

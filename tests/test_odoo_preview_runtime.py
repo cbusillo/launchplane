@@ -398,6 +398,9 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             mutate.assert_not_called()
 
     def setUp(self) -> None:
+        self.preview_resources = self.enterContext(
+            patch("control_plane.odoo_preview_resources.require_existing_preview_resources")
+        )
         self.enterContext(
             patch("control_plane.dokploy.memory_capacity.require_preview_host_memory_capacity")
         )
@@ -2775,9 +2778,21 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         requests: list[dict[str, object]] = []
         domain_deleted = False
+        guarded = False
+
+        @contextmanager
+        def guard() -> Iterator[None]:
+            nonlocal guarded
+            guarded = True
+            try:
+                yield
+            finally:
+                guarded = False
 
         def _fake_dokploy_request(**kwargs: object) -> object:
             nonlocal domain_deleted
+            if kwargs.get("method") == "POST":
+                self.assertTrue(guarded)
             requests.append(dict(kwargs))
             if kwargs["path"] in {"/api/project.all", "/api/compose.search"}:
                 return []
@@ -2814,6 +2829,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
                     environment_values=_environment_values(),
                 ),
+                provider_mutation_guard=guard,
             )
 
         self.assertEqual(result.status, "pass")
@@ -2828,6 +2844,41 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         assert isinstance(delete_payload, dict)
         self.assertEqual(delete_payload["composeId"], "compose-cm-pr-45")
         self.assertTrue(delete_payload["deleteVolumes"])
+        from control_plane.odoo_preview_resources import preview_resource_environment
+
+        self.assertTrue(self.preview_resources.called)
+        for call in self.preview_resources.call_args_list:
+            self.assertEqual(
+                call.kwargs["environment"], preview_resource_environment(dry_run.compose_name)
+            )
+
+    def test_destroy_refuses_unsafe_resources_before_any_provider_mutation(self) -> None:
+        self.preview_resources.side_effect = click.ClickException("Unsafe resource fixture")
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target())
+            )
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                return_value=[],
+            ) as provider,
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                record_store=preview_target_inventory(),
+                preview_context="fixture-preview",
+                request=OdooPreviewDokployApplyRequest(dry_run_plan=plan),
+            )
+        self.assertNotEqual(result.status, "pass")
+        self.assertFalse(
+            any(call.kwargs.get("method") == "POST" for call in provider.call_args_list)
+        )
 
     def test_apply_destroy_treats_missing_compose_without_domains_as_clean(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(

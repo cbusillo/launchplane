@@ -454,7 +454,7 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
                     provider_effect_checkpoint=None,
                     provider_lease_check=None,
                     expected_runtime_identity=None,
-                    qualify_existing_refresh=True,
+                    qualify_existing_preview=True,
                 )
                 self.assertEqual(result.status, "fail")
                 self.assertEqual(result.provider_effect_attempted, late)

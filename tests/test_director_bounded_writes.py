@@ -481,19 +481,27 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBound
             )
         )
 
-    async def test_refresh_rechecks_protected_use_after_first_provider_effect(self) -> None:
-        def execute(**kwargs: Any) -> Any:
-            kwargs["provider_effect_checkpoint"]("fixture-first-effect")
-            self.safety(usage="in_use")
-            kwargs["provider_effect_checkpoint"]("fixture-second-effect")
-            self.fail("The second effect must not run")
+    async def test_existing_preview_rechecks_protection_between_effects(self) -> None:
+        for operation in ("refresh", "destroy"):
+            with self.subTest(operation=operation):
+                fixture = DirectorBoundedWritesFixture(self)
+                fixture.payload["apply"]["dry_run_plan"]["operation"] = operation
+                fixture.issue_preview()
 
-        with patch("control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute):
-            response = await self.preview_apply()
-        self.assertEqual(response.status_code, 409, response.text)
-        # A refusal after an effect retains uncertainty; it cannot release the
-        # reservation as though the first effect never happened.
-        self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
+                def execute(**kwargs: Any) -> Any:
+                    kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+                    fixture.safety(usage="in_use")
+                    kwargs["provider_effect_checkpoint"]("fixture-second-effect")
+                    self.fail("The second effect must not run")
+
+                with patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute
+                ):
+                    response = await fixture.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "mutation_reconciliation_required"
+                )
 
     async def test_lifecycle_progress_during_refresh_does_not_create_a_false_fence(self) -> None:
         def execute(**kwargs: Any) -> Any:

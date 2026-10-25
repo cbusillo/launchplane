@@ -1142,7 +1142,7 @@ def execute_odoo_preview_dokploy_apply(
     expected_runtime_identity: RuntimeIdentity | None = None,
     propagate_domain_lookup_error: bool = False,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
-    qualify_existing_refresh: bool = False,
+    qualify_existing_preview: bool = False,
     restore_upstream: bool = False,
     restore_clean_snapshot: bool = False,
     preserve_existing_data: bool = False,
@@ -1182,6 +1182,8 @@ def execute_odoo_preview_dokploy_apply(
             request=request,
             provider_effect_checkpoint=provider_effect_checkpoint,
             propagate_domain_lookup_error=propagate_domain_lookup_error,
+            provider_mutation_guard=provider_mutation_guard,
+            provider_lease_check=provider_lease_check,
         )
     return _execute_refresh(
         database_url=database_url,
@@ -1193,7 +1195,7 @@ def execute_odoo_preview_dokploy_apply(
         provider_lease_check=provider_lease_check,
         expected_runtime_identity=expected_runtime_identity,
         integration_allowances=integration_allowances,
-        qualify_existing_refresh=qualify_existing_refresh,
+        qualify_existing_preview=qualify_existing_preview,
         restore_upstream=restore_upstream,
         restore_clean_snapshot=restore_clean_snapshot,
         preserve_existing_data=preserve_existing_data,
@@ -1618,7 +1620,7 @@ def _execute_refresh(
     provider_lease_check: Callable[[], None] | None,
     expected_runtime_identity: RuntimeIdentity | None,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
-    qualify_existing_refresh: bool = False,
+    qualify_existing_preview: bool = False,
     restore_upstream: bool = False,
     restore_clean_snapshot: bool = False,
     preserve_existing_data: bool = False,
@@ -1654,7 +1656,7 @@ def _execute_refresh(
         if restore_upstream or restore_clean_snapshot or preserve_existing_data:
             environment_values["ODOO_MAX_CRON_THREADS"] = "0"
             environment_values["ENV_OVERRIDE_DISABLE_CRON"] = "true"
-        if qualify_existing_refresh and creating_compose:
+        if qualify_existing_preview and creating_compose:
             raise click.ClickException("Existing-preview qualification cannot create a target.")
         if creating_compose and not plan.template_compose_id:
             raise click.ClickException("Odoo preview compose create requires template_compose_id.")
@@ -1697,7 +1699,7 @@ def _execute_refresh(
         )
 
         def qualify_resources() -> None:
-            if qualify_existing_refresh or preserve_existing_data:
+            if qualify_existing_preview or preserve_existing_data:
                 from control_plane.odoo_preview_resources import require_existing_preview_resources
 
                 require_existing_preview_resources(
@@ -1940,6 +1942,8 @@ def _execute_destroy(
     request: OdooPreviewDokployApplyRequest,
     provider_effect_checkpoint: Callable[[str], None] | None,
     propagate_domain_lookup_error: bool,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None,
+    provider_lease_check: Callable[[], None] | None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     compose_id = plan.compose_ref
@@ -1951,21 +1955,50 @@ def _execute_destroy(
             compose_id="",
             error_message="" if absent else "Preview provider absence is unknown.",
         )
-    destroy_result = destroy_dokploy_preview_resource(
-        record_store=record_store,
-        context=context,
-        instance=plan.preview_slug,
-        host=host,
-        token=token,
-        resource_type="compose",
-        resource_id=compose_id,
-        domain_host=plan.domain_host,
-        delete_volumes=plan.delete_volumes,
-        continue_after_domain_cleanup_error=False,
-        propagate_domain_lookup_error=propagate_domain_lookup_error,
-        missing_resource_is_clean=True,
-        before_provider_mutation=provider_effect_checkpoint,
-    )
+
+    def checkpoint_destroy_effect(phase: str) -> None:
+        if plan.delete_volumes:
+            from control_plane.odoo_preview_resources import (
+                preview_resource_environment,
+                require_existing_preview_resources,
+            )
+
+            try:
+                require_existing_preview_resources(
+                    host=host,
+                    token=token,
+                    compose_id=compose_id,
+                    compose_name=plan.compose_name,
+                    context=context,
+                    instance=plan.preview_slug,
+                    environment=preview_resource_environment(plan.compose_name),
+                    checkpoint=provider_lease_check or (lambda: None),
+                )
+            except dokploy_api.DokployRequestFailed as error:
+                if error.status_code != 404 or not _destroyed_preview_absence_verified(
+                    host=host, token=token, plan=plan
+                ):
+                    raise
+        if provider_effect_checkpoint is not None:
+            provider_effect_checkpoint(phase)
+
+    guard = provider_mutation_guard or nullcontext
+    with guard():
+        destroy_result = destroy_dokploy_preview_resource(
+            record_store=record_store,
+            context=context,
+            instance=plan.preview_slug,
+            host=host,
+            token=token,
+            resource_type="compose",
+            resource_id=compose_id,
+            domain_host=plan.domain_host,
+            delete_volumes=plan.delete_volumes,
+            continue_after_domain_cleanup_error=False,
+            propagate_domain_lookup_error=propagate_domain_lookup_error,
+            missing_resource_is_clean=True,
+            before_provider_mutation=checkpoint_destroy_effect,
+        )
     if destroy_result.cleanup_errors and destroy_result.cleanup_errors[0].startswith(
         f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"
     ):
