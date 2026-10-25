@@ -343,7 +343,7 @@ class TestingAddressTests(unittest.TestCase):
             evidence = next(
                 item
                 for item in (json.loads(record.getMessage()) for record in captured.records)
-                if item.get("event") == "handled_error_cause"
+                if item.get("trace_id") == response.json()["trace_id"]
             )
             self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
             self.assertTrue(evidence["sites"])

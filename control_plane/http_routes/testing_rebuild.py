@@ -7,7 +7,7 @@ from typing import Annotated, Literal, NoReturn
 
 import click
 
-from fastapi import Depends, Header, Path, Query
+from fastapi import Depends, Header, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from control_plane.build_provenance import BuildProvenanceError, record_verified_build_artifact
@@ -156,6 +156,9 @@ def register_testing_rebuild_routes(
         return request_fingerprint(
             {"product": product, **payload.model_dump(mode="json", exclude={"original_scope"})}
         )
+
+    async def lookup_request_fingerprint(request: Request) -> str:
+        return request_fingerprint(await request.json())
 
     def require_admin(
         identity: LaunchplaneIdentity,
@@ -424,8 +427,9 @@ def register_testing_rebuild_routes(
 
     def lookup_original(
         product: Annotated[str, Path(min_length=1)],
-        payload: TestingRebuildSubmit,
+        payload: TestingRebuildSubmit | OdooTargetReplacementApplyEnvelope,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.lookup_identity)],
+        raw_request_fingerprint: Annotated[str, Depends(lookup_request_fingerprint)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         idempotency_key: Annotated[
             str, Header(alias="Idempotency-Key", min_length=1, max_length=256)
@@ -434,7 +438,22 @@ def register_testing_rebuild_routes(
         """Read the original request after a denied recovery; never admit or retry it."""
         trace_id = common.next_trace_id()
         store = require_admin(identity, record_store, trace_id, read_only=True)
-        require_original_scope(identity, payload, trace_id)
+        if director_agent_identity(identity) and isinstance(
+            payload, OdooTargetReplacementApplyEnvelope
+        ):
+            requested_product = payload.product
+            requested_fingerprint = raw_request_fingerprint
+        elif not director_agent_identity(identity) and isinstance(payload, TestingRebuildSubmit):
+            require_original_scope(identity, payload, trace_id)
+            requested_product = product
+            requested_fingerprint = fingerprint(product, payload)
+        else:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Keep the original request body for this caller's testing lookup.",
+            )
         if not idempotency_key.strip():
             raise common.http_error(
                 status_code=400,
@@ -456,12 +475,9 @@ def register_testing_rebuild_routes(
             )
         if (
             original.product != product
+            or requested_product != product
             or not original.is_native_testing_rebuild
-            or (
-                original.request != replacement(product, payload)
-                if director_agent_identity(identity)
-                else original.request_fingerprint != fingerprint(product, payload)
-            )
+            or original.request_fingerprint != requested_fingerprint
         ):
             raise common.http_error(
                 status_code=409,
