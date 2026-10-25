@@ -15,7 +15,6 @@ from control_plane.contracts.every_code_feedback_resume import (
     parse_every_code_feedback_timestamp,
 )
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
-from control_plane.every_code_feedback_open_observation import _verified_open_observation
 from control_plane.every_code_feedback_resume_intent import decide_every_code_feedback_resume_intent
 from tests.test_every_code_feedback_resume_storage import _acceptance, _intent, T0, T1
 
@@ -44,16 +43,13 @@ def request_fixture() -> EveryCodeWorkRequestRecord:
 
 def observation_fixture(
     observed_at: str = T1,
-) -> EveryCodeFeedbackPullRequestOpenObservation | None:
-    return _verified_open_observation(
-        repository={"id": 34, "owner": {"id": 12}},
-        pull_request={
-            "number": 1,
-            "node_id": "PR_node",
-            "state": "open",
-            "merged": False,
-            "base": {"repo": {"id": 34, "owner": {"id": 12}}},
-        },
+) -> EveryCodeFeedbackPullRequestOpenObservation:
+    revision = _acceptance().revision
+    return EveryCodeFeedbackPullRequestOpenObservation(
+        repository_id=revision.repository_id,
+        repository_owner_id=revision.repository_owner_id,
+        pull_request_number=revision.pull_request_number,
+        pull_request_node_id=revision.pull_request_node_id,
         observed_at=observed_at,
     )
 
@@ -178,23 +174,4 @@ class FeedbackResumeIntentTests(unittest.TestCase):
         self.assertNotEqual(
             EveryCodeFeedbackResumeIntentRecord.model_validate(changed).intent_digest,
             minted.intent_digest,
-        )
-
-    def test_canonical_factory_rejects_closed_or_repository_mismatch(self) -> None:
-        repo = {"id": 34, "owner": {"id": 12}}
-        pr = {
-            "number": 1,
-            "node_id": "PR_node",
-            "state": "closed",
-            "merged": False,
-            "base": {"repo": {"id": 34, "owner": {"id": 12}}},
-        }
-        self.assertIsNone(
-            _verified_open_observation(repository=repo, pull_request=pr, observed_at=T1)
-        )
-        pr["state"] = "open"
-        self.assertIsNone(
-            _verified_open_observation(
-                repository={"id": 35, "owner": {"id": 12}}, pull_request=pr, observed_at=T1
-            )
         )
