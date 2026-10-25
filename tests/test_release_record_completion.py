@@ -161,7 +161,7 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             self.assertTrue(callable(resolve.call_args.kwargs["contains_commit"]))
 
     def test_only_current_release_waits_recheck_after_record_settlement(self) -> None:
-        from control_plane.release_invitation import SETTLED_DECISION_RECHECK_SECONDS
+        from control_plane.release_event_waits import RELEASE_WAIT_RECHECK_SECONDS
 
         backoff = ReleaseInvitationBackoff()
         with (
@@ -175,10 +175,10 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             self.advance(backoff)
             self.assertEqual(self.settle_waits.call_count, 1)
             self.assertEqual(self.issue["state"], "closed")
-            clock.return_value += SETTLED_DECISION_RECHECK_SECONDS + 1
+            clock.return_value += RELEASE_WAIT_RECHECK_SECONDS + 1
             self.advance(backoff)
             self.assertEqual(self.settle_waits.call_count, 2)
-            clock.return_value += SETTLED_DECISION_RECHECK_SECONDS + 1
+            clock.return_value += RELEASE_WAIT_RECHECK_SECONDS + 1
             with patch(
                 "control_plane.release_event_waits.release_version",
                 return_value=self.decision.checklist.production,

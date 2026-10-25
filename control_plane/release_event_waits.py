@@ -24,6 +24,7 @@ from control_plane.release_waits_github import (
 )
 
 
+RELEASE_WAIT_RECHECK_SECONDS = 1800
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -36,7 +37,6 @@ def advance_product_release_waits(
     should_stop: Callable[[], bool] = lambda: False,
 ) -> None:
     from control_plane.client_release import read_client_release_run
-    from control_plane.release_invitation import SETTLED_DECISION_RECHECK_SECONDS
 
     if should_stop():
         return
@@ -46,7 +46,7 @@ def advance_product_release_waits(
         previous, next_read = next_checks.get(profile.product, ("", 0))
         if previous == fingerprint and monotonic() < next_read:
             return
-        next_checks[profile.product] = (fingerprint, monotonic() + SETTLED_DECISION_RECHECK_SECONDS)
+        next_checks[profile.product] = (fingerprint, monotonic() + RELEASE_WAIT_RECHECK_SECONDS)
     decisions = [
         decision
         for decision in store.list_release_review_decision_records(product=profile.product)

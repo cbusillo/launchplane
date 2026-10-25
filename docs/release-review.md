@@ -1189,8 +1189,8 @@ remain authoritative. The required source commit must equal or precede the
 released commit; another product or a later commit stays waiting. Failed runs,
 temporary hotfix decisions and rollback runs do not resolve these waits.
 
-Only the current production decision is checked on the existing settled-decision
-cadence. Historical release records remain settled. Search indexing is eventual:
+Only the current production decision is rechecked, at thirty-minute intervals;
+a changed production version is checked immediately. Historical release records remain settled. Search indexing is eventual:
 a newly recorded or newly indexed wait is found on a later pass without a cutoff.
 Incomplete search coverage and individual failures remain explicit and retryable;
 independent repositories can progress. The adapter uses the existing GraphQL
