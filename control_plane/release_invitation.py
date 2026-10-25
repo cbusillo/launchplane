@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from time import monotonic
 from threading import Event
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from control_plane.client_test_notes import _markdown_lines
@@ -38,6 +39,8 @@ from control_plane.workflows.launchplane import (
     launchplane_github_token,
 )
 
+if TYPE_CHECKING:
+    from control_plane.client_release import ClientReleaseRunView
 
 # How often a worker confirms that a decision on unchanged lane versions still covers
 # the current checklist. Changed test notes can invalidate it without a new candidate.
@@ -523,6 +526,36 @@ def _close_issue(*, path: str, token: str, number: int) -> None:
         raise ValueError("Release issue closure was not confirmed.")
 
 
+def _finished(run: "ClientReleaseRunView") -> bool:
+    if run.state == "passed":
+        return True
+    return (
+        run.state == "stopped"
+        and any(step.status in {"fail", "cancelled"} for step in run.steps)
+        and not any(
+            step.status in {"pending", "running", "reconciliation_required"} for step in run.steps
+        )
+    )
+
+
+def _settled_invitation_line(run: "ClientReleaseRunView") -> str:
+    from control_plane.client_release import _DRILL_STEPS
+
+    if run.state == "passed":
+        return (
+            "**Released** — this version reached production through its accepted release. "
+            "No action is needed on this invitation."
+        )
+    drill_steps = {step.name for step in _DRILL_STEPS}
+    went_live = any(step.kind == "promote" and step.status == "pass" for step in run.steps)
+    if any(step.status in {"fail", "cancelled"} and step.step in drill_steps for step in run.steps):
+        stopped = "A follow-up safety check (the rollback drill) did not complete"
+    else:
+        stopped = "A release step did not complete"
+    went = "It went live in production. " if went_live else ""
+    return f"**Accepted.** {went}{stopped} and is being fixed; nothing is needed from you."
+
+
 def _settle_release_records(
     *,
     store: ReleaseReviewStore,
@@ -576,19 +609,7 @@ def _settle_release_record(
 
     with store.release_review_publication_lock(record_id=decision.record_id):
         run = read_client_release_run(store=store, profile=profile, decision=decision)
-        if (
-            run is None
-            or run.decision_record_id != decision.record_id
-            or run.state not in {"passed", "stopped"}
-            or any(
-                step.status in {"pending", "running", "reconciliation_required"}
-                for step in run.steps
-            )
-            or (
-                run.state == "stopped"
-                and not any(step.status in {"fail", "cancelled"} for step in run.steps)
-            )
-        ):
+        if run is None or run.decision_record_id != decision.record_id or not _finished(run):
             return False
         outcome = (
             ("Rolled back" if decision.release_start == "rollback" else "Released")
@@ -687,12 +708,12 @@ def _settle_completed_invitation(
         ):
             return
 
-        def completed() -> bool:
+        def completed() -> "ClientReleaseRunView | None":
             run = read_client_release_run(store=store, profile=profile, decision=decision)
-            return bool(
+            if (
                 run is not None
                 and run.decision_record_id == decision.record_id
-                and run.state == "passed"
+                and _finished(run)
                 and store.read_product_profile_record(profile.product) == profile
                 and _last_client_decision(store, profile) == last_decision
                 and store.read_release_review_decision_record(
@@ -701,9 +722,11 @@ def _settle_completed_invitation(
                 == decision
                 and release_version(store=store, profile=profile, instance="prod") == production
                 and release_version(store=store, profile=profile, instance="testing") == candidate
-            )
+            ):
+                return run
+            return None
 
-        if not completed():
+        if completed() is None:
             return
         previous_decision = _last_client_decision(store, profile, before=decision)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
@@ -790,7 +813,8 @@ def _settle_completed_invitation(
                     if last_decision is None or created_at > _timestamp(last_decision.decided_at):
                         pending = True
                     continue
-                if not completed():
+                run = completed()
+                if run is None:
                     return
                 comment_id = comment.get("id")
                 if not isinstance(comment_id, int) or comment_id < 1:
@@ -799,8 +823,7 @@ def _settle_completed_invitation(
                 # Neutralize historical mentions instead of notifying the Client again.
                 body = (
                     f"{completion}\n{marker}\n\n"
-                    "**Released** — this version reached production through its accepted release. "
-                    "No action is needed on this invitation.\n\n"
+                    f"{_settled_invitation_line(run)}\n\n"
                     f"[Saved acceptance]({decision.release_issue_url})\n\n"
                     "<details><summary>Original invitation and delivery receipts</summary>\n\n"
                     + "\n".join(lines).replace("@", "@\u200b")
@@ -816,7 +839,7 @@ def _settle_completed_invitation(
                     raise ValueError("Release invitation completion was not confirmed.")
                 matched = True
             if matched and not pending and production == candidate:
-                if not completed():
+                if completed() is None:
                     return
                 if issues[0].get("state") != "closed":
                     _close_issue(path=f"{path}/{number}", token=token, number=number)
