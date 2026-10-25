@@ -457,7 +457,11 @@ def register_testing_rebuild_routes(
         if (
             original.product != product
             or not original.is_native_testing_rebuild
-            or original.request_fingerprint != fingerprint(product, payload)
+            or (
+                original.request != replacement(product, payload)
+                if director_agent_identity(identity)
+                else original.request_fingerprint != fingerprint(product, payload)
+            )
         ):
             raise common.http_error(
                 status_code=409,

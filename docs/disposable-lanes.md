@@ -1621,8 +1621,11 @@ does not prove a new copy or completed restore. The worker still checks the
 source, generated values, independent resources, health and identity before
 cutover. The authenticated Director agent can also inspect these inputs, read a known
 testing operation, and look up its own original key and exact intent. These
-three reads still require database storage and an active administrator policy;
-they do not change submission, settlement or resume authority. The machine
+three reads still require database storage and an active administrator policy.
+Director lookup compares the complete stored typed replacement request because
+its native submission envelope has a different fingerprint from the browser
+control. Human lookup retains its original fingerprint check. These reads do
+not change submission, settlement or resume authority. The machine
 target-replacement plan route supports the same native read without a provider
 write.
 

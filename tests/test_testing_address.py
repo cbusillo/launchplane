@@ -340,7 +340,11 @@ class TestingAddressTests(unittest.TestCase):
                     )
                 )
             self.assertEqual(response.status_code, status, response.text)
-            evidence = json.loads(captured.records[0].getMessage())
+            evidence = next(
+                item
+                for item in (json.loads(record.getMessage()) for record in captured.records)
+                if item.get("event") == "handled_error_cause"
+            )
             self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
             self.assertTrue(evidence["sites"])
             self.assertNotIn(private, response.text + " ".join(captured.output))

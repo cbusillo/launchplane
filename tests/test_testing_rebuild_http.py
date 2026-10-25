@@ -16,7 +16,7 @@ from control_plane.build_provenance import VerifiedBuildArtifact
 from control_plane.contracts.artifact_identity import ArtifactSourceBuild
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_routes import testing_rebuild as routes
-from control_plane.http_routes.mutation_support import idempotency_scope, request_fingerprint
+from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane import testing_rebuild_preflight as preflight
 from control_plane import odoo_target_replacement_apply_http as admission
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -389,24 +389,52 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                     control_plane_root_path=self.fixture.root,
                 )
                 scope = idempotency_scope(identity)
-                original = self.fixture.operation.model_copy(
-                    update={
-                        "operation_id": self.fixture.operation.operation_id + "-" + kind,
-                        "status": "fail",
-                        "phase": "failed",
-                        "error_message": "Fixture completed without a candidate",
-                        "finished_at": self.fixture.operation.updated_at,
-                        "idempotency_scope": scope,
-                        "idempotency_key": kind,
-                        "request_fingerprint": request_fingerprint(
-                            {"product": self.product, **self.payload}
-                        ),
-                    }
-                )
-                self.store.write_odoo_stable_target_replacement_operation_record(original)
-                before = self.store.list_odoo_stable_target_replacement_operation_records()
                 headers = {"Authorization": "Bearer fixture-director", "Idempotency-Key": kind}
-                bound = {**self.payload, "original_scope": scope}
+                original_request = self.fixture.operation.request.model_copy(
+                    update={"reason": "Rebuild the disposable testing copy"}
+                )
+                if kind == "local_operator":
+                    admitted = await request(
+                        app,
+                        "POST",
+                        admission.ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
+                        headers=headers,
+                        payload={
+                            "product": self.product,
+                            "replacement": original_request.model_dump(mode="json"),
+                        },
+                    )
+                    self.assertEqual(admitted.status_code, 202, admitted.text)
+                    original = next(
+                        item
+                        for item in self.store.list_odoo_stable_target_replacement_operation_records()
+                        if item.idempotency_key == kind
+                    )
+                    self.store.write_odoo_stable_target_replacement_operation_record(
+                        original.model_copy(
+                            update={
+                                "status": "fail",
+                                "phase": "failed",
+                                "error_message": "Fixture completed without a candidate",
+                                "finished_at": original.updated_at,
+                            }
+                        )
+                    )
+                else:
+                    original = next(
+                        item
+                        for item in self.store.list_odoo_stable_target_replacement_operation_records()
+                        if item.idempotency_key == "local_operator"
+                    )
+                    headers["Idempotency-Key"] = original.idempotency_key
+                before = self.store.list_odoo_stable_target_replacement_operation_records()
+                bound = {
+                    "data_source_mode": original_request.data_source_mode,
+                    "artifact_id": original_request.artifact_id,
+                    "source_git_ref": original_request.source_git_ref,
+                    "reason": original_request.reason,
+                    "original_scope": scope,
+                }
                 operation_path = self.url + "/operations/" + original.operation_id
                 for method, path, payload in (
                     ("GET", self.url + "/inputs", None),
@@ -414,14 +442,18 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
                     ("POST", self.url + "/lookup", bound),
                 ):
                     observed = await request(app, method, path, headers=headers, payload=payload)
-                    self.assertEqual(observed.status_code, 200, observed.text)
+                    self.assertEqual(
+                        observed.status_code,
+                        404 if kind == "terminal_agent" and method == "POST" else 200,
+                        observed.text,
+                    )
                     if method == "GET" and path.endswith("inputs"):
                         self.assertEqual(observed.json()["original_scope"], scope)
                     with scoped_agent_transport():
                         refused = await request(app, method, path, headers=headers, payload=payload)
                     self.assertEqual(refused.status_code, 403, refused.text)
                 for change, status in (
-                    ({"reason": "other intent"}, 409),
+                    ({"reason": "other intent"}, 404 if kind == "terminal_agent" else 409),
                     ({"original_scope": "another-actor"}, 403),
                 ):
                     refused = await request(
