@@ -1565,9 +1565,9 @@ metadata. Use the configured public Launchplane URL so its origin matches
 calling through a different origin fails closed. Bearer-token and GitHub Actions
 OIDC callers do not use this browser preflight.
 
-Normal Launchplane deployment does not mutate authorization policy. It deploys
-the reviewed image and may reconcile runtime key-safety policy, but authz grants
-remain DB-backed service state. This prevents a checked-in catalog or ordinary
+Normal Launchplane deployment does not mutate authorization or runtime
+key-safety policy. It deploys the reviewed image; authz grants and key-safety
+rules remain DB-backed service state. This prevents a checked-in catalog or ordinary
 image rollout from silently expanding or replacing live authority.
 
 The former append-oriented authz maintenance bridge is retired. Do not add

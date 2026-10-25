@@ -2177,7 +2177,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                             else candidate
                         )
 
-                    def close_batch_pull_request(self, *, candidate: Any) -> None:
+                    def close_batch_pull_request(self, *, candidate: Any, reason: str) -> None:
                         closed.append(candidate.batch_id)
 
                     def land_batch_candidate(self, **_: Any) -> Any:

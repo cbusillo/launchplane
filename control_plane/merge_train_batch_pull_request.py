@@ -44,6 +44,8 @@ from control_plane.release_review_github import (
     owner_test_notes,
 )
 
+CLOSE_COMMENT_PAGE_LIMIT = 10
+
 
 def _candidate_branch(
     *, repository: str, base_branch: str, batch_id: str, candidate_ref: str
@@ -243,7 +245,7 @@ def _bound_batch_pull_request(
 
 
 def close_batch_pull_request(
-    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate, reason: str
 ) -> None:
     """Close PRs owned by this generated ref even when their mutable fields drift."""
     if not candidate.candidate_sha or candidate.head_check_reuse is not None:
@@ -266,6 +268,7 @@ def close_batch_pull_request(
             continue
         if pull_request.get("state") != "open":
             raise MergeAdmissionReconciliationRequiredError("Batch PR lifecycle is unavailable.")
+        _comment_close_reason_once(client=client, candidate=candidate, number=number, reason=reason)
         response = client.transport.request(
             method="PATCH",
             path=f"/repos/{_repository_path(candidate.repository)}/pulls/{number}",
@@ -274,6 +277,28 @@ def close_batch_pull_request(
         closed = _owned_batch_pull_request(response, candidate)
         if closed.get("state") != "closed" or closed.get("merged") is not False:
             raise MergeAdmissionReconciliationRequiredError("Batch PR retirement is not confirmed.")
+
+
+def _comment_close_reason_once(
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate, number: int, reason: str
+) -> None:
+    marker = f"<!-- launchplane-batch-close:{candidate.batch_id}:{candidate.candidate_sha} -->"
+    path = f"/repos/{_repository_path(candidate.repository)}/issues/{number}/comments?per_page=100"
+    for page in range(1, CLOSE_COMMENT_PAGE_LIMIT + 1):
+        comments = client.transport.request(method="GET", path=f"{path}&page={page}")
+        if not isinstance(comments, list):
+            raise MergeAdmissionReconciliationRequiredError("Batch PR comments are unavailable.")
+        if any(
+            isinstance(item, dict) and marker in str(item.get("body") or "") for item in comments
+        ):
+            return
+        if len(comments) < 100:
+            break
+    client.comment_pull_request(
+        repository=candidate.repository,
+        pull_request_number=number,
+        body=f"{marker}\nLaunchplane is closing this batch: {reason}",
+    )
 
 
 def batch_pull_request_body(
