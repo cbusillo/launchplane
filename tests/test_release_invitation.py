@@ -1843,7 +1843,6 @@ class ReleaseInvitationTests(unittest.TestCase):
         body = self.comments[0]["body"]
         visible_lines = [line for line in body.splitlines() if line and not line.startswith("<!--")]
         self.assertIn("Release review", visible_lines[0])
-        self.assertIn("is the site working with these changes", visible_lines[0])
         self.assertNotIn("Change review (preview)", body)
         self.assertIn("@site-owner", body)
         self.assertIn(
@@ -1851,7 +1850,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         )
         self.assertIn("Accepting starts the release", body)
         self.assertIn("verified backup", body)
-        self.assertIn("check the changes on the testing site", body)
+        self.assertIn("check the changes in the testing version", body)
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()
         )

@@ -44,8 +44,12 @@ class PreviewNotesTests(unittest.TestCase):
                 self.assertTrue(item.preview_era_notes)
                 self.assertNotIn("cm-website-preview", item.owner_test_notes)
                 self.assertNotIn("/ui/owner-review", item.owner_test_notes)
-                self.assertEqual(item.owner_test_notes.count("Check this on the testing site."), 2)
-                self.assertIn("Check this on the testing site.", item.owner_test_notes.splitlines())
+                self.assertEqual(
+                    item.owner_test_notes.count("Check this in the testing version."), 2
+                )
+                self.assertIn(
+                    "Check this in the testing version.", item.owner_test_notes.splitlines()
+                )
         self.assertIn('Check that "How long we keep it"', by_number[96].owner_test_notes)
         self.assertIn("Backup retention is still being checked", by_number[96].owner_test_notes)
         self.assertIn("Check that the main buttons", by_number[116].owner_test_notes)
@@ -64,7 +68,7 @@ class PreviewNotesTests(unittest.TestCase):
             with self.subTest(link=link):
                 self.assertEqual(
                     release_test_notes(link, preview_hosts=("pr-8.rehearsals.example.net",)),
-                    ("Check this on the testing site.", True),
+                    ("Check this in the testing version.", True),
                 )
         notes = (
             "On the preview, check Contact.\n"

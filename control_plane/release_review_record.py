@@ -102,8 +102,8 @@ def release_decision_issue_body(
             f"Testing: {checklist.candidate.source_commit} ({checklist.candidate.artifact_id})\n"
             f"Production shared inputs: {checklist.production.shared_addons_digest}\n"
             f"Testing shared inputs: {checklist.candidate.shared_addons_digest}\n"
-            f"Testing site: {checklist.testing_url}\n"
-            f"Checklist digest: {decision.checklist_digest}"
+            + (f"Testing site: {checklist.testing_url}\n" if checklist.testing_url else "")
+            + f"Checklist digest: {decision.checklist_digest}"
         ),
         "",
         "## Client checklist",
