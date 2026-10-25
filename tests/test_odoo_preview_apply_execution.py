@@ -330,7 +330,9 @@ class RunOdooPreviewApplyOperationTests(unittest.TestCase):
                 ),
                 observe_apply=observe,
             )
-            self.assertEqual(outcome.response_payload["result"]["status"], "blocked")
+            result = outcome.response_payload["result"]
+            assert isinstance(result, dict)
+            self.assertEqual(result["status"], "blocked")
             self.assertIsNone(
                 store.read_idempotency_record(
                     scope=_WORKER_SCOPE,
