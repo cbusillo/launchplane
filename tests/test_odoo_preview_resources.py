@@ -55,6 +55,8 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         self.calls.append(args)
         if args[0] == "ps":
             value = "\n".join(self.containers)
+        elif args[:2] == ["volume", "ls"]:
+            value = "\n".join(self.volumes)
         elif args[:2] == ["volume", "inspect"]:
             item = self.volumes[args[-1]]
             value = json.dumps(
@@ -93,6 +95,28 @@ class PreviewResourceInspectionTests(unittest.TestCase):
             except SystemExit as error:
                 status = error.code if isinstance(error.code, int) else 1
         return status, dict(line.split("=", 1) for line in output.getvalue().splitlines())
+
+    def test_destroy_allows_missing_volumes_and_own_host_bindings(self) -> None:
+        self.spec["operation"] = "destroy"
+        self.containers["preview"]["HostConfig"] = {
+            "PortBindings": {"8069/tcp": [{}]},
+            "NetworkMode": "host",
+        }
+        self.containers["preview"]["Mounts"].append(
+            {"Type": "bind", "Source": "/own/config", "RW": True}
+        )
+        self.assertEqual(self.run_program()[0], 0)
+        self.containers.clear()
+        self.volumes.clear()
+        self.assertEqual(self.run_program()[0], 0)
+        self.spec["operation"] = "refresh"
+        self.assertEqual(self.run_program()[0], 1)
+
+    def test_destroy_still_refuses_foreign_consumers(self) -> None:
+        self.spec["operation"] = "destroy"
+        mount = self.containers["preview"]["Mounts"][0]
+        self.containers["production"] = {"Config": {"Labels": {}}, "Mounts": [mount]}
+        self.assertEqual(self.run_program()[0], 1)
 
     def test_existing_local_data_is_preserved_by_read_only_inspection(self) -> None:
         status, evidence = self.run_program()
@@ -336,6 +360,93 @@ class PreviewResourceCollectorTests(unittest.TestCase):
             self.assertNotEqual(executed[-1]["schedule_app_name"], original_app_name)
             self.assertFalse(executed[-1]["schedule_payload"]["enabled"])
 
+    def test_destroy_source_and_later_binding_cover_actual_deletion_surface(self) -> None:
+        import copy
+        import click
+        import yaml
+        from control_plane.dokploy import api, compose
+        from control_plane.odoo_preview_resources import (
+            _preview_resource_binding,
+            _require_preview_destroy_source,
+            _preview_destroy_volumes,
+            require_preview_resource_binding,
+        )
+
+        environment = {
+            "ODOO_DATA_VOLUME": "preview-data",
+            "ODOO_DB_VOLUME": "preview-db",
+            "ODOO_LOG_VOLUME": "preview-logs",
+        }
+        raw = compose.render_odoo_raw_compose_file(
+            image_reference="fixture", hold_web_until_integration_readback=True
+        )
+        payload = {
+            "composeId": "preview",
+            "serverId": "server",
+            "appName": "app",
+            "sourceType": "raw",
+            "composePath": "docker-compose.yml",
+            "composeFile": raw,
+            "env": "\n".join(f"{key}={value}" for key, value in environment.items()),
+        }
+        _require_preview_destroy_source(payload)
+        with self.assertRaises(click.ClickException):
+            _require_preview_destroy_source({**payload, "randomize": True})
+        declared_names = _preview_destroy_volumes(payload, project="app", environment=environment)
+        self.assertTrue(set(environment.values()).issubset(declared_names))
+        implicit_names = {
+            f"app_{key}" for key, value in yaml.safe_load(raw)["volumes"].items() if not value
+        }
+        self.assertEqual(set(declared_names), set(environment.values()) | implicit_names)
+        binding = _preview_resource_binding(payload, compose_id="preview", environment=environment)
+        parsed = yaml.safe_load(raw)
+        legacy = {
+            **parsed,
+            "volumes": {key: value for key, value in parsed["volumes"].items() if value},
+        }
+        _require_preview_destroy_source({**payload, "composeFile": yaml.safe_dump(legacy)})
+        with self.assertRaises(click.ClickException):
+            _require_preview_destroy_source(
+                {**payload, "env": payload["env"] + "\nCOMPOSE_FILE=other.yml"}
+            )
+        mutations: list[dict[str, object]] = [
+            {"serverId": "other"},
+            {"appName": "other"},
+            {"sourceType": "git"},
+            {"composeType": "stack"},
+            {"randomize": True},
+            {"isolatedDeployment": True},
+            {"env": payload["env"] + "\nCOMPOSE_FILE=other.yml"},
+            {"composePath": "other.yml"},
+            {"composeFile": raw + "\n"},
+            {"env": ""},
+        ]
+        for mutation in mutations:
+            with (
+                self.subTest(mutation=tuple(mutation)),
+                patch.object(
+                    api, "fetch_dokploy_target_payload", return_value={**payload, **mutation}
+                ),
+            ):
+                with self.assertRaises(click.ClickException):
+                    require_preview_resource_binding(
+                        host="fixture",
+                        token="fixture",
+                        compose_id="preview",
+                        environment=environment,
+                        binding=binding,
+                    )
+        for mode in ("foreign-volume", "include", "extends"):
+            changed = copy.deepcopy(parsed)
+            if mode == "foreign-volume":
+                changed["volumes"]["odoo_data"]["name"] = "production-data"
+            elif mode == "include":
+                changed["include"] = ["other.yml"]
+            else:
+                changed["services"]["web"]["extends"] = {"file": "other.yml", "service": "web"}
+            with self.subTest(mode=mode), self.assertRaises(click.ClickException):
+                _require_preview_destroy_source({**payload, "composeFile": yaml.safe_dump(changed)})
+
     def test_wrong_missing_and_stale_receipts_refuse(self) -> None:
         import click
         from control_plane.odoo_preview_resources import require_existing_preview_resources
@@ -454,7 +565,7 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
                     provider_effect_checkpoint=None,
                     provider_lease_check=None,
                     expected_runtime_identity=None,
-                    qualify_existing_refresh=True,
+                    qualify_existing_preview=True,
                 )
                 self.assertEqual(result.status, "fail")
                 self.assertEqual(result.provider_effect_attempted, late)

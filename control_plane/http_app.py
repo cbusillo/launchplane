@@ -7424,7 +7424,7 @@ def create_launchplane_fastapi_app(
                     context=issued_plan.context,
                     instance=issued_plan.preview_slug,
                     preview=preview,
-                    preview_refresh=issued_plan.operation == "refresh",
+                    preview_operation=issued_plan.operation,
                 )
                 if preview_binding and binding != preview_binding:
                     raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
@@ -7455,7 +7455,7 @@ def create_launchplane_fastapi_app(
             observe_apply=observe_odoo_preview_apply_result,
             supersession_is_quiescent=odoo_preview_supersession_is_quiescent,
             pre_mutation_guard=preview_checkpoint if director_preview_apply else None,
-            qualify_existing_refresh=director_preview_apply and issued_plan.operation == "refresh",
+            qualify_existing_preview=director_preview_apply,
         )
         try:
             response = await run_provider_operation_http(
