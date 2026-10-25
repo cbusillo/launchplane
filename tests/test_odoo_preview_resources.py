@@ -407,7 +407,7 @@ class PreviewResourceCollectorTests(unittest.TestCase):
             _require_preview_destroy_source(
                 {**payload, "env": payload["env"] + "\nCOMPOSE_FILE=other.yml"}
             )
-        mutations = [
+        mutations: list[dict[str, object]] = [
             {"serverId": "other"},
             {"appName": "other"},
             {"sourceType": "git"},
