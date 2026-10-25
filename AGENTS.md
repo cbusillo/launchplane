@@ -113,7 +113,6 @@ Treat this file as the launch checklist for each engineering session in
   credential handling, or destructive helpers need review by another model
   before delivery. Use the `model-review` skill and its finding-disposition
   rules; record the provider/model and how findings were handled in the PR.
-  Reviewer approval is not a merge or completion gate.
 - Add targeted tests whenever contract or storage behavior changes. Broaden to
   affected-area modules or integration gates when the changed behavior or a
   failure justifies it; complete-suite proof stays in CI.
