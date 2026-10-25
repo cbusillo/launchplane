@@ -38,6 +38,18 @@ def filestore_clone_proved(source_directory, target_directory):
         clone.unlink(missing_ok=True)
 
 
+def copy_filestore(source, destination, clone):
+    Path(destination).mkdir(parents=True, exist_ok=True)
+    arguments = ['cp', '-a', '--reflink=always' if clone else '--reflink=auto', str(source) + '/.', str(destination)]
+    try:
+        command(arguments)
+    except RuntimeError:
+        if not clone:
+            raise
+        time.sleep(__TXG_SYNC_WAIT_SECONDS__)
+        command(arguments)
+
+
 def storage_maintenance(spec, containers):
     from datetime import datetime, timezone
     gen = spec['generation']
@@ -66,8 +78,9 @@ def storage_maintenance(spec, containers):
 
 def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0, *,
         runner_staging_bytes=None, host_staging_bytes=None, database_staging_bytes=0,
-        filestore_clone_source=None):
+        filestore_clone_source=None, clone_decisions=None):
     gen = spec['generation']
+    decisions = {} if clone_decisions is None else clone_decisions
     ssh_restore = host_staging_bytes is None and gen.get('source_mode', 'ssh') != 'container-export'
     if ssh_restore:
         filestore_clone_source = restore_staging_root()
@@ -88,8 +101,10 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         name = spec.get('preview_volumes', {}).get(role, gen['namespace'] + suffix)
         volume = json.loads(docker('volume', 'inspect', name))[0]
         backings[role] = volume['Mountpoint']
-        if role == 'data' and filestore_clone_source is not None and filestore_clone_proved(filestore_clone_source, backings[role]):
-            size = 0
+        if role == 'data' and filestore_clone_source is not None:
+            decisions['data'] = filestore_clone_proved(filestore_clone_source, backings[role])
+            if decisions['data']:
+                size = 0
         demand(backings[role], size)
     # SSH capture stages on the host; native capture/assembly stages in the
     # runner's writable layer. Require known backing rather than guessing overlay space.
@@ -114,7 +129,8 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         snapshot_path = clean_snapshot_root(spec['copy_binding_sha256'], create=False).parent
         while not snapshot_path.exists():
             snapshot_path = snapshot_path.parent
-        snapshot_filestore = 0 if filestore_clone_proved(backings['data'], snapshot_path) else budget['filestore_bytes']
+        decisions['snapshot'] = filestore_clone_proved(backings['data'], snapshot_path)
+        snapshot_filestore = 0 if decisions['snapshot'] else budget['filestore_bytes']
         demand(snapshot_path, budget['database_bytes'] + snapshot_filestore)
     capacity = all(available[device] >= size + budget['reserve_bytes'] for device, size in required.items())
     return capacity

@@ -48,7 +48,10 @@ removes staging left by a killed run once that run's namespace lock is free.
 The space check charges each filestore copy in full unless the host proves a
 clone with a real `cp --reflink=always` probe between the same two
 filesystems; a proven clone is charged zero. This applies to staging into
-testing, testing into the snapshot, and the snapshot into a new preview. The
+testing, testing into the snapshot, and the snapshot into a new preview. A copy
+admitted as a clone runs `cp --reflink=always` and fails rather than falling
+back to a full copy the check did not charge. Every child of a restore inherits
+its namespace lock, so staging is never discarded while a child still runs. The
 SSH runner is charged the dump, not the filestore. Database restores are always
 charged in full. On storage that cannot clone, every copy is still charged and
 refused when it does not fit.

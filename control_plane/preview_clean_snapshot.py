@@ -163,9 +163,10 @@ def restore_preview_snapshot(containers, source_lock):
     if (volume.get('Driver') != 'local' or volume.get('Options')
         or (volume.get('Labels') or {}).get('com.docker.compose.project') != spec['compose_project']):
         raise RuntimeError('Preview data volume is not exclusively owned')
+    clones = {}
     if (present == '0' or restart) and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
         containers, snapshot['storage_budget'], runner_staging_bytes=(path / 'database.dump').stat().st_size,
-        host_staging_bytes=0, filestore_clone_source=path.parent):
+        host_staging_bytes=0, filestore_clone_source=path.parent, clone_decisions=clones):
         raise RuntimeError('Preview snapshot clone lacks reviewed storage headroom')
     mounted = docker('ps', '--all', '--filter', 'volume=' + mounts[0]['Name'],
         '--format', '{{.ID}}').decode().splitlines()
@@ -186,9 +187,8 @@ def restore_preview_snapshot(containers, source_lock):
                 if not owned_unreleased:
                     raise RuntimeError('Preserve preview filestore without an owned unreleased attempt')
                 shutil.rmtree(destination)
-            destination.parent.mkdir(parents=True, exist_ok=True)
             write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False})
-            command(['cp', '-a', '--reflink=auto', str(path / 'filestore'), str(destination)])
+            copy_filestore(path / 'filestore', destination, clones.get('data', False))
     finally:
         docker('unpause', runner)
     dump = '/tmp/preview-snapshot-' + uuid.uuid4().hex + '.dump'

@@ -195,7 +195,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             if arguments[:2] == ["docker", "stop"]:
                 self.containers["web"]["State"]["Running"] = False
             if arguments[:2] == ["cp", "-a"]:
-                shutil.copytree(arguments[-2], arguments[-1])
+                shutil.copytree(arguments[-2], arguments[-1], dirs_exist_ok=True)
                 self.calls.append(arguments)
                 return subprocess.CompletedProcess(arguments, 0, stdout=b"", stderr=b"")
             return original(arguments, **kwargs)
@@ -327,6 +327,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.tmp = self.root
         self.clones = False
+        self.clone_copies_fail = False
+        self.inherited_descriptors: list[list[int]] = []
         self.gen = generation()
         self.database = self.gen.namespace.replace("-", "_")
         source = {
@@ -409,6 +411,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 
         self.calls.append(command)
+        self.inherited_descriptors.append(
+            [os.fstat(descriptor).st_ino for descriptor in kwargs.get("pass_fds", ())]
+        )
         result = b""
         if command[0] in {"ssh", "rsync"}:
             if command[0] == "ssh":
@@ -419,7 +424,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             if not self.clones:
                 return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"")
             shutil.copyfile(command[-2], command[-1])
-        elif command[:3] == ["cp", "-a", "--reflink=auto"]:
+        elif command[:2] == ["cp", "-a"]:
+            if self.clone_copies_fail and command[2] == "--reflink=always":
+                return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"")
             shutil.copytree(command[-2], command[-1], dirs_exist_ok=True)
         elif command[:2] == ["docker", "ps"]:
             result = "\n".join(self.containers).encode()
@@ -526,7 +533,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         clone = next(
             index
             for index, call in enumerate(self.calls)
-            if call[:3] == ["cp", "-a", "--reflink=auto"]
+            if call[:3] == ["cp", "-a", "--reflink=always"]
         )
         self.assertLess(self.calls.index(["docker", "pause", "script-runner"]), clone)
         self.assertLess(clone, self.calls.index(["docker", "unpause", "script-runner"]))
@@ -540,8 +547,37 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertTrue(
             any(call[:2] == ["docker", "cp"] and "filestore" in call[2] for call in self.calls)
         )
-        self.assertFalse(any(call[:3] == ["cp", "-a", "--reflink=auto"] for call in self.calls))
+        self.assertFalse(any(call[:2] == ["cp", "-a"] for call in self.calls))
         self.assertNotIn(["docker", "pause", "script-runner"], self.calls)
+
+    def test_admitted_clone_fails_closed_instead_of_copying_in_full(self) -> None:
+        self.spec["generation"]["drill_storage_budget"] = {
+            "database_bytes": 1024,
+            "filestore_bytes": 1024,
+            "staging_bytes": 1024,
+            "reserve_bytes": 1024,
+        }
+        self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.root)}}
+        self.clones = True
+        self.clone_copies_fail = True
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        self.assertEqual(
+            len([call for call in self.calls if call[:3] == ["cp", "-a", "--reflink=always"]]), 2
+        )
+        self.assertFalse(any(call[:3] == ["cp", "-a", "--reflink=auto"] for call in self.calls))
+        self.assertFalse(
+            any(call[:2] == ["docker", "cp"] and "filestore" in call[2] for call in self.calls)
+        )
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
+    def test_every_restore_child_process_holds_the_restore_lock(self) -> None:
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        lock = os.stat(self.tmp / (self.gen.namespace + "-copy.lock")).st_ino
+        for call, inherited in zip(self.calls, self.inherited_descriptors, strict=True):
+            if call[0] in {"ssh", "rsync", "docker"}:
+                self.assertIn(lock, inherited, call)
 
     def test_runner_left_paused_by_an_interrupted_landing_is_resumed_first(self) -> None:
         self.containers["script-runner"]["State"]["Status"] = "paused"

@@ -799,7 +799,7 @@ class TestingProviderDenied(Exception):
 
 def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False)
+        stderr=subprocess.PIPE, check=False, pass_fds=held_restore_lock)
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
@@ -934,10 +934,12 @@ def unpause_runner_left_by_interrupted_landing(containers):
         docker("unpause", containers["script-runner"][0])
 
 
-def land_staged_filestore(spec, runner, staged, database):
+def land_staged_filestore(spec, runner, staged, database, clone):
     volume = json.loads(docker("volume", "inspect", spec["generation"]["namespace"] + "-data"))[0]
     backing = Path(volume["Mountpoint"]).resolve(strict=True)
-    if not filestore_clone_proved(staged.parent, backing):
+    if clone is None:
+        clone = filestore_clone_proved(staged.parent, backing)
+    if not clone:
         docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
         docker("cp", str(staged) + "/.", runner + ":/volumes/data/filestore/" + database)
         return
@@ -946,8 +948,7 @@ def land_staged_filestore(spec, runner, staged, database):
     try:
         if destination.resolve() != destination:
             raise RuntimeError("Testing filestore is aliased")
-        destination.mkdir(parents=True, exist_ok=True)
-        command(["cp", "-a", "--reflink=auto", str(staged) + "/.", str(destination)])
+        copy_filestore(staged, destination, True)
     finally:
         docker("unpause", runner)
 
@@ -1118,7 +1119,8 @@ def restore_main():
         staged_bytes = sum(item['size'] for item in files['chunks'])
         assembly_bytes = sum(capture[part]['size'] for part in ('database', 'filestore'))
     discard_abandoned_restore_staging(namespace)
-    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes):
+    clones = {}
+    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes, clone_decisions=clones):
         raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
@@ -1179,7 +1181,7 @@ def restore_main():
             )
             command(["rsync", *rsync_options,
                 "-e", shlex.join(ssh), destination + ":" + path.rstrip("/") + "/", str(filestore) + "/"])
-            land_staged_filestore(spec, runner, filestore, database)
+            land_staged_filestore(spec, runner, filestore, database, clones.get('data'))
             docker("cp", str(dump), runner + ":" + dump_path)
             docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
         uid = docker("exec", runner, "id", "-u").decode().strip()
@@ -1208,7 +1210,7 @@ def restore_main():
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
         if gen.get('clean_snapshot_enabled'):
-            snapshot = capture_clean_snapshot(spec, containers)
+            snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot', False))
             print('clean_testing_snapshot_completed=true')
             print('clean_snapshot_database_sha256=' + snapshot['database_sha256'])
             print('clean_snapshot_filestore_sha256=' + snapshot['filestore_sha256'])
@@ -1236,7 +1238,7 @@ def restore_main():
 
 
 def main():
-    global inspection_only
+    global inspection_only, held_restore_lock
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     inspection_only = bool(spec.get('inspection_only'))
     namespace = spec["generation"]["namespace"]
@@ -1251,6 +1253,7 @@ def main():
     descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        held_restore_lock = (descriptor,)
         restore_main()
     finally:
         os.close(descriptor)
@@ -1261,6 +1264,7 @@ __LP_CLEAN_SNAPSHOT_LIBRARY__
 
 inspection_predicate = ReadbackPredicate.NATIVE_READ
 inspection_only = False
+held_restore_lock = ()
 try:
     main()
 except TestingProviderDenied:

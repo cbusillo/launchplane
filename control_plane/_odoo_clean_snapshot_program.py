@@ -177,7 +177,7 @@ def retire_clean_snapshot_bytes(spec, root):
             os.close(descriptor)
 
 
-def capture_clean_snapshot(spec, containers):
+def capture_clean_snapshot(spec, containers, clone):
     snapshot_id = spec['copy_binding_sha256']
     destination = clean_snapshot_root(snapshot_id)
     if destination.exists():
@@ -202,7 +202,7 @@ def capture_clean_snapshot(spec, containers):
             path / 'database.dump', budget['database_bytes'])
         if status:
             raise RuntimeError('Clean snapshot database capture failed')
-        command(['cp', '-a', '--reflink=auto', str(filestore), str(path / 'filestore')])
+        copy_filestore(filestore, path / 'filestore', clone)
         actual_tree = snapshot_tree_digest(path / 'filestore', budget['filestore_bytes'])
         if actual_tree != expected_tree:
             raise RuntimeError('Clean snapshot filestore changed during capture')

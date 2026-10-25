@@ -165,7 +165,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         elif arguments[0] == "cp":
             self.assertTrue(self.paused)
             self.assertEqual(Path(arguments[-2]), self.source / "filestore")
-            shutil.copytree(arguments[-2], arguments[-1])
+            shutil.copytree(arguments[-2], arguments[-1], dirs_exist_ok=True)
         elif arguments[:2] == ["docker", "cp"]:
             self.assertEqual(Path(arguments[2]), self.source / "database.dump")
         elif arguments[:2] == ["docker", "ps"]:
@@ -481,6 +481,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)):
             output = self.run_script()
         self.assertIn("clean_preview_snapshot_restored=true", output.splitlines())
+        self.assertTrue(any(call[:3] == ["cp", "-a", "--reflink=always"] for call in self.calls))
 
     def test_existing_preview_data_and_staff_edits_are_never_overwritten(self) -> None:
         self.present = True
