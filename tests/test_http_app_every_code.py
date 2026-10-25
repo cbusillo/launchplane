@@ -38,7 +38,6 @@ from tests.http_app_test_support import (
     _get_every_code_notification_attempts,
     _get_every_code_pr_feedback,
     _get_every_code_preview_gates,
-    _get_every_code_summary,
     _get_every_code_work_request,
     _get_every_code_work_requests,
     _get_preview_pr_feedback_notification_attempts,
@@ -1607,14 +1606,6 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
                 record_store_factory=lambda: store,
             )
 
-            summary_response = await _get_every_code_summary(
-                app,
-                repository="cbusillo/code",
-                issue_number="123",
-                state="queued",
-                limit="1",
-                offset="0",
-            )
             readiness_response = await _get_preview_readiness(
                 app,
                 repository="cbusillo/code",
@@ -1658,7 +1649,6 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
             )
 
         for response in (
-            summary_response,
             readiness_response,
             list_response,
             read_response,
@@ -1670,13 +1660,6 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["status"], "ok")
             self.assertIn("trace_id", response.json())
-
-        summary = summary_response.json()["summary"]
-        self.assertEqual(summary["repository"], "cbusillo/code")
-        self.assertEqual(summary["issue_number"], 123)
-        self.assertEqual(summary["state_filter"], "queued")
-        self.assertEqual(summary["summaries"][0]["request_id"], seeded["request_id"])
-        self.assertEqual(summary["summaries"][0]["summary_status"], "active")
 
         readiness = readiness_response.json()["readiness"]
         self.assertEqual(readiness["repository"], "cbusillo/code")
@@ -1712,11 +1695,6 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
             )
 
             responses = (
-                await _get_every_code_summary(
-                    app,
-                    repository="cbusillo/code",
-                    authorization="Bearer worker-token",
-                ),
                 await _get_preview_readiness(
                     app,
                     repository="cbusillo/code",
@@ -1833,10 +1811,6 @@ class FastApiEveryCodeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         openapi = response.json()
         expected_routes = {
-            "/v1/every-code/summary": (
-                "read_every_code_summary",
-                "EveryCodeSummaryResponse",
-            ),
             "/v1/previews/readiness": (
                 "read_preview_readiness",
                 "PreviewReadinessResponse",
