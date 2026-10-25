@@ -21,7 +21,10 @@ from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
 from control_plane.dokploy.api import validate_dokploy_schedule_script
 from control_plane.dokploy import api, post_deploy
-from control_plane.dokploy.source import DokployTargetDefinition
+from control_plane.dokploy.source import (
+    DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS,
+    DokployTargetDefinition,
+)
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY, render_odoo_raw_compose_file
 from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
 
@@ -308,7 +311,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertTrue(any(call[:3] == ["cp", "-a", "--reflink=always"] for call in self.calls))
         self.assertTrue(self.ready_before_web)
 
-    def service_schedule(self, snapshot: CleanTestingSnapshot) -> dict[str, str]:
+    def service_schedule(
+        self, snapshot: CleanTestingSnapshot, *, elapsed_seconds: int = 0
+    ) -> dict[str, str]:
         environment = {
             "ODOO_DB_NAME": self.database,
             "ODOO_DATA_VOLUME": "preview-data",
@@ -318,6 +323,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         }
 
         def schedule(**arguments: Any) -> dict[str, str]:
+            if elapsed_seconds > arguments["resolved_schedule_execution_timeout_seconds"]:
+                raise TimeoutError("The snapshot job outlived its observation budget")
             output = self.execute_script(arguments["schedule_payload"]["script"])
             logs: list[api.JsonValue] = list(output.splitlines())
             return {
@@ -367,6 +374,14 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(evidence["clean_preview_snapshot_restored"], "true")
         self.assertEqual(evidence["clean_preview_snapshot_id"], self.snapshot.snapshot_id)
         self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_snapshot_restore_outlives_the_deployment_wait_budget(self) -> None:
+        evidence = self.service_schedule(
+            self.snapshot,
+            elapsed_seconds=DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS + 1,
+        )
+        self.assertEqual(evidence["clean_preview_snapshot_restored"], "true")
+        self.assertTrue(self.ready_before_web)
 
     def test_retry_records_actual_and_requested_snapshot_provenance(self) -> None:
         self.runner_failure = True
