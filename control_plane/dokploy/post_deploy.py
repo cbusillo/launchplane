@@ -2740,20 +2740,15 @@ def bound_data_workflow_is_quiescent(
     token: str,
     binding: ComposeDataWorkflowBinding,
 ) -> bool:
-    schedules = api.dokploy_request(
+    payload = api.dokploy_request(
         host=host,
         token=token,
         path="/api/schedule.list",
         query={"id": binding.lookup_id, "scheduleType": binding.schedule_type},
     )
-    if isinstance(schedules, dict):
-        wrappers = [
-            schedules[key] for key in ("data", "schedules", "items", "result") if key in schedules
-        ]
-        if len(wrappers) != 1:
-            return False
-        schedules = wrappers[0]
-    if not isinstance(schedules, list) or any(not isinstance(item, dict) for item in schedules):
+    try:
+        schedules = api.extract_schedules(payload)
+    except click.ClickException:
         return False
     terminal = (
         DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
@@ -2761,11 +2756,7 @@ def bound_data_workflow_is_quiescent(
         | {"error", "failed", "fail"}
     )
     for schedule in schedules:
-        if (
-            not isinstance(schedule, dict)
-            or not schedule.get("appName")
-            or not schedule.get("name")
-        ):
+        if not schedule.get("appName") or not schedule.get("name"):
             return False
         if schedule["appName"] != binding.app_name:
             continue

@@ -851,10 +851,10 @@ class TestingAddressRecipientTests(unittest.TestCase):
             page.inventory_digest = "unrelated-preview-membership"
             page.projects[0].name = "Renamed unrelated project metadata"
             self.assertEqual(qualification.qualify_address_domains(**arguments), (digest, projects))
-            for flag, rows in (
-                (True, ()),
-                (None, ({"scheduleId": "job"},)),
-                (False, ({"scheduleId": "job"},)),
+            for flag, rows, expected_state in (
+                (True, (), "enabled"),
+                (None, ({"scheduleId": "job"},), "unknown"),
+                (False, ({"scheduleId": "job"},), "disabled"),
             ):
                 with self.subTest(flag=flag, rows=rows):
                     payloads["retained"]["autoDeploy"] = flag
@@ -865,10 +865,7 @@ class TestingAddressRecipientTests(unittest.TestCase):
                     ) as caught:
                         qualification.qualify_address_domains(**arguments)
                     schedules.assert_called_once()
-                    self.assertEqual(
-                        caught.exception.auto_deploy,
-                        "enabled" if flag is True else "disabled" if flag is False else "unknown",
-                    )
+                    self.assertEqual(caught.exception.auto_deploy, expected_state)
                     self.assertEqual(caught.exception.schedule_count, len(rows))
             payloads["retained"]["autoDeploy"] = False
             schedules.return_value = ()

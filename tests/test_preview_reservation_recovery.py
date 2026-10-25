@@ -975,6 +975,8 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
         cases: tuple[object, ...] = (
             {},
+            {"items": []},
+            {"items": [], "total": 40},
             [None],
             [{"name": "data", "appName": binding.app_name}],
             [{"name": "data", "appName": binding.app_name, "deployments": [{"status": "running"}]}],

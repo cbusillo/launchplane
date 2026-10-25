@@ -731,6 +731,8 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 ],
                 [{"scheduleId": "matching", "appName": app_name}, None],
                 {"items": [], "data": []},
+                {"items": []},
+                {"items": [], "total": 40},
             )
             for schedule_inventory in schedule_inventories:
                 with self.subTest(backend=type(store).__name__, inventory=schedule_inventory):
