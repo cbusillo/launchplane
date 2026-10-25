@@ -15,7 +15,10 @@ from unittest.mock import Mock, patch
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    parse_launchplane_mutation_timestamp,
+)
 from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -29,15 +32,28 @@ from control_plane.preview_gateway import (
     PREVIEW_IDLE_SECONDS,
     preview_backend_alias,
 )
-from control_plane.preview_idle import PreviewIdleAdapter, PreviewIdleScheduler, idle_action
+from control_plane.preview_idle import (
+    PreviewIdleAdapter,
+    PreviewIdleScheduler,
+    idle_action,
+)
 from control_plane.preview_idle_runtime import PREVIEW_IDLE_RUNTIME_PROGRAM
-from control_plane.provider_operations import ProviderMutationUnknownError
+from control_plane.provider_operations import (
+    DurableProviderMutationAdapter,
+    ProviderMutationRejectedError,
+    ProviderMutationUnknownError,
+    run_durable_provider_operation,
+)
 from control_plane.preview_reservation_recovery import (
     classify_preview_reservation,
     recover_held_preview,
 )
 from control_plane.preview_idle import observe_idle_reservation
-from control_plane.odoo_preview_apply_execution import _original_supersession_is_quiescent
+from control_plane.odoo_preview_apply_execution import (
+    _original_supersession_is_quiescent,
+    prepare_odoo_preview_apply_operation,
+)
+from control_plane.workflows.odoo_preview_runtime import ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS
 from control_plane.legacy_preview_reconciliation import _require_no_held_odoo_work
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import _odoo_preview_profile_payload
@@ -343,10 +359,20 @@ class PreviewIdleOperationTests(unittest.TestCase):
             for item in self.value["services"].values():
                 item.update(running=mode == "awake", healthy=mode == "awake")
             if self.interrupt:
+                if control["action"] == "awake":
+                    self.value["gateway"].update(mode="asleep", requested=True)
+                    for item in self.value["services"].values():
+                        item.update(running=False, healthy=False)
                 self.value["services"]["database"].update(running=True, healthy=True)
                 raise ProviderMutationUnknownError("Interrupted fixture stop")
         kwargs["receive"](
-            {"type": "complete", "result": {**deepcopy(self.value), "accepted": True}}
+            {
+                "type": "complete",
+                "result": {
+                    **deepcopy(self.value),
+                    **({"accepted": True} if payload["action"] not in {"observe", "poll"} else {}),
+                },
+            }
         )
 
     def run_preview(self) -> None:
@@ -596,6 +622,170 @@ class PreviewIdleOperationTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(self.effects), effects)
+
+    def supersede_then_abort_refresh(self, held: LaunchplaneIdempotencyRecord) -> None:
+        request = Mock()
+        request.apply.dry_run_plan.compose_ref = self.provider["composeId"]
+        with patch(
+            "control_plane.odoo_preview_apply_execution.build_odoo_preview_runtime_identity",
+            return_value=self.identity,
+        ):
+            operation = prepare_odoo_preview_apply_operation(
+                record_store=self.store,
+                control_plane_root=self.root,
+                profile=self.profile,
+                apply_request=request,
+                issued_plan=Mock(operation="refresh"),
+                reservation_scope="fixture-refresh",
+                idempotency_key="aborted-refresh",
+                request_fingerprint="refresh",
+                trace_id="aborted-refresh",
+            )
+        policy = operation.target_supersession
+        adapter = Mock(spec=DurableProviderMutationAdapter)
+        adapter.target_key.return_value = held.provider_target_key
+        adapter.reconciliation_key.return_value = held.reconciliation_key
+        adapter.apply.side_effect = ProviderMutationRejectedError(ValueError("refresh aborted"))
+        expired = parse_launchplane_mutation_timestamp(
+            held.lease_expires_at, field_name="lease_expires_at"
+        ) + timedelta(seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS + 1)
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=expired.isoformat()
+        ):
+            with self.assertRaisesRegex(ValueError, "refresh aborted"):
+                run_durable_provider_operation(
+                    store=self.store,
+                    scope=operation.reservation_scope,
+                    route_path=operation.route_path,
+                    idempotency_key=operation.idempotency_key,
+                    request_fingerprint=operation.request_fingerprint,
+                    lease_owner="refresh",
+                    response_trace_id=operation.trace_id,
+                    adapter=adapter,
+                    target_supersession=policy,
+                )
+        original = self.store.read_idempotency_record_by_id(held.record_id)
+        assert original is not None
+        self.assertEqual(original.state, "completed")
+        self.assertEqual(original.response_payload, policy.response_payload)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+
+    def test_readonly_adopted_sleep_can_wake_without_apply_response_fields(self) -> None:
+        held = self.interrupted_stop()
+        for item in self.value["services"].values():
+            item.update(running=False, healthy=False)
+        result = recover_held_preview(
+            store=self.store, reservation=held, profile=self.profile, root=self.root, observe=Mock()
+        )
+        self.assertEqual(result["settlement"], "adopted")
+        record = self.store.read_idempotency_record_by_id(held.record_id)
+        assert record is not None
+        self.assertNotIn("accepted", record.response_payload)
+        self.value["gateway"]["requested"] = True
+        self.run_preview()
+        self.assertEqual(self.value["gateway"]["mode"], "awake")
+
+    def test_superseded_sleep_can_wake_after_refresh_aborts(self) -> None:
+        held = self.interrupted_stop()
+        for item in self.value["services"].values():
+            item.update(running=False, healthy=False)
+        self.supersede_then_abort_refresh(held)
+        self.value["gateway"]["requested"] = True
+        self.run_preview()
+        self.assertEqual(self.value["gateway"]["mode"], "awake")
+
+    def test_superseded_partial_wake_resumes_exact_gateway_receipt_after_refresh_aborts(
+        self,
+    ) -> None:
+        self.run_preview()
+        self.value["gateway"]["requested"] = True
+        self.interrupt = True
+        self.run_preview()
+        self.interrupt = False
+        original_id = self.effects[-1]["record_id"]
+        held = self.store.read_idempotency_record_by_id(original_id)
+        assert held is not None
+        self.supersede_then_abort_refresh(held)
+        self.run_preview()
+        self.assertEqual(self.effects[-1]["record_id"], original_id)
+        self.assertEqual(self.value["gateway"]["mode"], "awake")
+
+    def test_resumed_gateway_wake_is_adopted_after_its_completion_response_is_lost(self) -> None:
+        self.run_preview()
+        self.value["gateway"]["requested"] = True
+        self.interrupt = True
+        self.run_preview()
+        self.interrupt = False
+        original_id = self.effects[-1]["record_id"]
+        held = self.store.read_idempotency_record_by_id(original_id)
+        assert held is not None
+        self.supersede_then_abort_refresh(held)
+
+        def lose_response(**kwargs: Any) -> None:
+            if kwargs["payload"]["action"] == "awake":
+
+                def lose(_frame: object) -> None:
+                    raise ProviderMutationUnknownError("fixture completion response lost")
+
+                kwargs["receive"] = lose
+            self.transport(**kwargs)
+
+        with patch.object(self.remote, "side_effect", lose_response):
+            self.run_preview()
+        self.assertEqual(self.value["gateway"]["wake_record_id"], original_id)
+        recovery = self.store.list_held_provider_target_reservations()[0]
+        self.assertNotEqual(recovery.record_id, original_id)
+        effects = len(self.effects)
+        self.run_preview()
+        completed = self.store.read_idempotency_record_by_id(recovery.record_id)
+        assert completed is not None
+        self.assertEqual(completed.state, "completed")
+        self.assertEqual(len(self.effects), effects)
+
+    def exhaust_partial_effects(self) -> None:
+        self.interrupt = True
+        for _ in range(10):
+            self.run_preview()
+        held = self.store.list_held_provider_target_reservations()[0]
+        effects = len(self.effects)
+        self.run_preview()
+        self.assertEqual(self.store.read_idempotency_record_by_id(held.record_id), held)
+        self.assertEqual(len(self.effects), effects)
+        self.interrupt = False
+        self.supersede_then_abort_refresh(held)
+
+    def test_persistent_partial_sleep_stops_retrying_without_renewing_the_lease(self) -> None:
+        self.exhaust_partial_effects()
+
+    def test_persistent_partial_wake_stops_retrying_without_renewing_the_lease(self) -> None:
+        self.run_preview()
+        self.value["gateway"]["requested"] = True
+        self.exhaust_partial_effects()
+
+    def test_unrecognized_wake_cursor_cannot_replace_an_original_receipt(self) -> None:
+        self.run_preview()
+        self.value["gateway"].update(requested=True, wake_record_id="unknown")
+        effects = len(self.effects)
+        self.run_preview()
+        self.assertEqual(len(self.effects), effects)
+
+    def test_partial_wake_keeps_its_checkpoint_when_retry_admission_refuses(self) -> None:
+        self.run_preview()
+        self.value["gateway"]["requested"] = True
+        self.interrupt = True
+        self.run_preview()
+        held = self.store.list_held_provider_target_reservations()[0]
+        self.interrupt = False
+        with patch.object(
+            self.store,
+            "serialize_existing_preview_refresh",
+            side_effect=ValueError("fixture admission changed"),
+        ):
+            self.run_preview()
+        current = self.store.read_idempotency_record_by_id(held.record_id)
+        assert current is not None
+        self.assertEqual(current.state, "reconcile_required")
+        self.assertEqual(current.provider_effect_started_at, held.provider_effect_started_at)
 
     def test_idle_hold_on_another_preview_does_not_block_legacy_reconciliation(self) -> None:
         self.interrupted_stop()

@@ -1748,6 +1748,14 @@ def _execute_refresh(
                 token=token,
                 server_id=str(target_payload.get("serverId") or ""),
                 database_url=database_url,
+                running_preview={
+                    "project": str(target_payload.get("appName") or ""),
+                    "identity": dokploy_api.parse_dokploy_env_text(
+                        str(target_payload.get("env") or "")
+                    ).get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
+                }
+                if not restore_clean_snapshot
+                else None,
             )
         if restore_clean_snapshot or retained_filestore:
             filestore = filestore_for_mode(apply=False)

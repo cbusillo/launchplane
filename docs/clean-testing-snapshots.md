@@ -191,10 +191,18 @@ before forwarding traffic. Insufficient capacity reports that no start occurred
 and leaves no held target reservation. A later attempt checks capacity again.
 Once admitted, the original wake receipt survives a gateway restart and an
 interrupted start resumes without charging its own running containers twice.
+Data-preserving refreshes also credit their own running services after matching
+the current target's identity; cold starts still meet the memory floor.
 Shared operation truth stays in Launchplane's database. Existing preview
 reservation reads expose idle operations too, and the normal original-operation
 observation and qualified refresh/destroy supersession paths recognize them.
 Changing a memory floor or storage budget does not change storage custody.
+Wake authority uses the retained completed sleep intent and its gateway receipt,
+including completion adopted by observation or qualified supersession. Idle
+retries preserve their effect checkpoint and stop after three attempts, leaving
+the original fence available for observation or expired refresh/destroy
+supersession. If that refresh aborts, a completed original wake can resume only
+its exact gateway receipt after target qualification with no live hold.
 Quiet polling does not take the preview executor lock or perform a host-wide
 storage inspection. Full qualification runs under exclusion before effects.
 

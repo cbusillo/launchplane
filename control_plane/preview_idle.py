@@ -50,6 +50,7 @@ from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALT
 
 
 _LOGGER = logging.getLogger(__name__)
+PREVIEW_IDLE_MAX_ATTEMPTS = 3
 
 
 def idle_action(observation: dict[str, Any]) -> str:
@@ -154,6 +155,25 @@ def observe_idle_reservation(
             allow_mutation=False,
             original_intent=intent,
         ).status
+
+
+def completed_idle_intent(
+    store: PostgresRecordStore,
+    record_id: str,
+    product: str,
+    target: dict[str, Any],
+    action: str,
+) -> dict[str, Any] | None:
+    original = store.read_idempotency_record_by_id(record_id)
+    if original is None or original.state != "completed":
+        return None
+    try:
+        intent = original_idle_intent(store, original, product)
+    except ValueError:
+        return None
+    if intent["target"] != idle_target_binding(target) or intent["action"] != action:
+        return None
+    return intent
 
 
 def idle_reservation_is_quiescent(
@@ -261,7 +281,8 @@ class PreviewIdleAdapter:
             and gateway["sleep_record_id"] == self.record_id
             and all(not item["running"] for item in services.values())
             if action == "sleep"
-            else gateway["mode"] == "awake" and gateway["wake_record_id"] == self.record_id
+            else gateway["mode"] == "awake"
+            and gateway["wake_record_id"] == self.intent["control"].get("record_id", self.record_id)
         )
         if present:
             return ProviderObservation("present", response_status_code=200, response_payload=result)
@@ -283,8 +304,14 @@ class PreviewIdleAdapter:
             or action == "awake"
             and gateway["mode"] == "asleep"
             and gateway["sleep_record_id"] == self.intent["control"]["sleep_record_id"]
+            and gateway["wake_record_id"]
+            in {"", self.intent["control"].get("record_id", self.record_id)}
         )
-        return ProviderObservation("absent" if retry else "unknown", retry_safe=retry)
+        return ProviderObservation(
+            "absent" if retry else "unknown",
+            retry_safe=retry,
+            preserve_effect_checkpoint=True,
+        )
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -589,20 +616,15 @@ class PreviewIdleScheduler:
                         return
                     gateway = observation["gateway"]
                     if action == "awake":
-                        original = self.store.read_idempotency_record_by_id(
-                            gateway["sleep_record_id"]
-                        )
                         if (
-                            original is None
-                            or original.state != "completed"
-                            or original.response_payload.get("accepted") is not True
-                            or (original.scope, original.route_path) != (IDLE_SCOPE, IDLE_ROUTE)
-                        ):
-                            return
-                        original_intent = self.store.read_original_mutation_intent(original)
-                        if (
-                            original_intent.get("target") != idle_target_binding(target)
-                            or original_intent.get("action") != "sleep"
+                            completed_idle_intent(
+                                self.store,
+                                gateway["sleep_record_id"],
+                                profile.product,
+                                target,
+                                "sleep",
+                            )
+                            is None
                         ):
                             return
                     control = (
@@ -610,6 +632,17 @@ class PreviewIdleScheduler:
                         if action == "sleep"
                         else {"sleep_record_id": gateway["sleep_record_id"]}
                     )
+                    if action == "awake" and gateway["wake_record_id"]:
+                        original_wake = completed_idle_intent(
+                            self.store, gateway["wake_record_id"], profile.product, target, "awake"
+                        )
+                        if (
+                            original_wake is None
+                            or original_wake["control"].get("sleep_record_id")
+                            != gateway["sleep_record_id"]
+                        ):
+                            return
+                        control["record_id"] = gateway["wake_record_id"]
                     intent = {
                         "product": profile.product,
                         "preview_id": preview_id,
@@ -642,4 +675,5 @@ class PreviewIdleScheduler:
                     adapter=adapter,
                     original_intent=intent,
                     lease_seconds=900,
+                    allow_mutation=not held or held[0].attempt < PREVIEW_IDLE_MAX_ATTEMPTS,
                 )
