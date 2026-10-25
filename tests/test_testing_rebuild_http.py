@@ -342,6 +342,35 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             self.store.read_artifact_manifest(self.manifest.artifact_id)
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_snapshot_hold_without_budget_refuses_before_enqueue(self) -> None:
+        from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
+
+        profile = self.fixture.intent.profile.model_copy(deep=True)
+        profile.preview.clean_testing_snapshot = True
+        testing = next(lane for lane in profile.lanes if lane.instance == "testing")
+        testing.odoo_testing_drill_storage = None
+        intent = self.fixture.intent.model_copy(update={"profile": profile})
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        with (
+            patch.object(preflight, "capture_rebuild_intent", return_value=intent),
+            patch.object(preflight, "native_testing_source_authority") as source,
+        ):
+            for mode in ("production_restore", "upstream_restore"):
+                with self.subTest(source=mode):
+                    self.payload["data_source_mode"] = mode
+                    inspected = await self.call(
+                        "GET", path=self.url + "/inputs?data_source_mode=" + mode
+                    )
+                    submitted = await self.call("POST", self.payload, key=mode)
+                    self.assertEqual(inspected.status_code, 409, inspected.text)
+                    self.assertEqual(
+                        inspected.json()["error"]["code"], TESTING_STORAGE_BUDGET_REQUIRED
+                    )
+                    self.assertEqual(submitted.status_code, 409, submitted.text)
+        source.assert_not_called()
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
     async def test_submit_admission_disposition_is_independent_of_inspection_checkpoint(
         self,
     ) -> None:

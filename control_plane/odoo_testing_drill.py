@@ -15,6 +15,7 @@ from uuid import uuid4
 from pydantic import JsonValue
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -325,7 +326,10 @@ def prepare_drill(
         raise DrillSkipped("drill_disabled")
     from control_plane.clean_testing_snapshot import snapshot_storage_budget
 
-    snapshot_storage_budget(profile, context)
+    try:
+        snapshot_storage_budget(profile, context)
+    except ValueError as error:
+        raise DrillPrerequisite(TESTING_STORAGE_BUDGET_REQUIRED) from error
     production = [candidate for candidate in profile.lanes if candidate.instance == "prod"]
     if (
         len(production) != 1

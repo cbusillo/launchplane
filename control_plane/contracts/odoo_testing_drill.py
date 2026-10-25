@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import re
 
+TESTING_STORAGE_BUDGET_REQUIRED = "testing_storage_budget_required"
+
 
 class OdooTestingDrillStorageBudget(BaseModel):
     """Admin-supplied working headroom, never an inferred source-size guarantee."""

@@ -309,12 +309,15 @@ class TestingDrillScenario(unittest.TestCase):
 
 class TestingDrillTests(TestingDrillScenario):
     def test_snapshot_hold_without_budget_never_queues_an_invalid_generation(self) -> None:
+        from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
+
         self.profile.preview.clean_testing_snapshot = True
         testing = next(lane for lane in self.profile.lanes if lane.instance == "testing")
         testing.odoo_testing_drill_storage = None
         self.store.write_product_profile_record(self.profile)
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "fail")
+        self.assertEqual(self.evidence().step, TESTING_STORAGE_BUDGET_REQUIRED)
         self.assertEqual(self.evidence().operation_id, "")
         self.assertEqual(
             self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
