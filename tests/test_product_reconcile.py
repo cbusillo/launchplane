@@ -6044,10 +6044,12 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
             from control_plane.storage.postgres import LaunchplaneIdempotencyRow
 
+            plan_id = plan["preview_plan_id"]
+            assert isinstance(plan_id, str)
             record = self.store.read_idempotency_record(
                 scope=reconcile_reservation_scope("site"),
                 route_path=ODOO_PREVIEW_APPLY_ROUTE,
-                idempotency_key=str(plan["preview_plan_id"]),
+                idempotency_key=plan_id,
             )
             assert record is not None
             expired = LaunchplaneIdempotencyRecord.model_validate(
