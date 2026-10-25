@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import click
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.text_fields import require_text
@@ -1261,7 +1262,13 @@ def observe_odoo_preview_dokploy_apply(
         )
         status = dokploy_api.deployment_status(deployment)
         if deployment is None:
-            retry_safe_phases = {"", "compose_create", "compose_update", "domain_ensure"}
+            retry_safe_phases = {
+                "",
+                "compose_create",
+                "compose_update",
+                "domain_ensure",
+                "preview_filestore_prepare",
+            }
             return OdooPreviewDokployObservation(
                 outcome=("absent" if provider_effect_phase in retry_safe_phases else "unknown"),
                 retry_safe=provider_effect_phase in retry_safe_phases,
@@ -1646,6 +1653,7 @@ def _execute_refresh(
     resolved_compose_id = ""
     domain_id = ""
     deploy_triggered = False
+    storage_prepare_attempted = False
     provider_effect_attempted = False
     module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped"
     module_install_update_evidence: dict[str, str] = {}
@@ -1697,6 +1705,50 @@ def _execute_refresh(
                 target_type="compose",
                 target_id=compose_id,
             )
+        from control_plane.preview_filestore import prepare_preview_filestore
+
+        def prepare_filestore(dispatch: Callable[[], None]) -> None:
+            nonlocal storage_prepare_attempted
+            with guard():
+                checkpoint_provider_effect("preview_filestore_prepare")
+                storage_prepare_attempted = True
+                dispatch()
+
+        def inspect_filestore(dispatch: Callable[[], None]) -> None:
+            if provider_lease_check is not None:
+                provider_lease_check()
+            dispatch()
+
+        def filestore_for_mode(*, apply: bool) -> dict[str, object] | None:
+            return prepare_preview_filestore(
+                host=host,
+                token=token,
+                server_id=str(target_payload.get("serverId") or ""),
+                project=str(target_payload.get("appName") or ""),
+                data_volume=environment_values["ODOO_DATA_VOLUME"],
+                database_volume=environment_values["ODOO_DB_VOLUME"],
+                logs_volume=environment_values["ODOO_LOG_VOLUME"],
+                database_name=environment_values["ODOO_DB_NAME"],
+                snapshot=plan.clean_snapshot if restore_clean_snapshot else None,
+                apply=apply,
+                require_existing=retained_filestore,
+                dispatch_guard=prepare_filestore if apply else inspect_filestore,
+            )
+
+        filestore = None
+        current_compose = yaml.safe_load(str(target_payload.get("composeFile") or ""))
+        retained_filestore = isinstance(current_compose, dict) and "odoo_filestore" in (
+            current_compose.get("volumes") or {}
+        )
+        if restore_clean_snapshot or retained_filestore:
+            if restore_clean_snapshot:
+                memory_capacity.require_preview_host_memory_capacity(
+                    host=host,
+                    token=token,
+                    server_id=str(target_payload.get("serverId") or ""),
+                    database_url=database_url,
+                )
+            filestore = filestore_for_mode(apply=False)
         compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=request.image_reference,
             hold_web_until_integration_readback=web_held_until_integration_readback(
@@ -1708,6 +1760,7 @@ def _execute_refresh(
             mount_workflow_ssh=restore_upstream,
             protect_workflow_ssh=restore_upstream,
             domain_certificate_type=plan.domain_certificate_type,
+            preview_filestore=filestore,
         )
 
         def qualify_resources() -> None:
@@ -1723,6 +1776,7 @@ def _execute_refresh(
                     instance=plan.preview_slug,
                     environment=request.environment_values,
                     checkpoint=provider_lease_check or (lambda: None),
+                    pending_filestore=restore_clean_snapshot and filestore is not None,
                 )
 
         qualify_resources()
@@ -1778,6 +1832,9 @@ def _execute_refresh(
                 certificate_type=plan.domain_certificate_type,
             )
         steps.append(_step("domain_create_or_update", plan.domain_host))
+
+        if filestore is not None and filestore_for_mode(apply=True) != filestore:
+            raise click.ClickException("Preview filestore changed after its preparation plan.")
 
         latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
@@ -1912,7 +1969,7 @@ def _execute_refresh(
         rollback_errors: tuple[str, ...] = ()
         if isinstance(exc, dokploy_post_deploy.OdooPostDeployReadbackFailure):
             module_install_update_evidence = exc.evidence
-        if not deploy_triggered:
+        if not deploy_triggered and not storage_prepare_attempted:
             if created_compose_id and provider_effect_checkpoint is not None:
                 provider_effect_checkpoint("rollback_started")
             elif provider_lease_check is not None:
