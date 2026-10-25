@@ -7424,7 +7424,7 @@ def create_launchplane_fastapi_app(
                     context=issued_plan.context,
                     instance=issued_plan.preview_slug,
                     preview=preview,
-                    preview_refresh=issued_plan.operation == "refresh",
+                    preview_operation=issued_plan.operation,
                 )
                 if preview_binding and binding != preview_binding:
                     raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
