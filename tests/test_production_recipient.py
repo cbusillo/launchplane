@@ -9,6 +9,7 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+from control_plane import http_error_evidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -413,11 +414,26 @@ class ProductionRecipientTests(unittest.TestCase):
             document["services"]["database"]["deploy"]["resources"]["limits"]["cpus"] = "8"
             return json.dumps(document)
 
-        with patch(
-            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
-            side_effect=wrong_render,
+        with (
+            patch(
+                "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+                side_effect=wrong_render,
+            ),
+            self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs,
         ):
             self.assertEqual(self.run_operation().response_status_code, 409)
+            effects = list(self.effects)
+            apply_logs = list(logs.records)
+            logs.records.clear()
+            self.assertEqual(self.run_operation().response_status_code, 409)
+            self.assertEqual(self.effects, effects)
+        self.assertTrue(apply_logs)
+        self.assertTrue(logs.records)
+        for entry in [*apply_logs, *logs.records]:
+            evidence = json.loads(entry.getMessage())
+            self.assertEqual(evidence["trace_id"], self.adapter.trace_id)
+            self.assertTrue(evidence["sites"])
+            self.assertNotIn(self.values["DB_PASSWORD"], entry.getMessage())
         saved = custody(self.store, self.product, self.context)
         assert saved is not None
         self.assertFalse(saved.qualified_at)

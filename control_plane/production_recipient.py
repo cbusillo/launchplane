@@ -28,6 +28,7 @@ from control_plane.generic_web_deploy_http import (
     GenericWebDeployProductMismatchError,
     resolve_generic_web_deploy_lane,
 )
+from control_plane.http_error_evidence import log_handled_error_cause
 from control_plane.production_recipient_resources import inspect_resources
 from control_plane.production_recipient_upstreams import (
     require_delivered_upstreams,
@@ -869,7 +870,8 @@ class ProductionRecipientAdapter:
                 return ProviderObservation("absent", retry_safe=True)
             try:
                 self.verify(record)
-            except ValueError:
+            except ValueError as error:
+                log_handled_error_cause(error, self.trace_id)
                 unused = self.unused_recipient(record)
                 if (
                     record.before_configuration_sha256
@@ -885,7 +887,8 @@ class ProductionRecipientAdapter:
                     trace_id=self.trace_id, records={}, result=plan(record)
                 ),
             )
-        except Exception:
+        except Exception as error:
+            log_handled_error_cause(error, self.trace_id)
             return ProviderObservation("unknown")
 
     def apply(
@@ -1112,6 +1115,7 @@ class ProductionRecipientAdapter:
                 ),
             )
         except Exception as error:
+            log_handled_error_cause(error, self.trace_id)
             if not started:
                 raise ProviderMutationRejectedError(
                     error
