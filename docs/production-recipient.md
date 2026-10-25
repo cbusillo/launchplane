@@ -94,6 +94,14 @@ provider effect retains the original key and custody. A matching complete
 configuration can be adopted by original-key apply/reconciliation after a lost reply; an uncertain create
 is fenced and never repeated with another key.
 
+Preparation also materializes the reviewed raw Compose file in the recipient's
+own Dokploy directory under that same host execution fence. Dokploy's converted
+Compose read requires this file even before deployment. Matching files replay;
+different files and symlink paths refuse. Preparation preserves other files,
+including the runtime environment file, and verifies the source digest before
+requesting the actual provider render. A saved provider configuration alone never
+qualifies the recipient.
+
 Before any provider effect, a rejected attempt may be replaced by a fresh reviewed
 plan and a new key only when its reservation is gone and it has no provider IDs.
 The compare-and-write retains the complete prior attempt in custody history.

@@ -641,7 +641,9 @@ class ProductionRecipientAdapter:
         )
         return replacement
 
-    def verify(self, record: ProductionRecipientRecord, *, published: bool = False) -> None:
+    def verify_configuration(
+        self, record: ProductionRecipientRecord, *, published: bool = False
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         self.require_unchanged(record)
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         payload = api.fetch_dokploy_target_payload(
@@ -697,6 +699,12 @@ class ProductionRecipientAdapter:
             raise RecipientAuthorityChanged(
                 "The provider environment differs from managed production inputs."
             )
+        qualified_render(record, values)
+        return expected, values
+
+    def verify(self, record: ProductionRecipientRecord, *, published: bool = False) -> None:
+        expected, values = self.verify_configuration(record, published=published)
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
         actual = read_provider_compose(
             compose.fetch_dokploy_converted_compose_file(
                 host=host, token=token, compose_id=record.target_id
@@ -736,7 +744,6 @@ class ProductionRecipientAdapter:
             raise RecipientAuthorityChanged(
                 "The actual provider render differs from reviewed source and limits."
             )
-        qualified_render(record, values)
 
     def unused_recipient(self, record: ProductionRecipientRecord) -> dict[str, Any]:
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -878,7 +885,8 @@ class ProductionRecipientAdapter:
                     and provider_binding_digest(unused) == record.before_configuration_sha256
                 ):
                     return ProviderObservation("absent", retry_safe=True)
-                return ProviderObservation("unknown")
+                self.verify_configuration(record)
+                return ProviderObservation("absent", retry_safe=True)
             if not record.qualified_at:
                 return ProviderObservation("absent", retry_safe=True)
             return ProviderObservation(
@@ -1032,7 +1040,7 @@ class ProductionRecipientAdapter:
             configured = False
             if record.before_configuration_sha256:
                 if provider_binding_digest(fresh) != record.before_configuration_sha256:
-                    self.verify(record)
+                    self.verify_configuration(record)
                     configured = True
             else:
                 if fresh.get("env"):
@@ -1042,7 +1050,7 @@ class ProductionRecipientAdapter:
                     app_name=app_name,
                     before_configuration_sha256=provider_binding_digest(fresh),
                 )
-            inspect_resources(self.root, record, prepare=not configured, checkpoint=checkpoint)
+            inspect_resources(self.root, record, prepare=True, checkpoint=checkpoint)
             if record.request.upstreams:
                 from control_plane.production_recipient_host import (
                     run_recipient_program,

@@ -400,6 +400,33 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertEqual(self.effects, effects)
         self.assert_old_preserved()
 
+    def test_configured_recipient_without_materialized_source_continues_original_key(self) -> None:
+        materialized: dict[str, str] = {}
+
+        def prepare_source(root: Path, record: Any, *, prepare: bool, checkpoint: Any) -> None:
+            self.inspect_resources(root, record, prepare=prepare, checkpoint=checkpoint)
+            document = json.loads(record.compose_source)
+            for volume in document["volumes"].values():
+                volume["external"] = True
+            if prepare:
+                materialized[record.target_id] = json.dumps(document)
+
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=lambda **kwargs: materialized.get(kwargs["compose_id"], "null"),
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+            effects = list(self.effects)
+            with patch(
+                "control_plane.production_recipient.inspect_resources", side_effect=prepare_source
+            ):
+                self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assertEqual(self.effects, effects)
+        saved = custody(self.store, self.product, self.context)
+        assert saved is not None
+        self.assertTrue(saved.qualified_at)
+        self.assert_old_preserved()
+
     def test_changed_authority_or_review_never_creates_recipient(self) -> None:
         changed = self.profile.model_copy(update={"updated_at": "2026-10-15T11:00:00Z"})
         self.store.write_product_profile_record(changed)

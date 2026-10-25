@@ -27,7 +27,11 @@ from control_plane.production_recipient_recovery import RECOVERY_ROUTE
 from control_plane.http_routes.production_recipient import register_production_recipient_routes
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.production_recipient import ROUTE, plan
-from control_plane.production_recipient_resources import RESOURCE_PROGRAM, resource_spec
+from control_plane.production_recipient_resources import (
+    RESOURCE_LIBRARY,
+    RESOURCE_PROGRAM,
+    resource_spec,
+)
 from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     LocalAdminIdentity,
@@ -86,6 +90,36 @@ class HostProgramTests(unittest.TestCase):
         self.assertEqual(self.fixture.containers, original)
         self.assertEqual(data.read_text(), "recoverable old production")
         self.assertFalse(any(call[:2] == ["volume", "create"] for call in self.fixture.calls))
+
+    def test_materialized_source_replays_without_overwriting_files_or_following_symlinks(
+        self,
+    ) -> None:
+        namespace: dict[str, Any] = {}
+        exec(compile(RESOURCE_LIBRARY, "<production-resources>", "exec"), namespace)
+        namespace["COMPOSE_ROOT"] = self.fixture.root
+        spec = {**self.spec, "compose_source": json.dumps({"services": {"app": {}}})}
+        directory = self.fixture.root / spec["project"] / "code"
+        path = directory / "docker-compose.yml"
+        with redirect_stdout(io.StringIO()):
+            namespace["qualify_source"](spec)
+            unrelated = directory / ".env"
+            unrelated.write_text("preserved")
+            namespace["qualify_source"]({**spec, "prepare": False})
+            self.assertEqual(path.read_text(), spec["compose_source"])
+            self.assertEqual(unrelated.read_text(), "preserved")
+            path.write_text("foreign source")
+            with self.assertRaises(ValueError):
+                namespace["qualify_source"](spec)
+            self.assertEqual(path.read_text(), "foreign source")
+            path.unlink()
+            path.symlink_to(unrelated)
+            with self.assertRaises(ValueError):
+                namespace["qualify_source"](spec)
+            self.assertEqual(unrelated.read_text(), "preserved")
+            path.unlink()
+            with self.assertRaises(ValueError):
+                namespace["qualify_source"]({**spec, "prepare": False})
+            self.assertFalse(path.exists())
 
     def test_missing_or_foreign_or_needed_volume_is_not_adopted_or_deleted(self) -> None:
         self.spec["prepare"] = False
