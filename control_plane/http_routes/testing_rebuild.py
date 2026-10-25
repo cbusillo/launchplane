@@ -158,7 +158,16 @@ def register_testing_rebuild_routes(
         )
 
     async def lookup_request_fingerprint(request: Request) -> str:
-        return request_fingerprint(await request.json())
+        try:
+            payload = await request.json()
+        except ValueError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=common.next_trace_id(),
+                code="invalid_request",
+                message="Request payload failed JSON validation.",
+            ) from error
+        return request_fingerprint(payload)
 
     def require_admin(
         identity: LaunchplaneIdentity,

@@ -356,6 +356,27 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])
 
+    async def test_lookup_rejects_missing_or_malformed_body_without_changing_operations(
+        self,
+    ) -> None:
+        before = self.store.list_odoo_stable_target_replacement_operation_records()
+        for body in (b"", b'{"replacement":'):
+            with self.subTest(body=body):
+                headers = _browser_mutation_headers(self.sessions, self.session)
+                headers.update({"Idempotency-Key": "invalid-body", "Content-Type": "text/plain"})
+                response = await request(
+                    self.app,
+                    "POST",
+                    self.url + "/lookup",
+                    headers=headers,
+                    raw_body=body,
+                    capture_server_error_response=True,
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
+        self.assertEqual(self.fixture.effects, [])
+
     async def test_director_reads_preserve_original_binding_and_mutation_guards(self) -> None:
         from control_plane.service_auth import (
             BearerIdentityConfig,
