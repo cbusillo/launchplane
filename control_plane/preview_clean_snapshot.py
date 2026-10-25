@@ -75,12 +75,13 @@ PREVIEW_CLEAN_SNAPSHOT_PROGRAM = (
 import base64
 import shutil
 import tempfile
+import time
 import uuid
 
 
 def command(arguments, *, stdin=None):
     result = subprocess.run(arguments, input=stdin, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False)
+        stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
         raise RuntimeError('Clean snapshot preview operation failed')
     return result.stdout
@@ -97,7 +98,21 @@ def one_inspection(identifier):
     return rows[0]
 
 
+def wait_for_idle_preview_runner(containers):
+    runner, inspection = containers['script-runner']
+    if inspection.get('State', {}).get('Status') == 'paused':
+        docker('unpause', runner)
+    for attempt in range(3):
+        inspection = one_inspection(runner)
+        if 'ExecIDs' in inspection and inspection['ExecIDs'] in (None, []):
+            return
+        if attempt < 2:
+            time.sleep(0.1)
+    raise RuntimeError('Preview runner execution custody is active or unavailable')
+
+
 def restore_preview_snapshot(containers, source_lock):
+    wait_for_idle_preview_runner(containers)
     snapshot = spec['snapshot']
     binding = {key: spec[key] for key in ('compose_project', 'database_name', 'preview_volumes')}
     binding.update({key: snapshot[key] for key in ('server_id', 'product', 'context')})
@@ -240,9 +255,21 @@ def restore_preview_snapshot(containers, source_lock):
 
 
 import fcntl
-containers = inspect_copy_runtime(spec, expected_instance='preview')
-with (clean_snapshot_root(spec['snapshot']['snapshot_id']).parent / 'snapshot.lock').open('a') as lock:
-    fcntl.flock(lock, fcntl.LOCK_SH)
-    restore_preview_snapshot(containers, lock)
+root = clean_snapshot_root(spec['snapshot']['snapshot_id']).parent
+locks = root / 'preview-locks'
+locks.mkdir(mode=0o700, exist_ok=True)
+if locks.resolve() != locks.absolute():
+    raise RuntimeError('Preview target lock custody is aliased')
+target = hashlib.sha256(spec['compose_project'].encode()).hexdigest()
+descriptor = os.open(locks / (target + '.lock'), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+try:
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    inherited_lock_descriptors = (descriptor,)
+    containers = inspect_copy_runtime(spec, expected_instance='preview')
+    with (root / 'snapshot.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_SH)
+        restore_preview_snapshot(containers, lock)
+finally:
+    os.close(descriptor)
 """
 )

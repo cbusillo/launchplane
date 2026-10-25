@@ -91,6 +91,20 @@ data. Later builds keep Client edits. The marker inherited from testing cannot
 prove a preview restore. Retry evidence records both the requested snapshot and
 the original snapshot retained by the attempt.
 
+Each preview restore takes a nonblocking exclusive lock for its Compose project
+before runtime inspection. The lock spans copying, restore, sanitization, module
+work and cleanup. Every host subprocess inherits its descriptor, so a retry
+refuses while an earlier run or its surviving children still hold it. Different
+preview targets can restore concurrently. The persistent target lock is separate
+from the shared snapshot read lock, which is released after copying.
+Runtime inspection also requires the runner's Docker `ExecIDs` to be empty;
+an in-container restore can outlive its host CLI client. Active or unavailable
+exec custody refuses before any preview data or web state changes. An owned
+runner left paused by an interrupted copy is unpaused under the target lock;
+the idle check briefly retries to let a short health probe finish. This checks
+active exec roots; it does not establish custody of arbitrary in-container
+descendants after their exec root dies.
+
 PostgreSQL 17 and separate preview database volumes still require a full
 database restore. The #4057 capability provides filestore reflinks where the
 actual filesystem supports them, with full-copy fallback. It does not provide
