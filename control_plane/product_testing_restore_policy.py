@@ -13,6 +13,41 @@ from control_plane.contracts.product_profile_record import (
 )
 
 
+def director_testing_storage_allowed(
+    existing: LaunchplaneProductProfileRecord | None,
+    replacement: LaunchplaneProductProfileRecord,
+) -> bool:
+    if (
+        existing is None
+        or not existing.is_active
+        or existing.driver_id != "odoo"
+        or len(existing.lanes) != len(replacement.lanes)
+    ):
+        return False
+    changed = [
+        index
+        for index, (before, after) in enumerate(zip(existing.lanes, replacement.lanes, strict=True))
+        if before != after
+    ]
+    if len(changed) != 1:
+        return False
+    index = changed[0]
+    before = existing.lanes[index]
+    budget = replacement.lanes[index].odoo_testing_drill_storage
+    if before.instance != "testing" or budget is None:
+        return False
+    retained = (
+        before.odoo_testing_drill_storage.retained_copy_bindings
+        if before.odoo_testing_drill_storage is not None
+        else ()
+    )
+    if budget.retained_copy_bindings != retained:
+        return False
+    expected = existing.model_copy(deep=True)
+    expected.lanes[index].odoo_testing_drill_storage = budget
+    return replacement == expected
+
+
 class TestingRestorePolicyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

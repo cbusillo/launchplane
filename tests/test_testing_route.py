@@ -261,7 +261,11 @@ class TestingRouteTests(unittest.TestCase):
 
     def test_conflicting_alias_behavior_or_physical_backend_still_refuses(self) -> None:
         original = deepcopy(self.raw)
-        changes: tuple[dict[str, Any], ...] = ({"priority": 900}, {"tls": {}}, {"middlewares": []})
+        changes: tuple[dict[str, Any], ...] = (
+            {"priority": 900},
+            {"tls": {}},
+            {"middlewares": ["unknown@docker"]},
+        )
         for change in changes:
             with self.subTest(change=change):
                 self.raw = deepcopy(original)
@@ -289,6 +293,66 @@ class TestingRouteTests(unittest.TestCase):
                     "service": "foreign@docker",
                 }
                 self.plan()
+
+    def test_aliases_share_the_required_csp_without_losing_individual_drift_checks(self) -> None:
+        original = deepcopy(self.raw)
+        for alias_has_csp in (False, True):
+            with self.subTest(alias_has_csp=alias_has_csp):
+                self.raw = deepcopy(original)
+                for name, router in list(self.raw["routers"].items()):
+                    self.raw["routers"]["alias-" + name] = {**deepcopy(router), "middlewares": []}
+                    if alias_has_csp:
+                        self.raw["routers"][name]["middlewares"] = []
+                        self.raw["routers"]["alias-" + name]["middlewares"] = [
+                            "old-connections@docker"
+                        ]
+                plan = self.plan()
+                self.assertEqual(set(plan.legacy_routers), set(self.raw["routers"]))
+                document = route_document(plan, self.new)
+                for router in document["http"]["routers"].values():
+                    self.assertTrue(router["middlewares"])
+                    for reference in router["middlewares"]:
+                        self.assertEqual(
+                            document["http"]["middlewares"][reference.removesuffix("@file")],
+                            {"headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}},
+                        )
+                self.assertEqual(
+                    observe_testing_route(plan, self.apply(plan, self.new), document), self.new
+                )
+                for name in plan.legacy_routers:
+                    applied = self.apply(plan, self.new)
+                    applied["routers"][name]["middlewares"] = ["foreign@file"]
+                    with self.subTest(router=name), self.assertRaises(ValueError):
+                        observe_testing_route(plan, applied, document)
+
+    def test_aliases_refuse_changed_csp_or_ordered_file_middleware(self) -> None:
+        original = deepcopy(self.raw)
+        for middleware in (
+            {"status": "disabled", "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP}},
+            {"status": "enabled", "headers": {"contentSecurityPolicy": "connect-src *"}},
+            {
+                "status": "enabled",
+                "headers": {"contentSecurityPolicy": TESTING_CONNECTION_CSP},
+                "basicAuth": {"users": []},
+            },
+        ):
+            with self.subTest(middleware=middleware), self.assertRaises(ValueError):
+                self.raw = deepcopy(original)
+                self.raw["middlewares"]["alias-connections@docker"] = middleware
+                self.raw["routers"]["alias@docker"] = {
+                    **deepcopy(self.raw["routers"]["old-https@docker"]),
+                    "middlewares": ["alias-connections@docker"],
+                }
+                self.plan()
+        self.raw = deepcopy(original)
+        self.raw["middlewares"]["headers@file"] = {"status": "enabled", "headers": {}}
+        self.raw["routers"]["old-https@docker"]["middlewares"].append("headers@file")
+        self.raw["routers"]["alias@docker"] = {
+            **deepcopy(self.raw["routers"]["old-https@docker"]),
+            "middlewares": ["headers@file"],
+        }
+        with self.assertRaises(ValueError):
+            self.plan()
 
     def test_only_canonical_internal_challenge_is_exempt_on_application_entrypoints(self) -> None:
         add_proxy_internal_routes(self.raw)
