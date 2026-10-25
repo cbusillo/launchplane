@@ -780,6 +780,29 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                 scrubbed = scrubber.scrub([{"kind": "code-word"}], schema, schema)
                 self.assertEqual(scrubbed[0]["kind"] == "code-word", retained)
 
+    def test_repeated_item_cache_retains_at_most_one_row_bound(self) -> None:
+        import gc
+        import tracemalloc
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        row_bound = 64 * 1024
+        gc.collect()
+        already_tracing = tracemalloc.is_tracing()
+        if not already_tracing:
+            tracemalloc.start()
+        try:
+            baseline = tracemalloc.get_traced_memory()[0]
+            scrubber = _Scrubber()
+            with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", row_bound):
+                for index in range(64):
+                    scrubber.scrub([{f"key-{index}-{field}": True for field in range(256)}], {}, {})
+            gc.collect()
+            retained = tracemalloc.get_traced_memory()[0] - baseline
+            self.assertLess(retained, row_bound * 8)
+        finally:
+            if not already_tracing:
+                tracemalloc.stop()
+
     def test_compressed_history_exceeds_legacy_bound_without_losing_any_row(self) -> None:
         from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
 

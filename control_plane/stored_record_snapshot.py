@@ -128,6 +128,7 @@ class _Scrubber:
         self._numbers: dict[str, int] = {}
         self._used_numbers: set[int] = set()
         self._scrubbed_items_by_source: dict[tuple[int, int, str, bool, bytes], _ScrubbedItem] = {}
+        self._cached_source_bytes = 0
 
     def _digest(self, value: str) -> str:
         return hmac.new(self._salt, value.encode(), hashlib.sha256).hexdigest()
@@ -332,12 +333,13 @@ class _Scrubber:
         source = json.dumps(value, separators=(",", ":")).encode()
         key = (id(schema), id(root), name, declared, hashlib.sha256(source).digest())
         cached = self._scrubbed_items_by_source.get(key)
-        if cached is None or cached.schema is not schema or cached.root is not root:
-            cached = _ScrubbedItem(
-                schema, root, self.scrub(value, schema, root, name, declared=declared)
-            )
-            self._scrubbed_items_by_source[key] = cached
-        return cached.value
+        if cached is not None and cached.schema is schema and cached.root is root:
+            return cached.value
+        scrubbed = self.scrub(value, schema, root, name, declared=declared)
+        if self._cached_source_bytes + len(source) <= SNAPSHOT_MAX_BYTES:
+            self._cached_source_bytes += len(source)
+            self._scrubbed_items_by_source[key] = _ScrubbedItem(schema, root, scrubbed)
+        return scrubbed
 
 
 def _normalized(normalize: Callable[[Any], Any], value: object) -> Any:

@@ -53,6 +53,8 @@ Because each revision repeats most rules of the one before, an array item such
 as a rule is scrubbed once per export and reused wherever the same source item
 recurs under the same schema; the cache key is a digest, not the source text.
 Scrubbing cost therefore follows distinct content rather than revision count.
+The cache stops growing once its items' source reaches the 16 MiB row cap, so
+it never accumulates history beyond one maximum row.
 Every row is still exported, and its source digest check and scrubbed digest
 recomputation still run per row.
 
