@@ -664,7 +664,8 @@ class PreviewIdleScheduler:
                     check=check,
                     admit=admit,
                 )
-                run_durable_provider_operation(
+                allow_mutation = not held or held[0].attempt < PREVIEW_IDLE_MAX_ATTEMPTS
+                outcome = run_durable_provider_operation(
                     store=self.store,
                     scope=IDLE_SCOPE,
                     route_path=IDLE_ROUTE,
@@ -675,5 +676,18 @@ class PreviewIdleScheduler:
                     adapter=adapter,
                     original_intent=intent,
                     lease_seconds=900,
-                    allow_mutation=not held or held[0].attempt < PREVIEW_IDLE_MAX_ATTEMPTS,
+                    allow_mutation=allow_mutation,
                 )
+                if (
+                    allow_mutation
+                    and outcome.record is not None
+                    and outcome.record.state == "reconcile_required"
+                    and outcome.record.attempt >= PREVIEW_IDLE_MAX_ATTEMPTS
+                ):
+                    _LOGGER.warning(
+                        "Preview %s %s retries exhausted; retain operation %s for observation "
+                        "or qualified refresh/destroy recovery",
+                        preview_id,
+                        intent["action"],
+                        outcome.record.record_id,
+                    )

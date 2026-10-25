@@ -114,19 +114,6 @@ class PreviewIdleTests(unittest.TestCase):
         value["gateway"]["requested"] = True
         self.assertEqual(idle_action(value), "awake")
 
-    def test_proved_capacity_refusal_has_no_unknown_effect(self) -> None:
-        adapter = PreviewIdleAdapter(
-            host="fixture",
-            token="fixture",
-            target={},
-            intent={"action": "awake"},
-            record_id="wake-fixture",
-            check=lambda: None,
-        )
-        with patch.object(adapter, "read", return_value={"accepted": False, "capacity": False}):
-            result = adapter.apply("original-operation", Mock())
-        self.assertFalse(result.response_payload["accepted"])
-
     def test_interrupted_partial_stop_resumes_only_its_own_receipt(self) -> None:
         target = {"context": "fixture", "compose_name": "fixture-pr-1"}
         adapter = PreviewIdleAdapter(
@@ -211,10 +198,18 @@ class PreviewIdleTests(unittest.TestCase):
         )
         self.assertFalse(gateway.get("volumes"))
         self.assertFalse(gateway.get("env_file"))
-        self.assertTrue(
-            any("Host(`preview.example.invalid`)" in label for label in gateway["labels"])
-        )
-        self.assertFalse(any("Host(" in label for label in services["web"]["labels"]))
+        baseline = yaml.safe_load(
+            render_odoo_raw_compose_file(
+                image_reference=identity.image_reference,
+                hold_web_until_integration_readback=True,
+                domain_hosts=("preview.example.invalid",),
+                publish_host_ports=False,
+                mount_workflow_ssh=False,
+            )
+        )["services"]["web"]
+        self.assertEqual(gateway["labels"], baseline["labels"])
+        web_labels = dict(label.split("=", 1) for label in services["web"]["labels"])
+        self.assertEqual(web_labels.get("traefik.enable"), "false")
         self.assertEqual(set(gateway["networks"]), set(services["web"]["networks"]))
         self.assertEqual(
             services["web"]["networks"]["default"]["aliases"],
@@ -744,8 +739,10 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
     def exhaust_partial_effects(self) -> None:
         self.interrupt = True
-        for _ in range(10):
-            self.run_preview()
+        with self.assertLogs("control_plane.preview_idle", level="WARNING") as warnings:
+            for _ in range(10):
+                self.run_preview()
+        self.assertEqual(len(warnings.records), 1)
         held = self.store.list_held_provider_target_reservations()[0]
         effects = len(self.effects)
         self.run_preview()

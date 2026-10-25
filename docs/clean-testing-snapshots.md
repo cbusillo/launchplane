@@ -202,7 +202,9 @@ Wake authority uses the retained completed sleep intent and its gateway receipt,
 including completion adopted by observation or qualified supersession. Idle
 retries preserve their effect checkpoint and stop after three attempts, leaving
 the original fence available for observation or expired refresh/destroy
-supersession. If that refresh aborts, a completed original wake can resume only
+supersession. Exhaustion emits a warning naming the preview and original
+operation. The waiting page remains until recovery; partially started services
+stay under that original operation's custody. If a refresh aborts, a completed original wake can resume only
 its exact gateway receipt after target qualification with no live hold.
 Quiet polling does not take the preview executor lock or perform a host-wide
 storage inspection. Full qualification runs under exclusion before effects.
