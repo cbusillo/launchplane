@@ -165,7 +165,7 @@ def restore_preview_snapshot(containers, source_lock):
         raise RuntimeError('Preview data volume is not exclusively owned')
     if (present == '0' or restart) and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
         containers, snapshot['storage_budget'], runner_staging_bytes=(path / 'database.dump').stat().st_size,
-        host_staging_bytes=0):
+        host_staging_bytes=0, filestore_clone_source=path.parent):
         raise RuntimeError('Preview snapshot clone lacks reviewed storage headroom')
     mounted = docker('ps', '--all', '--filter', 'volume=' + mounts[0]['Name'],
         '--format', '{{.ID}}').decode().splitlines()

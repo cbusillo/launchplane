@@ -907,6 +907,51 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
         os.close(directory)
 
 
+def restore_lock_path(namespace):
+    return Path(tempfile.gettempdir()) / (namespace + "-copy.lock")
+
+
+def discard_abandoned_restore_staging(namespace):
+    for staging in restore_staging_root().iterdir():
+        if staging.is_symlink() or not staging.is_dir() or not re.fullmatch(r"lp-testing-[a-f0-9]{32}", staging.name):
+            continue
+        if staging.name == namespace:
+            shutil.rmtree(staging)
+            continue
+        descriptor = os.open(restore_lock_path(staging.name), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            continue
+        else:
+            shutil.rmtree(staging)
+        finally:
+            os.close(descriptor)
+
+
+def unpause_runner_left_by_interrupted_landing(containers):
+    if containers["script-runner"][1].get("State", {}).get("Status") == "paused":
+        docker("unpause", containers["script-runner"][0])
+
+
+def land_staged_filestore(spec, runner, staged, database):
+    volume = json.loads(docker("volume", "inspect", spec["generation"]["namespace"] + "-data"))[0]
+    backing = Path(volume["Mountpoint"]).resolve(strict=True)
+    if not filestore_clone_proved(staged.parent, backing):
+        docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
+        docker("cp", str(staged) + "/.", runner + ":/volumes/data/filestore/" + database)
+        return
+    destination = backing / "filestore" / database
+    docker("pause", runner)
+    try:
+        if destination.resolve() != destination:
+            raise RuntimeError("Testing filestore is aliased")
+        destination.mkdir(parents=True, exist_ok=True)
+        command(["cp", "-a", "--reflink=auto", str(staged) + "/.", str(destination)])
+    finally:
+        docker("unpause", runner)
+
+
 def restore_main():
     global inspection_predicate, inspection_only
     inspection_predicate = ReadbackPredicate.INPUT
@@ -1054,6 +1099,7 @@ def restore_main():
             artifacts=files['artifacts']
         print(prefix+json.dumps({'type':'complete','runner':containers['script-runner'][1]['Id'],'resume':present=='1','artifacts':artifacts}),flush=True)
         return
+    unpause_runner_left_by_interrupted_landing(containers)
     present = docker("exec", "-i", containers["database"][0], "sh", "-c",
         'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
         "_", database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
@@ -1071,6 +1117,7 @@ def restore_main():
         files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
         staged_bytes = sum(item['size'] for item in files['chunks'])
         assembly_bytes = sum(capture[part]['size'] for part in ('database', 'filestore'))
+    discard_abandoned_restore_staging(namespace)
     if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes):
         raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
@@ -1118,7 +1165,8 @@ def restore_main():
                 if source["ODOO_UPSTREAM_USER"] == "root"
                 else ["pg_dump", "-U", source["ODOO_UPSTREAM_DB_USER"], "-Fc", source["ODOO_UPSTREAM_DB_NAME"]]
             )
-            staging = Path(tempfile.mkdtemp(prefix=namespace + "-copy-"))
+            staging = restore_staging_root() / namespace
+            staging.mkdir(mode=0o700)
             dump = staging / "database.dump"
             with dump.open("xb") as output:
                 command([*ssh, destination, remote], stdout=output)
@@ -1131,8 +1179,7 @@ def restore_main():
             )
             command(["rsync", *rsync_options,
                 "-e", shlex.join(ssh), destination + ":" + path.rstrip("/") + "/", str(filestore) + "/"])
-            docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
-            docker("cp", str(filestore) + "/.", runner + ":/volumes/data/filestore/" + database)
+            land_staged_filestore(spec, runner, filestore, database)
             docker("cp", str(dump), runner + ":" + dump_path)
             docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
         uid = docker("exec", runner, "id", "-u").decode().strip()
@@ -1198,7 +1245,7 @@ def main():
     if spec.get('inspection_only') and not spec.get('verification_only'):
         restore_main()
         return
-    path = str(Path(tempfile.gettempdir()) / (namespace + "-copy.lock"))
+    path = restore_lock_path(namespace)
     # This coordination file is disposable across host reboot/tmp cleanup. Its
     # existence is not copy evidence; every execution uses the same flock inode.
     descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)

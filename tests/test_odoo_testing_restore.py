@@ -2,6 +2,7 @@ import base64
 from contextlib import closing, redirect_stdout
 import io
 import hashlib
+import shutil
 import tarfile
 import json
 import os
@@ -21,6 +22,7 @@ from control_plane.dokploy.compose import (
 )
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane._odoo_testing_storage_program import RESTORE_STAGING_DIRECTORY
 
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -192,9 +194,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         def snapshot_command(arguments: list[str], **kwargs: Any) -> Any:
             if arguments[:2] == ["docker", "stop"]:
                 self.containers["web"]["State"]["Running"] = False
-            if arguments[0] == "cp":
-                import shutil
-
+            if arguments[:2] == ["cp", "-a"]:
                 shutil.copytree(arguments[-2], arguments[-1])
                 self.calls.append(arguments)
                 return subprocess.CompletedProcess(arguments, 0, stdout=b"", stderr=b"")
@@ -325,6 +325,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
+        self.tmp = self.root
+        self.clones = False
         self.gen = generation()
         self.database = self.gen.namespace.replace("-", "_")
         source = {
@@ -411,6 +413,14 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         if command[0] in {"ssh", "rsync"}:
             if command[0] == "ssh":
                 kwargs["stdout"].write(b"fixture dump")
+            else:
+                (Path(command[-1]) / "attachment").write_bytes(b"production attachment")
+        elif command[:2] == ["cp", "--reflink=always"]:
+            if not self.clones:
+                return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"")
+            shutil.copyfile(command[-2], command[-1])
+        elif command[:3] == ["cp", "-a", "--reflink=auto"]:
+            shutil.copytree(command[-2], command[-1], dirs_exist_ok=True)
         elif command[:2] == ["docker", "ps"]:
             result = "\n".join(self.containers).encode()
         elif command[:2] == ["docker", "inspect"]:
@@ -474,7 +484,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 ["copy", encoded] + (["fixture:"] if self.spec.get("inspection_only") else []),
             ),
             patch("subprocess.run", side_effect=self.command),
-            patch("tempfile.gettempdir", return_value=str(self.root)),
+            patch("tempfile.gettempdir", return_value=str(self.tmp)),
+            patch("pathlib.Path.home", return_value=self.root),
+            patch("time.sleep"),
             redirect_stdout(output),
         ):
             try:
@@ -494,6 +506,71 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             except SystemExit as error:
                 status = int(error.code or 0)
         return status, output.getvalue()
+
+    def test_ssh_restore_stages_on_disk_outside_tmp(self) -> None:
+        self.tmp = self.root / "tmp"
+        self.tmp.mkdir()
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        staged = Path(next(call for call in self.calls if call[0] == "rsync")[-1])
+        self.assertFalse(staged.is_relative_to(self.tmp))
+        self.assertTrue(staged.is_relative_to(self.root))
+        self.assertFalse(staged.exists())
+
+    def test_staged_filestore_lands_by_host_clone_with_the_runner_paused(self) -> None:
+        self.clones = True
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        landed = self.root / (self.gen.namespace + "-data") / "filestore" / self.database
+        self.assertEqual((landed / "attachment").read_bytes(), b"production attachment")
+        clone = next(
+            index
+            for index, call in enumerate(self.calls)
+            if call[:3] == ["cp", "-a", "--reflink=auto"]
+        )
+        self.assertLess(self.calls.index(["docker", "pause", "script-runner"]), clone)
+        self.assertLess(clone, self.calls.index(["docker", "unpause", "script-runner"]))
+        self.assertFalse(
+            any(call[:2] == ["docker", "cp"] and "filestore" in call[2] for call in self.calls)
+        )
+
+    def test_storage_that_cannot_clone_keeps_the_runner_copy(self) -> None:
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertTrue(
+            any(call[:2] == ["docker", "cp"] and "filestore" in call[2] for call in self.calls)
+        )
+        self.assertFalse(any(call[:3] == ["cp", "-a", "--reflink=auto"] for call in self.calls))
+        self.assertNotIn(["docker", "pause", "script-runner"], self.calls)
+
+    def test_runner_left_paused_by_an_interrupted_landing_is_resumed_first(self) -> None:
+        self.containers["script-runner"]["State"]["Status"] = "paused"
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        resumed = self.calls.index(["docker", "unpause", "script-runner"])
+        first_runner_exec = next(
+            index
+            for index, call in enumerate(self.calls)
+            if call[:2] == ["docker", "exec"] and "script-runner" in call
+        )
+        self.assertLess(resumed, first_runner_exec)
+
+    def test_abandoned_restore_staging_is_removed_only_when_no_restore_holds_it(self) -> None:
+        import fcntl
+
+        root = self.root / RESTORE_STAGING_DIRECTORY
+        held = root / ("lp-testing-" + "1" * 32)
+        abandoned = root / ("lp-testing-" + "2" * 32)
+        for staging in (held, abandoned):
+            (staging / "filestore").mkdir(parents=True)
+            (staging / "filestore/attachment").write_bytes(b"production attachment")
+        lock = os.open(self.tmp / (held.name + "-copy.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        self.addCleanup(os.close, lock)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertTrue((held / "filestore/attachment").exists())
+        self.assertFalse(abandoned.exists())
 
     def test_new_copy_starts_without_performing_inline_disposal(self) -> None:
         previous = "lp_drill_" + "b" * 32

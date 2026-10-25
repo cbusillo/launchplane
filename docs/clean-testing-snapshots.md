@@ -34,7 +34,24 @@ qualified source. Existing guarded recovery owns retry and storage admission.
 The host saves a bounded PostgreSQL dump and an independent filestore copy
 outside every application volume. It verifies their hashes and atomically
 renames the completed directory. It uses the existing clone-or-copy behavior
-for the filestore; full-copy headroom remains required.
+for the filestore.
+
+## Storage
+
+An SSH refresh stages the source dump and filestore on disk under the host
+user's `~/.local/state/launchplane-testing-restore-staging/<namespace>`, never
+in `/tmp`, which may be a RAM disk. When the host proves it can clone from that
+staging into the testing volume, the filestore lands by `cp --reflink=auto`
+with the runner paused; otherwise the runner copy is used. A later restore
+removes staging left by a killed run once that run's namespace lock is free.
+
+The space check charges each filestore copy in full unless the host proves a
+clone with a real `cp --reflink=always` probe between the same two
+filesystems; a proven clone is charged zero. This applies to staging into
+testing, testing into the snapshot, and the snapshot into a new preview. The
+SSH runner is charged the dump, not the filestore. Database restores are always
+charged in full. On storage that cannot clone, every copy is still charged and
+refused when it does not fit.
 
 The newest qualified immutable database-backed capture is the preview source,
 separate from the current testing generation. Worker completion records it
@@ -99,8 +116,8 @@ proved gone or replaced. Unknown hard-crash partial directories remain in
 custody; they are never swept by filename.
 Unknown reader evidence preserves copies. Reviewed headroom is checked before
 testing stops; insufficient capacity keeps the previous source usable.
-PostgreSQL restore and full filestore-copy headroom are also required for a new
-preview. Neither cleanup path removes testing originals, backups or unknown files.
+PostgreSQL restore headroom, and filestore headroom unless a clone is proved,
+are also required for a new preview. Neither cleanup path removes testing originals, backups or unknown files.
 
 Obsolete snapshot retirement commits an atomic tombstone rename before deleting
 bytes, so an interrupted delete can finish on the next pass. Cleanup errors and
