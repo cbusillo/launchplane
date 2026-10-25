@@ -403,10 +403,20 @@ class MergeTrainPolicyTests(unittest.TestCase):
                 }
             ],
         }
-        for label in ("stack-landed", "", None):
-            with self.subTest(label=label):
+        for label, dependency_id in (
+            ("stack-landed", None),
+            ("", None),
+            (None, None),
+            ("stack-landed", 711),
+        ):
+            with self.subTest(label=label, dependency_id=dependency_id):
                 payload = json.loads(json.dumps(legacy_payload))
                 repository = payload["policies"][0]
+                if dependency_id is not None:
+                    repository["enqueue"].update(
+                        trusted_automation_github_user_ids=[dependency_id],
+                        dependency_update_github_user_ids=[dependency_id],
+                    )
                 if label is None:
                     repository.pop("stack_child_disposition_label")
                 else:

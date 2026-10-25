@@ -453,6 +453,7 @@ def build_release_review(
             read=read,
             preview_hosts=preview_hosts,
             review_label=profile.owner.review_label,
+            policy_store=store,
         )
         if production.shared_addons_digest != candidate.shared_addons_digest:
             shared_sources, additional_changes = read_shared_source_changes(
@@ -462,6 +463,7 @@ def build_release_review(
                 read=read,
                 preview_hosts=preview_hosts,
                 review_label=profile.owner.review_label,
+                policy_store=store,
             )
     except ReleaseEvidenceUnavailable:
         raise

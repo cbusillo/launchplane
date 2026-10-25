@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 from functools import partial
 import json
 from pathlib import Path
@@ -1348,7 +1349,9 @@ def _dependency_update_policy(
         trusted_automation_github_user_ids=trusted if trusted is not None else (github_user_id,)
     )
     payload = base.model_dump(mode="json")
-    payload["policies"][0]["enqueue"]["dependency_update_github_user_ids"] = [github_user_id]
+    payload["policies"][0]["enqueue"]["dependency_update_bots"] = [
+        dependency_bot_policy(github_user_id).model_dump()
+    ]
     return MergeTrainPolicy.model_validate(payload)
 
 

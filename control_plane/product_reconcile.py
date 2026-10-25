@@ -49,7 +49,7 @@ from control_plane.testing_restore_prerequisite import (
 )
 
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
-from control_plane.dependency_update_review import pure_dependabot_update
+from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_reconcile_read import preview_refresh_failure
 from control_plane import secrets
@@ -2155,7 +2155,11 @@ def _plan_preview_target(
         body=str(pull_request.get("body") or ""),
         labels=_labels(pull_request),
         review_label=profile.owner.review_label,
-        pure_dependency_update=pure_dependabot_update(pull_request, read=transport.get_json),
+        pure_dependency_update=pure_dependency_update(
+            pull_request,
+            read=transport.get_json,
+            store=record_store,
+        ),
         director_standing=profile.release_on_acceptance == "director_standing",
     )
     if not intent.explicit_override and recorded_train_candidate(

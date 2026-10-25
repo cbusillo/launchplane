@@ -70,7 +70,8 @@ from control_plane.contracts.merge_train_structural_provenance import (
 )
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
 from control_plane.contracts.text_fields import require_text
-from control_plane.dependency_update_review import pure_dependabot_update
+from control_plane.dependency_update_review import dependency_update_policy, pure_dependency_update
+from control_plane.contracts.merge_train_policy import MergeTrainEnqueuePolicy
 from control_plane.release_review_shared import repository_key
 from control_plane.client_release_repositories import (
     ClientReleaseRepositoryStore,
@@ -3752,7 +3753,7 @@ class GitHubMergeTrainSnapshotReader:
             return True
         base = _json_object(pull_request.get("base"), "GitHub pull request base")
         if (
-            user.get("id") in policy.enqueue.dependency_update_github_user_ids
+            policy.enqueue.dependency_bot(user.get("id")) is not None
             and user.get("type") == "Bot"
             and self._safe_dependency_update_class(
                 repository_path=_repository_path(policy.repository),
@@ -3760,6 +3761,7 @@ class GitHubMergeTrainSnapshotReader:
                     pull_request.get("number"), "GitHub pull request requires number."
                 ),
                 author_id=_required_int(user.get("id"), "GitHub pull request user requires id."),
+                pull_request=pull_request,
                 head_sha=_required_text(head.get("sha"), "GitHub pull request head requires sha."),
                 base_branch=str(base.get("ref") or ""),
                 base_sha=str(base.get("sha") or ""),
@@ -3934,6 +3936,7 @@ class GitHubMergeTrainSnapshotReader:
                 repository_path=repository_path,
                 pull_request_number=pull_request_number,
                 author_id=actor_id,
+                pull_request=source,
                 head_sha=head_sha,
                 base_branch=str(base.get("ref") or ""),
                 base_sha=str(base.get("sha") or ""),
@@ -4386,6 +4389,7 @@ class GitHubMergeTrainSnapshotReader:
         repository_path: str,
         pull_request_number: int,
         author_id: int,
+        pull_request: dict[str, object],
         head_sha: str,
         base_branch: str,
         base_sha: str,
@@ -4400,6 +4404,7 @@ class GitHubMergeTrainSnapshotReader:
                 repository_path=repository_path,
                 pull_request_number=pull_request_number,
                 author_id=author_id,
+                pull_request=pull_request,
                 head_sha=head_sha,
                 base_branch=base_branch,
                 base_sha=base_sha,
@@ -4417,10 +4422,16 @@ class GitHubMergeTrainSnapshotReader:
         repository_path: str,
         pull_request_number: int,
         author_id: int,
+        pull_request: dict[str, object],
         head_sha: str,
         base_branch: str,
         base_sha: str,
     ) -> DependencyUpdateClass:
+        policy = self._dependency_policy(pull_request)
+        user = _json_object(pull_request.get("user"), "GitHub pull request user")
+        bot = policy.dependency_bot(user.get("id")) if policy is not None else None
+        if bot is None or user.get("type") != "Bot":
+            return "needs_review"
         payload = self.transport.request(
             method="GET",
             path=f"/repos/{repository_path}/pulls/{pull_request_number}/commits?per_page=100",
@@ -4459,13 +4470,24 @@ class GitHubMergeTrainSnapshotReader:
             if not isinstance(author, dict) or author.get("id") != author_id:
                 return "needs_review"
             messages.append(str(detail.get("message") or ""))
-        update_class = classify_dependency_update(messages)
+        update_class = classify_dependency_update(
+            messages,
+            metadata_format=bot.metadata_format,
+            allowed_update_types=bot.allowed_update_types,
+        )
         if update_class != "patch_or_minor":
             return update_class
         if self._force_pushed_by_other(
             repository_path=repository_path,
             pull_request_number=pull_request_number,
             author_id=author_id,
+        ):
+            return "needs_review"
+        if not pure_dependency_update(
+            pull_request,
+            read=lambda path: self.transport.request(method="GET", path=path),
+            store=self._branch_refresh_store,
+            repository_policy=self._repository_policy,
         ):
             return "needs_review"
         return update_class
@@ -4658,6 +4680,13 @@ class GitHubMergeTrainSnapshotReader:
             raise
         return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
 
+    def _dependency_policy(self, pull_request: dict[str, object]) -> MergeTrainEnqueuePolicy | None:
+        return dependency_update_policy(
+            pull_request,
+            store=self._branch_refresh_store,
+            repository_policy=self._repository_policy,
+        )
+
     def client_review_intent(
         self,
         *,
@@ -4688,8 +4717,11 @@ class GitHubMergeTrainSnapshotReader:
         dependency_only = (
             bool(profiles)
             and pull_request is not None
-            and pure_dependabot_update(
-                pull_request, read=lambda path: self.transport.request(method="GET", path=path)
+            and pure_dependency_update(
+                pull_request,
+                read=lambda path: self.transport.request(method="GET", path=path),
+                store=self._branch_refresh_store,
+                repository_policy=self._repository_policy,
             )
         )
         intents = tuple(
