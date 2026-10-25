@@ -5,6 +5,10 @@ import hashlib
 from control_plane.contracts.preview_record import PreviewRecord
 
 
+PREVIEW_IDLE_SCOPE = "launchplane:preview-idle:v1"
+PREVIEW_IDLE_ROUTE = "service:preview-idle"
+
+
 def odoo_preview_reconciliation_key(*, context: str, compose_name: str) -> str:
     if not context.strip() or not compose_name.strip():
         raise ValueError("Preview execution requires context and compose name.")

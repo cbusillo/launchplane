@@ -1,5 +1,5 @@
-from collections.abc import Callable
-from contextlib import ExitStack
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 import hashlib
 import json
 import logging
@@ -10,25 +10,31 @@ import uuid
 
 import yaml
 
-from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
+from control_plane.contracts.idempotency_record import (
+    build_launchplane_mutation_reservation_id,
+    LaunchplaneIdempotencyRecord,
+)
 from control_plane.contracts.preview_execution import (
     odoo_preview_reconciliation_key,
     odoo_preview_target_key,
     preview_execution_lock_name,
+    PREVIEW_IDLE_SCOPE as IDLE_SCOPE,
+    PREVIEW_IDLE_ROUTE as IDLE_ROUTE,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.runtime_identity import runtime_identity_env
+from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.dokploy import api, source
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 from control_plane.dokploy.memory_capacity import preview_host_memory_floor
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
 from control_plane.dokploy.preview_inventory import complete_preview_compose_inventory
 from control_plane.drivers.registry import product_profile_uses_odoo_driver
+from control_plane.disposable_lanes import require_disposable_lane
 from control_plane.preview_gateway import PREVIEW_GATEWAY_SERVICE, PREVIEW_IDLE_SECONDS
 from control_plane.preview_idle_runtime import PREVIEW_IDLE_RUNTIME_PROGRAM
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
-    ProviderMutationUnknownError,
+    ProviderMutationRejectedError,
     ProviderObservation,
     ProviderOperationLease,
     run_durable_provider_operation,
@@ -40,10 +46,9 @@ from control_plane.workflows.generic_web_preview import (
     resolve_generic_web_preview_slug,
     serialize_generic_web_preview_operation,
 )
+from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
 
 
-IDLE_SCOPE = "launchplane:preview-idle:v1"
-IDLE_ROUTE = "service:preview-idle"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -68,6 +73,112 @@ def _fingerprint(value: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
+def idle_target_binding(target: dict[str, Any]) -> dict[str, Any]:
+    spec = {
+        key: value
+        for key, value in target["spec"].items()
+        if key not in {"memory_floor", "disk_reserve"}
+    }
+    return {
+        **{key: value for key, value in target.items() if key != "authority_binding"},
+        "spec": spec,
+    }
+
+
+def original_idle_intent(
+    store: PostgresRecordStore, reservation: LaunchplaneIdempotencyRecord, product: str
+) -> dict[str, Any]:
+    intent = store.read_original_mutation_intent(reservation)
+    if (
+        (reservation.scope, reservation.route_path) != (IDLE_SCOPE, IDLE_ROUTE)
+        or intent.get("product") != product
+        or intent.get("action") not in {"sleep", "awake"}
+    ):
+        raise ValueError("Preview idle original intent is unavailable.")
+    target = intent.get("target")
+    if not isinstance(target, dict) or not isinstance(target.get("spec"), dict):
+        raise ValueError("Preview idle target binding is unavailable.")
+    generation = target["spec"].get("generation")
+    control = intent.get("control")
+    if not isinstance(generation, dict) or not isinstance(control, dict):
+        raise ValueError("Preview idle original generation or control is unavailable.")
+    identity = RuntimeIdentity.model_validate_json(target["spec"]["identity"])
+    if (
+        identity.product != product
+        or identity.environment_kind != "preview"
+        or not identity.preview_id
+        or not identity.preview_generation_id
+        or identity.preview_id != intent.get("preview_id")
+        or identity.context != target.get("context")
+        or identity.instance != target.get("compose_name")
+        or identity.image_reference != target["spec"].get("image_reference")
+        or generation.get("instance") != "preview"
+        or generation.get("namespace") != target["spec"].get("compose_project")
+        or odoo_preview_target_key(context=identity.context, compose_name=identity.instance)
+        != reservation.provider_target_key
+        or odoo_preview_reconciliation_key(context=identity.context, compose_name=identity.instance)
+        != reservation.reconciliation_key
+        or _fingerprint(intent) != reservation.request_fingerprint
+    ):
+        raise ValueError("Preview idle original binding differs.")
+    return intent
+
+
+def observe_idle_reservation(
+    store: PostgresRecordStore, reservation: LaunchplaneIdempotencyRecord, product: str, root: Path
+) -> str:
+    intent = original_idle_intent(store, reservation, product)
+    host, token = source.read_dokploy_config(control_plane_root=root)
+    with store.testing_replacement_execution_lock(
+        preview_execution_lock_name(reservation.provider_target_key)
+    ) as check:
+        if check is None:
+            return "in_progress"
+        adapter = PreviewIdleAdapter(
+            host=host,
+            token=token,
+            target=intent["target"],
+            intent=intent,
+            record_id=reservation.record_id,
+            check=check,
+        )
+        return run_durable_provider_operation(
+            store=store,
+            scope=reservation.scope,
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            request_fingerprint=reservation.request_fingerprint,
+            lease_owner=uuid.uuid4().hex,
+            response_trace_id="preview-idle-observe:" + uuid.uuid4().hex,
+            adapter=adapter,
+            allow_mutation=False,
+            original_intent=intent,
+        ).status
+
+
+def idle_reservation_is_quiescent(
+    store: PostgresRecordStore,
+    reservation: LaunchplaneIdempotencyRecord,
+    product: str,
+    compose_id: str,
+    root: Path,
+) -> bool:
+    intent = original_idle_intent(store, reservation, product)
+    if intent["target"]["compose_id"] != compose_id:
+        return False
+    host, token = source.read_dokploy_config(control_plane_root=root)
+    adapter = PreviewIdleAdapter(
+        host=host,
+        token=token,
+        target=intent["target"],
+        intent=intent,
+        record_id=reservation.record_id,
+        check=lambda: None,
+    )
+    result = adapter.read()
+    return set(result["services"]) == {"web", "database", "script-runner"}
+
+
 class PreviewIdleAdapter:
     def __init__(
         self,
@@ -78,10 +189,12 @@ class PreviewIdleAdapter:
         intent: dict[str, Any],
         record_id: str,
         check: Callable[[], None],
+        admit: Callable[[], AbstractContextManager[None]] = nullcontext,
     ) -> None:
         self.host, self.token = host, token
         self.target, self.intent = target, intent
         self.record_id, self.check = record_id, check
+        self.admit = admit
 
     def target_key(self) -> str:
         return odoo_preview_target_key(
@@ -105,10 +218,18 @@ class PreviewIdleAdapter:
         }
 
         def dispatch(effect: Callable[[], None]) -> None:
-            self.check()
-            if lease is not None:
-                lease.checkpoint_effect("preview_idle_" + action)
-            effect()
+            effect_started = False
+            try:
+                with self.admit() if lease is not None else nullcontext():
+                    self.check()
+                    if lease is not None:
+                        effect_started = True
+                        lease.checkpoint_effect("preview_idle_" + action)
+                    effect()
+            except Exception as error:
+                if lease is not None and not effect_started:
+                    raise ProviderMutationRejectedError(error) from error
+                raise
 
         _read_remote(
             host=self.host,
@@ -140,9 +261,7 @@ class PreviewIdleAdapter:
             and gateway["sleep_record_id"] == self.record_id
             and all(not item["running"] for item in services.values())
             if action == "sleep"
-            else gateway["mode"] == "awake"
-            and gateway["wake_record_id"] == self.record_id
-            and all(item["running"] and item["healthy"] for item in services.values())
+            else gateway["mode"] == "awake" and gateway["wake_record_id"] == self.record_id
         )
         if present:
             return ProviderObservation("present", response_status_code=200, response_payload=result)
@@ -171,11 +290,11 @@ class PreviewIdleAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         result = self.read(self.intent["action"], lease)
-        if result.get("capacity") is False:
-            raise ProviderMutationUnknownError(
-                "Preview wake is waiting for capacity under its original operation."
-            )
-        return ProviderMutationOutcome(response_status_code=200, response_payload=result)
+        return ProviderMutationOutcome(
+            response_status_code=200,
+            response_payload=result,
+            provider_effect_performed=result.get("accepted") is True,
+        )
 
 
 class PreviewIdleScheduler:
@@ -185,6 +304,8 @@ class PreviewIdleScheduler:
         self._thread: Thread | None = None
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
         self._stop.clear()
         self._thread = Thread(target=self._loop, name="preview-idle", daemon=True)
         self._thread.start()
@@ -192,8 +313,9 @@ class PreviewIdleScheduler:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join()
-            self._thread = None
+            self._thread.join(timeout=5)
+            if not self._thread.is_alive():
+                self._thread = None
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -254,6 +376,14 @@ class PreviewIdleScheduler:
         ]
         if len(matches) != 1 or identity.instance != name:
             return None
+        authority_binding = require_disposable_lane(
+            self.store,
+            product=profile.product,
+            context=profile.preview.context,
+            instance=slug,
+            preview=preview,
+            preview_operation="refresh",
+        )
         compose_id = matches[0]
         for registered in self.store.list_dokploy_target_id_records():
             if registered.target_id == compose_id:
@@ -298,6 +428,7 @@ class PreviewIdleScheduler:
             "compose_id": compose_id,
             "server_id": str(payload.get("serverId") or ""),
             "slug": slug,
+            "authority_binding": authority_binding,
             "spec": {
                 "generation": {
                     "instance": "preview",
@@ -305,6 +436,7 @@ class PreviewIdleScheduler:
                 },
                 "compose_project": str(payload.get("appName") or ""),
                 "database_name": env.get("ODOO_DB_NAME", ""),
+                "health_path": DEFAULT_ODOO_RUNTIME_HEALTH_PATH,
                 "image_reference": identity.image_reference,
                 "preview_volumes": {
                     "data": env.get("ODOO_DATA_VOLUME", ""),
@@ -315,8 +447,6 @@ class PreviewIdleScheduler:
                 "identity": raw_identity,
                 "usage_only": True,
                 "memory_floor": preview_host_memory_floor(
-                    host=host,
-                    token=token,
                     server_id=str(payload.get("serverId") or ""),
                     record_store=self.store,
                 ),
@@ -326,6 +456,20 @@ class PreviewIdleScheduler:
 
     def run_once(self) -> None:
         host, token = source.read_dokploy_config(control_plane_root=self.control_plane_root)
+        for held in self.store.list_held_provider_target_reservations():
+            if self._stop.is_set():
+                return
+            if held.route_path != IDLE_ROUTE:
+                continue
+            try:
+                retained = self.store.read_original_mutation_intent(held)
+                observe_idle_reservation(
+                    self.store, held, str(retained.get("product") or ""), self.control_plane_root
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Preview idle original observation is unavailable for %s", held.record_id
+                )
         for profile in self.store.list_product_profile_records():
             if (
                 not profile.is_active
@@ -352,6 +496,17 @@ class PreviewIdleScheduler:
         key = odoo_preview_target_key(
             context=target["context"], compose_name=target["compose_name"]
         )
+        held_before = self.store.list_held_provider_target_reservations(provider_target_key=key)
+        if held_before and any(
+            (item.scope, item.route_path) != (IDLE_SCOPE, IDLE_ROUTE) for item in held_before
+        ):
+            return
+        if not held_before:
+            observer = PreviewIdleAdapter(
+                host=host, token=token, target=target, intent={}, record_id="", check=lambda: None
+            )
+            if not idle_action(observer.read("poll")):
+                return
         with self.store.testing_replacement_execution_lock(
             preview_execution_lock_name(key)
         ) as check:
@@ -372,6 +527,40 @@ class PreviewIdleScheduler:
                 if current != target:
                     return
                 check()
+
+                @contextmanager
+                def admit() -> Iterator[None]:
+                    with self.store.serialize_existing_preview_refresh():
+                        fresh_profile = self.store.read_product_profile_record(profile.product)
+                        fresh_preview = self.store.read_preview_record(preview_id)
+                        fresh_generation = self.store.read_preview_generation_record(
+                            fresh_preview.serving_generation_id
+                        )
+                        if (
+                            not fresh_profile.is_active
+                            or not fresh_profile.preview.enabled
+                            or fresh_preview.state != "active"
+                            or fresh_preview.active_generation_id
+                            != fresh_preview.serving_generation_id
+                            or fresh_generation.state != "ready"
+                            or fresh_generation.runtime_identity is None
+                            or runtime_identity_env(fresh_generation.runtime_identity)[
+                                "LAUNCHPLANE_RUNTIME_IDENTITY_JSON"
+                            ]
+                            != target["spec"]["identity"]
+                            or require_disposable_lane(
+                                self.store,
+                                product=profile.product,
+                                context=profile.preview.context,
+                                instance=target["slug"],
+                                preview=fresh_preview,
+                                preview_operation="refresh",
+                            )
+                            != target["authority_binding"]
+                        ):
+                            raise ValueError("Preview idle authority changed before dispatch.")
+                        yield
+
                 held = self.store.list_held_provider_target_reservations(provider_target_key=key)
                 intent: dict[str, Any] = {}
                 idempotency_key = ""
@@ -381,8 +570,10 @@ class PreviewIdleScheduler:
                         IDLE_ROUTE,
                     ):
                         return
-                    intent = self.store.read_original_mutation_intent(held[0])
-                    if intent.get("target") != target or intent.get("action") not in {
+                    intent = original_idle_intent(self.store, held[0], profile.product)
+                    if intent.get("target") != idle_target_binding(target) or intent.get(
+                        "action"
+                    ) not in {
                         "sleep",
                         "awake",
                     }:
@@ -404,12 +595,13 @@ class PreviewIdleScheduler:
                         if (
                             original is None
                             or original.state != "completed"
+                            or original.response_payload.get("accepted") is not True
                             or (original.scope, original.route_path) != (IDLE_SCOPE, IDLE_ROUTE)
                         ):
                             return
                         original_intent = self.store.read_original_mutation_intent(original)
                         if (
-                            original_intent.get("target") != target
+                            original_intent.get("target") != idle_target_binding(target)
                             or original_intent.get("action") != "sleep"
                         ):
                             return
@@ -418,7 +610,14 @@ class PreviewIdleScheduler:
                         if action == "sleep"
                         else {"sleep_record_id": gateway["sleep_record_id"]}
                     )
-                    intent = {"target": target, "action": action, "control": control}
+                    intent = {
+                        "product": profile.product,
+                        "preview_id": preview_id,
+                        "target": idle_target_binding(target),
+                        "action": action,
+                        "control": control,
+                        "attempt_id": uuid.uuid4().hex,
+                    }
                     idempotency_key = _fingerprint(intent)
                 record_id = build_launchplane_mutation_reservation_id(
                     scope=IDLE_SCOPE, route_path=IDLE_ROUTE, idempotency_key=idempotency_key
@@ -430,6 +629,7 @@ class PreviewIdleScheduler:
                     intent=intent,
                     record_id=record_id,
                     check=check,
+                    admit=admit,
                 )
                 run_durable_provider_operation(
                     store=self.store,

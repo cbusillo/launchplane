@@ -1,10 +1,20 @@
+import hashlib
+
+
 PREVIEW_GATEWAY_SERVICE = "preview-router"
 PREVIEW_IDLE_SECONDS = 15 * 60
 PREVIEW_GATEWAY_SOCKET = "/tmp/launchplane-preview-control.sock"
+PREVIEW_BACKEND_ALIAS_PREFIX = "lp-preview-"
+
+
+def preview_backend_alias(identity: str) -> str:
+    return PREVIEW_BACKEND_ALIAS_PREFIX + hashlib.sha256(identity.encode()).hexdigest()[:32]
+
 
 PREVIEW_GATEWAY_PROGRAM = (
     f"PREVIEW_IDLE_SECONDS = {PREVIEW_IDLE_SECONDS!r}\n"
     f"PREVIEW_GATEWAY_SOCKET = {PREVIEW_GATEWAY_SOCKET!r}\n"
+    f"PREVIEW_BACKEND_ALIAS_PREFIX = {PREVIEW_BACKEND_ALIAS_PREFIX!r}\n"
     + r"""
 import asyncio
 from contextlib import suppress
@@ -75,7 +85,7 @@ class PreviewGateway:
     def control(self, request):
         action = request.get('action')
         accepted = action == 'status'
-        if action in {'sleep', 'awake'}:
+        if action in {'sleep', 'waking', 'awake'}:
             record_id = request.get('record_id', '')
             if not isinstance(record_id, str) or not record_id.startswith('mutation-reservation-') or len(record_id) > 128:
                 return {'accepted': False, **self.status()}
@@ -87,7 +97,12 @@ class PreviewGateway:
                     self.persist('asleep', record_id, '')
                     self.awake.clear()
                     accepted = True
-            elif request.get('sleep_record_id') == self.sleep_record_id and self.sleep_record_id:
+            elif (request.get('sleep_record_id') == self.sleep_record_id and self.sleep_record_id
+                and (action == 'waking' and self.mode == 'asleep' and self.wake_record_id in {'', record_id}
+                     or action == 'awake' and self.wake_record_id == record_id)):
+                if action == 'waking':
+                    self.persist('asleep', self.sleep_record_id, record_id)
+                    return {'accepted': True, **self.status()}
                 self.persist('awake', self.sleep_record_id, record_id)
                 self.last_visit = self.clock()
                 self.requested = False
@@ -115,7 +130,7 @@ class PreviewGateway:
         self.sequence += 1
 
     async def unavailable(self, writer, *, refresh):
-        body = (('<!doctype html><html><head><meta charset="utf-8">'
+        body = (('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             + ('<meta http-equiv="refresh" content="5">' if refresh else '')
             + '<title>Opening preview</title><style>body{font:18px system-ui;max-width:34rem;'
               'margin:15vh auto;padding:2rem;color:#203047;background:#f6f8fc}h1{font-size:1.6rem}'
@@ -150,7 +165,7 @@ class PreviewGateway:
                 upstream_reader, upstream_writer = await asyncio.wait_for(
                     asyncio.open_connection(backend_host, backend_port), timeout=2)
             except (OSError, asyncio.TimeoutError):
-                self.requested = True
+                self.requested = self.mode == 'asleep'
                 await self.unavailable(writer, refresh=refresh)
                 return
             self.requested = False
@@ -192,7 +207,7 @@ async def run_gateway():
     os.umask(0o077)
     control = await asyncio.start_unix_server(gateway.control_connection, path=socket_path, limit=4096)
     server = await asyncio.start_server(
-        lambda reader, writer: gateway.connection(reader, writer, 'web', port), '0.0.0.0', port)
+        lambda reader, writer: gateway.connection(reader, writer, PREVIEW_BACKEND_ALIAS_PREFIX + gateway.identity[:32], port), '0.0.0.0', port)
     async with control, server:
         await asyncio.gather(control.serve_forever(), server.serve_forever())
 
@@ -202,7 +217,11 @@ if __name__ == '__main__':
 """
 )
 
-PREVIEW_GATEWAY_INSPECTION_LIBRARY = r"""
+PREVIEW_GATEWAY_INSPECTION_LIBRARY = (
+    f"PREVIEW_BACKEND_ALIAS_PREFIX = {PREVIEW_BACKEND_ALIAS_PREFIX!r}\n"
+    + r"""
+import hashlib
+
 def inspect_preview_gateway(container, web):
     config, host = container['Config'], container['HostConfig']
     if (container.get('Mounts') or host.get('Privileged') or host.get('Binds')
@@ -226,4 +245,9 @@ def inspect_preview_gateway(container, web):
         raise RuntimeError('Preview gateway environment differs')
     if set(container['NetworkSettings']['Networks']) != set(web['NetworkSettings']['Networks']):
         raise RuntimeError('Preview gateway networks differ')
+    private = set(web['NetworkSettings']['Networks']) - {'dokploy-network'}
+    alias = PREVIEW_BACKEND_ALIAS_PREFIX + hashlib.sha256(identity.encode()).hexdigest()[:32]
+    if len(private) != 1 or alias not in (web['NetworkSettings']['Networks'][next(iter(private))].get('Aliases') or []):
+        raise RuntimeError('Preview gateway backend differs')
 """
+)

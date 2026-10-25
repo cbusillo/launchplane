@@ -13,7 +13,6 @@ PREVIEW_IDLE_RUNTIME_PROGRAM = (
 import base64
 import fcntl
 import hashlib
-import socket
 import sys
 import time
 
@@ -42,10 +41,23 @@ def control(router, request):
 
 
 def runtime():
-    containers = inspect_copy_runtime(spec, expected_instance='preview')
-    routers = [one_inspection(item) for item in docker('ps', '-aq', '--filter',
-        'label=com.docker.compose.project=' + spec['compose_project'], '--filter',
-        'label=com.docker.compose.service=preview-router').decode().splitlines()]
+    if spec['action'] == 'poll':
+        selected = {}
+        for identifier in docker('ps', '-aq', '--filter', 'label=com.docker.compose.project=' + spec['compose_project']).decode().splitlines():
+            item = one_inspection(identifier)
+            service = item['Config'].get('Labels', {}).get('com.docker.compose.service')
+            if service in selected:
+                raise RuntimeError('Preview idle services are ambiguous')
+            selected[service] = (identifier, item)
+        if set(selected) != {'database', 'script-runner', 'web', 'preview-router'}:
+            raise RuntimeError('Preview idle services differ')
+        routers = [selected.pop('preview-router')[1]]
+        containers = selected
+    else:
+        containers = inspect_copy_runtime(spec, expected_instance='preview')
+        routers = [one_inspection(item) for item in docker('ps', '-aq', '--filter',
+            'label=com.docker.compose.project=' + spec['compose_project'], '--filter',
+            'label=com.docker.compose.service=preview-router').decode().splitlines()]
     if len(routers) != 1 or not routers[0]['State']['Running']:
         raise RuntimeError('Preview gateway is unavailable')
     inspect_preview_gateway(routers[0], containers['web'][1])
@@ -79,7 +91,7 @@ def execute():
     status = control(router, {'action': 'status'})
     states = application_state(containers)
     action = spec['action']
-    if action == 'observe':
+    if action in {'observe', 'poll'}:
         return {'gateway': status, 'services': states}
     request = spec['control']
     if action == 'sleep':
@@ -98,20 +110,28 @@ def execute():
             return {'gateway': status, 'services': states, 'accepted': True}
         if status['mode'] != 'asleep' or status['sleep_record_id'] != request['sleep_record_id']:
             raise RuntimeError('Preview wake lacks its original sleep receipt')
-        floor = spec['memory_floor']
-        if floor is not None and observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup')) < floor:
-            return {'gateway': status, 'services': states, 'capacity': False, 'accepted': False}
-        volume = json.loads(docker('volume', 'inspect', spec['preview_volumes']['data']))[0]
-        space = os.statvfs(volume['Mountpoint'])
-        if space.f_bavail * space.f_frsize < spec['disk_reserve']:
-            return {'gateway': status, 'services': states, 'capacity': False, 'accepted': False}
-        for service in ('database', 'script-runner', 'web'):
-            docker('start', containers[service][0])
+        if status['wake_record_id'] != request['record_id']:
+            if status['wake_record_id']:
+                raise RuntimeError('Preview wake belongs to another original operation')
+            floor = spec['memory_floor']
+            if floor is not None and observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup')) < floor:
+                return {'gateway': status, 'services': states, 'capacity': False, 'accepted': False}
+            volume = json.loads(docker('volume', 'inspect', spec['preview_volumes']['data']))[0]
+            space = os.statvfs(volume['Mountpoint'])
+            if space.f_bavail * space.f_frsize < spec['disk_reserve']:
+                return {'gateway': status, 'services': states, 'capacity': False, 'accepted': False}
+            status = control(router, {**request, 'action': 'waking'})
+            if not status.get('accepted'):
+                raise RuntimeError('Preview wake admission receipt was refused')
+        docker('start', containers['database'][0])
+        wait_healthy(containers['database'][0])
+        docker('start', containers['script-runner'][0], containers['web'][0])
+        for service in ('script-runner', 'web'):
             wait_healthy(containers[service][0])
-        program = 'import json,sys,urllib.request;response=json.load(urllib.request.urlopen("http://127.0.0.1:"+sys.argv[1]+"/web/health",timeout=10));print(json.dumps(response))'
+        program = 'import json,sys,urllib.request;response=json.load(urllib.request.urlopen("http://127.0.0.1:"+sys.argv[1]+sys.argv[2],timeout=10));print(json.dumps(response))'
         port = one_inspection(router)['Config']['Cmd'][1]
-        health = json.loads(docker('exec', containers['web'][0], '/venv/bin/python3', '-I', '-S', '-c', program, port))
-        identity = health.get('runtime_identity')
+        health = json.loads(docker('exec', containers['web'][0], '/venv/bin/python3', '-I', '-S', '-c', program, port, spec['health_path']))
+        identity = next((health[key] for key in ('runtime_identity', 'launchplane_runtime_identity', 'launchplaneRuntimeIdentity', 'LAUNCHPLANE_RUNTIME_IDENTITY_JSON') if isinstance(health.get(key), dict)), None)
         if not isinstance(identity, dict):
             raise RuntimeError('Preview health lacks its runtime identity')
         if 'source_revision' in identity:
@@ -132,6 +152,9 @@ def execute():
 
 try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
+    if spec['action'] == 'poll':
+        print(sys.argv[2] + json.dumps({'type': 'complete', 'result': execute()}), flush=True)
+        sys.exit(0)
     root = Path.home() / CLEAN_SNAPSHOT_STATE_DIRECTORY / 'preview-locks'
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if root.resolve(strict=True) != root.absolute():
@@ -150,7 +173,7 @@ try:
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
-except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+except (OSError, ValueError, KeyError, IndexError, TypeError, RuntimeError, subprocess.SubprocessError):
     frame = {'type': 'failed'}
 print(sys.argv[2] + json.dumps(frame), flush=True)
 """

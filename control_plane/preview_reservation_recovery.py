@@ -135,6 +135,19 @@ def classify_preview_reservation(
             == "dokploy-provider-target:" + hashlib.sha256(key.encode()).hexdigest()
         ):
             target_number = candidate
+    from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
+
+    if reservation.route_path == PREVIEW_IDLE_ROUTE:
+        from control_plane.preview_idle import original_idle_intent
+
+        try:
+            idle_intent = original_idle_intent(store, reservation, profile.product)
+        except ValueError:
+            pass
+        else:
+            available = True
+            action = str(idle_intent["action"])
+            number = target_number
     return {
         "reservation_id": reservation.record_id,
         "recovery_reference": preview_reservation_reference(reservation, retained_intent),
@@ -177,6 +190,15 @@ def recover_held_preview(
         return {**result, "settlement": "refused", "reason": code}
 
     try:
+        from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
+
+        if reservation.route_path == PREVIEW_IDLE_ROUTE:
+            from control_plane.preview_idle import observe_idle_reservation
+
+            return {
+                **result,
+                "settlement": observe_idle_reservation(store, reservation, profile.product, root),
+            }
         intent = original_preview_intent(reservation, profile=profile, store=store)
         with store.testing_replacement_execution_lock(
             preview_execution_lock_name(reservation.provider_target_key)

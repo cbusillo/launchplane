@@ -187,9 +187,16 @@ next normal data-preserving refresh.
 
 Wakes serialize on the host, retain the configured memory floor and disk reserve,
 and wait for PostgreSQL, runner and web health plus the exact runtime identity
-before forwarding traffic. Insufficient capacity preserves the original wake
-operation for another qualified observation. Gateway restarts retain their own
-sleep cursor; shared operation truth stays in Launchplane's database.
+before forwarding traffic. Insufficient capacity reports that no start occurred
+and leaves no held target reservation. A later attempt checks capacity again.
+Once admitted, the original wake receipt survives a gateway restart and an
+interrupted start resumes without charging its own running containers twice.
+Shared operation truth stays in Launchplane's database. Existing preview
+reservation reads expose idle operations too, and the normal original-operation
+observation and qualified refresh/destroy supersession paths recognize them.
+Changing a memory floor or storage budget does not change storage custody.
+Quiet polling does not take the preview executor lock or perform a host-wide
+storage inspection. Full qualification runs under exclusion before effects.
 
 ## Product transition and custody
 

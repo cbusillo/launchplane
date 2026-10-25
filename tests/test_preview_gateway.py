@@ -32,10 +32,11 @@ class PreviewGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.forwarded: list[bytes] = []
         self.backend = await asyncio.start_server(self.backend_request, "127.0.0.1", 0)
+        self.backend_port = self.backend.sockets[0].getsockname()[1]
         self.addAsyncCleanup(self.close_server, self.backend)
         self.server = await asyncio.start_server(
             lambda reader, writer: self.gateway.connection(
-                reader, writer, "127.0.0.1", self.backend.sockets[0].getsockname()[1]
+                reader, writer, "127.0.0.1", self.backend_port
             ),
             "127.0.0.1",
             0,
@@ -115,6 +116,15 @@ class PreviewGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             self.gateway.control(
                 {
+                    "action": "waking",
+                    "record_id": self.wake_record,
+                    "sleep_record_id": self.sleep_record,
+                }
+            )["accepted"]
+        )
+        self.assertTrue(
+            self.gateway.control(
+                {
                     "action": "awake",
                     "record_id": self.wake_record,
                     "sleep_record_id": self.sleep_record,
@@ -164,6 +174,13 @@ class PreviewGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.forwarded)
         self.gateway.control(
             {
+                "action": "waking",
+                "record_id": self.wake_record,
+                "sleep_record_id": self.sleep_record,
+            }
+        )
+        self.gateway.control(
+            {
                 "action": "awake",
                 "record_id": self.wake_record,
                 "sleep_record_id": self.sleep_record,
@@ -171,3 +188,48 @@ class PreviewGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue((await pending).startswith(b"HTTP/1.1 200"))
         self.assertEqual(self.forwarded, [request])
+
+    async def test_admitted_wake_receipt_survives_restart_and_rejects_another_operation(
+        self,
+    ) -> None:
+        self.sleep()
+        self.assertTrue(
+            self.gateway.control(
+                {
+                    "action": "waking",
+                    "record_id": self.wake_record,
+                    "sleep_record_id": self.sleep_record,
+                }
+            )["accepted"]
+        )
+        restarted = self.gateway_type(
+            self.identity, self.root / "state.json", idle_seconds=PREVIEW_IDLE_SECONDS
+        )
+        self.assertEqual(restarted.wake_record_id, self.wake_record)
+        self.assertFalse(restarted.awake.is_set())
+        self.assertFalse(
+            restarted.control(
+                {
+                    "action": "waking",
+                    "record_id": self.sleep_record,
+                    "sleep_record_id": self.sleep_record,
+                }
+            )["accepted"]
+        )
+        self.assertTrue(
+            restarted.control(
+                {
+                    "action": "awake",
+                    "record_id": self.wake_record,
+                    "sleep_record_id": self.sleep_record,
+                }
+            )["accepted"]
+        )
+
+    async def test_transient_backend_failure_does_not_create_a_permanent_wake_request(self) -> None:
+        await self.close_server(self.backend)
+        response = await self.request(b"GET / HTTP/1.1\r\n\r\n")
+        self.assertTrue(response.startswith(b"HTTP/1.1 503"))
+        self.assertFalse(self.gateway.requested)
+        self.now += PREVIEW_IDLE_SECONDS
+        self.assertTrue(self.gateway.control(self.sleep_request())["accepted"])

@@ -155,8 +155,6 @@ def parse_preview_memory_floors(raw: object) -> dict[str, int]:
 
 def preview_host_memory_floor(
     *,
-    host: str,
-    token: str,
     server_id: str,
     database_url: str | None = None,
     record_store: RuntimeEnvironmentRecordStore | None = None,
@@ -199,8 +197,6 @@ def require_preview_host_memory_capacity(
     record_store: RuntimeEnvironmentRecordStore | None = None,
 ) -> None:
     floor = preview_host_memory_floor(
-        host=host,
-        token=token,
         server_id=server_id,
         database_url=database_url,
         record_store=record_store,

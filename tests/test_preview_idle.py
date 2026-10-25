@@ -1,7 +1,9 @@
 import ast
+from collections.abc import Iterator
 import base64
 from copy import deepcopy
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, nullcontext, contextmanager
+from datetime import datetime, timedelta, timezone
 import io
 import json
 from pathlib import Path
@@ -12,6 +14,9 @@ from unittest.mock import Mock, patch
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -22,12 +27,21 @@ from control_plane.preview_gateway import (
     PREVIEW_GATEWAY_PROGRAM,
     PREVIEW_GATEWAY_SERVICE,
     PREVIEW_IDLE_SECONDS,
+    preview_backend_alias,
 )
 from control_plane.preview_idle import PreviewIdleAdapter, PreviewIdleScheduler, idle_action
 from control_plane.preview_idle_runtime import PREVIEW_IDLE_RUNTIME_PROGRAM
 from control_plane.provider_operations import ProviderMutationUnknownError
+from control_plane.preview_reservation_recovery import (
+    classify_preview_reservation,
+    recover_held_preview,
+)
+from control_plane.preview_idle import observe_idle_reservation
+from control_plane.odoo_preview_apply_execution import _original_supersession_is_quiescent
+from control_plane.legacy_preview_reconciliation import _require_no_held_odoo_work
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import _odoo_preview_profile_payload
+from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
 import yaml
 
 
@@ -84,7 +98,7 @@ class PreviewIdleTests(unittest.TestCase):
         value["gateway"]["requested"] = True
         self.assertEqual(idle_action(value), "awake")
 
-    def test_capacity_wait_keeps_the_original_wake_operation_held(self) -> None:
+    def test_proved_capacity_refusal_has_no_unknown_effect(self) -> None:
         adapter = PreviewIdleAdapter(
             host="fixture",
             token="fixture",
@@ -94,8 +108,8 @@ class PreviewIdleTests(unittest.TestCase):
             check=lambda: None,
         )
         with patch.object(adapter, "read", return_value={"accepted": False, "capacity": False}):
-            with self.assertRaises(ProviderMutationUnknownError):
-                adapter.apply("original-operation", Mock())
+            result = adapter.apply("original-operation", Mock())
+        self.assertFalse(result.response_payload["accepted"])
 
     def test_interrupted_partial_stop_resumes_only_its_own_receipt(self) -> None:
         target = {"context": "fixture", "compose_name": "fixture-pr-1"}
@@ -185,7 +199,15 @@ class PreviewIdleTests(unittest.TestCase):
             any("Host(`preview.example.invalid`)" in label for label in gateway["labels"])
         )
         self.assertFalse(any("Host(" in label for label in services["web"]["labels"]))
-        self.assertEqual(gateway["networks"], services["web"]["networks"])
+        self.assertEqual(set(gateway["networks"]), set(services["web"]["networks"]))
+        self.assertEqual(
+            services["web"]["networks"]["default"]["aliases"],
+            [
+                preview_backend_alias(
+                    runtime_identity_env(identity)["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"]
+                )
+            ],
+        )
 
 
 class PreviewIdleOperationTests(unittest.TestCase):
@@ -196,6 +218,9 @@ class PreviewIdleOperationTests(unittest.TestCase):
         )
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
+        self.enterContext(
+            patch.object(self.store, "serialize_existing_preview_refresh", side_effect=nullcontext)
+        )
         payload = _odoo_preview_profile_payload("fixture")
         payload["preview"] = {
             "enabled": True,
@@ -271,6 +296,12 @@ class PreviewIdleOperationTests(unittest.TestCase):
         )
         self.enterContext(
             patch(
+                "control_plane.preview_idle.source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture"),
+            )
+        )
+        self.enterContext(
+            patch(
                 "control_plane.preview_idle.api.fetch_dokploy_target_payload",
                 side_effect=lambda **_: deepcopy(self.provider),
             )
@@ -283,13 +314,19 @@ class PreviewIdleOperationTests(unittest.TestCase):
         self.effects: list[dict[str, Any]] = []
         self.capacity = True
         self.interrupt = False
+        self.refuse_sleep = False
 
     def transport(self, **kwargs: Any) -> None:
         payload = kwargs["payload"]
         kwargs["dispatch_guard"](lambda: None)
-        if payload["action"] != "observe":
+        if payload["action"] not in {"observe", "poll"}:
             control = payload["control"]
             self.effects.append(deepcopy(control))
+            if control["action"] == "sleep" and self.refuse_sleep:
+                kwargs["receive"](
+                    {"type": "complete", "result": {**deepcopy(self.value), "accepted": False}}
+                )
+                return
             if control["action"] == "awake" and not self.capacity:
                 kwargs["receive"](
                     {
@@ -333,7 +370,7 @@ class PreviewIdleOperationTests(unittest.TestCase):
         self.assertEqual([effect["action"] for effect in self.effects], ["sleep", "awake"])
         self.assertEqual(self.effects[1]["sleep_record_id"], sleep_id)
 
-    def test_capacity_recovers_using_the_same_wake_reservation(self) -> None:
+    def test_capacity_refusal_finishes_without_a_fence_and_next_attempt_can_wake(self) -> None:
         self.run_preview()
         self.value["gateway"]["requested"] = True
         self.capacity = False
@@ -341,10 +378,11 @@ class PreviewIdleOperationTests(unittest.TestCase):
         original = self.effects[-1]["record_id"]
         held = self.store.read_idempotency_record_by_id(original)
         assert held is not None
-        self.assertEqual(held.state, "reconcile_required")
+        self.assertEqual(held.state, "completed")
+        self.assertFalse(held.response_payload["accepted"])
         self.capacity = True
         self.run_preview()
-        self.assertEqual(self.effects[-1]["record_id"], original)
+        self.assertNotEqual(self.effects[-1]["record_id"], original)
         self.assertEqual(self.value["gateway"]["mode"], "awake")
         completed = self.store.read_idempotency_record_by_id(original)
         assert completed is not None
@@ -376,10 +414,12 @@ class PreviewIdleOperationTests(unittest.TestCase):
         self.remote.assert_not_called()
         self.store.write_preview_generation_record(self.generation)
         self.store.write_product_profile_record(
-            self.profile.model_copy(update={"lifecycle_state": "retired"})
+            self.profile.model_copy(
+                update={"preview": self.profile.preview.model_copy(update={"enabled": False})}
+            )
         )
         self.run_preview()
-        self.remote.assert_not_called()
+        self.assertFalse(self.effects)
 
     def test_another_provider_operation_is_preserved_without_an_idle_effect(self) -> None:
         target = self.scheduler._bind(self.profile, self.preview.preview_id, "fixture", "fixture")
@@ -408,6 +448,169 @@ class PreviewIdleOperationTests(unittest.TestCase):
             self.store.read_idempotency_record_by_id(original.record.record_id), original.record
         )
 
+    def protective_report(self, **values: Any) -> DisposableLaneSafety:
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        return DisposableLaneSafety(
+            product=self.profile.product,
+            context=self.profile.preview.context,
+            instance="pr-1",
+            observed_by="fixture",
+            observer_kind="fixture",
+            binding_sha256="a" * 64,
+            observed_at=now,
+            expires_at=now + timedelta(minutes=5),
+            usage_evidence="fixture",
+            data_evidence="fixture",
+            isolation_evidence="fixture",
+            **values,
+        )
+
+    def test_expired_protected_use_data_and_shared_resources_still_block_idle_effects(self) -> None:
+        for values in (
+            {"usage": "in_use"},
+            {"data": "only_copy"},
+            {"production_resources": "shared"},
+            {"production_resources": "separation_ready"},
+        ):
+            with (
+                self.subTest(values=values),
+                patch.object(
+                    self.store,
+                    "read_disposable_lane_safety",
+                    return_value=self.protective_report(**values),
+                ),
+            ):
+                with self.assertRaises(DisposableLaneSafetyUnknown):
+                    self.run_preview()
+        self.assertFalse(self.effects)
+
+    def test_protection_added_at_dispatch_refuses_before_a_checkpoint_or_effect(self) -> None:
+        protected = [False]
+
+        @contextmanager
+        def admission() -> Iterator[None]:
+            protected[0] = True
+            yield
+
+        with (
+            patch.object(self.store, "serialize_existing_preview_refresh", side_effect=admission),
+            patch.object(
+                self.store,
+                "read_disposable_lane_safety",
+                side_effect=lambda *_: (
+                    self.protective_report(usage="in_use") if protected[0] else None
+                ),
+            ),
+        ):
+            with self.assertRaises(DisposableLaneSafetyUnknown):
+                self.run_preview()
+        self.assertFalse(self.effects)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
+
+    def test_quiet_poll_does_not_take_the_preview_executor(self) -> None:
+        self.value["gateway"]["idle_seconds"] = 0
+        with patch.object(self.store, "testing_replacement_execution_lock") as lock:
+            self.run_preview()
+        lock.assert_not_called()
+        self.assertFalse(self.effects)
+
+    def test_transient_sleep_refusal_does_not_poison_future_idle_attempts(self) -> None:
+        self.refuse_sleep = True
+        self.run_preview()
+        first = self.effects[-1]["record_id"]
+        self.refuse_sleep = False
+        self.run_preview()
+        self.assertNotEqual(first, self.effects[-1]["record_id"])
+        self.assertEqual(self.value["gateway"]["mode"], "asleep")
+
+    def test_mutable_capacity_policy_does_not_change_original_target_custody(self) -> None:
+        floor = [100]
+        with patch(
+            "control_plane.preview_idle.preview_host_memory_floor", side_effect=lambda **_: floor[0]
+        ):
+            self.interrupt = True
+            self.run_preview()
+            original_id = self.effects[-1]["record_id"]
+            held = self.store.read_idempotency_record_by_id(original_id)
+            assert held is not None
+            intent = self.store.read_original_mutation_intent(held)
+            self.assertNotIn("memory_floor", intent["target"]["spec"])
+            self.assertNotIn("disk_reserve", intent["target"]["spec"])
+            floor[0] = 200
+            self.interrupt = False
+            self.run_preview()
+        self.assertEqual(self.effects[-1]["record_id"], original_id)
+
+    def interrupted_stop(self) -> LaunchplaneIdempotencyRecord:
+        self.interrupt = True
+        self.run_preview()
+        self.interrupt = False
+        record = self.store.read_idempotency_record_by_id(self.effects[-1]["record_id"])
+        assert record is not None
+        return record
+
+    def test_idle_hold_is_listed_and_original_observation_is_read_only(self) -> None:
+        held = self.interrupted_stop()
+        self.assertEqual(
+            self.store.list_held_odoo_preview_reservations(product=self.profile.product), (held,)
+        )
+        classified = classify_preview_reservation(held, profile=self.profile, store=self.store)
+        self.assertTrue(classified["original_action_available"])
+        self.assertEqual(classified["target_pull_request_number"], self.preview.anchor_pr_number)
+        effects = len(self.effects)
+        result = recover_held_preview(
+            store=self.store, reservation=held, profile=self.profile, root=self.root, observe=Mock()
+        )
+        self.assertEqual(result["settlement"], "reconcile_required")
+        self.assertEqual(len(self.effects), effects)
+
+    def test_completed_original_can_settle_after_preview_admission_is_disabled(self) -> None:
+        held = self.interrupted_stop()
+        for item in self.value["services"].values():
+            item.update(running=False, healthy=False)
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={"preview": self.profile.preview.model_copy(update={"enabled": False})}
+            )
+        )
+        effects = len(self.effects)
+        self.assertEqual(
+            observe_idle_reservation(self.store, held, self.profile.product, self.root), "adopted"
+        )
+        self.assertEqual(len(self.effects), effects)
+
+    def test_refresh_can_qualify_idle_supersession_without_replaying_its_effect(self) -> None:
+        held = self.interrupted_stop()
+        effects = len(self.effects)
+        request = Mock()
+        request.apply.dry_run_plan.compose_ref = self.provider["composeId"]
+        self.assertTrue(
+            _original_supersession_is_quiescent(
+                reservation=held,
+                profile=self.profile,
+                request=request,
+                root=self.root,
+                database_url=self.store.database_url,
+                check=Mock(),
+                store=self.store,
+            )
+        )
+        self.assertEqual(len(self.effects), effects)
+
+    def test_idle_hold_on_another_preview_does_not_block_legacy_reconciliation(self) -> None:
+        self.interrupted_stop()
+        other = self.preview.model_copy(
+            update={
+                "preview_id": "another-preview",
+                "anchor_pr_number": 2,
+                "canonical_url": "https://another-preview.example.invalid",
+            }
+        )
+        previews = (self.preview, other)
+        _require_no_held_odoo_work(self.store, self.profile, "pr-2", previews)
+        with self.assertRaises(ValueError):
+            _require_no_held_odoo_work(self.store, self.profile, "pr-1", previews)
+
 
 class PreviewIdleRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -428,6 +631,7 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
             "memory_floor": 100,
             "disk_reserve": 100,
             "preview_volumes": {"data": "data-fixture"},
+            "health_path": DEFAULT_ODOO_RUNTIME_HEALTH_PATH,
         }
         self.namespace["runtime"] = self.runtime
         self.namespace["docker"] = self.docker
@@ -460,11 +664,11 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
     def docker(self, *arguments: str) -> bytes:
         self.calls.append(arguments)
         if arguments[0] in {"stop", "start"}:
-            name = arguments[-1]
-            self.states[name] = {
-                "running": arguments[0] == "start",
-                "healthy": arguments[0] == "start",
-            }
+            for name in arguments[1:] if arguments[0] == "start" else [arguments[-1]]:
+                self.states[name] = {
+                    "running": arguments[0] == "start",
+                    "healthy": arguments[0] == "start",
+                }
         if arguments[:2] == ("volume", "inspect"):
             return json.dumps([{"Mountpoint": "/fixture"}]).encode()
         if arguments[0] == "exec":
@@ -474,7 +678,9 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
     def control(self, router: str, request: dict[str, Any]) -> dict[str, Any]:
         if request["action"] != "status":
             self.calls.append(("control", request["action"]))
-            self.value["gateway"]["mode"] = "asleep" if request["action"] == "sleep" else "awake"
+            self.value["gateway"]["mode"] = (
+                "asleep" if request["action"] in {"sleep", "waking"} else "awake"
+            )
             self.value["gateway"][
                 "sleep_record_id" if request["action"] == "sleep" else "wake_record_id"
             ] = request["record_id"]
@@ -516,7 +722,7 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         self.wake()
         self.namespace["execute"]()
         self.assertEqual(
-            [call[-1] for call in self.calls if call[0] == "start"],
+            [name for call in self.calls if call[0] == "start" for name in call[1:]],
             ["database", "script-runner", "web"],
         )
         self.assertEqual(self.calls[-1], ("control", "awake"))
@@ -534,6 +740,16 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.namespace["execute"]()
         self.assertFalse(self.calls)
+
+    def test_admitted_partial_wake_does_not_charge_its_memory_twice(self) -> None:
+        self.wake()
+        self.value["gateway"]["wake_record_id"] = "wake-fixture"
+        self.states["database"] = {"running": True, "healthy": True}
+        self.namespace["observe_memory_headroom"] = Mock(
+            side_effect=AssertionError("Do not re-admit this original wake")
+        )
+        self.namespace["execute"]()
+        self.assertEqual(self.calls[-1], ("control", "awake"))
 
     def test_native_entrypoint_runs_with_its_own_imports_and_project_lock(self) -> None:
         self.namespace["spec"]["compose_project"] = "fixture-project"

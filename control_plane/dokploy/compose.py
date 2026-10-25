@@ -11,7 +11,11 @@ from control_plane.dokploy import api
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
-from control_plane.preview_gateway import PREVIEW_GATEWAY_PROGRAM, PREVIEW_GATEWAY_SERVICE
+from control_plane.preview_gateway import (
+    PREVIEW_GATEWAY_PROGRAM,
+    PREVIEW_GATEWAY_SERVICE,
+    preview_backend_alias,
+)
 
 TESTING_CONNECTION_CSP = (
     "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
@@ -403,7 +407,16 @@ networks:
             )
     if preview_identity is not None:
         web = compose["services"]["web"]
-        web["networks"] = ["default", "dokploy-network"]
+        web["networks"] = {
+            "default": {
+                "aliases": [
+                    preview_backend_alias(
+                        runtime_identity_env(preview_identity)["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"]
+                    )
+                ]
+            },
+            "dokploy-network": {},
+        }
         compose["services"][PREVIEW_GATEWAY_SERVICE] = {
             "image": normalized_image_reference,
             "pull_policy": "always",

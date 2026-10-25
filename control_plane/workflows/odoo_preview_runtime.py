@@ -1740,14 +1740,16 @@ def _execute_refresh(
         retained_filestore = isinstance(current_compose, dict) and "odoo_filestore" in (
             current_compose.get("volumes") or {}
         )
+        if restore_clean_snapshot or (
+            expected_runtime_identity is not None and not creating_compose and not restore_upstream
+        ):
+            memory_capacity.require_preview_host_memory_capacity(
+                host=host,
+                token=token,
+                server_id=str(target_payload.get("serverId") or ""),
+                database_url=database_url,
+            )
         if restore_clean_snapshot or retained_filestore:
-            if restore_clean_snapshot:
-                memory_capacity.require_preview_host_memory_capacity(
-                    host=host,
-                    token=token,
-                    server_id=str(target_payload.get("serverId") or ""),
-                    database_url=database_url,
-                )
             filestore = filestore_for_mode(apply=False)
         compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=request.image_reference,
