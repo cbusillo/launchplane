@@ -2994,28 +2994,6 @@ def _local_operator_bearer_config(*, token_label: str = "local-owner-read") -> B
 type _AsgiResponse = Response
 
 
-async def _get_every_code_summary(
-    app: FastAPI,
-    *,
-    repository: str = "",
-    issue_number: str = "",
-    state: str = "",
-    limit: str = "",
-    offset: str = "",
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    params = _query_params(
-        repository=repository,
-        issue_number=issue_number,
-        state=state,
-        limit=limit,
-        offset=offset,
-    )
-    suffix = f"?{urlencode(params)}" if params else ""
-    return await _asgi_get(app, f"/v1/every-code/summary{suffix}", headers=headers)
-
-
 async def _get_preview_readiness(
     app: FastAPI,
     *,
