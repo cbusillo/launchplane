@@ -170,7 +170,7 @@ def inspection(spec,database,image,*,candidate_may_run=False):
         'generation':{'namespace':namespace,'instance':'rehearsal','resources_binding_sha256':spec['resources_binding_sha256']},
         'compose_project':namespace,'database_name':database,'image_reference':image,
         'database_data_directory':spec['database_data_directory'],'storage_maintenance':True,
-        'pre_switch_candidate':True,'candidate_may_run':candidate_may_run,
+        'candidate_may_run':candidate_may_run or spec.get('action') in {'retire','retire-incomplete','abandon-validation'},
     },expected_instance='rehearsal')
 
 
@@ -203,7 +203,7 @@ def stamp(spec,containers,database):
 
 
 def snapshot(spec,root,containers,database):
-    validations=spec['record'].get('business_validations',[])
+    validations=business_validation_history(spec['record'])
     if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
         raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
@@ -224,10 +224,7 @@ def snapshot(spec,root,containers,database):
         'database_sha256':digest(path/'database.dump'),'filestore_sha256':digest(path/'filestore.tar'),
         'source_capture_sha256':digest(root/'capture.json'),
         'sanitized':True,'odoo_version':version,'captured_at':datetime.now(timezone.utc).isoformat()}
-    validations=spec['record'].get('business_validations',[])
     if database.endswith('_final_upgrade') and validations:
-        if validations[-1].get('passed') is not True:
-            raise RuntimeError('Product validation has not passed')
         receipt['business_validation_sha256']=hashlib.sha256(
             json.dumps(validations,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
     save(path/'receipt.json',receipt)
@@ -868,11 +865,20 @@ def prepared_rebuild_runtime(spec,root,database):
     return containers
 
 
+def stop_pre_switch_candidate(spec):
+    identifiers=docker('ps','-aq','--filter','label=com.docker.compose.project='+spec['record']['rehearsal_id'],
+        '--filter','label=com.docker.compose.service=pre-switch-web').decode().splitlines()
+    if any(not re.fullmatch('[a-f0-9]{12,64}',identifier) for identifier in identifiers):
+        raise RuntimeError('Candidate stop inventory is unverified')
+    if identifiers:
+        docker('stop',*identifiers)
+
+
 def verify_before_switch(spec,root,containers,database):
     before_web(spec,containers,database,start=False)
-    compose(spec,root,image=spec['target_image'],database=database,candidate=True)
-    containers=inspection(spec,database,spec['target_image'],candidate_may_run=True)
     try:
+        compose(spec,root,image=spec['target_image'],database=database,candidate=True)
+        containers=inspection(spec,database,spec['target_image'],candidate_may_run=True)
         if (containers['web'][1].get('State',{}).get('Running') is not False
                 or containers['pre-switch-web'][1].get('State',{}).get('Running') is not True):
             raise RuntimeError('Private switch endpoint is not held')
@@ -888,7 +894,7 @@ def verify_before_switch(spec,root,containers,database):
             'record_binding_sha256':spec['record_binding_sha256'],
             'attempt_sha256':spec['attempt_sha256'],'phase_timing':spec['phase_timing']})
     finally:
-        docker('stop',containers['pre-switch-web'][0])
+        stop_pre_switch_candidate(spec)
     return inspection(spec,database,spec['target_image'])
 
 
@@ -902,8 +908,10 @@ def upgrade_final(spec,root,containers):
     upgrade_started=time.monotonic()
     copy_runner(spec,containers,names['final_upgrade'],fresh=False)
     spec['phase_elapsed']['final-upgrade']=time.monotonic()-upgrade_started
-    switch_started=time.monotonic()
+    verification_started=time.monotonic()
     containers=verify_before_switch(spec,root,containers,names['final_upgrade'])
+    spec['phase_elapsed']['pre-switch-verification']=time.monotonic()-verification_started
+    switch_started=time.monotonic()
     docker('start',containers['web'][0])
     phase_stamp(spec,'web_started')
     private_health(spec,containers)

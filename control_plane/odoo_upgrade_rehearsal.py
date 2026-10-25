@@ -19,6 +19,7 @@ from control_plane._odoo_rehearsal_business_validation import (
     business_entrypoint_check_script,
     business_entrypoint_schedule,
     final_business_database,
+    business_validation_history,
     BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -519,6 +520,7 @@ def rehearsal_host_spec(
         payload["services"]["pre-switch-web"] = {
             **payload["services"]["web"],
             "profiles": ["pre-switch"],
+            "restart": "no",
         }
         rendered[image] = yaml.safe_dump(payload, sort_keys=False)
     environment = {
@@ -1538,7 +1540,7 @@ class OdooRehearsalAdapter:
                 (copy for copy in updated.copies if copy.database.endswith("_final_upgrade")), None
             )
             if final is None or final.business_validation_sha256 != canonical_json_sha256(
-                [item.model_dump(mode="json") for item in record.business_validations]
+                business_validation_history(record.model_dump(mode="json"))
             ):
                 raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)

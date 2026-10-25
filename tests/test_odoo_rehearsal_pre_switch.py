@@ -32,7 +32,7 @@ class PreSwitchVerificationTests(unittest.TestCase):
         }
         self.candidate = deepcopy(self.containers["web"])
         self.candidate[1]["State"]["Running"] = True
-        self.containers["pre-switch-web"] = ("candidate-web", self.candidate[1])
+        self.containers["pre-switch-web"] = ("c" * 64, self.candidate[1])
         self.containers["web"][1]["State"]["Running"] = False
         self.events: list[str] = []
         for key in ("clone", "compose", "sql", "copy_runner", "before_web"):
@@ -51,6 +51,8 @@ class PreSwitchVerificationTests(unittest.TestCase):
         self.host["docker"] = Mock(side_effect=self.docker)
 
     def docker(self, *args: str, **kwargs: Any) -> bytes:
+        if args[0] == "ps":
+            return ("c" * 64 + "\n").encode()
         if args[0] == "start":
             self.assertIn("pre_switch_verified", self.spec["phase_timing"]["observed"])
             self.events.append("switch")
@@ -62,8 +64,16 @@ class PreSwitchVerificationTests(unittest.TestCase):
         return receipt(self.spec["business_validation_identity"])
 
     def test_candidate_http_business_and_isolation_pass_before_normal_web_starts(self) -> None:
+        from types import SimpleNamespace
+
+        self.host["time"] = SimpleNamespace(monotonic=lambda: float(len(self.events)))
         self.host["upgrade_final"](self.spec, self.root, self.containers)
-        self.assertEqual(self.events, ["pre-switch-web", "business", "isolation", "switch", "web"])
+        switched = self.events.index("switch")
+        for check in ("pre-switch-web", "business", "isolation"):
+            self.assertLess(self.events.index(check), switched)
+        self.assertLess(switched, self.events.index("web"))
+        self.assertEqual(self.spec["phase_elapsed"]["pre-switch-verification"], switched)
+        self.assertEqual(self.spec["phase_elapsed"]["private-switch"], len(self.events) - switched)
         timing = self.spec["phase_timing"]
         self.assertEqual(
             timing["pre_switch_validation"], receipt(self.spec["business_validation_identity"])
@@ -81,6 +91,8 @@ class PreSwitchVerificationTests(unittest.TestCase):
 
     def test_lost_switch_keeps_original_t4_and_refuses_another_attempt(self) -> None:
         def fail_switch(*args: str, **kwargs: Any) -> bytes:
+            if args[0] == "ps":
+                return ("c" * 64 + "\n").encode()
             if args[0] == "start":
                 raise RuntimeError("switch interrupted")
             return b""
@@ -123,12 +135,70 @@ class PreSwitchVerificationTests(unittest.TestCase):
                     any(call.args[0] == "start" for call in self.host["docker"].call_args_list)
                 )
                 self.assertIn(
-                    ("stop", "candidate-web"),
+                    ("stop", "c" * 64),
                     [call.args for call in self.host["docker"].call_args_list],
                 )
 
+    def test_candidate_start_or_inspection_failure_stops_only_its_scoped_service(self) -> None:
+        for failed in ("compose", "inspection"):
+            with self.subTest(failed=failed):
+                self.host["docker"].reset_mock()
+                self.host["compose"].side_effect = (
+                    RuntimeError("interrupted start") if failed == "compose" else None
+                )
+                self.host["inspection"].side_effect = (
+                    RuntimeError("unavailable inspection") if failed == "inspection" else None
+                )
+                with self.assertRaises(RuntimeError):
+                    self.host["verify_before_switch"](
+                        self.spec,
+                        self.root,
+                        self.containers,
+                        self.spec["business_validation_identity"]["database"],
+                    )
+                self.assertIn(
+                    ("stop", "c" * 64), [call.args for call in self.host["docker"].call_args_list]
+                )
+                selected = next(
+                    call.args for call in self.host["docker"].call_args_list if call.args[0] == "ps"
+                )
+                self.assertIn(
+                    "label=com.docker.compose.project=" + self.fixture.identifier, selected
+                )
+                self.assertIn("label=com.docker.compose.service=pre-switch-web", selected)
+                self.host["business_validation"].assert_not_called()
+
 
 class CandidateIsolationTests(unittest.TestCase):
+    def test_supported_retirement_can_inspect_an_owned_running_candidate(self) -> None:
+        fixture = rehearsal_tests.RehearsalHostSafetyTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        candidate = deepcopy(fixture.fixture.containers["web"])
+        candidate["Id"] = "candidate-id"
+        candidate["Config"]["Labels"]["com.docker.compose.service"] = "pre-switch-web"
+        candidate["State"]["Running"] = True
+        fixture.fixture.containers["pre-switch-web"] = candidate
+        spec = {
+            "record": {"rehearsal_id": fixture.identifier},
+            "resources_binding_sha256": fixture.spec["generation"]["resources_binding_sha256"],
+            "database_data_directory": fixture.spec["database_data_directory"],
+        }
+        for action in ("retire", "retire-incomplete", "abandon-validation"):
+            with self.subTest(action=action):
+                found = fixture.host["inspection"](
+                    {**spec, "action": action},
+                    fixture.fixture.database,
+                    fixture.spec["image_reference"],
+                )
+                self.assertEqual(found["pre-switch-web"][1]["Id"], candidate["Id"])
+        with self.assertRaises(RuntimeError):
+            fixture.host["inspection"](
+                {**spec, "action": "verify"},
+                fixture.fixture.database,
+                fixture.spec["image_reference"],
+            )
+
     def test_candidate_reuses_only_rehearsal_storage_and_private_network(self) -> None:
         fixture = rehearsal_tests.RehearsalHostSafetyTests()
         fixture.setUp()
@@ -138,9 +208,6 @@ class CandidateIsolationTests(unittest.TestCase):
         candidate["Config"]["Labels"]["com.docker.compose.service"] = "pre-switch-web"
         candidate["State"]["Running"] = False
         fixture.fixture.containers["pre-switch-web"] = candidate
-        with self.assertRaises(RuntimeError):
-            fixture.inspect()
-        fixture.spec["pre_switch_candidate"] = True
         self.assertIn("pre-switch-web", fixture.inspect())
         candidate["State"]["Running"] = True
         with self.assertRaises(RuntimeError):
@@ -213,8 +280,10 @@ class CandidateIsolationTests(unittest.TestCase):
                     fixture.native_private_health(
                         spec, {"script-runner": ("runner", {})}, hostname="pre-switch-web"
                     )
+                    from urllib.parse import urlsplit
+
                     self.assertEqual(
-                        opener.open.call_args.args[0], "http://pre-switch-web:8069/web/login"
+                        urlsplit(opener.open.call_args.args[0]).hostname, "pre-switch-web"
                     )
                 with self.assertRaises(RuntimeError):
                     build.call_args.args[1].redirect_request(

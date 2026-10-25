@@ -82,7 +82,7 @@ def inspect_copy_runtime(spec, *, expected_instance):
             raise CopyReadbackRefused(ReadbackPredicate.MOUNTS)
         volumes = set(names.values())
     containers = {}
-    optional_services = {'pre-switch-web'} if expected_instance == 'rehearsal' and spec.get('pre_switch_candidate') else set()
+    optional_services = {'pre-switch-web'} if expected_instance == 'rehearsal' else set()
     all_containers = []
     for identifier in docker("ps", "-aq").decode().splitlines():
         container = one_inspection(identifier)

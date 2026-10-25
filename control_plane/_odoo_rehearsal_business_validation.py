@@ -15,6 +15,13 @@ BUSINESS_VALIDATION_OUTPUT_MAX_BYTES = 2 * BUSINESS_VALIDATION_RECEIPT_MAX_BYTES
 # The remote host has only the standard library. Keep this parser identical to
 # the local validator rather than maintaining a second interpretation.
 BUSINESS_VALIDATION_RECEIPT_LIBRARY = r"""
+def business_validation_history(record):
+    final=next((item for item in reversed(record.get('phase_timings',[]))
+        if item['action'] in {'simulate-final','rebuild-final'}),None)
+    verification=final.get('pre_switch_validation') if final else None
+    return ([verification] if verification else [])+record.get('business_validations',[])
+
+
 def checked_business_receipt(value, expected=None):
     if (not isinstance(value,dict)
             or set(value)!={'product','rehearsal_id','artifact_id','source_commit','database',
@@ -47,6 +54,12 @@ def checked_business_receipt(value, expected=None):
         raise ValueError('Passing validation requires committed writes')
     return value
 """
+
+
+def business_validation_history(record: dict[str, object]) -> list[dict[str, object]]:
+    namespace: dict[str, object] = {}
+    exec(BUSINESS_VALIDATION_RECEIPT_LIBRARY, namespace)
+    return namespace["business_validation_history"](record)  # type: ignore[operator, no-any-return]
 
 
 def checked_business_receipt(value: object) -> object:

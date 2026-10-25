@@ -3431,6 +3431,9 @@ key and new evidence file:
    business scenarios and a fresh connection-isolation readback must pass before
    starting that normal endpoint. The candidate is stopped before the switch;
    its stopped container stays in owned rehearsal inventory for retirement.
+   An interrupted candidate is stopped by its exact project/service selection;
+   it has no restart policy. Supported retirement and abandonment admit an owned
+   running candidate for their existing guarded stop/disposal path.
    It never recaptures or fences the real business system. `rebuild-final`
    uses the same pre-switch checks after restoring preserved inputs.
 3. `validate-business` runs the candidate image’s fixed product-owned entrypoint on the
@@ -3546,6 +3549,12 @@ These timestamps measure this simulated lifecycle; they do not replace the
 consuming product's browser, authentication, canonical URL/logo, integration
 and release acceptance requirements. Product commit uncertainty, including an
 unverified pending postcheck, stays unknown.
+The `pre-switch-verification` elapsed term measures candidate checks separately
+from `private-switch`, which starts after T4. The final upgraded snapshot's
+business-history hash includes the latest simulation/rebuild's pre-switch
+receipt followed by the post-switch validation history; an older candidate's
+discarded writes are not attributed to a rebuilt copy. Legacy histories retain
+their original hash when they contain no pre-switch receipt.
 
 #### Private product business validation
 
