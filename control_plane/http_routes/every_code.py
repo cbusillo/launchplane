@@ -219,17 +219,6 @@ def every_code_read_store_or_503(
         ) from error
 
 
-def every_code_invalid_payload_error(
-    *, dependencies: ReadRouteDependencies, trace_id: str, error: ValueError
-) -> Exception:
-    return dependencies.http_error(
-        status_code=400,
-        trace_id=trace_id,
-        code="invalid_payload",
-        message=str(error),
-    )
-
-
 def register_every_code_work_request_read_routes(
     app: ApiRouteRegistrar,
     *,
