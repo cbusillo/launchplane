@@ -56,7 +56,8 @@ from control_plane import runtime_platform_credentials
 from control_plane.dokploy import memory_capacity
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
-from control_plane.dokploy.api import JsonObject, JsonValue
+from control_plane.dokploy.application_endpoint import application_endpoint_spec
+from control_plane.dokploy.api import JsonObject
 
 
 _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
@@ -553,10 +554,6 @@ def _ensure_application(
     return _fetch_application(host=host, token=token, application_id=created_application_id), True
 
 
-def _preview_endpoint_spec_swarm(template_application: JsonObject) -> JsonValue:
-    return template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
-
-
 def _configure_application(
     *,
     host: str,
@@ -585,7 +582,7 @@ def _configure_application(
             "sourceType": "docker",
             "autoDeploy": True,
             "replicas": template_application.get("replicas"),
-            "endpointSpecSwarm": _preview_endpoint_spec_swarm(template_application),
+            "endpointSpecSwarm": application_endpoint_spec(template_application),
             "createEnvFile": template_application.get("createEnvFile"),
             "triggerType": template_application.get("triggerType"),
             "enabled": template_application.get("enabled"),

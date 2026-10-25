@@ -15,6 +15,120 @@ from control_plane.workflows.dokploy_deploy import (
 
 
 class DokployDeployRegistryTests(unittest.TestCase):
+    def _deploy_application_endpoint(
+        self,
+        *,
+        instance: str,
+        endpoint: object = None,
+        ports: object = None,
+        persist: bool = True,
+        allow_update: bool = True,
+    ) -> list[str]:
+        from control_plane.dokploy.application_endpoint import application_endpoint_spec
+
+        application = {"endpointSpecSwarm": endpoint, "ports": ports}
+        events: list[str] = []
+
+        def request(**kwargs: object) -> bool:
+            path = str(kwargs["path"])
+            events.append(path)
+            if path == "/api/application.update":
+                self.assertEqual(
+                    kwargs["payload"],
+                    {
+                        "applicationId": "app-fixture",
+                        "endpointSpecSwarm": application_endpoint_spec({}),
+                    },
+                )
+                if persist:
+                    application["endpointSpecSwarm"] = application_endpoint_spec({})
+            return True
+
+        self.endpoint_events = events
+
+        def before_provider_mutation(phase: str) -> None:
+            events.append(f"checkpoint:{phase}")
+            if not allow_update:
+                raise ValueError("synthetic checkpoint refusal")
+
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                side_effect=lambda **_: dict(application),
+            ),
+            patch("control_plane.dokploy.api.latest_deployment_for_target", return_value=None),
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=request),
+            patch(
+                "control_plane.dokploy.api.trigger_deployment",
+                side_effect=lambda **_: events.append("deploy"),
+            ),
+            patch("control_plane.dokploy.api.wait_for_target_deployment"),
+        ):
+            execute_dokploy_artifact_deploy(
+                host="https://provider.invalid",
+                token="synthetic",
+                ship_request=ShipRequest(
+                    artifact_id="example/app:sha-fixture",
+                    context="fixture",
+                    instance=instance,
+                    source_git_ref="fixture",
+                    target_name="fixture",
+                    target_type="application",
+                    provider_id="dokploy",
+                    target_category="application",
+                    provider_target_type="application",
+                    deploy_mode="dokploy-application-api",
+                ),
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="application", target_id="app-fixture", target_name="fixture"
+                ),
+                deploy_timeout_seconds=10,
+                before_provider_mutation=before_provider_mutation,
+                effect_started=lambda: events.append("effect_started"),
+            )
+        return events
+
+    def test_testing_application_uses_preview_endpoint_default_before_image(self) -> None:
+        cases: tuple[tuple[str, object, object, bool], ...] = (
+            ("testing", None, [], True),
+            ("testing", {}, [], True),
+            ("prod", None, [], False),
+            ("testing", {"Mode": "vip"}, [], False),
+            ("testing", {"Mode": "dnsrr"}, [], False),
+            ("testing", "", [], False),
+            ("testing", False, [], False),
+            ("testing", [], [], False),
+            ("testing", None, [{"publishedPort": 8080}], False),
+            ("testing", None, None, False),
+        )
+        for instance, endpoint, ports, should_configure in cases:
+            with self.subTest(instance=instance, endpoint=endpoint, ports=ports):
+                events = self._deploy_application_endpoint(
+                    instance=instance, endpoint=endpoint, ports=ports
+                )
+                self.assertEqual("/api/application.update" in events, should_configure)
+                if should_configure:
+                    update_index = events.index("/api/application.update")
+                    self.assertEqual(
+                        events[update_index - 2 : update_index],
+                        ["checkpoint:target_update", "effect_started"],
+                    )
+                    self.assertLess(
+                        events.index("/api/application.update"),
+                        events.index("/api/application.saveDockerProvider"),
+                    )
+
+    def test_testing_endpoint_readback_failure_stops_image_and_deploy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "endpoint.*readback"):
+            self._deploy_application_endpoint(instance="testing", ports=[], persist=False)
+        self.assertNotIn("/api/application.saveDockerProvider", self.endpoint_events)
+        self.assertNotIn("deploy", self.endpoint_events)
+
+    def test_testing_endpoint_checkpoint_refusal_prevents_mutation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "checkpoint refusal"):
+            self._deploy_application_endpoint(instance="testing", ports=[], allow_update=False)
+        self.assertEqual(self.endpoint_events, ["checkpoint:target_update"])
+
     def test_compose_encoding_refuses_before_effect_checkpoint_or_write(self) -> None:
         from unittest.mock import Mock
 

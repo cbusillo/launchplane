@@ -18,6 +18,7 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy.application_endpoint import application_endpoint_spec
 from control_plane.runtime_environments import merge_provider_environment
 from control_plane import runtime_platform_credentials
 from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
@@ -86,6 +87,7 @@ def update_dokploy_target_artifact(
     runtime_environment: dict[str, str] | None = None,
     retired_runtime_keys: frozenset[str] = frozenset(),
     runtime_verified: Callable[[], None] | None = None,
+    testing_application: bool = False,
 ) -> None:
     target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
@@ -166,6 +168,31 @@ def update_dokploy_target_artifact(
                     )
                 if runtime_verified is not None:
                     runtime_verified()
+        if (
+            testing_application
+            and "endpointSpecSwarm" in target_payload
+            and target_payload["endpointSpecSwarm"] in (None, {})
+            and target_payload.get("ports") == []
+        ):
+            endpoint_spec = application_endpoint_spec(target_payload)
+            if before_provider_mutation is not None:
+                before_provider_mutation("target_update")
+            if effect_started is not None:
+                effect_started()
+            dokploy_api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/application.update",
+                method="POST",
+                payload={"applicationId": target_id, "endpointSpecSwarm": endpoint_spec},
+            )
+            persisted = dokploy_api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type=target_type, target_id=target_id
+            )
+            if persisted.get("endpointSpecSwarm") != endpoint_spec:
+                raise TestingInputSafetyRefused(
+                    "Application testing endpoint setting readback failed."
+                )
         if before_provider_mutation is not None:
             before_provider_mutation("target_update")
         if effect_started is not None:
@@ -362,6 +389,7 @@ def execute_dokploy_artifact_deploy(
         runtime_environment=runtime_environment,
         retired_runtime_keys=retired_runtime_keys,
         runtime_verified=runtime_verified,
+        testing_application=ship_request.instance == "testing",
     )
     if before_provider_mutation is not None:
         before_provider_mutation("deploy_trigger")
