@@ -68,6 +68,12 @@ class VeriReelProdBackupGateOperationRecord(BaseModel):
     error_code: str = ""
     error_message: str = ""
     runner_trace_id: str = ""
+    previous_attempt: VeriReelProdBackupGateOperationRecord | None = None
+    previous_backup: BackupGateRecord | None = None
+    continuation_digest: str = ""
+    continuation_reason: str = ""
+    continuation_actor: str = ""
+    continued_at: str = ""
 
     @model_validator(mode="after")
     def _validate_record(self) -> "VeriReelProdBackupGateOperationRecord":

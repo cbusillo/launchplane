@@ -1147,6 +1147,29 @@ trace after settling.
 The activity read derives stopped-step events from those same operations, with
 the reason in `summary` and record, operation, decision and available trace IDs
 in `records`. Reading this evidence never retries a stopped release.
+An admin can continue the original accepted generic-web release after a backup
+failed while preparing its capture credentials, using
+`POST /v1/products/{product}/releases/{decision_record_id}/backup-continuation`.
+Send a concrete `reason` first; this review changes no operation or provider.
+Send the same reason with `apply: true` and its `expected_digest` to requeue the
+same first backup operation. Apply requires existing scoped
+`production_backup_gate.execute` authority; review requires
+`product_environment.read`. Neither supplies promotion permission or records
+another acceptance. The normal worker performs fresh capture, verification,
+promotion, checks and the decision's rollback drill.
+
+Only a terminal `backup_preflight_unavailable` failure with the exact retained
+`backup_preflight` stage, no result and no cancellation qualifies. Empty progress
+is unknown. Snapshot or archive evidence, changed backup authority, a newer
+decision, held releases, changed source pair, missing rollback baseline or a
+later started step refuses. Apply compares the exact reviewed operation and
+failed backup evidence transactionally. The operation retains its complete prior
+attempt and failed backup record, review digest, authenticated actor, reason and time. Repeating an applied
+review returns its receipt, even after the worker advances, without requeueing.
+Expired or consumed passing captures and stopped promotions need their own
+supported recovery; this control cannot reset them. Inspecting release progress
+alone never retries anything.
+
 `GET /v1/release-review` returns
 `release_on_acceptance` (what the next acceptance would do), `live_site_url`,
 and `release_run`, derived from the step operations, whose ids come from the

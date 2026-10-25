@@ -18393,6 +18393,52 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def continue_precapture_backup_operation(
+        self,
+        *,
+        expected: VeriReelProdBackupGateOperationRecord,
+        resumed: VeriReelProdBackupGateOperationRecord,
+        expected_backup: BackupGateRecord,
+    ) -> bool:
+        from control_plane.client_release_backup_continuation import require_precapture_failure
+
+        require_precapture_failure(expected)
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                select(LaunchplaneVeriReelProdBackupGateOperationRow)
+                .where(
+                    LaunchplaneVeriReelProdBackupGateOperationRow.operation_id
+                    == expected.operation_id
+                )
+                .with_for_update()
+            )
+            backup_row = session.scalar(
+                select(LaunchplaneBackupGateRow)
+                .where(LaunchplaneBackupGateRow.record_id == expected.backup_record_id)
+                .with_for_update()
+            )
+            if (
+                row is None
+                or backup_row is None
+                or self._read_payload(
+                    model_type=VeriReelProdBackupGateOperationRecord, payload=row.payload
+                )
+                != expected
+                or self._read_payload(model_type=BackupGateRecord, payload=backup_row.payload)
+                != expected_backup
+                or resumed.previous_attempt != expected
+                or resumed.previous_backup != expected_backup
+                or resumed.status != "pending"
+                or resumed.operation_id != expected.operation_id
+                or resumed.binding != expected.binding
+                or resumed.authorization != expected.authorization
+            ):
+                return False
+            self._sync_verireel_prod_backup_gate_operation_row(row, resumed)
+            session.commit()
+            return True
+
     def _sync_verireel_prod_backup_gate_operation_row(
         self,
         row: LaunchplaneVeriReelProdBackupGateOperationRow,

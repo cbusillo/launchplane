@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
+from control_plane.client_release_backup_continuation import BACKUP_CONTINUATION_ROUTE
 from control_plane.http_routes.discussion_topics import ROUTE as DISCUSSION_TOPICS_ROUTE
 from control_plane.private_testing_transport import ROUTE as PRIVATE_TESTING_TRANSPORT_ROUTE
 from control_plane.private_testing_activation import ROUTE as PRIVATE_TESTING_ACTIVATION_ROUTE
@@ -104,6 +105,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        BACKUP_CONTINUATION_ROUTE,
+        "Review or requeue only a proved pre-capture failure under the original accepted release; retain failed history and unknown-effect fences.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "body",
+        ("expected_digest",),
+    ),
     OperationSpec(
         "GET",
         "/v1/products/{product}/environments/{environment}/discord-identity",

@@ -20,6 +20,10 @@ from control_plane.client_release import (
     client_release_grant_allows,
     _generic_web_release_authority_allows,
 )
+from control_plane.client_release_backup_continuation import (
+    BackupContinuationReview,
+    continue_release_backup,
+)
 from control_plane.contracts.product_profile_record import ProductOwnerProfile
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -30,6 +34,7 @@ from control_plane.contracts.release_review import (
     ReleaseDecision,
 )
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
+from control_plane.contracts.durable_operation_authorization import DurableOperationCancellation
 from control_plane.workflows.runtime_identity_health import HealthcheckPass
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
@@ -280,6 +285,198 @@ class GenericWebClientReleaseTests(unittest.TestCase):
 
     def advance(self) -> tuple[str, ...]:
         return advance_client_releases(store=self.store, control_plane_root=self.root)
+
+    def stopped_precapture_backup(self) -> tuple[ReleaseReviewDecisionRecord, str]:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        (operation_id,) = self.advance()
+        with patch(
+            "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
+            side_effect=ValueError("capture credential unbound"),
+        ):
+            result = run_production_backup_gate_operation_worker_once(
+                record_store=self.store, control_plane_root_path=self.root, lease_owner="test"
+            )
+        self.assertTrue(result.terminal_write_committed)
+        self.assertEqual(self.advance(), ())
+        return accepted, operation_id
+
+    def continue_backup(
+        self, accepted: ReleaseReviewDecisionRecord, *, digest: str = "", apply: bool = False
+    ) -> Any:
+        with patch(
+            "control_plane.client_release_backup_continuation.resolve_guest_capture_values",
+            return_value={},
+        ):
+            return continue_release_backup(
+                store=self.store,
+                root=self.root,
+                product=self.profile.product,
+                decision_record_id=accepted.record_id,
+                review=BackupContinuationReview(
+                    reason="Approved capture enrollment is now qualified",
+                    expected_digest=digest,
+                    apply=apply,
+                ),
+                actor="local:release-agent",
+                trace_id="continuation-trace",
+            )
+
+    def test_precapture_continuation_preserves_acceptance_and_completes_drill(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        original = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        original_backup = self.store.read_backup_gate_record(original.backup_record_id)
+        plan = self.continue_backup(accepted)
+        assert original.authorization is not None
+        self.assertEqual(
+            self.store.read_verireel_prod_backup_gate_operation_record(operation_id), original
+        )
+        self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        resumed = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        self.assertEqual(resumed.previous_attempt, original)
+        self.assertEqual(resumed.previous_backup, original_backup)
+        self.assertEqual(resumed.authorization, original.authorization)
+        self.assertEqual(resumed.status, "pending")
+        with patch(
+            "control_plane.client_release.ROLLBACK_DRILL_CODE_CHANGED_AT", "2000-01-01T00:00:00Z"
+        ):
+            self.capture()
+            self.assertTrue(self.advance())
+            self.assertTrue(self.advance())
+            self.assertTrue(self.advance())
+            self.capture()
+            self.assertTrue(self.advance())
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertEqual(
+            self.store.read_verireel_prod_backup_gate_operation_record(
+                operation_id
+            ).previous_backup,
+            original_backup,
+        )
+        self.assertTrue(all(step.status == "pass" for step in run.steps))
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=accepted.product, record_id=accepted.record_id
+            ),
+            accepted,
+        )
+        replay = self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(replay.status, "replayed")
+        self.assertEqual(self.advance(), ())
+
+    def test_precapture_continuation_refuses_unknown_capture_and_stale_review(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        original = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        original_backup = self.store.read_backup_gate_record(original.backup_record_id)
+        plan = self.continue_backup(accepted)
+        assert original.authorization is not None
+        updates: tuple[dict[str, Any], ...] = (
+            {"progress_evidence": {}},
+            {"progress_evidence": {"provider_stage": "snapshot"}},
+            {"progress_evidence": {"provider_stage": "backup_preflight", "snapshot_name": "saved"}},
+            {"error_code": "backup_source_lock_lost"},
+            {"status": "running"},
+            {
+                "status": "cancelled",
+                "phase": "cancelled",
+                "error_code": "",
+                "error_message": "",
+                "cancellation": DurableOperationCancellation(
+                    reason="Release stopped",
+                    cancelled_at=original.finished_at,
+                    caller=original.authorization.caller,
+                ),
+            },
+        )
+        for update in updates:
+            with self.subTest(update=update):
+                changed = original.model_copy(update=update)
+                changed_backup = original_backup.model_copy(
+                    update={
+                        "evidence": {
+                            **changed.progress_evidence,
+                            "error_message": changed.error_message,
+                        }
+                    }
+                )
+                self.store.write_verireel_prod_backup_gate_operation_record(changed)
+                self.store.write_backup_gate_record(changed_backup)
+                with self.assertRaises(ValueError):
+                    self.continue_backup(accepted)
+                with self.assertRaises(ValueError):
+                    self.store.continue_precapture_backup_operation(
+                        expected=changed,
+                        expected_backup=changed_backup,
+                        resumed=changed.model_copy(
+                            update={
+                                "previous_attempt": changed,
+                                "previous_backup": changed_backup,
+                                "status": "pending",
+                                "phase": "created",
+                            }
+                        ),
+                    )
+                self.assertEqual(
+                    self.store.read_verireel_prod_backup_gate_operation_record(operation_id),
+                    changed,
+                )
+        self.store.write_backup_gate_record(original_backup)
+        self.store.write_verireel_prod_backup_gate_operation_record(
+            original.model_copy(update={"runner_trace_id": "changed-evidence"})
+        )
+        with self.assertRaises(ValueError):
+            self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+
+    def test_precapture_continuation_refuses_changed_authority_and_acceptance(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        plan = self.continue_backup(accepted)
+        self.switch("held")
+        with self.assertRaises(ValueError):
+            self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.switch("promote_with_rollback_drill")
+        self.accept("changes_requested", suffix="-new")
+        with self.assertRaises(ValueError):
+            self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        operation = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        self.assertIsNone(operation.previous_attempt)
+
+    def test_precapture_continuation_compare_and_swap_preserves_changed_operation(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        plan = self.continue_backup(accepted)
+        commit = self.store.continue_precapture_backup_operation
+
+        def race(**kwargs: Any) -> bool:
+            current = kwargs["expected"].model_copy(update={"runner_trace_id": "racing-write"})
+            self.store.write_verireel_prod_backup_gate_operation_record(current)
+            return commit(**kwargs)
+
+        with patch.object(self.store, "continue_precapture_backup_operation", side_effect=race):
+            with self.assertRaises(ValueError):
+                self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(
+            self.store.read_verireel_prod_backup_gate_operation_record(
+                operation_id
+            ).runner_trace_id,
+            "racing-write",
+        )
+
+    def test_concurrent_identical_continuation_replays_the_winning_receipt(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        plan = self.continue_backup(accepted)
+        commit = self.store.continue_precapture_backup_operation
+
+        def race(**kwargs: Any) -> bool:
+            self.assertTrue(commit(**kwargs))
+            return commit(**kwargs)
+
+        with patch.object(self.store, "continue_precapture_backup_operation", side_effect=race):
+            result = self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(result.status, "replayed")
+        current = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        assert current.previous_attempt is not None
+        self.assertIsNone(current.previous_attempt.previous_attempt)
 
     def write_qualified_testing_inventory(self, inventory: EnvironmentInventory) -> None:
         """Represent a complete testing deployment when moving this fixture's candidate."""
