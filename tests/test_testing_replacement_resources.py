@@ -196,7 +196,7 @@ class TestingReplacementResourceHttpTests(
     async def test_native_refusal_keeps_its_actionable_code_across_continuation_routes(
         self,
     ) -> None:
-        from control_plane.testing_replacement_bootstrap import ROUTE as bootstrap_route
+        from control_plane.testing_replacement_bootstrap import ROUTE as BOOTSTRAP_ROUTE
         from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 
         self.store.seed_authz_policy_if_absent(
@@ -224,7 +224,7 @@ class TestingReplacementResourceHttpTests(
                 side_effect=NativeTestingRebuildRequired(),
             ),
         ):
-            for route, mode in ((ROUTE, "apply"), (ROUTE, "readback"), (bootstrap_route, "apply")):
+            for route, mode in ((ROUTE, "apply"), (ROUTE, "readback"), (BOOTSTRAP_ROUTE, "apply")):
                 with self.subTest(route=route, mode=mode):
                     payload = {
                         "context": self.context,
@@ -233,7 +233,7 @@ class TestingReplacementResourceHttpTests(
                         "mode": mode,
                         "reviewed_plan_sha256": canonical_json_sha256({"fixture": "review"}),
                     }
-                    if route == bootstrap_route:
+                    if route == BOOTSTRAP_ROUTE:
                         payload["domain_host"] = "fresh.example.invalid"
                     response = await request(
                         self.app,
