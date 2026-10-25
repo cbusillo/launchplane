@@ -1297,6 +1297,9 @@ as the supported renewal path rather than returning a provider-domain error.
 
 ### Changing a native testing canonical address
 
+Address-plan refusals retain their trace and sanitized source sites in the
+service cause log; responses and logs omit raw provider errors and request values.
+
 `POST /v1/products/{product}/testing-address` amends the current published Odoo
 testing lane without replacing its copy. The Director agent supplies `context`,
 `retirement_operation_id`, `reservation_operation_id`, `hostname`, and `reason`.
@@ -1616,8 +1619,16 @@ generated credential provenance. It does not record an artifact, reserve a copy,
 create a lease or dispatch a mutation. Its `candidate_verification: pending`
 does not prove a new copy or completed restore. The worker still checks the
 source, generated values, independent resources, health and identity before
-cutover. The machine target-replacement plan route supports the same native
-read without a provider write.
+cutover. The authenticated Director agent can also inspect these inputs, read a known
+testing operation, and look up its own original key and exact intent. These
+three reads still require database storage and an active administrator policy.
+For lookup, Director callers supply the exact original native apply envelope,
+including the original omission of optional fields. Its raw fingerprint must
+match the stored original; the lookup never replays that request. Human lookup
+retains its typed browser body, original scope and fingerprint check. These reads do
+not change submission, settlement or resume authority. The machine
+target-replacement plan route supports the same native read without a provider
+write.
 
 `POST /v1/products/{product}/testing-rebuild` takes the inspected build/source
 pair, a concrete reason and the original request key. Existing administrator

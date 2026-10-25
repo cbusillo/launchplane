@@ -29892,6 +29892,7 @@ def create_launchplane_fastapi_app(
         dependencies=TestingRebuildRouteDependencies(
             common=read_route_dependencies,
             mutation_identity=read_operator_mutation_identity,
+            lookup_identity=read_browser_mutation_identity,
             root=resolved_control_plane_root,
         ),
     )
