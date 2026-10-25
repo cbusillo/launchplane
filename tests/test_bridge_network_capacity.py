@@ -204,7 +204,14 @@ class CapacityHostProgramTests(unittest.TestCase):
             )
 
     def test_incomplete_reads_and_inventory_churn_never_report_capacity(self) -> None:
-        for field, value in (("pool", None), ("networks", []), ("routes", []), ("changed", True)):
+        for field, value in (
+            ("pool", {}),
+            ("pool", ""),
+            ("pool", False),
+            ("networks", []),
+            ("routes", []),
+            ("changed", True),
+        ):
             with self.subTest(field=field), patch.object(self, field, value):
                 self.list_calls = 0
                 self.assertEqual(self.run_program(), {"type": "failed"})
@@ -221,6 +228,22 @@ class CapacityHostProgramTests(unittest.TestCase):
         self.assertEqual(
             self.run_program(denial=b"permission denied", denial_command="ip"), {"type": "failed"}
         )
+
+    def test_builtin_pools_still_exclude_networks_and_host_routes(self) -> None:
+        unconfigured_pools: tuple[None | list[object], ...] = (None, [])
+        for pools in unconfigured_pools:
+            with self.subTest(pools=pools), patch.object(self, "pool", pools):
+                self.list_calls = 0
+                result = self.run_program()
+                self.assertEqual(result["type"], "complete")
+                self.assertGreater(result["result"]["free_slots"], BRIDGE_NETWORK_CAPACITY_MARGIN)
+                self.assertLess(result["result"]["free_slots"], result["result"]["total_slots"])
+                with patch.object(
+                    self, "routes", [{"dst": "172.16.0.0/12"}, {"dst": "192.168.0.0/16"}]
+                ):
+                    exhausted = self.run_program()
+                self.assertEqual(exhausted["type"], "complete")
+                self.assertEqual(exhausted["result"]["free_slots"], 0)
 
     def test_executable_permission_failure_is_unavailable_without_a_daemon_denial(self) -> None:
         for binary in ("docker", "ip"):
