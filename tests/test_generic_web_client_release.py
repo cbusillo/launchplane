@@ -22,6 +22,7 @@ from control_plane.client_release import (
 )
 from control_plane.client_release_backup_continuation import (
     BackupContinuationReview,
+    BackupContinuationRefused,
     continue_release_backup,
 )
 from control_plane.contracts.product_profile_record import ProductOwnerProfile
@@ -36,6 +37,7 @@ from control_plane.contracts.release_review import (
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.durable_operation_authorization import DurableOperationCancellation
 from control_plane.workflows.runtime_identity_health import HealthcheckPass
+from control_plane.odoo_business_hours import BusinessHoursHeld
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
 from control_plane.client_release import CLIENT_RELEASE_IDEMPOTENCY_SCOPE
@@ -403,9 +405,10 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 )
                 self.store.write_verireel_prod_backup_gate_operation_record(changed)
                 self.store.write_backup_gate_record(changed_backup)
-                with self.assertRaises(ValueError):
+                with self.assertRaises(BackupContinuationRefused) as refusal:
                     self.continue_backup(accepted)
-                with self.assertRaises(ValueError):
+                self.assertEqual(refusal.exception.code, "backup_capture_outcome_not_proven_absent")
+                with self.assertRaises(BackupContinuationRefused) as refusal:
                     self.store.continue_precapture_backup_operation(
                         expected=changed,
                         expected_backup=changed_backup,
@@ -418,6 +421,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                             }
                         ),
                     )
+                self.assertEqual(refusal.exception.code, "backup_capture_outcome_not_proven_absent")
                 self.assertEqual(
                     self.store.read_verireel_prod_backup_gate_operation_record(operation_id),
                     changed,
@@ -426,8 +430,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.store.write_verireel_prod_backup_gate_operation_record(
             original.model_copy(update={"runner_trace_id": "changed-evidence"})
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(BackupContinuationRefused) as refusal:
             self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(refusal.exception.code, "backup_continuation_review_changed")
 
     def test_precapture_continuation_refuses_changed_authority_and_acceptance(self) -> None:
         accepted, operation_id = self.stopped_precapture_backup()
@@ -448,17 +453,20 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 }
             )
         )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(BackupContinuationRefused) as refusal:
             self.continue_backup(accepted)
+        self.assertEqual(refusal.exception.code, "backup_acceptance_provenance_invalid")
         self.store.write_verireel_prod_backup_gate_operation_record(original)
         plan = self.continue_backup(accepted)
         self.switch("held")
-        with self.assertRaises(ValueError):
+        with self.assertRaises(BackupContinuationRefused) as refusal:
             self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(refusal.exception.code, "release_acceptance_no_longer_current")
         self.switch("promote_with_rollback_drill")
         self.accept("changes_requested", suffix="-new")
-        with self.assertRaises(ValueError):
+        with self.assertRaises(BackupContinuationRefused) as refusal:
             self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(refusal.exception.code, "release_acceptance_no_longer_current")
         operation = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
         self.assertIsNone(operation.previous_attempt)
 
@@ -473,8 +481,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             return commit(**kwargs)
 
         with patch.object(self.store, "continue_precapture_backup_operation", side_effect=race):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(BackupContinuationRefused) as refusal:
                 self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(refusal.exception.code, "backup_continuation_review_changed")
         self.assertEqual(
             self.store.read_verireel_prod_backup_gate_operation_record(
                 operation_id
@@ -497,6 +506,54 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         current = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
         assert current.previous_attempt is not None
         self.assertIsNone(current.previous_attempt.previous_attempt)
+
+    def test_continuation_reports_bounded_prerequisite_causes_without_requeueing(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        original = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        cases: tuple[tuple[str, Exception, str], ...] = (
+            (
+                "guest_capture_metadata",
+                ValueError("private credential failure"),
+                "backup_capture_credential_unavailable",
+            ),
+            (
+                "resolve_production_backup_binding",
+                ValueError("private target failure"),
+                "backup_authority_unavailable",
+            ),
+            (
+                "require_release_window",
+                BusinessHoursHeld("private calendar failure"),
+                "release_window_held",
+            ),
+        )
+        for target, error, code in cases:
+            with (
+                self.subTest(target=target),
+                patch(
+                    "control_plane.client_release_backup_continuation.guest_capture_metadata",
+                    return_value=(),
+                ),
+                patch(
+                    f"control_plane.client_release_backup_continuation.{target}", side_effect=error
+                ),
+            ):
+                with self.assertRaises(BackupContinuationRefused) as refusal:
+                    continue_release_backup(
+                        store=self.store,
+                        root=self.root,
+                        product=self.profile.product,
+                        decision_record_id=accepted.record_id,
+                        review=BackupContinuationReview(reason="Capture enrollment qualified"),
+                        actor="release-agent",
+                        trace_id="bounded-cause",
+                    )
+                self.assertEqual(refusal.exception.code, code)
+                self.assertEqual(str(refusal.exception), code)
+                self.assertEqual(
+                    self.store.read_verireel_prod_backup_gate_operation_record(operation_id),
+                    original,
+                )
 
     def write_qualified_testing_inventory(self, inventory: EnvironmentInventory) -> None:
         """Represent a complete testing deployment when moving this fixture's candidate."""

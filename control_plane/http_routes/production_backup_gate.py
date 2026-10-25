@@ -4,6 +4,7 @@ from pathlib import Path as FilePath
 from typing import Annotated, Literal
 
 import click
+from control_plane.action_effects import BACKUP_CONTINUATION_ACTION
 from fastapi import Depends, Header, Path, Query
 from pydantic import BaseModel, ConfigDict
 
@@ -40,7 +41,6 @@ from control_plane.service_auth import (
 )
 from control_plane.client_release_backup_continuation import (
     BACKUP_CONTINUATION_ROUTE,
-    BACKUP_CONTINUATION_ACTION,
     BackupContinuationReview,
     BackupContinuationResult,
     BackupContinuationRefused,
@@ -63,7 +63,7 @@ class ProductionBackupGateRouteDependencies:
     read_mutation_identity: Callable[..., LaunchplaneIdentity]
     read_continuation_identity: Callable[..., LaunchplaneIdentity]
     cancel_pending_operation: Callable[..., VeriReelProdBackupGateOperationRecord]
-    control_plane_root: FilePath = FilePath(".")
+    control_plane_root: FilePath
 
 
 class ProductionBackupGateResponse(BaseModel):
@@ -218,7 +218,7 @@ def register_production_backup_gate_routes(
             return result.model_copy(update={"apply_authorized": apply_authorized})
         except BackupContinuationRefused as error:
             raise common.http_error(
-                status_code=409,
+                status_code=404 if error.code == "release_record_not_found" else 409,
                 trace_id=trace,
                 code=error.code,
                 message="The original backup or accepted release is not qualified for continuation.",

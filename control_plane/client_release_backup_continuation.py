@@ -19,7 +19,7 @@ from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
 )
 from control_plane.guest_capture_credentials import guest_capture_metadata
-from control_plane.odoo_business_hours import require_release_window
+from control_plane.odoo_business_hours import BusinessHoursHeld, require_release_window
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import resolve_production_backup_binding
 from control_plane.workflows.ship import utc_now_timestamp
@@ -27,7 +27,6 @@ from control_plane.workflows.ship import utc_now_timestamp
 BACKUP_CONTINUATION_ROUTE = (
     "/v1/products/{product}/releases/{decision_record_id}/backup-continuation"
 )
-BACKUP_CONTINUATION_ACTION = "client_release_backup.continue"
 
 
 class BackupContinuationRefused(ValueError):
@@ -98,9 +97,12 @@ def continue_release_backup(
     actor: str,
     trace_id: str,
 ) -> BackupContinuationResult:
-    decision = store.read_release_review_decision_record(
-        product=product, record_id=decision_record_id
-    )
+    try:
+        decision = store.read_release_review_decision_record(
+            product=product, record_id=decision_record_id
+        )
+    except FileNotFoundError as error:
+        raise BackupContinuationRefused("release_record_not_found") from error
     profile = store.read_product_profile_record(product)
     if decision.product != product or profile.driver_id != "generic-web":
         raise BackupContinuationRefused("backup_continuation_scope_invalid")
@@ -110,7 +112,10 @@ def continue_release_backup(
     operation_id = client_release_step_operation_id(
         profile=profile, decision=decision, step=steps[0]
     )
-    operation = store.read_verireel_prod_backup_gate_operation_record(operation_id)
+    try:
+        operation = store.read_verireel_prod_backup_gate_operation_record(operation_id)
+    except FileNotFoundError as error:
+        raise BackupContinuationRefused("backup_operation_unavailable") from error
     if _has_continuation_receipt(operation, review, actor):
         return BackupContinuationResult(
             trace_id=trace_id,
@@ -133,6 +138,8 @@ def continue_release_backup(
         )
         if decision.release_start == "promote_with_rollback_drill":
             _generic_web_drill_target(store, profile, decision)
+    except BusinessHoursHeld as error:
+        raise BackupContinuationRefused("release_window_held") from error
     except ClientReleaseNotReady as error:
         raise BackupContinuationRefused("release_evidence_not_current") from error
     authorization = operation.authorization
@@ -142,11 +149,20 @@ def continue_release_backup(
         or not client_release_grant_allows(store, authorization)
     ):
         raise BackupContinuationRefused("backup_acceptance_provenance_invalid")
-    binding = resolve_production_backup_binding(store, operation.binding.request)
+    try:
+        binding = resolve_production_backup_binding(store, operation.binding.request)
+    except (FileNotFoundError, ValueError) as error:
+        raise BackupContinuationRefused("backup_authority_unavailable") from error
     if binding != operation.binding:
         raise BackupContinuationRefused("backup_authority_changed")
-    guest_capture_metadata(store, binding)
-    backup = store.read_backup_gate_record(operation.backup_record_id)
+    try:
+        guest_capture_metadata(store, binding)
+    except (FileNotFoundError, ValueError) as error:
+        raise BackupContinuationRefused("backup_capture_credential_unavailable") from error
+    try:
+        backup = store.read_backup_gate_record(operation.backup_record_id)
+    except FileNotFoundError as error:
+        raise BackupContinuationRefused("backup_evidence_unavailable") from error
     if backup.status != "fail" or backup.evidence != {
         **operation.progress_evidence,
         "error_message": operation.error_message,

@@ -43,6 +43,7 @@ from tests.test_http_app_production_backup_authority import (
 )
 from tests.test_postgres_integration import _store_for_fresh_head_database
 from tests import test_generic_web_client_release as release_fixtures
+from control_plane.action_effects import BACKUP_CONTINUATION_ACTION
 
 
 class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -86,6 +87,15 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
             denied = await request(app, "POST", path, payload=body)
             self.assertIn(denied.status_code, (401, 403))
             headers = {"Authorization": "Bearer local-operator-token"}
+            missing = await request(
+                app,
+                "POST",
+                f"/v1/products/{fixture.profile.product}/releases/missing-decision/backup-continuation",
+                headers=headers,
+                payload=body,
+            )
+            self.assertEqual(missing.status_code, 404, missing.text)
+            self.assertEqual(missing.json()["error"]["code"], "release_record_not_found")
             planned = await request(app, "POST", path, headers=headers, payload=body)
             self.assertEqual(planned.status_code, 200, planned.text)
             self.assertTrue(planned.json()["apply_authorized"])
@@ -145,7 +155,7 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
         )
 
     @scoped_agent_test
-    async def test_ordinary_reader_cannot_continue_even_with_capture_permission(self) -> None:
+    async def test_scoped_permissions_cannot_supply_director_trust(self) -> None:
         fixture = release_fixtures.GenericWebClientReleaseTests("runTest")
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
@@ -162,7 +172,11 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                         products=(fixture.profile.product,),
                         contexts=(fixture.context,),
                         instances=("prod",),
-                        actions=("product_environment.read", "production_backup_gate.execute"),
+                        actions=(
+                            "product_environment.read",
+                            "production_backup_gate.execute",
+                            BACKUP_CONTINUATION_ACTION,
+                        ),
                     ),
                 ),
             ),
