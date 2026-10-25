@@ -6,10 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.delivery_apply_receipt import (
-    ReviewedServiceResponse,
-    apply_reviewed_service_bundle,
-)
+from control_plane.delivery_apply_receipt import apply_reviewed_service_bundle
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.launchplane_github_delivery import (
     DELIVERY_GITHUB_APP_ID_KEY,
@@ -25,9 +22,16 @@ from control_plane.storage.product_authority_bundle import (
 GITHUB_DELIVERY_CONFIGURATION_ROUTE = "/v1/service/github-delivery/configuration"
 
 
-class DeliveryGitHubAppConfigurationResponse(ReviewedServiceResponse):
+class DeliveryGitHubAppConfigurationResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    actor: str
+    reason: str
+    mode: Literal["dry-run", "apply"]
     app_id: int
     integration: str
+    plan_digest: str
+    trace_id: str
+    runtime_environment: dict[str, object] | None
 
 
 class DeliveryGitHubAppConfigurationRequest(BaseModel):

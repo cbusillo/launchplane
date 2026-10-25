@@ -6,10 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.delivery_apply_receipt import (
-    ReviewedServiceResponse,
-    apply_reviewed_service_bundle,
-)
+from control_plane.delivery_apply_receipt import apply_reviewed_service_bundle
 from control_plane.discussion_reminders import (
     SETTINGS_KEY as DISCUSSION_REMINDERS_SETTING,
     DiscussionReminderSettings,
@@ -56,11 +53,6 @@ class ServiceRuntimeSettingRequest(BaseModel):
             raise ValueError("Only declared non-secret service settings can be set here.")
         validate_value(self.value)
         return self
-
-
-class ServiceRuntimeSettingResponse(ReviewedServiceResponse):
-    key: str
-    value_sha256: str
 
 
 def plan_service_runtime_setting(

@@ -16,13 +16,14 @@ Each value is checked with the same parser its reader uses, so an invalid value
 is refused before review. Any other key, including a secret-shaped one, is
 refused. Secrets stay in [managed secret records](secrets.md).
 
-The request names `key`, `value` and `reason`. `mode: dry-run` returns a
-`plan_digest` and writes nothing. `mode: apply` repeats the same request with
+The request names `key`, `value` and `reason`. `mode: dry-run` returns
+`result.plan_digest` and writes nothing. `mode: apply` repeats the same request with
 `expected_plan_digest` and an `Idempotency-Key` header. Apply refuses when the
 record changed since the review, and writes the setting and its idempotency
 receipt together. Other keys in the record stay as they are. Repeating an apply
-with the same key and request returns the original result; a different request
-under that key is refused. Responses carry key names and a SHA-256 of the value,
+with the same key and request returns the original result, marked `replayed`
+with its `original_trace_id`. A different request under that key is refused.
+Responses carry key names and a SHA-256 of the value,
 never the value. Read the result back with the names-only
 `GET /v1/contexts/launchplane/runtime-settings`.
 

@@ -4,7 +4,11 @@ from typing import Annotated
 from fastapi import Depends, Header, Response
 from starlette.concurrency import run_in_threadpool
 
-from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.http_routes.mutation_support import (
+    AcceptedEvidenceResponse,
+    accepted_evidence_response,
+    idempotency_scope,
+)
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 from control_plane.service_runtime_settings import (
@@ -13,7 +17,6 @@ from control_plane.service_runtime_settings import (
     SERVICE_RUNTIME_SETTINGS_PLAN_ACTION,
     SERVICE_RUNTIME_SETTINGS_ROUTE,
     ServiceRuntimeSettingRequest,
-    ServiceRuntimeSettingResponse,
     apply_service_runtime_setting,
 )
 from control_plane.storage.postgres import PostgresRecordStore
@@ -31,7 +34,7 @@ def register_service_runtime_settings_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> dict[str, object]:
+    ) -> AcceptedEvidenceResponse:
         trace_id = dependencies.next_trace_id()
         response.headers["Cache-Control"] = "no-store"
         if not dependencies.authorization_allows(
@@ -58,7 +61,7 @@ def register_service_runtime_settings_routes(
                 message="Service settings require shared database storage.",
             )
         try:
-            return await run_in_threadpool(
+            result = await run_in_threadpool(
                 apply_service_runtime_setting,
                 store=record_store,
                 request=body,
@@ -73,12 +76,23 @@ def register_service_runtime_settings_routes(
                 code="service_runtime_setting_conflict",
                 message="The service setting is unavailable, stale, or conflicts with its reviewed request.",
             ) from error
+        original_trace_id = str(result["trace_id"])
+        replayed = original_trace_id != trace_id
+        return accepted_evidence_response(
+            trace_id=trace_id,
+            records={"runtime_environment": f"context:{SERVICE_CONTEXT}"},
+            result=result,
+            replayed=replayed,
+            original_trace_id=original_trace_id if replayed else "",
+        )
 
     app.add_api_route(
         SERVICE_RUNTIME_SETTINGS_ROUTE,
         set_service_runtime_setting,
         methods=["POST"],
-        response_model=ServiceRuntimeSettingResponse,
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
         operation_id="set_launchplane_service_runtime_setting",
         summary="Review and set a declared non-secret Launchplane service setting",
         responses={

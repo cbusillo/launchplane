@@ -4,7 +4,6 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 import hashlib
 import json
-from typing import Literal
 
 from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
@@ -12,16 +11,6 @@ from sqlalchemy.exc import IntegrityError
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
-
-
-class ReviewedServiceResponse(BaseModel):
-    status: Literal["ok"] = "ok"
-    actor: str
-    reason: str
-    mode: Literal["dry-run", "apply"]
-    plan_digest: str
-    trace_id: str
-    runtime_environment: dict[str, object] | None
 
 
 def delivery_request_fingerprint(request: BaseModel) -> str:

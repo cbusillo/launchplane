@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import unittest
@@ -162,6 +163,7 @@ class ServiceRuntimeSettingHttpTests(unittest.IsolatedAsyncioTestCase):
         ):
             store = _store(directory)
             self.addCleanup(store.close)
+            traces = itertools.count()
             caller = [LocalOperatorIdentity("director", "existing-bootstrap", director_agent=True)]
             app = FastAPI()
             register_service_runtime_settings_routes(
@@ -169,7 +171,7 @@ class ServiceRuntimeSettingHttpTests(unittest.IsolatedAsyncioTestCase):
                 dependencies=ReadRouteDependencies(
                     read_identity=lambda: caller[0],
                     get_record_store=lambda: store,
-                    next_trace_id=lambda: "trace-test",
+                    next_trace_id=lambda: f"trace-{next(traces)}",
                     authorization_allows=LaunchplaneAuthzPolicy(schema_version=3).allows,
                     http_error=_launchplane_http_error,
                     error_response_model=LaunchplaneErrorResponse,
@@ -184,7 +186,7 @@ class ServiceRuntimeSettingHttpTests(unittest.IsolatedAsyncioTestCase):
             preview = await http_request(
                 app, "POST", SERVICE_RUNTIME_SETTINGS_ROUTE, payload=payload
             )
-            self.assertEqual(preview.status_code, 200, preview.text)
+            self.assertEqual(preview.status_code, 202, preview.text)
             applied = await http_request(
                 app,
                 "POST",
@@ -193,11 +195,24 @@ class ServiceRuntimeSettingHttpTests(unittest.IsolatedAsyncioTestCase):
                 payload={
                     **payload,
                     "mode": "apply",
-                    "expected_plan_digest": preview.json()["plan_digest"],
+                    "expected_plan_digest": preview.json()["result"]["plan_digest"],
                 },
             )
-            self.assertEqual(applied.status_code, 200, applied.text)
+            self.assertEqual(applied.status_code, 202, applied.text)
             self.assertEqual(_service_env(store)[PREVIEW_MEMORY_FLOORS_SETTING], FLOORS)
+            replay = await http_request(
+                app,
+                "POST",
+                SERVICE_RUNTIME_SETTINGS_ROUTE,
+                headers={"Idempotency-Key": "set-floor"},
+                payload={
+                    **payload,
+                    "mode": "apply",
+                    "expected_plan_digest": preview.json()["result"]["plan_digest"],
+                },
+            )
+            self.assertTrue(replay.json()["replayed"])
+            self.assertEqual(replay.json()["original_trace_id"], applied.json()["trace_id"])
             caller[0] = LocalOperatorIdentity("other-agent", "other-token")
             denied = await http_request(
                 app, "POST", SERVICE_RUNTIME_SETTINGS_ROUTE, payload=payload
