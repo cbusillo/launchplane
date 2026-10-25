@@ -228,7 +228,6 @@ class PublishedRecoveryTests(unittest.TestCase):
             ) as clock,
             patch.object(self, "host", side_effect=capture_then_expire),
         ):
-            clock.now.return_value = datetime.now(timezone.utc)
             assert_committed_receipt_survives_later_drift(self, recovered=False)
 
     def test_optional_provider_fields_preserve_qualification(self) -> None:
