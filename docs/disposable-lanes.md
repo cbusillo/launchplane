@@ -1913,6 +1913,13 @@ rollback does not make old code a supported continuation.
 
 ## Bootstrap a qualified fresh Odoo testing generation
 
+An Odoo testing lane with an established `base_url` uses the native
+same-address testing rebuild described above. A new legacy bootstrap refuses
+before provider work when that address is present, so a recovery generation
+cannot replace the canonical lane address with its temporary hostname.
+Existing recorded generations retain their original-key recovery path. Lanes
+without an address can still bootstrap their first independent generation.
+
 After resource qualification and the testing-only `upstream_restore` data policy,
 `POST /v1/products/{product}/testing-replacement-bootstrap` binds that exact
 allocation to a new independent hostname. It does not move the retained hostname

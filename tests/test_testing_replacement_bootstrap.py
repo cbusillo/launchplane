@@ -1,6 +1,7 @@
 """Fresh generation continuation against real record transactions and fake provider IO."""
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import os
 from datetime import datetime, timedelta
 from typing import Any
@@ -61,11 +62,13 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
                 "lanes": tuple(
                     lane.model_copy(
                         update={
+                            "base_url": "",
+                            "health_url": "",
                             "odoo_data_policy": ProductOdooLaneDataPolicy(
                                 data_authority="resettable",
                                 allowed_rebuild_sources=("upstream_restore",),
                                 upstream_source=f"{profile.product}:{source_lane.context}:prod",
-                            )
+                            ),
                         }
                     )
                     if lane.instance == "testing"
@@ -937,6 +940,34 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
             self.store.read_fresh_odoo_testing_generation(
                 self.profile.product, self.fixture.context
             )
+        )
+        self.assertEqual(self.routes, [])
+
+
+class FreshTestingBootstrapAddressTests(FreshTestingBootstrapScenario):
+    def test_established_address_is_preserved_before_provider_io(self) -> None:
+        directory = Path(self.enterContext(TemporaryDirectory()))
+        self.seed(f"sqlite:///{directory / 'records.db'}")
+        self.patches()
+        canonical = "https://stable.example.invalid"
+        profile = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(
+                        update={"base_url": canonical, "health_url": canonical + "/health"}
+                    )
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        with self.assertRaises(ValueError):
+            bootstrap_plan(self.store, profile.product, self.request)
+        self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
+        self.assertIsNone(
+            self.store.read_fresh_odoo_testing_generation(profile.product, self.fixture.context)
         )
         self.assertEqual(self.routes, [])
 
