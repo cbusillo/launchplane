@@ -13,6 +13,7 @@ from typing import Any
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+import yaml
 
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
@@ -21,7 +22,7 @@ from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_sc
 from control_plane.dokploy.api import validate_dokploy_schedule_script
 from control_plane.dokploy import api, post_deploy
 from control_plane.dokploy.source import DokployTargetDefinition
-from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
+from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY, render_odoo_raw_compose_file
 from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
 
 
@@ -288,6 +289,24 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             (self.source / "filestore/attachment").read_bytes(),
         )
         self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_private_preview_render_passes_snapshot_runtime_inspection(self) -> None:
+        rendered = yaml.safe_load(
+            render_odoo_raw_compose_file(
+                image_reference=self.image,
+                hold_web_until_integration_readback=True,
+                publish_host_ports=False,
+                mount_workflow_ssh=False,
+            )
+        )
+        for role in ("web", "script-runner"):
+            self.containers[role]["HostConfig"] = {
+                "ExtraHosts": rendered["services"][role].get("extra_hosts", [])
+            }
+        self.clones = True
+        self.run_script()
+        self.assertTrue(any(call[:3] == ["cp", "-a", "--reflink=always"] for call in self.calls))
+        self.assertTrue(self.ready_before_web)
 
     def service_schedule(self, snapshot: CleanTestingSnapshot) -> dict[str, str]:
         environment = {

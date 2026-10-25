@@ -86,7 +86,9 @@ lookup, including before the product has published its first snapshot. There
 is no production or live-testing fallback. The preview and snapshot must be on
 the same execution server; cross-host transport is not implied.
 
-The copy receives no source SSH mount or upstream connection. Its schedule
+The copy receives no source SSH mount or upstream connection. Private-port
+preview renders also omit the host-gateway alias; runtime inspection rejects
+host aliases before copying. Its schedule
 uses the immutable image bound to the preview request, without requiring
 a separate image setting in the runtime environment. Its filestore
 is cloned or copied into exclusively owned storage with the preview writer
