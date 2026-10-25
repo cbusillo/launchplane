@@ -175,6 +175,7 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_production_backup_policy_records(), ())
 
     async def test_policy_administrator_is_rechecked_inside_the_atomic_write(self) -> None:
+        from itertools import chain, repeat
         from unittest.mock import patch
 
         operation_id = await self.propose()
@@ -185,10 +186,12 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         removed = _policy_record(self.policy)
         with patch(
             "control_plane.privileged_operation_worker.read_active_authz_policy_record",
-            side_effect=[active, removed],
+            side_effect=chain([active], repeat(removed)),
         ):
             completed = execute_approved_privileged_operations_once(record_store=self.store)
         self.assertEqual(completed[0].status, "execution_failed", completed)
+        assert completed[0].execution is not None
+        self.assertEqual(completed[0].execution.failure_code, "approval_policy_admin_drift")
         self.assertEqual(self.store.list_production_backup_policy_records(), ())
 
     async def test_missing_immutable_approval_rule_is_not_reported_as_a_stale_proposal(
@@ -198,9 +201,10 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         rules = self.policy.model_dump(mode="json")["github_humans"]
         rules[0]["github_ids"] = []
         self.replace_human_rules(rules)
-        response = await self.decide(operation_id)
-        self.assertEqual(response.status_code, 403, response.text)
-        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        for decision in ("approve", "decline"):
+            response = await self.decide(operation_id, decision)
+            self.assertEqual(response.status_code, 403, response.text)
+            self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(self.store.list_production_backup_policy_records(), ())
 
     async def test_inert_durable_redacted_then_single_human_click_executes(self) -> None:

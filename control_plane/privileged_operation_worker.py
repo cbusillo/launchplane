@@ -413,7 +413,11 @@ def _authorize_approved_operation(
         authorization=authorization,
         policy_record=policy_record,
     ):
-        raise ValueError("approval_managed_rule_drift")
+        raise ValueError(
+            "approval_policy_admin_drift"
+            if approval.grant == "policy_administrator"
+            else "approval_managed_rule_drift"
+        )
     if record.descriptor_id == "managed-authz-policy-set" and not (
         managed_github_id_action_allows(
             policy=policy_record.policy,

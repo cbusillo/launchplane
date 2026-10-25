@@ -105,7 +105,7 @@ def decide_backup_policy(
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> PrivilegedOperationWriteResult:
     if identity.role != "admin" or not isinstance(record.request, BackupPolicyProposalInput):
-        raise ValueError("Backup policy decisions require a signed-in administrator.")
+        raise PermissionError("Backup policy decisions require a signed-in administrator.")
     policy = record.request.authority.policy
     target = AuthorizationTarget(scope="instance", instances=(policy.instance,))
     if not authorization_allows(
@@ -115,22 +115,13 @@ def decide_backup_policy(
         context=policy.context,
         target=target,
     ):
-        raise ValueError("Backup policy decision is unauthorized.")
+        raise PermissionError("Backup policy decision is unauthorized.")
     actor = PrivilegedOperationActor(
         identity_type="github_human", github_id=identity.github_id, login=identity.login
     )
-    if decision == "decline":
-        return cancel_privileged_operation(
-            record_store=record_store,
-            operation_id=record.operation_id,
-            actor_github_id=actor.github_id,
-            actor_login=actor.login,
-            source_event_id=source_event_id,
-            reason="Director declined the proposed backup policy.",
-            now=now,
-        )
     if (
-        record.status in {"approved", "executing", "executed", "execution_failed"}
+        decision == "approve"
+        and record.status in {"approved", "executing", "executed", "execution_failed"}
         and record.approval is not None
     ):
         store = require_privileged_operation_store(record_store)
@@ -143,10 +134,6 @@ def decide_backup_policy(
                 and event.actor == actor
             ):
                 return PrivilegedOperationWriteResult("replayed", record, event)
-    if record.status == "planned":
-        fresh = plan_backup_policy_proposal(record_store, record.request)
-        if fresh != record.evidence:
-            raise ValueError("Backup authority changed; a new proposal is required.")
     active = read_active_authz_policy_record(record_store)
     administrator = active.policy.names_administrator(identity)
     rule = None
@@ -162,6 +149,20 @@ def decide_backup_policy(
             )
         except ManagedRuleAuthorizationError as error:
             raise PermissionError("Backup approval requires immutable human authority.") from error
+    if decision == "decline":
+        return cancel_privileged_operation(
+            record_store=record_store,
+            operation_id=record.operation_id,
+            actor_github_id=actor.github_id,
+            actor_login=actor.login,
+            source_event_id=source_event_id,
+            reason="Director declined the proposed backup policy.",
+            now=now,
+        )
+    if record.status == "planned":
+        fresh = plan_backup_policy_proposal(record_store, record.request)
+        if fresh != record.evidence:
+            raise ValueError("Backup authority changed; a new proposal is required.")
     assert isinstance(record.evidence, BackupPolicyHumanEvidence)
     approval = PrivilegedOperationApproval(
         approver=actor,
