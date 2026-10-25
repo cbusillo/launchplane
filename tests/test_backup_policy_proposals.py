@@ -120,6 +120,89 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             payload={"decision": decision, "source_event_id": f"ui:{decision}:{operation_id}"},
         )
 
+    def replace_human_rules(self, rules: list[dict[str, Any]]) -> None:
+        active = self.store.list_authz_policy_records(status="active", limit=2)[0]
+        policy = active.policy.model_dump(mode="json") | {"github_humans": rules}
+        replacement = type(active)(
+            record_id=f"test-policy-{active.revision + 1}",
+            revision=active.revision + 1,
+            source=active.source,
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            policy=LaunchplaneAuthzPolicy.model_validate(policy),
+        )
+        result = self.store.compare_and_write_authz_policy_record(
+            expected_record=active, replacement_record=replacement
+        )
+        self.assertEqual(result.status, "written")
+
+    def administrator_rule(self) -> dict[str, Any]:
+        return {
+            "managed_set_id": "test.administrators",
+            "managed_rule_id": "director",
+            "github_ids": [_github_human_identity().github_id],
+            "roles": ["admin"],
+            "products": ["launchplane"],
+            "contexts": ["launchplane"],
+            "actions": ["authz_policy_grant.write"],
+        }
+
+    async def test_policy_administrator_approves_without_a_lane_rule_after_policy_changes(
+        self,
+    ) -> None:
+        operation_id = await self.propose()
+        self.replace_human_rules([self.administrator_rule()])
+        approved = await self.decide(operation_id)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.replace_human_rules(
+            [self.administrator_rule(), *self.policy.model_dump(mode="json")["github_humans"]]
+        )
+        completed = execute_approved_privileged_operations_once(record_store=self.store)
+        self.assertEqual(completed[0].status, "executed", completed)
+        self.assertEqual((await self.decide(operation_id)).status_code, 200)
+        self.assertEqual(
+            self.store.list_production_backup_policy_records()[0].policy_digest,
+            self.draft.policy.policy_digest,
+        )
+
+    async def test_policy_administrator_revocation_blocks_worker_write(self) -> None:
+        operation_id = await self.propose()
+        self.replace_human_rules([self.administrator_rule()])
+        approved = await self.decide(operation_id)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.replace_human_rules(self.policy.model_dump(mode="json")["github_humans"])
+        completed = execute_approved_privileged_operations_once(record_store=self.store)
+        self.assertEqual(completed[0].status, "execution_failed", completed)
+        self.assertEqual(self.store.list_production_backup_policy_records(), ())
+
+    async def test_policy_administrator_is_rechecked_inside_the_atomic_write(self) -> None:
+        from unittest.mock import patch
+
+        operation_id = await self.propose()
+        self.replace_human_rules([self.administrator_rule()])
+        approved = await self.decide(operation_id)
+        self.assertEqual(approved.status_code, 200, approved.text)
+        active = self.store.list_authz_policy_records(status="active", limit=2)[0]
+        removed = _policy_record(self.policy)
+        with patch(
+            "control_plane.privileged_operation_worker.read_active_authz_policy_record",
+            side_effect=[active, removed],
+        ):
+            completed = execute_approved_privileged_operations_once(record_store=self.store)
+        self.assertEqual(completed[0].status, "execution_failed", completed)
+        self.assertEqual(self.store.list_production_backup_policy_records(), ())
+
+    async def test_missing_immutable_approval_rule_is_not_reported_as_a_stale_proposal(
+        self,
+    ) -> None:
+        operation_id = await self.propose()
+        rules = self.policy.model_dump(mode="json")["github_humans"]
+        rules[0]["github_ids"] = []
+        self.replace_human_rules(rules)
+        response = await self.decide(operation_id)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(self.store.list_production_backup_policy_records(), ())
+
     async def test_inert_durable_redacted_then_single_human_click_executes(self) -> None:
         operation_id = await self.propose()
         self.assertEqual(self.store.list_production_backup_policy_records(), ())

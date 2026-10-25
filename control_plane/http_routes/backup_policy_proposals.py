@@ -173,6 +173,13 @@ def register_backup_policy_proposal_routes(
                 code="backup_proposal_missing",
                 message="Backup proposal was not found.",
             ) from error
+        except PermissionError as error:
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Current immutable human authority is required to approve backup proposals.",
+            ) from error
         except (TypeError, LookupError) as error:
             raise dependencies.http_error(
                 status_code=503,

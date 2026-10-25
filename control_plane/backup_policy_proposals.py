@@ -19,6 +19,7 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_pre_state_digest,
 )
 from control_plane.durable_operation_authorization import (
+    ManagedRuleAuthorizationError,
     read_active_authz_policy_record,
     require_single_managed_github_id_rule_identity,
 )
@@ -115,15 +116,6 @@ def decide_backup_policy(
         target=target,
     ):
         raise ValueError("Backup policy decision is unauthorized.")
-    active = read_active_authz_policy_record(record_store)
-    rule = require_single_managed_github_id_rule_identity(
-        policy=active.policy,
-        identity=identity,
-        action="production_backup_authority.write",
-        product=policy.product,
-        context=policy.context,
-        target=target,
-    )
     actor = PrivilegedOperationActor(
         identity_type="github_human", github_id=identity.github_id, login=identity.login
     )
@@ -155,6 +147,21 @@ def decide_backup_policy(
         fresh = plan_backup_policy_proposal(record_store, record.request)
         if fresh != record.evidence:
             raise ValueError("Backup authority changed; a new proposal is required.")
+    active = read_active_authz_policy_record(record_store)
+    administrator = active.policy.names_administrator(identity)
+    rule = None
+    if not administrator:
+        try:
+            rule = require_single_managed_github_id_rule_identity(
+                policy=active.policy,
+                identity=identity,
+                action="production_backup_authority.write",
+                product=policy.product,
+                context=policy.context,
+                target=target,
+            )
+        except ManagedRuleAuthorizationError as error:
+            raise PermissionError("Backup approval requires immutable human authority.") from error
     assert isinstance(record.evidence, BackupPolicyHumanEvidence)
     approval = PrivilegedOperationApproval(
         approver=actor,
@@ -168,8 +175,9 @@ def decide_backup_policy(
         policy_revision=active.revision,
         policy_sha256=active.policy_sha256,
         policy_source=active.source,
-        managed_set_id=rule.managed_set_id,
-        managed_rule_id=rule.managed_rule_id,
+        managed_set_id=rule.managed_set_id if rule else "",
+        managed_rule_id=rule.managed_rule_id if rule else "",
+        grant="policy_administrator" if administrator else "policy_rule",
         expires_at=record.expires_at,
         reason="Director approved the service-pinned backup policy.",
         rollback_class="policy_cas",

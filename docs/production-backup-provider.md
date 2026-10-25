@@ -369,7 +369,13 @@ descriptor; its product card owns review and decisions.
 **Approve** and **Decline** send only the proposal ID, decision and stable source
 event to `/v1/production-backup-authority/proposals/{operation_id}/decision`.
 Decisions require a signed-in administrator, CSRF/origin validation, current
-lane write authority and immutable-ID managed approval provenance. The proposer
+lane write authority and immutable-ID approval provenance. An administrator named
+by the active policy uses that existing authority without an additional lane rule;
+other administrators require one exact managed GitHub-ID lane rule. Unrelated
+policy changes do not invalidate a pending backup proposal or that administrator's
+approval. The worker rechecks administrator membership before saving, including
+inside the atomic authority write. A lost approval permission is reported as an
+authorization refusal, separately from a changed backup plan. The proposer
 can never decide a proposal or use its `local_operator` credentials to apply backup
 authority directly. Decline persists cancellation. Approval rechecks the pinned
 plan and records the human decision. The existing privileged-operation worker
