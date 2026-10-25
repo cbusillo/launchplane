@@ -2006,6 +2006,22 @@ Writes require `product_profile.write` for the profile product in the
 Launchplane service context, validate the profile write contract before storage,
 and preserve optional `Idempotency-Key` replay/conflict behavior.
 
+#### Testing storage requirements
+
+A Director agent may use the same conditional profile POST to configure only
+`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes` within
+one existing active Odoo testing lane's `odoo_testing_drill_storage`. Read the
+current profile and strong `ETag`, preserve every other field, and submit the
+reviewed replacement with that `If-Match` and a stable `Idempotency-Key`.
+The service requires all four positive integer requirements and preserves
+existing `retained_copy_bindings` exactly, including an empty list when first
+configuring storage. Mixed edits, budget removal, production lanes, scoped
+agents and inactive or non-Odoo products refuse. Existing atomic profile
+compare-and-write, stale-revision rejection and original-key replay remain in force.
+Read the profile back after acceptance or an uncertain response. This records
+working-headroom requirements; it neither qualifies actual capacity nor starts
+a restore, capture, drill or disposal.
+
 The testing-restore-policy route is a bounded Director-agent exception for
 ordinary testing preparation. It accepts only an owned Odoo testing context,
 mode, reason and reviewed plan digest. It derives the production source from

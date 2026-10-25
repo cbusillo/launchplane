@@ -122,9 +122,12 @@ refresh. A Director agent may conditionally set only `preview.clean_testing_snap
 from false to true through the existing `POST /v1/product-profiles` route. Read the
 current profile and strong `ETag`, preserve every other field, and submit that
 exact replacement with `If-Match` and a stable `Idempotency-Key`; read back the
-profile after acceptance or an uncertain response. This path cannot install or change a budget, retention
-bindings, drill state, source settings, Client or release authority. The agent rebuilding
-testing qualifies the budget through its existing configuration path. A missing
+profile after acceptance or an uncertain response. This opt-in preserves the budget,
+retention bindings, drill state, source settings, Client and release authority.
+The agent rebuilding testing separately qualifies and records its four
+[testing storage requirements](service-boundary.md#testing-storage-requirements)
+through the same conditional profile route, preserving retention bindings and
+every other field. These changes cannot be combined in one write. A missing
 budget refuses snapshot use before reading a completed snapshot; opting in does
 not admit headroom or start a refresh. Opt-out still requires full profile authority and custody review.
 New preview copies refuse until a reviewed budget exists and an admitted refresh

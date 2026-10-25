@@ -783,6 +783,7 @@ from control_plane.preview_override_authorization import (
     director_preview_override_allowed,
     director_preview_snapshot_allowed,
 )
+from control_plane.product_testing_restore_policy import director_testing_storage_allowed
 from control_plane import artifact_scan as control_plane_artifact_scan
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
@@ -13712,22 +13713,22 @@ def create_launchplane_fastapi_app(
             product=profile.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
         )
-        director_preview_write = not policy_profile_write and director_agent_identity(identity)
-        if not policy_profile_write and not director_preview_write:
+        director_conditional_write = not policy_profile_write and director_agent_identity(identity)
+        if not policy_profile_write and not director_conditional_write:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Workflow cannot write the requested product profile.",
             )
-        if director_preview_write and (
+        if director_conditional_write and (
             not request.headers.get("If-Match", "") or not idempotency_key.strip()
         ):
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
                 code="conditional_preview_review_required",
-                message="Preview settings require If-Match and an Idempotency-Key.",
+                message="Conditional profile settings require If-Match and an Idempotency-Key.",
             )
         if profile.preview.historical_transport:
             raise _launchplane_http_error(
@@ -13809,13 +13810,18 @@ def create_launchplane_fastapi_app(
                     ),
                 ) from error
         scan_activation = (
-            director_preview_write
+            director_conditional_write
             and control_plane_artifact_scan.is_artifact_scan_activation(existing_profile, profile)
         )
-        snapshot_activation = director_preview_write and director_preview_snapshot_allowed(
+        snapshot_activation = director_conditional_write and director_preview_snapshot_allowed(
             existing_profile, profile
         )
-        if director_preview_write and not (scan_activation or snapshot_activation):
+        storage_update = director_conditional_write and director_testing_storage_allowed(
+            existing_profile, profile
+        )
+        if director_conditional_write and not (
+            scan_activation or snapshot_activation or storage_update
+        ):
             try:
                 integration_key_markers = latest_active_runtime_key_safety_policy(
                     cast(RuntimeKeySafetyPolicyReadStore, record_store)
@@ -13833,7 +13839,10 @@ def create_launchplane_fastapi_app(
                     status_code=403,
                     trace_id=trace_id,
                     code="authorization_denied",
-                    message="Director agents may conditionally change only bounded preview settings.",
+                    message=(
+                        "Director agents may conditionally change only bounded preview settings "
+                        "or testing storage requirements."
+                    ),
                 )
         if profile.odoo_business_hours != (
             existing_profile.odoo_business_hours if existing_profile else None
