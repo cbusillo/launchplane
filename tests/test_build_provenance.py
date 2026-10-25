@@ -312,14 +312,15 @@ class GenericWebBuildProvenanceTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "manifest_artifact_missing")
 
         manifest = {"id": 70, "name": "artifact-manifest-1", "expired": False}
-        for payload in (
+        inventories: tuple[dict[str, object], ...] = (
             {"total_count": 1, "artifacts": []},
             {"total_count": 0},
             {"total_count": False, "artifacts": []},
             {"artifacts": []},
             {"total_count": 2, "artifacts": [manifest, manifest]},
             {"total_count": 1, "artifacts": [{**manifest, "expired": True}]},
-        ):
+        )
+        for payload in inventories:
             with (
                 self.subTest(payload=payload),
                 patch.object(github, "get_json", side_effect=lambda path: inventory(payload, path)),
