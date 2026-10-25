@@ -125,6 +125,10 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "ingress_route.plan": ActionDeclaration("plan"),
         "inventory.read": ActionDeclaration("read"),
         "launchplane_service.read": ActionDeclaration("read"),
+        "launchplane_service.runtime_settings.apply": ActionDeclaration(
+            "write", "service", director_agent_write=True
+        ),
+        "launchplane_service.runtime_settings.plan": ActionDeclaration("plan", "service"),
         "launchplane_service.reconcile_odoo_workers": ActionDeclaration("write"),
         "launchplane_service.reconcile_verireel_workers": ActionDeclaration("write"),
         "launchplane_service_deploy.execute": ActionDeclaration("write"),

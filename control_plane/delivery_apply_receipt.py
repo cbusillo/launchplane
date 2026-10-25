@@ -1,12 +1,27 @@
 """Exact completed-receipt lookup for DB-only service delivery Applies."""
 
+from collections.abc import Callable
+from datetime import UTC, datetime
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+
+
+class ReviewedServiceResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    actor: str
+    reason: str
+    mode: Literal["dry-run", "apply"]
+    plan_digest: str
+    trace_id: str
+    runtime_environment: dict[str, object] | None
 
 
 def delivery_request_fingerprint(request: BaseModel) -> str:
@@ -51,3 +66,61 @@ def read_delivery_apply_receipt(
     ):
         raise ValueError("Service delivery Apply idempotency conflict.")
     return receipt
+
+
+def apply_reviewed_service_bundle(
+    *,
+    store: PostgresRecordStore,
+    request: BaseModel,
+    actor: str,
+    trace_id: str,
+    idempotency_key: str,
+    scope: str,
+    route_path: str,
+    plan: Callable[[], tuple[dict[str, object], ProductAuthorityBundle]],
+) -> dict[str, object]:
+    fields = request.model_dump(mode="json")
+    applying = fields["mode"] == "apply"
+
+    def completed_original() -> dict[str, object] | None:
+        stored = read_delivery_apply_receipt(
+            store=store,
+            request=request,
+            actor=actor,
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+        return dict(stored.response_payload) if stored is not None else None
+
+    if applying:
+        if not idempotency_key.strip():
+            raise ValueError("Apply requires Idempotency-Key.")
+        if (previous := completed_original()) is not None:
+            return previous
+    try:
+        summary, bundle = plan()
+        summary["trace_id"] = trace_id
+        if not applying:
+            return summary
+        if fields["expected_plan_digest"] != summary["plan_digest"]:
+            raise ValueError("The configuration changed since the reviewed dry-run.")
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=f"idempotency-{trace_id}",
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=delivery_request_fingerprint(request),
+            response_status_code=200,
+            response_trace_id=trace_id,
+            recorded_at=datetime.now(UTC).isoformat(),
+            response_payload=summary,
+        )
+        store.write_product_authority_bundle(
+            bundle.model_copy(update={"idempotency_record": receipt})
+        )
+        return summary
+    except (ValueError, FileNotFoundError, IntegrityError):
+        if applying and (previous := completed_original()) is not None:
+            return previous
+        raise

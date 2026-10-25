@@ -127,6 +127,13 @@ terminal transport may dry-run, which is an inert plan, but cannot apply.
 Append-only revisions, current-record comparison, idempotency and PostgreSQL
 storage still govern apply.
 
+[Service settings](service-runtime-settings.md) apply also inherits that
+standing permission. It writes only keys declared non-secret in source, on
+Launchplane's own service context, and cannot touch credentials, access, merge
+authority or a product's lanes. The Director's `local_operator` may apply;
+terminal transport is refused. Reviewed plan digest, idempotency and
+current-record comparison still govern apply.
+
 The expected-config declaration path remains additive for the authenticated
 Director agent. It may add a positive external-provider purpose to an existing
 nonlocal requirement, preserving its other metadata. Clearing purpose, enabling
