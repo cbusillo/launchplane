@@ -15612,6 +15612,7 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.testing_replacement_resources import (
             resource_request_payload,
             resource_context,
+            require_legacy_testing_target,
         )
         from control_plane.disposable_lanes import (
             disposable_lane_binding_sha256,
@@ -15640,6 +15641,7 @@ class PostgresRecordStore(HumanSessionStore):
                 target_id = self.read_dokploy_target_id_record(
                     context_name=request.context, instance_name="testing"
                 )
+                require_legacy_testing_target(self, target, target_id.target_id)
                 preparation = DisposableTestingResourcePreparation(
                     operation_id=request.operation_id,
                     product=product,

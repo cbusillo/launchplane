@@ -1913,6 +1913,13 @@ rollback does not make old code a supported continuation.
 
 ## Bootstrap a qualified fresh Odoo testing generation
 
+Native-published testing lanes use their native same-address rebuild. Legacy
+resource admission, bootstrap planning and path inspection return
+`native_testing_rebuild_required` before allocating replacement resources on
+such a lane. The existing legacy generation and original-key continuation stay
+available on their original recipients; this rule does not block a previously
+allocated legacy copy merely because its lane has a base URL.
+
 After resource qualification and the testing-only `upstream_restore` data policy,
 `POST /v1/products/{product}/testing-replacement-bootstrap` binds that exact
 allocation to a new independent hostname. It does not move the retained hostname

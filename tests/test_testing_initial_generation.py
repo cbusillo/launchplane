@@ -6,6 +6,7 @@ from control_plane.odoo_testing_usage import OdooTestingUsage
 from control_plane.testing_replacement_resources import (
     ROUTE,
     TestingReplacementResourcesRequest,
+    NativeTestingRebuildRequired,
 )
 from tests.support.auth import scoped_agent_transport
 from tests.support.http import request
@@ -92,6 +93,31 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
             (await self.post(key="changed-key", operation_id=result["operation_id"])).status_code,
             409,
         )
+
+    async def test_native_initial_refusal_precedes_custody_and_provider_reads(self) -> None:
+        from sqlalchemy import select
+        from control_plane.storage.postgres import LaunchplaneDisposableReplacementPreparationRow
+
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        ).model_copy(update={"source_label": "service:testing-rebuild"})
+        self.store.write_dokploy_target_record(target)
+        with self.store._session_factory() as session:
+            before = tuple(
+                session.scalars(select(LaunchplaneDisposableReplacementPreparationRow.operation_id))
+            )
+        self.credentials.reset_mock()
+        self.usage.reset_mock()
+        response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], NativeTestingRebuildRequired.code)
+        self.credentials.assert_not_called()
+        self.usage.assert_not_called()
+        with self.store._session_factory() as session:
+            after = tuple(
+                session.scalars(select(LaunchplaneDisposableReplacementPreparationRow.operation_id))
+            )
+        self.assertEqual(after, before)
 
     async def test_positive_use_production_wrong_lane_and_client_remain_refused(self) -> None:
         self.usage.return_value = OdooTestingUsage("in_use", True, True, "complete")
