@@ -836,7 +836,7 @@ def _build_queue_entry(
         ineligible_reasons.append(f"held by {repository_policy.blocked_label} label")
     is_dependency_update = (
         pull_request.actor_id is not None
-        and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
+        and repository_policy.enqueue.dependency_bot(pull_request.actor_id) is not None
     )
     label_refusal = enqueue_label_refusal(
         repository_policy, labels=pull_request.labels, label_actors=pull_request.label_actors

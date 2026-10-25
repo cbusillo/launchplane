@@ -1,3 +1,7 @@
+from tempfile import TemporaryDirectory
+from pathlib import Path
+from control_plane.storage.filesystem import FilesystemRecordStore
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 import unittest
 import hashlib
 from unittest.mock import patch
@@ -526,7 +530,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
 
             def pull_request(self, number: int) -> dict[str, object]:
                 return super().pull_request(number) | {
-                    "user": {"login": "dependabot[bot]", "type": "Bot"},
+                    "user": {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
                     "labels": [{"name": label} for label in self.review_labels],
                 }
 
@@ -537,9 +541,13 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
                     return {"files": [{"filename": "uv.lock", "status": "modified"}]}
                 return super().request(method=method, path=path, body=body)
 
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        store = FilesystemRecordStore(Path(directory.name))
+        seed_dependency_policy(store, repository=self.guard.candidate_record.candidate.repository)
         provider = DependabotProvider(self.guard.candidate_record.candidate)
         body = _batch_owner_test_notes(
-            client=GitHubMergeTrainClient(transport=provider),
+            client=GitHubMergeTrainClient(transport=provider, branch_refresh_store=store),
             candidate=self.guard.candidate_record.candidate,
         )
         intent = client_test_notes(owner_test_notes(body))

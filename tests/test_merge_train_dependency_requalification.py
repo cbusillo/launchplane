@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -341,7 +342,7 @@ def _dependency_policy_record() -> MergeTrainPolicyRecord:
         update={
             "enqueue": repository_policy.enqueue.model_copy(
                 update={
-                    "dependency_update_github_user_ids": (42,),
+                    "dependency_update_bots": (dependency_bot_policy(42),),
                     "trusted_automation_github_user_ids": (42,),
                 }
             ),
