@@ -45,23 +45,10 @@ the state needed to reuse the same request and worktree.
 The retained worktree remains worker-owned and is not a workspace for manual
 processes: terminal-process cleanup continues during polling.
 
-A signed linked-PR close or merge event records closure even if execution
-already finished. The closure marker prefixes the existing result summary;
-it describes the PR, not the execution outcome. That metadata does not change
-the completed execution's outcome, fencing token, or finish time. First
-observed closure remains final for this request even if the PR is reopened.
-Once closure is recorded, ordinary
-cleanup may remove the saved workspace under its existing safety checks.
-Terminal requests without a result PR remain eligible for cleanup. Dirty or
-uninspectable worktrees continue to be protected independently.
-
-Cleanup reconciliation also preserves workspaces awaiting PR feedback and
-reports `awaiting_pull_request_feedback`. A missed closure event can therefore
-retain disk state; absence of closure evidence is not permission to delete it.
-For a missed event, an authorized repository admin can redeliver the
-original GitHub webhook through GitHub's delivery interface. Launchplane still
-validates the signed event and its request/PR match. Do not replace missing
-closure evidence with a local record edit or manual deletion.
+Historical PR-closure summaries remain readable. The removed Every Code webhook
+and its orphan handlers no longer record new closure deliveries. Existing
+cleanup checks still retain workspaces awaiting closure evidence; absence of
+that evidence is not permission for a local record edit or workspace deletion.
 
 The retired service mutation routes no longer start or resume Every Code work.
 Historical records and saved workspaces remain preserved; missing execution
