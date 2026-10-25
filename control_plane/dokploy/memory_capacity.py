@@ -153,14 +153,14 @@ def parse_preview_memory_floors(raw: object) -> dict[str, int]:
     return floors
 
 
-def require_preview_host_memory_capacity(
+def preview_host_memory_floor(
     *,
     host: str,
     token: str,
     server_id: str,
     database_url: str | None = None,
     record_store: RuntimeEnvironmentRecordStore | None = None,
-) -> None:
+) -> int | None:
     try:
         if record_store is None:
             selected_database = resolve_database_url(database_url)
@@ -187,9 +187,26 @@ def require_preview_host_memory_capacity(
         raise PreviewMemoryCapacityRefused(
             "Preview start refused: service-record memory policy is unavailable or invalid."
         ) from None
-    if server_id not in floors:
+    return floors.get(server_id)
+
+
+def require_preview_host_memory_capacity(
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    database_url: str | None = None,
+    record_store: RuntimeEnvironmentRecordStore | None = None,
+) -> None:
+    floor = preview_host_memory_floor(
+        host=host,
+        token=token,
+        server_id=server_id,
+        database_url=database_url,
+        record_store=record_store,
+    )
+    if floor is None:
         return
-    floor = floors[server_id]
     try:
         headroom = read_host_memory_headroom(host=host, token=token, server_id=server_id)
     except PreviewMemoryCapacityRefused:

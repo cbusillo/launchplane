@@ -1970,6 +1970,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             domain_host="pr-45.cm-preview.example.test",
             runtime_port=8069,
             certificate_type="letsencrypt",
+            service_name="web",
         )
         wait_deploy.assert_called_once()
         module_update.assert_called_once()

@@ -160,6 +160,37 @@ PostgreSQL 17 and separate preview database volumes still require a full
 database restore. Snapshot capture retains its existing clone-or-copy behavior;
 only new preview filestores use overlays. This does not provide database copy-on-write.
 
+## Idle previews
+
+Service-issued previews without upstream connections put their public route on
+a small router from the same immutable image. It receives the preview generation
+identity, with no application environment file, data mount or source credential.
+The existing network layout stays the same. A private Unix socket lets Launchplane
+read activity and coordinate sleep through its existing provider transport.
+There is no public control endpoint or outbound wake callback.
+
+After fifteen minutes without traffic and with no open connections or active
+runner execution, Launchplane freezes forwarding and stops web, the runner and
+PostgreSQL. It retains their containers, database, attachments and overlay source.
+A visitor sees a page that checks again while Launchplane starts the preview.
+A waiting non-GET request is forwarded once after wake, or receives a temporary
+failure if startup exceeds its bounded wait. The router never replays it.
+
+Sleep and wake use the existing preview executor and product locks, durable
+provider reservations and host project lock. An interrupted operation keeps its
+original intent; only a fresh observation under exclusion can resume it. A
+gateway cursor cannot authorize wake on its own: Launchplane verifies the
+completed sleep receipt against the current ready generation and target.
+Manual stops, staff testing holds, changed generations, foreign reservations
+and unavailable custody remain held. Existing previews gain the router on their
+next normal data-preserving refresh.
+
+Wakes serialize on the host, retain the configured memory floor and disk reserve,
+and wait for PostgreSQL, runner and web health plus the exact runtime identity
+before forwarding traffic. Insufficient capacity preserves the original wake
+operation for another qualified observation. Gateway restarts retain their own
+sleep cursor; shared operation truth stays in Launchplane's database.
+
 ## Product transition and custody
 
 OPW's preview repair landed in PR4734. Its transition still needs the Director's

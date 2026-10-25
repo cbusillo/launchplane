@@ -1761,6 +1761,7 @@ def _execute_refresh(
             protect_workflow_ssh=restore_upstream,
             domain_certificate_type=plan.domain_certificate_type,
             preview_filestore=filestore,
+            preview_identity=expected_runtime_identity if not restore_upstream else None,
         )
 
         def qualify_resources() -> None:
@@ -1830,6 +1831,9 @@ def _execute_refresh(
                 domain_host=plan.domain_host,
                 runtime_port=plan.runtime_port,
                 certificate_type=plan.domain_certificate_type,
+                service_name="preview-router"
+                if expected_runtime_identity is not None and not restore_upstream
+                else "web",
             )
         steps.append(_step("domain_create_or_update", plan.domain_host))
 
