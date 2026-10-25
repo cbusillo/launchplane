@@ -6086,6 +6086,15 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self, refused_path: str = "/api/domain.delete", *, real_inputs: bool = False
     ) -> list[str]:
         self.advance_preview_recovery_grace = True
+        self.enterContext(
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources",
+                return_value="fixture-inspected-binding",
+            )
+        )
+        self.enterContext(
+            patch("control_plane.odoo_preview_resources.require_preview_resource_binding")
+        )
         calls: list[str] = []
         domain_exists = True
 
@@ -6275,6 +6284,17 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             first = self.run_once()
+        self.assertEqual(first.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(calls.count("/api/compose.delete"), 1)
+        reservation = self.store.read_idempotency_record(
+            scope=reconcile_reservation_scope("site"),
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=str(first.last_plan["preview_plan_id"]),
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "reconcile_required")
+        self.assertEqual(reservation.provider_effect_phase, "compose_destroy")
+
         # A later phase with a present compose returns unknown without retrying.
         for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
             self.request("preview", 5)
@@ -6322,6 +6342,17 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             first = self.run_once()
+        self.assertEqual(first.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(calls.count("/api/domain.delete"), 1)
+        reservation = self.store.read_idempotency_record(
+            scope=reconcile_reservation_scope("site"),
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=str(first.last_plan["preview_plan_id"]),
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "reconcile_required")
+        self.assertEqual(reservation.provider_effect_phase, "domain_delete")
+
         with patch.object(
             self.store, "checkpoint_mutation_provider_effect", side_effect=OSError("DB unavailable")
         ):
