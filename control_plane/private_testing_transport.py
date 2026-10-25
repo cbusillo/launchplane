@@ -146,13 +146,7 @@ def _without_provider_metadata(
             or labels.get("dokploy.service") != service_name
         ):
             raise PrivateTestingTransportRefused("Provider metadata names another target or route.")
-    networks = current.get("networks")
-    # Like testing activation, ignore only Dokploy's unused root declaration.
-    # An attachment, alias, other declaration or provider option remains refused.
-    if networks == {"dokploy-network": {"external": True}} and all(
-        not _object(service).get("networks") for service in services.values()
-    ):
-        current.pop("networks")
+    compose.discard_unused_dokploy_network(current, expected=overlay)
     return current
 
 

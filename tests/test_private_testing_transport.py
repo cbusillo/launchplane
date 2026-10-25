@@ -427,13 +427,14 @@ class PrivateTestingTransportTests(unittest.TestCase):
             self.compose["services"]["bridge"].update(change)
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.plan()
-        self.compose = deepcopy(original)
-        self.compose["networks"] = {
-            "dokploy-network": {"external": True},
-            "foreign": {"external": True},
-        }
-        with self.assertRaises(ValueError):
-            self.plan()
+        for networks in (
+            {"dokploy-network": {"external": True}, "foreign": {"external": True}},
+            {"dokploy-network": {"external": 1}},
+        ):
+            self.compose = deepcopy(original)
+            self.compose["networks"] = networks
+            with self.subTest(networks=networks), self.assertRaises(ValueError):
+                self.plan()
 
     def test_cli_validates_before_http_and_forwards_only_inert_mode(self) -> None:
         path = self.root / "plan.json"

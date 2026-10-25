@@ -1927,6 +1927,8 @@ class ActivationTests(unittest.TestCase):
         aliased_network["networks"]["default"] = {"name": "dokploy-network"}
         changed_network = deepcopy(converted)
         changed_network["networks"]["dokploy-network"]["name"] = "foreign-network"
+        malformed_network = deepcopy(converted)
+        malformed_network["networks"]["dokploy-network"]["external"] = 1
         foreign_network = deepcopy(converted)
         foreign_network["networks"]["foreign-network"] = {"external": True}
         code = TestingActivationRefusalCode
@@ -1945,6 +1947,7 @@ class ActivationTests(unittest.TestCase):
             ({}, interpolated_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, aliased_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, changed_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, malformed_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, foreign_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, "null", code.RECIPIENT_SOURCE_UNMATERIALIZED),
             ({}, "services: [" + private, code.RECIPIENT_RENDER_UNVERIFIED),
