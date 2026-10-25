@@ -202,6 +202,8 @@ def capture_clean_snapshot(spec, containers, clone):
             path / 'database.dump', budget['database_bytes'])
         if status:
             raise RuntimeError('Clean snapshot database capture failed')
+        if clone is None:
+            clone = filestore_clone_proved(mountpoint, destination.parent)
         copy_filestore(filestore, path / 'filestore', clone)
         actual_tree = snapshot_tree_digest(path / 'filestore', budget['filestore_bytes'])
         if actual_tree != expected_tree:

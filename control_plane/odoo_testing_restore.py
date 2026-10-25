@@ -799,7 +799,7 @@ class TestingProviderDenied(Exception):
 
 def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False, pass_fds=held_restore_lock)
+        stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
@@ -1210,7 +1210,7 @@ def restore_main():
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
         if gen.get('clean_snapshot_enabled'):
-            snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot', False))
+            snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot'))
             print('clean_testing_snapshot_completed=true')
             print('clean_snapshot_database_sha256=' + snapshot['database_sha256'])
             print('clean_snapshot_filestore_sha256=' + snapshot['filestore_sha256'])
@@ -1238,7 +1238,7 @@ def restore_main():
 
 
 def main():
-    global inspection_only, held_restore_lock
+    global inspection_only, inherited_lock_descriptors
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     inspection_only = bool(spec.get('inspection_only'))
     namespace = spec["generation"]["namespace"]
@@ -1253,7 +1253,7 @@ def main():
     descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        held_restore_lock = (descriptor,)
+        inherited_lock_descriptors = (descriptor,)
         restore_main()
     finally:
         os.close(descriptor)
@@ -1264,7 +1264,6 @@ __LP_CLEAN_SNAPSHOT_LIBRARY__
 
 inspection_predicate = ReadbackPredicate.NATIVE_READ
 inspection_only = False
-held_restore_lock = ()
 try:
     main()
 except TestingProviderDenied:

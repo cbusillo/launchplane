@@ -189,6 +189,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         def capture(arguments: list[str], **kwargs: Any) -> Any:
             self.calls.append(arguments)
             self.assertNotIn(["docker", "start", "web"], self.calls)
+            lock = os.stat(self.tmp / (self.gen.namespace + "-copy.lock")).st_ino
+            inherited = [os.fstat(descriptor).st_ino for descriptor in kwargs["pass_fds"]]
+            self.assertIn(lock, inherited)
             return popen([sys.executable, "-c", "print('clean database dump')"], **kwargs)
 
         def snapshot_command(arguments: list[str], **kwargs: Any) -> Any:
@@ -576,7 +579,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertEqual(status, 0, output)
         lock = os.stat(self.tmp / (self.gen.namespace + "-copy.lock")).st_ino
         for call, inherited in zip(self.calls, self.inherited_descriptors, strict=True):
-            if call[0] in {"ssh", "rsync", "docker"}:
+            if call[0] in {"ssh", "rsync", "docker", "cp"}:
                 self.assertIn(lock, inherited, call)
 
     def test_runner_left_paused_by_an_interrupted_landing_is_resumed_first(self) -> None:

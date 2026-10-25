@@ -30,7 +30,8 @@ def filestore_clone_proved(source_directory, target_directory):
         for wait in (0, __TXG_SYNC_WAIT_SECONDS__):
             time.sleep(wait)
             if subprocess.run(['cp', '--reflink=always', str(probe), str(clone)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0:
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                    pass_fds=inherited_lock_descriptors).returncode == 0:
                 return True
         return False
     finally:
