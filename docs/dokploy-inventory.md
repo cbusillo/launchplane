@@ -2,6 +2,28 @@
 title: Read-only Dokploy inventory
 ---
 
+`GET /v1/dokploy-targets/inspect?target_type=compose&target_id=<id>&include_automation=true`
+adds a bounded automation observation to the existing target inspection. The
+same option works for an application or a tracked context/instance. Existing
+inspection authorization applies; no provider writes or grants are introduced.
+The opt-in read checks the returned target ID, reports `auto_deploy` as enabled,
+disabled or unknown, and independently reads its target-scoped schedules even
+when automatic deployment is enabled. Each identified schedule reports its
+enabled tri-state and bounded deployment IDs with allowlisted status values.
+Commands, scripts, cron expressions, logs and credential values are excluded.
+
+The read has a 30-second provider-call budget, at most five seconds per call,
+20 schedules and 100 history entries per schedule. Absent/malformed or oversized
+collections and duplicate/missing identities remain incomplete or unknown;
+only an explicit empty collection reports empty history. Provider failures or
+budget exhaustion return the existing value-free unavailable response with an
+automation stage. Coverage is the configured provider credential's target
+schedule collection, excludes server-level schedules, and is an observation
+across sequential reads, not an atomic snapshot. `qualification=not_evaluated`
+never establishes executor exclusion, historical effect settlement, safe retry,
+hostname authority or permission to change a recipient. Retained custody and
+operation fences remain unchanged.
+
 `GET /v1/dokploy/inventory?limit=25` enumerates every project and environment
 visible to Launchplane's configured Dokploy credential, including empty projects,
 empty environments, untracked/self-hosting target records and database-only targets.
