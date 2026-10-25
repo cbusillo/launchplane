@@ -565,30 +565,6 @@ def resolve_effective_secret_bindings_from_store(
     return effective
 
 
-def resolve_lane_worker_secret_values(
-    *,
-    context_name: str,
-    instance_name: str,
-    database_url: str | None = None,
-) -> dict[str, str]:
-    """Resolve worker credentials stored for exactly this lane, never inherited ones."""
-    if not context_name.strip() or not instance_name.strip():
-        return {}
-    store = _open_secret_store(database_url)
-    if store is None:
-        return {}
-    try:
-        return resolve_secret_values_for_integration_from_store(
-            record_store=store,
-            integration=LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
-            context_name=context_name,
-            instance_name=instance_name,
-            scopes=frozenset({"context_instance"}),
-        )
-    finally:
-        store.close()
-
-
 def resolve_launchplane_service_secret(
     *, context_name: str, binding_key: str, database_url: str | None = None
 ) -> str:

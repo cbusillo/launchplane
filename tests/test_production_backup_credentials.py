@@ -9,7 +9,15 @@ from unittest.mock import patch
 
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding, SecretVersion
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.production_backup_credentials import BACKUP_CREDENTIAL_KEYS
+from control_plane.guest_capture_credentials import CAPTURE_KEYS as BACKUP_CREDENTIAL_KEYS
+from control_plane.guest_capture_credentials import (
+    capture_boundary,
+    validate_guest_capture_enrollment,
+)
+from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
+from control_plane.contracts.privileged_operation import PrivilegedOperationLocalOperatorActor
+from control_plane.privileged_operation_service import create_typed_privileged_operation_plan
+from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -22,6 +30,9 @@ from tests.http_app_test_support import (
     _github_oauth_config,
 )
 from tests.support.stores import sqlite_database_url
+from tests.support.auth import scoped_agent_test
+from control_plane.storage.guest_capture_bindings import GUEST_CAPTURE_BINDING_WRITE_STEP
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from tests.test_production_backup_authority import (
     _profile,
     _policy,
@@ -95,13 +106,13 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.route = "/v1/products/example-product/environments/prod/backup-worker-bindings/apply"
         setup_memory_files(self)
 
-    def make_app(self, actions: tuple[str, ...]) -> FastAPI:
+    def make_app(self, actions: tuple[str, ...], product: str = "example-product") -> FastAPI:
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=_github_human_product_config_policy(
                 actions=actions,
-                product="example-product",
-                context="example-product",
+                product=product,
+                context=product,
                 instances=("prod",),
                 schema_version=2,
             ),
@@ -377,3 +388,273 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay.status_code, 202, replay.text)
         self.assertTrue(replay.json()["replayed"])
         self.assertEqual(replay.json()["original_trace_id"], applied.json()["trace_id"])
+
+    async def test_other_product_preflight_uses_guest_credentials_without_copying(self) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "adopt")).status_code, 202)
+        payload = _profile().model_dump(mode="json")
+        payload["product"] = "other"
+        payload["lanes"][0]["context"] = "other"
+        self.store.write_product_profile_record(type(_profile()).model_validate(payload))
+        payload = _policy().model_dump(mode="json")
+        payload.update(
+            product="other", context="other", record_id="", policy_id="", policy_digest=""
+        )
+        self.store.write_production_backup_policy_record(type(_policy()).model_validate(payload))
+        host = BackupHost()
+        with (
+            patch("control_plane.secrets._decrypt_secret_value", return_value="fixture"),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            ),
+        ):
+            response = await _asgi_request(
+                self.make_app(("production_backup_authority.read",), product="other"),
+                "GET",
+                "/v1/production-backup-authority/preflight?product=other&context=other&instance=prod&promotion_action=generic_web_prod_promotion.execute",
+                headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["status"], "pass")
+        self.assertFalse(response.json()["result"]["capture_started"])
+        self.assertEqual(len(self.store.list_secret_records()), len(self.originals))
+        self.assertFalse(
+            any(
+                command[0] == "vzdump"
+                or len(command) > 1
+                and command[1] in {"snapshot", "delsnapshot"}
+                for command in host.commands
+            )
+        )
+
+    async def test_saved_pending_proposal_preflight_does_not_apply_policy(self) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "adopt")).status_code, 202)
+        current = _policy()
+        proposed = _policy(revision=2, supersedes_record_id=current.record_id)
+        proposal = create_typed_privileged_operation_plan(
+            record_store=self.store,
+            descriptor_id="production-backup-policy",
+            actor=PrivilegedOperationLocalOperatorActor(principal_sha256="a" * 64),
+            source_kind="agent_api",
+            source_event_id="preflight-proposal",
+            request=BackupPolicyProposalInput(
+                authority=ProductionBackupAuthorityWriteEnvelope(
+                    mode="dry_run",
+                    policy=proposed,
+                    expected_current_policy_record_id=current.record_id,
+                ),
+                reason="Qualify without capture",
+            ),
+            expires_in_seconds=3600,
+        ).record
+        host = BackupHost()
+        with (
+            patch("control_plane.secrets._decrypt_secret_value", return_value="fixture"),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            ),
+        ):
+            response = await _asgi_request(
+                self.app,
+                "GET",
+                f"/v1/production-backup-authority/preflight?product=example-product&context=example-product&instance=prod&promotion_action={current.promotion_action}&proposal_id={proposal.operation_id}",
+                headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["policy_record_id"], proposed.record_id)
+        self.assertEqual(response.json()["result"]["status"], "pass")
+        self.assertEqual(
+            self.store.list_production_backup_policy_records(status="active"), (current,)
+        )
+        self.assertEqual(
+            self.store.read_privileged_operation_record(proposal.operation_id).status, "planned"
+        )
+        self.assertFalse(
+            any(
+                command[0] == "vzdump"
+                or len(command) > 1
+                and command[1] in {"snapshot", "delsnapshot"}
+                for command in host.commands
+            )
+        )
+
+    @scoped_agent_test
+    async def test_scoped_caller_can_qualify_active_policy_but_cannot_probe_pending_proposal(
+        self,
+    ) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "bind")).status_code, 202)
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_operators": [
+                    {
+                        "subjects": ["scoped"],
+                        "token_labels": ["scoped"],
+                        "products": ["example-product"],
+                        "contexts": ["example-product"],
+                        "instances": ["prod"],
+                        "actions": ["production_backup_authority.read"],
+                    }
+                ],
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=policy,
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="scoped-fixture",
+                local_operator_subject="scoped",
+                local_operator_token_label="scoped",
+            ),
+        )
+        query = "/v1/production-backup-authority/preflight?product=example-product&context=example-product&instance=prod&promotion_action=generic_web_prod_promotion.execute"
+        host = BackupHost()
+        with (
+            patch("control_plane.secrets._decrypt_secret_value", return_value="fixture"),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            ) as provider,
+        ):
+            active = await _asgi_request(
+                app, "GET", query, headers={"Authorization": "Bearer scoped-fixture"}
+            )
+            self.assertEqual(active.status_code, 200, active.text)
+            self.assertEqual(active.json()["result"]["status"], "pass")
+            provider.reset_mock()
+            denied = await _asgi_request(
+                app,
+                "GET",
+                query + "&proposal_id=pending-fixture",
+                headers={"Authorization": "Bearer scoped-fixture"},
+            )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        provider.assert_not_called()
+
+    async def test_canonical_pair_needs_pin_apply_and_replays_without_relabelling(self) -> None:
+        for binding in self.store.list_secret_bindings():
+            key = next(
+                key
+                for key, identifier in self.selection.items()
+                if identifier == binding.binding_id
+            )
+            self.store.write_secret_binding(binding.model_copy(update={"binding_key": key}))
+        dry = await self.post(
+            {"bindings": self.selection, "reason": "Bind the existing guest pair"}
+        )
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.assertTrue(dry.json()["result"]["changed"])
+        body = {
+            "mode": "apply",
+            "bindings": self.selection,
+            "reason": "Bind the existing guest pair",
+            "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+        }
+        self.assertEqual((await self.post(body, "canonical-pin")).status_code, 202)
+        self.assertTrue((await self.post(body, "canonical-pin")).json()["replayed"])
+        after = await self.post({"bindings": self.selection, "reason": "Already guest-bound"})
+        self.assertEqual(after.status_code, 202, after.text)
+        self.assertFalse(after.json()["result"]["changed"])
+        self.assertEqual(
+            self.store.guest_capture_secret_ids(),
+            frozenset(record.secret_id for record in self.originals),
+        )
+
+    def revise_capture_endpoint(self, host: str) -> None:
+        for current in self.store.list_production_backup_target_records(status="active"):
+            if current.target_id not in _policy().target_ids:
+                continue
+            payload = current.model_dump(mode="json")
+            payload.update(
+                record_id="",
+                target_digest="",
+                target_revision=current.target_revision + 1,
+                supersedes_record_id=current.record_id,
+            )
+            payload["destination"].update(host=host, username="capture")
+            self.store.write_production_backup_target_record(type(current).model_validate(payload))
+
+    async def test_reviewed_endpoint_transition_reuses_the_pair_without_changing_secret_data(
+        self,
+    ) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "original-pin")).status_code, 202)
+        old_boundary = capture_boundary(_policy(), _source_target(), _destination_target())
+        old_pin = self.store.read_guest_capture_binding(old_boundary)
+        assert old_pin is not None
+        records = self.store.list_secret_records()
+        versions = tuple(
+            self.store.list_secret_versions(secret_id=record.secret_id) for record in records
+        )
+        self.revise_capture_endpoint("new-endpoint.invalid")
+        with patch.object(
+            self.store, "read_secret_version", side_effect=AssertionError("No key reads")
+        ):
+            self.store.seed_guest_capture_bindings()
+            state = self.store.guest_capture_enrollment_state("example-product", "prod")
+            body = await self.reviewed()
+            result = await self.post(body, "endpoint-transition")
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertEqual(self.store.read_guest_capture_binding(old_boundary), old_pin)
+        pin = self.store.read_guest_capture_binding(
+            old_boundary.model_copy(update={"host": "new-endpoint.invalid", "username": "capture"})
+        )
+        assert pin is not None
+        self.assertEqual(
+            pin.model_dump(exclude={"boundary"}), old_pin.model_dump(exclude={"boundary"})
+        )
+        self.assertEqual(self.store.list_secret_records(), records)
+        self.assertEqual(
+            tuple(
+                self.store.list_secret_versions(secret_id=record.secret_id) for record in records
+            ),
+            versions,
+        )
+        host = BackupHost()
+        with (
+            patch("control_plane.secrets._decrypt_secret_value", return_value="fixture"),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            ),
+        ):
+            response = await _asgi_request(
+                self.app,
+                "GET",
+                "/v1/production-backup-authority/preflight?product=example-product&context=example-product&instance=prod&promotion_action="
+                + _policy().promotion_action,
+                headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["status"], "pass")
+        self.assertFalse(response.json()["result"]["capture_started"])
+        for change in (
+            {"guest_id": "999"},
+            {"storage_id": "other"},
+            {"snapshot_prefix": "other"},
+        ):
+            candidate = old_pin.model_copy(
+                update={"boundary": old_boundary.model_copy(update=change)}
+            )
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                validate_guest_capture_enrollment(candidate, state)
+
+    async def test_failed_pin_rolls_back_rebinding_and_its_receipt(self) -> None:
+        body = await self.reviewed()
+
+        def fail_after_pin(step: str) -> None:
+            if step == GUEST_CAPTURE_BINDING_WRITE_STEP:
+                raise RuntimeError("injected")
+
+        with patch.object(
+            self.store, "_after_product_authority_bundle_step", side_effect=fail_after_pin
+        ):
+            with self.assertRaises(RuntimeError):
+                await self.post(body, "pin-rollback")
+        self.assertFalse(self.store.guest_capture_secret_ids())
+        self.assertEqual(
+            {binding.binding_key for binding in self.store.list_secret_bindings()},
+            {record.name for record in self.originals},
+        )
+        self.assertEqual((await self.post(body, "pin-rollback")).status_code, 202)
