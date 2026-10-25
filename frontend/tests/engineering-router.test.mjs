@@ -23,7 +23,6 @@ test("engineering hub and every child route deep-link exactly", () => {
     view: "hub",
   });
   for (const view of [
-    "every-code",
     "merge-train",
     "tenant-admission",
     "privileged-operations",

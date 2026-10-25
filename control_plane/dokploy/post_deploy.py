@@ -1,3 +1,6 @@
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
+from control_plane.filestore_permissions import FILESTORE_PERMISSION_SHELL
 from control_plane.production_recipient_evidence import (
     WRITER_ACTION_MARKER,
     WRITER_ACTIONS,
@@ -42,6 +45,7 @@ from control_plane.dokploy.source import (
     DokployTargetDefinition,
 )
 from control_plane.odoo_preview_import_source import preview_fishbowl_clear_program
+from control_plane import odoo_preview_restore
 from control_plane.integration_readback import (
     INTEGRATION_READBACK_CHECKED_MARKER,
     INTEGRATION_READBACK_OK_MARKER,
@@ -69,6 +73,11 @@ from control_plane.odoo_testing_restore import (
     preflight_fresh_testing_intent,
 )
 from control_plane.odoo_testing_resources import TESTING_RESOURCES_INCOMPLETE_MARKER
+from control_plane.dokploy.native_copy_stream import CAPABILITY_FAILURE_SITES_MARKER
+from control_plane.dokploy.native_copy_stream import (
+    NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+    NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS,
+)
 
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
@@ -202,6 +211,9 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         ODOO_COMPANY_EMAIL_CONTRACT_MARKER,
         "website_bootstrap_applied",
         "odoo_restore_completed",
+        "clean_testing_snapshot_completed",
+        "clean_preview_snapshot_restored",
+        "clean_snapshot_retirement_deferred",
         "odoo_restore_failure_logged",
         INTEGRATION_READBACK_OK_MARKER,
         "connection_isolation_ok",
@@ -234,7 +246,12 @@ ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
     | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
-    | {"website_settings_sha256"}
+    | {
+        "website_settings_sha256",
+        "clean_snapshot_database_sha256",
+        "clean_snapshot_filestore_sha256",
+        "clean_preview_snapshot_id",
+    }
     | READBACK_FAILURE_MARKERS
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
@@ -396,6 +413,15 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if key == CAPABILITY_FAILURE_SITES_MARKER:
+        sites = value.split(",")
+        return 0 < len(sites) <= NATIVE_PROGRAM_SOURCE_SITE_LIMIT and all(
+            site.isascii()
+            and site.isdigit()
+            and len(site) <= NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS
+            and int(site) > 0
+            for site in sites
+        )
     if readback_marker_is_safe(key, value):
         return True
     if key in {"rehearsal_result", "rehearsal_child_failure", "recipient_recovery_retained"}:
@@ -420,6 +446,9 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         "recipient_recovery_data",
         "recipient_recovery_operation",
         ODOO_PREVIEW_RESOURCES_BINDING_MARKER,
+        "clean_snapshot_database_sha256",
+        "clean_snapshot_filestore_sha256",
+        "clean_preview_snapshot_id",
     }:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
     if key in {"connection_isolation_resource_sha256", "connection_isolation_operation_sha256"}:
@@ -623,6 +652,7 @@ def run_compose_post_deploy_update(
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     run_destructive_restore: bool = False,
+    preview_ssh_source_directory: str = "",
     bootstrap_missing_database: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
@@ -630,10 +660,13 @@ def run_compose_post_deploy_update(
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
+    clean_preview_snapshot: CleanTestingSnapshot | None = None,
+    clean_preview_image_reference: str = "",
     fresh_restore_source_environment: dict[str, str] | None = None,
     prepare_native_source: Callable[[dict[str, object], str], dict[str, object]] | None = None,
     clear_preview_fishbowl_source: bool = False,
     testing_candidate_namespace: str = "",
+    database_url: str | None = None,
 ) -> dict[str, str]:
     if testing_candidate_namespace and (
         target_definition.instance != "testing"
@@ -645,6 +678,15 @@ def run_compose_post_deploy_update(
         )
     ):
         raise ValueError("Candidate schedule must belong to its isolated target namespace.")
+    if clean_preview_snapshot is not None and (
+        run_destructive_restore
+        or fresh_testing_generation is not None
+        or not clean_preview_image_reference
+        or runtime_key_safety_environment_class(target_definition.instance) != "preview"
+    ):
+        raise ValueError(
+            "Clean preview restore requires its own snapshot and image, with no upstream source."
+        )
     if fresh_testing_generation is not None:
         if (
             not run_destructive_restore
@@ -771,7 +813,7 @@ def run_compose_post_deploy_update(
     )
     resolved_schedule_execution_timeout_seconds = resolve_data_workflow_execution_timeout_seconds(
         deploy_timeout_seconds=schedule_timeout_seconds,
-        run_destructive_restore=run_destructive_restore,
+        run_destructive_restore=run_destructive_restore or clean_preview_snapshot is not None,
         requested_timeout_seconds=schedule_execution_timeout_seconds,
     )
     if fresh_testing_generation is not None:
@@ -803,6 +845,12 @@ def run_compose_post_deploy_update(
             target_payload=target_payload,
         )
     )
+    if (
+        fresh_testing_generation is not None
+        and fresh_testing_generation.clean_snapshot_enabled
+        and not schedule_server_id
+    ):
+        raise click.ClickException("Clean snapshot capture requires a registered execution server.")
     schedule_name = DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME
     schedule_app_name = (
         testing_candidate_namespace
@@ -849,6 +897,9 @@ def run_compose_post_deploy_update(
             target_definition.instance
         ),
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
+        preview_restore=run_destructive_restore
+        and runtime_key_safety_environment_class(target_definition.instance) == "preview",
+        preview_ssh_source_directory=preview_ssh_source_directory,
         probe_company_email_contract=require_company_email and allow_historical_sender_contract,
         clear_preview_fishbowl_source=clear_preview_fishbowl_source,
         website_settings_instance=target_definition.instance.strip().lower()
@@ -870,7 +921,32 @@ def run_compose_post_deploy_update(
             clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
             data_workflow_lock_path=data_workflow_lock_path,
         )
+        if fresh_testing_generation.clean_snapshot_enabled and database_url and schedule_server_id:
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            snapshot_store = PostgresRecordStore(database_url=database_url)
+            fresh_arguments["clean_snapshot_retirements"] = [
+                item.model_dump(mode="json")
+                for item in snapshot_store.clean_snapshot_retirement_candidates(
+                    fresh_testing_generation.product,
+                    fresh_testing_generation.context,
+                    schedule_server_id,
+                )
+            ]
         schedule_script = build_fresh_testing_restore_script(**fresh_arguments)
+    if clean_preview_snapshot is not None:
+        schedule_script = build_preview_clean_snapshot_script(
+            snapshot=clean_preview_snapshot,
+            server_id=schedule_server_id or "",
+            compose_project=compose_app_name,
+            database_name=database_name,
+            image_reference=clean_preview_image_reference,
+            workflow_environment=resolved_workflow_environment_overrides,
+            runtime_environment=desired_env_map,
+            readback_spec=readback_policy.encoded_spec(),
+            readback_program=INTEGRATION_READBACK_PROGRAM,
+            web_gate_path=INTEGRATION_READBACK_PASSED_PATH,
+        )
     from control_plane.odoo_testing_restore import NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES
 
     api.validate_dokploy_schedule_script(
@@ -1004,6 +1080,30 @@ def run_compose_post_deploy_update(
             evidence, allow_historical_contract=allow_historical_sender_contract
         )
     require_integration_readback_evidence(evidence, readback_policy)
+    if fresh_testing_generation is not None and fresh_testing_generation.clean_snapshot_enabled:
+        if evidence.get("clean_testing_snapshot_completed") != "true" or not schedule_server_id:
+            raise ValueError("Testing refresh lacks its clean snapshot capture proof.")
+        for key in ("clean_snapshot_database_sha256", "clean_snapshot_filestore_sha256"):
+            if re.fullmatch(r"[a-f0-9]{64}", evidence.get(key, "")) is None:
+                raise OdooPostDeployReadbackFailure(
+                    "Testing refresh lacks its clean snapshot integrity proof.", evidence=evidence
+                )
+        evidence["clean_snapshot_server_id"] = schedule_server_id
+    if (
+        clean_preview_snapshot is not None
+        and evidence.get("clean_preview_snapshot_restored") != "true"
+    ):
+        raise ValueError("Preview lacks its clean snapshot restore proof.")
+    if clean_preview_snapshot is not None:
+        actual = evidence.get("clean_preview_snapshot_id", "")
+        if re.fullmatch(r"[a-f0-9]{64}", actual) is None:
+            raise OdooPostDeployReadbackFailure(
+                "Preview lacks its actual clean snapshot identity.", evidence=evidence
+            )
+        evidence["clean_preview_snapshot_requested_id"] = clean_preview_snapshot.snapshot_id
+        evidence["clean_preview_snapshot_retained_attempt"] = str(
+            actual != clean_preview_snapshot.snapshot_id
+        ).lower()
     return evidence
 
 
@@ -2710,6 +2810,8 @@ def _build_dokploy_data_workflow_script(
     readback_policy: IntegrationReadbackPolicy,
     hold_web_until_integration_readback: bool,
     bootstrap_missing_database: bool = False,
+    preview_restore: bool = False,
+    preview_ssh_source_directory: str = "",
     probe_company_email_contract: bool = False,
     clear_preview_fishbowl_source: bool = False,
     website_settings_instance: str = "",
@@ -2723,6 +2825,10 @@ def _build_dokploy_data_workflow_script(
     """
     if bootstrap_missing_database and workflow_mode != "maintenance":
         raise ValueError("Only a maintenance run can bootstrap a missing database.")
+    if preview_restore and workflow_mode != "restore":
+        raise ValueError("Preview restore requires the restore workflow.")
+    if preview_restore and not preview_ssh_source_directory:
+        raise ValueError("Preview restore requires its explicit SSH source directory.")
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     quoted_compose_app_name = shlex.quote(compose_app_name)
     quoted_database_name = shlex.quote(database_name)
@@ -2756,6 +2862,12 @@ def _build_dokploy_data_workflow_script(
     }
     workflow_arguments = workflow_arguments_by_mode[workflow_mode]
     workflow_label = workflow_label_by_mode[workflow_mode]
+    workflow_command = (
+        "python3 -u -I -c " + shlex.quote(odoo_preview_restore.preview_restore_program())
+        if preview_restore
+        else 'python3 -u /volumes/scripts/run_odoo_data_workflows.py "${workflow_arguments[@]}"'
+    )
+    preview_workflow = runtime_key_safety_environment_class(website_settings_instance) == "preview"
     module_update_modules_configured = "1" if required_update_modules.strip() else "0"
     readback_marker_patterns = "|".join(sorted(ODOO_POST_DEPLOY_READBACK_MARKERS))
     restore_failure_grep_arguments = " ".join(
@@ -2768,7 +2880,7 @@ set -euo pipefail
 compose_project={quoted_compose_app_name}
 database_name={quoted_database_name}
 filestore_root={quoted_filestore_path}
-workflow_ssh_dir=/tmp/platform-data-workflow-ssh
+workflow_ssh_dir={shlex.quote(str(odoo_preview_restore.PREVIEW_WORKFLOW_SSH_DIRECTORY))}
 workflow_arguments=({workflow_arguments})
 workflow_environment=()
 {workflow_environment_lines}
@@ -2908,11 +3020,28 @@ neutralize_copy_connections() {{
 {CONNECTION_ISOLATION_PROGRAM}PY
 }}
 
+cleanup_preview_capture() {{
+    if [ "{int(preview_workflow)}" != "1" ]; then
+        return 0
+    fi
+    docker exec -u root \
+        -e ODOO_DB_NAME="${{database_name}}" \
+        -e ODOO_DATA_WORKFLOW_LOCK_FILE="${{data_workflow_lock_path}}" \
+        "${{script_runner_container_id}}" python3 -I -c {shlex.quote(odoo_preview_restore.preview_capture_cleanup_program())}
+}}
+
 exit_trap() {{
     local exit_status="$?"
     trap - EXIT
+    if ! cleanup_preview_capture; then
+        web_restart_blocked=1
+        exit_status=1
+    fi
     if [ "${{restore_mode}}" = "1" ] && [ "${{restore_completed}}" != "1" ]; then
         echo "odoo_restore_completed=false"
+        if [ "{int(preview_restore)}" = "1" ]; then
+            web_restart_blocked=1
+        fi
     fi
     if [ "${{web_restart_blocked}}" != "1" ] && [ "${{start_web_after_workflow}}" = "1" ]; then
         if ! enforce_website_settings; then
@@ -2983,6 +3112,16 @@ SQL
 fi
 workflow_uid=$(docker exec "${{script_runner_container_id}}" id -u)
 workflow_gid=$(docker exec "${{script_runner_container_id}}" id -g)
+if [ "{int(preview_restore)}" = "1" ]; then
+    reader_binds=$(docker inspect -f '{{{{range .Mounts}}}}{{{{if eq .Type "bind"}}}}{{{{.Source}}}}|{{{{.Destination}}}}|{{{{.RW}}}}{{{{println}}}}{{{{end}}}}{{{{end}}}}' "${{script_runner_container_id}}")
+    web_binds=$(docker inspect -f '{{{{range .Mounts}}}}{{{{if eq .Type "bind"}}}}{{{{.Source}}}}|{{{{.Destination}}}}|{{{{.RW}}}}{{{{println}}}}{{{{end}}}}{{{{end}}}}' "${{web_container_id}}")
+    if [ "${{reader_binds}}" != {shlex.quote(preview_ssh_source_directory + "|/root/.ssh|false")} ] || [ -n "${{web_binds}}" ]; then
+        echo "Preview source mount does not match its dedicated read-only root-only binding." >&2
+        exit 1
+    fi
+    echo "odoo_preview_reader_mount_verified=true"
+    docker exec "${{script_runner_container_id}}" python3 -I -c {shlex.quote(odoo_preview_restore.preview_source_process_program())}
+fi
 
 if [ "${{clear_stale_lock}}" = "1" ]; then
     echo "Clearing stale data workflow lock ${{data_workflow_lock_path}}"
@@ -2990,6 +3129,7 @@ if [ "${{clear_stale_lock}}" = "1" ]; then
 fi
 
 trap exit_trap EXIT
+cleanup_preview_capture
 
 web_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")
 if [ "${{web_status}}" = "running" ]; then
@@ -3046,8 +3186,7 @@ workflow_identity_key=$(docker exec -u root \
             filestore_database_path="$filestore_database_path/$ODOO_DATABASE_NAME"
         fi
         mkdir -p "$ODOO_FILESTORE_ROOT" "$filestore_database_path"
-        chown -R "$target_owner" "$filestore_database_path"
-        chmod -R ug+rwX "$filestore_database_path"
+        {FILESTORE_PERMISSION_SHELL}
 
         rm -rf "$WORKFLOW_SSH_DIR"
         install -d -m 700 -o "$WORKFLOW_UID" -g "$WORKFLOW_GID" "$WORKFLOW_SSH_DIR"
@@ -3083,7 +3222,7 @@ docker exec \
     -e DATA_WORKFLOW_SSH_KEY="$workflow_identity_key" \
     "${{workflow_environment[@]}}" \
     "${{script_runner_container_id}}" \
-    python3 -u /volumes/scripts/run_odoo_data_workflows.py "${{workflow_arguments[@]}}" \
+    {workflow_command} \
     2>&1 | tee "$workflow_output_file"
 workflow_pipeline_status=("${{PIPESTATUS[@]}}")
 workflow_exit_status=${{workflow_pipeline_status[0]}}
@@ -3143,6 +3282,7 @@ if [ "$neutralization_status" -ne 0 ] || [ "$readback_status" -ne 0 ]; then
     exit 1
 fi
 
+cleanup_preview_capture
 start_web_container
 if [ "${{restore_mode}}" = "1" ]; then
     restore_completed=1

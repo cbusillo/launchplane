@@ -507,6 +507,14 @@ def _merge_train_policy_record_with_provider_expectation(
 
 
 class PrivilegedOperationWorkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.setting_gaps = self.enterContext(
+            patch(
+                "control_plane.privileged_operation_registry.merge_train_target_setting_gaps",
+                return_value=(),
+            )
+        )
+
     def test_policy_review_can_be_approved_and_executed_years_after_preparation(self) -> None:
         later = FIXED_NOW + timedelta(days=3650)
         with TemporaryDirectory() as directory:
@@ -797,7 +805,7 @@ class PrivilegedOperationWorkerTests(unittest.TestCase):
         assert isinstance(record.execution, ManagedAuthzPolicySetExecutionEvidence)
         self.assertEqual(
             record.execution.failure_code,
-            "authz_policy_schema_v3_transition_denied:activation_not_current",
+            "authz_policy_schema_v3_transition_denied:ordinary_authority_retired",
         )
         self.assertFalse(record.execution.reconciliation_required)
         self.assertEqual(len(apply_errors), 1)

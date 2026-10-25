@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -108,7 +109,7 @@ class QueueBlockingTests(unittest.IsolatedAsyncioTestCase):
                     "failure_policy": failure_policy,
                     "enqueue": repository_policy.enqueue.model_copy(
                         update={
-                            "dependency_update_github_user_ids": (42,),
+                            "dependency_update_bots": (dependency_bot_policy(42),),
                             "trusted_automation_github_user_ids": (42,),
                         }
                     ),

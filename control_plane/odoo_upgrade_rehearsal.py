@@ -19,6 +19,7 @@ from control_plane._odoo_rehearsal_business_validation import (
     business_entrypoint_check_script,
     business_entrypoint_schedule,
     final_business_database,
+    business_validation_history,
     BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -516,6 +517,11 @@ def rehearsal_host_spec(
                     "ODOO_VERSION": "${ODOO_VERSION:?missing}",
                 }
             )
+        payload["services"]["pre-switch-web"] = {
+            **payload["services"]["web"],
+            "profiles": ["pre-switch"],
+            "restart": "no",
+        }
         rendered[image] = yaml.safe_dump(payload, sort_keys=False)
     environment = {
         **shape,
@@ -549,12 +555,6 @@ def rehearsal_host_spec(
         "target_image": new,
         "versions": {
             new: artifact_odoo_version(record.target_artifact),
-        },
-        "artifacts": {
-            new: record.target_artifact.artifact_id,
-        },
-        "refs": {
-            new: record.target_artifact.source_commit,
         },
         "workflow": {
             **{
@@ -1292,7 +1292,7 @@ class OdooRehearsalAdapter:
         if abandoned_attempt_sha256:
             spec["abandoned_attempt_sha256"] = abandoned_attempt_sha256
             spec["abandoned_action"] = abandoned_action or "validate-business"
-        if self.request.action == "validate-business":
+        if self.request.action in {"simulate-final", "rebuild-final", "validate-business"}:
             spec["business_validation_identity"] = business_validation_identity(
                 record, operation_key
             )
@@ -1481,6 +1481,14 @@ class OdooRehearsalAdapter:
         timings = list(record.phase_timings)
         if result.get("phase_timing") is not None:
             timing = RehearsalPhaseTiming.model_validate(result["phase_timing"])
+            if timing.pre_switch_validation is not None and any(
+                getattr(timing.pre_switch_validation, key) != value
+                for key, value in {
+                    **business_validation_identity(record, ""),
+                    "attempt_sha256": timing.attempt_sha256,
+                }.items()
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
             prior_timing = next(
                 (item for item in timings if item.attempt_sha256 == timing.attempt_sha256), None
             )
@@ -1527,13 +1535,12 @@ class OdooRehearsalAdapter:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if not set(old_copies) <= {copy.database for copy in updated.copies}:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        if self.request.action == "verify" and record.business_validations:
+        history = business_validation_history(record.model_dump(mode="json"))
+        if self.request.action == "verify" and history:
             final = next(
                 (copy for copy in updated.copies if copy.database.endswith("_final_upgrade")), None
             )
-            if final is None or final.business_validation_sha256 != canonical_json_sha256(
-                [item.model_dump(mode="json") for item in record.business_validations]
-            ):
+            if final is None or final.business_validation_sha256 != canonical_json_sha256(history):
                 raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
         public = self.public(updated)

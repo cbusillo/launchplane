@@ -49,7 +49,7 @@ from control_plane.testing_restore_prerequisite import (
 )
 
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
-from control_plane.dependency_update_review import pure_dependabot_update
+from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_reconcile_read import preview_refresh_failure
 from control_plane import secrets
@@ -403,8 +403,6 @@ def resolve_build_provenance_transport(
     record_store: object, profile: LaunchplaneProductProfileRecord
 ) -> BuildProvenanceTransport:
     """Mint the product's read-only build-provenance token from its merge-train App."""
-    if not profile.is_managed_runtime:
-        raise ProductReconcileError("Product has no managed runtime.")
     identity, repository_id = _merge_train_app_identity(
         record_store, profile, purpose="build-provenance"
     )
@@ -529,10 +527,6 @@ def reconcile_testing_target(
     testing_hooks: TestingProviderHooks = TestingProviderHooks(),
 ) -> ReconcileOutcome:
     """Deploy the testing lane's desired artifact when it runs anything else."""
-    if not profile.is_managed_runtime:
-        return ReconcileOutcome(
-            {"target": "testing", "action": "none", "reason": "product_has_no_runtime"}
-        )
     plan, desired = _plan_testing_target(
         record_store=record_store,
         profile=profile,
@@ -1853,10 +1847,6 @@ def reconcile_preview_target(
     lease_held: Callable[[], bool] = lambda: True,
 ) -> ReconcileOutcome:
     """Apply or destroy the PR's preview so it matches what the PR asks for now."""
-    if not profile.is_managed_runtime:
-        return ReconcileOutcome(
-            {"target": "preview", "action": "none", "reason": "product_has_no_runtime"}
-        )
     from control_plane.preview_reservation_recovery import (
         classify_preview_reservation,
         held_preview_reservations,
@@ -2165,7 +2155,11 @@ def _plan_preview_target(
         body=str(pull_request.get("body") or ""),
         labels=_labels(pull_request),
         review_label=profile.owner.review_label,
-        pure_dependency_update=pure_dependabot_update(pull_request, read=transport.get_json),
+        pure_dependency_update=pure_dependency_update(
+            pull_request,
+            read=transport.get_json,
+            store=record_store,
+        ),
         director_standing=profile.release_on_acceptance == "director_standing",
     )
     if not intent.explicit_override and recorded_train_candidate(
@@ -2807,10 +2801,6 @@ def reconcile_product_request(
         return ReconcileOutcome(
             {"target": request.target_kind, "action": "none", "reason": "product_inactive"}
         )
-    if not profile.is_managed_runtime:
-        return ReconcileOutcome(
-            {"target": request.target_kind, "action": "none", "reason": "product_has_no_runtime"}
-        )
     identity = product_repository_identity(record_store, profile)
     if request.target_kind == "preview" and (
         not profile.preview.enabled or not profile.preview.context.strip()
@@ -3158,10 +3148,8 @@ def request_product_reconcile_sweep(
     inventory_records = record_store.list_repository_inventory_records()
     profiles = record_store.list_product_profile_records()
     for profile in profiles:
-        if (
-            not profile.is_active
-            or not profile.is_managed_runtime
-            or not _has_repository_identity(profile, inventory_records, profiles)
+        if not profile.is_active or not _has_repository_identity(
+            profile, inventory_records, profiles
         ):
             continue
         if any(lane.instance == "testing" for lane in profile.lanes):

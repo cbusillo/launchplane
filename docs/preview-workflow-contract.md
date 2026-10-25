@@ -403,8 +403,41 @@ explicit maintenance-only `ODOO_UPDATE_MODULES` input. It also merges the
 managed Launchplane and Enterprise addon roots into `ODOO_ADDONS_PATH` so a
 stale explicit runtime-environment value cannot override the compose default
 and make required module dependencies unavailable. Refresh then deploys the
-compose and runs the managed Odoo post-deploy maintenance schedule before any
-smoke check can pass. A new preview has no database yet, and its web container
+compose and runs the managed Odoo data-workflow schedule before any
+smoke check can pass. An Odoo preview with `data_transport_mode="driver"` and
+an upstream source initially runs the existing devkit restore, replacing a partial
+unrecorded database before OpenUpgrade. Later refreshes preserve that copy through
+maintenance only when a successful generation's completed original apply receipt
+proves a requested restore completed on the same compose. The requested mode is
+attached by the control plane, independently of addon output. Unknown history on an existing preview
+refuses a reset. Retained-copy refreshes inspect current storage and never
+bootstrap a missing database. No new database marker is needed.
+
+The restore requires complete upstream settings, a non-root reader and an explicit
+dedicated SSH directory. Its source mount is root-only and read-only. The workflow
+checks actual runner/web bind mounts before staging an identity: the runner must
+have only the canonical source from Launchplane's resolved settings bound read-only at `/root/.ssh`, and web has no
+host bind. Missing, changed or unreadable mounts stop before credential access.
+The workflow must run without root, effective/permitted/ambient capabilities, root-directory
+access or privilege escalation. The existing root broker stages the temporary
+identity; it and upstream environment variables are removed after filestore
+transfer, before addon code. The restricted source remains behind that root
+boundary until a later maintenance refresh omits the mount. Qualification, cleanup
+and restore programs run in isolated Python mode so PR files in the working
+directory cannot execute through standard-library imports before that boundary.
+These checks do not establish trust in an image's interpreter or installed
+packages; [artifact provenance](artifact-provenance.md) remains a separate prerequisite.
+
+The path forces bootstrap off and sanitization on, disables copied crons and
+serves without cron threads. The existing SQL connection-isolation library runs
+and verifies its committed changes at the devkit's pre-registry credential boundary,
+before OpenUpgrade or addon code. The unsanitized recovery dump is removed before
+that code runs and cleaned up on failure. No integration credentials are retained
+from the source. Guarded schedule entry/failure cleanup removes retained capture
+and temporary identity files; cleanup failure keeps web stopped.
+Previews with `data_transport_mode="none"` use post-deploy maintenance without
+host SSH mounts, even if their template carries upstream settings. A new source-free preview has
+no database yet, and its web container
 cannot create one, because it waits for the integration read-back and that
 needs the database. So the preview schedule first asks the preview's own
 Postgres whether the database exists. If it doesn't, the schedule runs the

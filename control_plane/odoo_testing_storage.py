@@ -7,6 +7,7 @@ import re
 from typing import Any, cast
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import _read_remote
@@ -157,7 +158,7 @@ def prepare_drill_storage(
         store.update_odoo_testing_drill_receipt(
             operation.idempotency_key, time.time(), {"storage_status": "unconfigured"}
         )
-        raise DrillPrerequisite("testing_storage_budget_required")
+        raise DrillPrerequisite(TESTING_STORAGE_BUDGET_REQUIRED)
     budget = lane.odoo_testing_drill_storage.model_dump(exclude={"retained_copy_bindings"})
     binding = fresh_testing_authority_sha256(store, generation)
     pending = store.list_odoo_testing_disposal_receipts(operation.product, operation.context)

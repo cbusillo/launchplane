@@ -200,6 +200,9 @@ def bootstrap_copy_prerequisites(
     generation: FreshOdooTestingGeneration | None,
     source_mode: Literal["ssh", "container-export"],
 ) -> tuple[tuple[str, ...], str]:
+    from control_plane.clean_testing_snapshot import snapshot_storage_budget
+
+    snapshot_storage_budget(profile, context)
     require_testing_restore_policy(profile, context)
     omitted = testing_credential_omissions(store, context, generation)
     require_testing_credential_safety(store, context, omitted)
@@ -606,6 +609,8 @@ class TestingReplacementBootstrapAdapter:
                 check()
                 self._publish_safety(existing_generation, allocation.retained_target_id)
                 return existing_generation, operation, plan
+            from control_plane.clean_testing_snapshot import snapshot_storage_budget
+
             generation = existing_generation or FreshOdooTestingGeneration(
                 product=self.product,
                 context=self.request.context,
@@ -620,6 +625,8 @@ class TestingReplacementBootstrapAdapter:
                 source_mode=plan.source_mode,
                 source_binding_sha256=plan.source_binding_sha256,
                 omitted_runtime_keys=plan.omitted_runtime_keys,
+                clean_snapshot_enabled=profile.preview.clean_testing_snapshot,
+                drill_storage_budget=snapshot_storage_budget(profile, self.request.context),
                 prepared_at=utc_now_timestamp(),
             )
             if existing_generation is None:

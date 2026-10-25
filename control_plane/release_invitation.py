@@ -19,6 +19,7 @@ from control_plane.launchplane_github_delivery import resolve_delivery_github_ap
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import (
+    ReleaseChecklist,
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
     ReleaseVersion,
@@ -44,6 +45,10 @@ if TYPE_CHECKING:
 # How often a worker confirms that a decision on unchanged lane versions still covers
 # the current checklist. Changed test notes can invalidate it without a new candidate.
 SETTLED_DECISION_RECHECK_SECONDS = 1800
+WEBSITE_SETTINGS_REVIEW_NOTE = (
+    "- Website settings: review the prepared search indexing, analytics and cookie "
+    "consent settings on the release page. They apply only after you accept."
+)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -146,6 +151,18 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _settings_invitation_key(checklist: ReleaseChecklist) -> str:
+    if (
+        checklist.website_settings is None
+        or checklist.candidate.website_settings_sha256
+        == checklist.production.website_settings_sha256
+    ):
+        return ""
+    return hashlib.sha256(
+        f"website-settings:{checklist.candidate.website_settings_sha256}".encode()
+    ).hexdigest()
+
+
 def _change_link(change: InvitationChange) -> str:
     # Keep Client instructions; name constituents instead of their batch PR.
     item = change.item
@@ -159,17 +176,20 @@ def _change_link(change: InvitationChange) -> str:
 
 
 def _announced_changes(
-    request: dict[str, object] | None, changes: dict[str, InvitationChange], candidate_marker: str
+    request: dict[str, object] | None,
+    changes: dict[str, InvitationChange],
+    candidate_markers: set[str],
+    settings_key: str = "",
 ) -> set[str]:
     if request is None:
         return set()
     lines = _comment_lines(request)
-    if candidate_marker in lines and not any(
+    if candidate_markers.intersection(lines) and not any(
         line.startswith("<!-- launchplane:release-request:") for line in lines
     ):
         # A manually adopted receipt for this exact candidate already requested
         # every included change, even when its prose has no individual PR links.
-        return set(changes)
+        return set(changes) | ({settings_key} if settings_key else set())
     keys = {
         match[1]
         for line in lines
@@ -194,6 +214,9 @@ def _announced_changes(
 REPLACED_MARKER = "<!-- launchplane:release-invitation-replaced -->"
 COMPLETED_PREFIX = "<!-- launchplane:release-invitation-completed:"
 WHY_NOW = "**Why now:** "
+ENGINEERING_WHY_NOW = (
+    WHY_NOW + "Engineering updates are ready for production and need your release acceptance."
+)
 ADOPTED_ORIGINAL_PREFIX = "<!-- launchplane:release-adopted-original:"
 
 
@@ -336,6 +359,33 @@ def _request_marker(
     return f"<!-- launchplane:release-request:{key} -->"
 
 
+def _accepted_release_in_progress(
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord | None,
+    production: ReleaseVersion,
+    candidate: ReleaseVersion,
+) -> bool:
+    if decision is None or decision.decision != "accepted" or not decision.release_start:
+        return False
+    from control_plane.client_release import read_client_release_run
+
+    run = read_client_release_run(store=store, profile=profile, decision=decision)
+    return run is not None and (
+        any(step.status in {"pending", "running", "reconciliation_required"} for step in run.steps)
+        or (
+            run.state == "waiting"
+            and (
+                any(step.status == "pass" for step in run.steps)
+                or (
+                    production == decision.checklist.production
+                    and candidate == decision.checklist.candidate
+                )
+            )
+        )
+    )
+
+
 def _open_request(
     comments: list[dict[str, object]],
     marker: str,
@@ -375,14 +425,25 @@ def release_request_issue_marker(product: str) -> str:
 
 
 def release_invitation_marker(product: str, candidate: ReleaseVersion) -> str:
-    identity = (
+    identity: tuple[str, ...] = (
         product,
         candidate.artifact_id,
         candidate.source_commit,
         candidate.shared_addons_digest,
     )
+    if candidate.website_settings_sha256:
+        identity += (candidate.website_settings_sha256,)
     key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
     return f"<!-- launchplane:release-invitation:{key} -->"
+
+
+def _release_invitation_markers(product: str, candidate: ReleaseVersion) -> set[str]:
+    return {
+        release_invitation_marker(product, candidate),
+        release_invitation_marker(
+            product, candidate.model_copy(update={"website_settings_sha256": ""})
+        ),
+    }
 
 
 def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord) -> bool:
@@ -397,7 +458,7 @@ def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord
         and checklist.repository == profile.repository
         and checklist.owner_github_id == profile.owner.github_id
         and checklist.production != checklist.candidate
-        and not checklist_blockers(checklist)
+        and not checklist_blockers(checklist, profile=profile)
         and review.blockers == (CLIENT_APPROVAL_REQUIRED,)
     )
 
@@ -695,6 +756,7 @@ def _settle_completed_invitation(
             )
             comments = [comment for comment in comments if comment.get("id") not in preserved]
             marker = release_invitation_marker(profile.product, production)
+            candidate_markers = _release_invitation_markers(profile.product, production)
             completion = (
                 COMPLETED_PREFIX + hashlib.sha256(decision.record_id.encode()).hexdigest() + " -->"
             )
@@ -707,7 +769,7 @@ def _settle_completed_invitation(
                 # without another invitation. Settle only its newest open receipt.
                 for comment in reversed(comments):
                     lines = _comment_lines(comment)
-                    if marker not in lines or REPLACED_MARKER in lines:
+                    if not candidate_markers.intersection(lines) or REPLACED_MARKER in lines:
                         continue
                     if any(line.startswith(COMPLETED_PREFIX) for line in lines):
                         continue
@@ -733,7 +795,7 @@ def _settle_completed_invitation(
                 ):
                     continue
                 created_at = _timestamp(comment.get("created_at"))
-                if marker not in lines or (
+                if not candidate_markers.intersection(lines) or (
                     previous_decision is not None
                     and created_at <= _timestamp(previous_decision.decided_at)
                     and comment is not continued_request
@@ -787,18 +849,10 @@ def publish_release_invitation(
     urgent_reason: str = "",
     urgent_checklist_digest: str = "",
 ) -> bool:
-    """Keep the Client's release request current; return whether one is open.
-
-    Only a Client-facing change opens a request. An engineering-only candidate
-    waits for the next Client-facing release unless an admin deliberately opens
-    it with ``urgent_reason`` for the exact checklist the admin reviewed
-    (``urgent_checklist_digest``). The Client still has to accept it either way.
-    """
     origin = launchplane_public_origin_from_env()
     if (
         not origin
         or not profile.is_active
-        or not profile.is_managed_runtime
         or profile.production_use == "prelaunch"
         or profile.release_on_acceptance == "director_standing"
         or not profile.owner.is_set
@@ -859,6 +913,8 @@ def publish_release_invitation(
         if not receipt_due and previous_fingerprint == fingerprint and monotonic() < next_read:
             return False
         backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
+    if _accepted_release_in_progress(store, profile, last_decision, production, candidate):
+        return False
     # A person already decided about these versions. The decision still settles the
     # review only while it covers the current checklist; edited test notes change the
     # checklist without a new candidate, and the Client then needs a fresh request.
@@ -914,6 +970,12 @@ def publish_release_invitation(
         notification_changes = {
             key: change for key, change in client_changes.items() if change.client_review_requested
         }
+        settings_key = _settings_invitation_key(review.checklist)
+        change_links = {key: _change_link(change) for key, change in client_changes.items()}
+        notification_links = {key: change_links[key] for key in notification_changes}
+        if settings_key:
+            change_links[settings_key] = WEBSITE_SETTINGS_REVIEW_NOTE
+            notification_links[settings_key] = change_links[settings_key]
         marker = release_invitation_marker(profile.product, review.checklist.candidate)
         issue_marker = release_request_issue_marker(profile.product)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
@@ -937,8 +999,6 @@ def publish_release_invitation(
             if len(issues) > 1:
                 raise ValueError("Release invitation destination is ambiguous.")
             if not issues:
-                if not notification_changes and not urgent_reason:
-                    return False
                 created = github_api_request(
                     path=path,
                     token=token,
@@ -961,10 +1021,6 @@ def publish_release_invitation(
                 and not any(line.startswith(COMPLETED_PREFIX) for line in _comment_lines(comment))
             ]
             request = _open_request(comments, request_marker, last_decision)
-            # Engineering-only changes never open a release review on their own;
-            # they ride with the next Client-facing release or an urgent opening.
-            if request is None and not notification_changes and not urgent_reason:
-                return False
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
             reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
             # Recompile after destination lookup: a concurrent acceptance or testing
@@ -978,6 +1034,13 @@ def publish_release_invitation(
                 not _ready(latest, profile)
                 or latest.checklist_digest != review.checklist_digest
                 or _last_client_decision(store, profile) != last_decision
+                or _accepted_release_in_progress(
+                    store,
+                    profile,
+                    last_decision,
+                    review.checklist.production,
+                    review.checklist.candidate,
+                )
             ):
                 return False
             if issues[0].get("state") == "closed":
@@ -1007,10 +1070,13 @@ def publish_release_invitation(
                 if request
                 else _now() + timedelta(days=3)
             )
-            announced = _announced_changes(request, notification_changes, marker)
-            added = {
-                key: item for key, item in notification_changes.items() if key not in announced
-            }
+            announced = _announced_changes(
+                request,
+                notification_changes,
+                _release_invitation_markers(profile.product, review.checklist.candidate),
+                settings_key,
+            )
+            added = {key: link for key, link in notification_links.items() if key not in announced}
             # A matching candidate receipt still needs the one-time migration
             # to plain wording and cleanup of older duplicate invitations.
             formatted = (
@@ -1021,10 +1087,13 @@ def publish_release_invitation(
             # An unchanged candidate can still have a request from before release
             # steps were displayed, or corrected notes on its source PR. Refresh
             # that content silently before trusting or reminding from the receipt.
-            release_steps_changed = request is not None and any(
-                _change_link(change) not in _comment_lines(request)
-                for change in client_changes.values()
-                if change.release_test_notes
+            release_steps_changed = request is not None and (
+                (WEBSITE_SETTINGS_REVIEW_NOTE in _comment_lines(request)) != bool(settings_key)
+                or any(
+                    link not in _comment_lines(request)
+                    for key, link in change_links.items()
+                    if key == settings_key or client_changes[key].release_test_notes
+                )
             )
             if (
                 request
@@ -1071,10 +1140,7 @@ def publish_release_invitation(
                 _remember_delivery(backoff, receipt, due, True)
                 return True
             notify = not request or bool(added)
-            changes = [
-                _change_link(change)
-                for change in (added if request and added else client_changes).values()
-            ]
+            changes = list((added if request and added else change_links).values())
             if not changes:
                 changes = ["- Engineering updates only; no new Client change needs checking."]
             client = f"@{profile.owner.github_login}" if notify else profile.owner.github_login
@@ -1083,7 +1149,7 @@ def publish_release_invitation(
             )
             receipts = "\n".join(
                 f"<!-- launchplane:release-client-change:{key} -->"
-                for key in sorted(announced | notification_changes.keys())
+                for key in sorted(announced | notification_links.keys())
             )
             if reminded:
                 receipts += f"\n{reminder_marker}"
@@ -1113,12 +1179,20 @@ def publish_release_invitation(
             )
             if not request and urgent_reason:
                 why_now = WHY_NOW + " ".join(urgent_reason.split()).replace("@", "@\u200b")
+            elif not why_now or why_now == ENGINEERING_WHY_NOW:
+                why_now = "" if notification_links else ENGINEERING_WHY_NOW
             display_time = _display_time()
             action = (
                 "check the changes on the testing site, then press **Accept** or **Request changes**."
                 if client_changes
                 else "there is nothing new to test. Read the release summary, then press **Accept** or **Request changes**."
             )
+            if settings_key:
+                action = (
+                    "review the prepared website settings on the release page"
+                    + (" and check the changes on the testing site" if client_changes else "")
+                    + ", then press **Accept** or **Request changes**."
+                )
             body = (
                 f"{request_marker}\n{marker}\n{receipts}\n\n"
                 "**Release review** — is the site working with these changes, so they can go live?\n\n"
@@ -1195,6 +1269,11 @@ def adopt_release_invitation(
             + " -->"
         )
         changes = client_invitation_changes(store, profile, review.checklist)
+        notification_keys = {
+            key for key, change in changes.items() if change.client_review_requested
+        }
+        if settings_key := _settings_invitation_key(review.checklist):
+            notification_keys.add(settings_key)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
         with launchplane_github_token(
             token_resolver=resolve_launchplane_github_token,
@@ -1219,7 +1298,9 @@ def adopt_release_invitation(
                 or original.get("id") != comment_id
                 or original.get("issue_url") != f"https://api.github.com{path}/{issue_number}"
                 or issue_marker not in _receipt_lines(issue)
-                or candidate_marker not in _receipt_lines(original)
+                or not _release_invitation_markers(
+                    profile.product, review.checklist.candidate
+                ).intersection(_receipt_lines(original))
                 or REPLACED_MARKER in _receipt_lines(original)
                 or any(line.startswith(COMPLETED_PREFIX) for line in _receipt_lines(original))
                 or (
@@ -1263,8 +1344,7 @@ def adopt_release_invitation(
                     ADOPTED_ORIGINAL_PREFIX + str(comment_id) + " -->",
                     *(
                         f"<!-- launchplane:release-client-change:{key} -->"
-                        for key, change in sorted(changes.items())
-                        if change.client_review_requested
+                        for key in sorted(notification_keys)
                     ),
                     "",
                     "Existing release request adopted; no new Client action or decision.",

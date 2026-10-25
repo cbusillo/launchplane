@@ -7,10 +7,11 @@ import json
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALIDATION_LIBRARY
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
+from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from typing import Literal, TypeVar, TypedDict
+from typing import Literal, TypeVar, TypedDict, NotRequired
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
@@ -66,6 +67,7 @@ class FreshOdooTestingGeneration(BaseModel):
     drill_storage_budget: OdooTestingDrillStorageBudget | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    clean_snapshot_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
     drill_database: str = Field(
         default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
     )
@@ -84,6 +86,8 @@ class FreshOdooTestingGeneration(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> "FreshOdooTestingGeneration":
+        if self.clean_snapshot_enabled and self.drill_storage_budget is None:
+            raise ValueError("Clean testing snapshots require reviewed storage headroom.")
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
         if bool(self.discard_drill_database) != bool(self.discard_copy_binding) or (
@@ -162,7 +166,7 @@ from run_odoo_data_workflows import LocalServerSettings, OdooDataWorkflowRunner
     + r"""
 logging.disable(logging.CRITICAL)
 expected_copy_instance = globals().get("expected_copy_instance", "testing")
-if expected_copy_instance not in {"testing", "rehearsal"} or os.environ.get("PLATFORM_INSTANCE") != expected_copy_instance:
+if expected_copy_instance not in {"testing", "rehearsal", "preview"} or os.environ.get("PLATFORM_INSTANCE") != expected_copy_instance:
     raise SystemExit("Testing copy requires its exact instance")
 for key in tuple(os.environ):
     if key.startswith("ODOO_UPSTREAM_") or key.startswith("DATA_WORKFLOW_SSH_"):
@@ -431,6 +435,7 @@ class FreshRestoreScriptArguments(TypedDict):
     runtime_environment: dict[str, str]
     clear_stale_lock: bool
     data_workflow_lock_path: str
+    clean_snapshot_retirements: NotRequired[list[dict[str, object]]]
 
 
 def build_fresh_testing_restore_script(
@@ -447,6 +452,7 @@ def build_fresh_testing_restore_script(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
     native_capture: dict[str, object] | None = None,
+    clean_snapshot_retirements: list[dict[str, object]] | None = None,
 ) -> str:
     spec = fresh_testing_restore_spec(
         generation=generation,
@@ -461,6 +467,7 @@ def build_fresh_testing_restore_script(
         clear_stale_lock=clear_stale_lock,
         data_workflow_lock_path=data_workflow_lock_path,
         native_capture=native_capture,
+        clean_snapshot_retirements=clean_snapshot_retirements,
     )
     return render_fresh_testing_restore_spec(spec)
 
@@ -530,6 +537,7 @@ def fresh_testing_restore_spec(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
     native_capture: dict[str, object] | None = None,
+    clean_snapshot_retirements: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     from control_plane.dokploy.compose import (
         ODOO_DATABASE_DATA_DIRECTORY,
@@ -547,6 +555,7 @@ def fresh_testing_restore_spec(
         readback_spec=readback_spec,
     )
     spec = {
+        "clean_snapshot_retirements": clean_snapshot_retirements or [],
         "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
         "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
         "runner_healthcheck_command": ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
@@ -572,8 +581,12 @@ def fresh_testing_restore_spec(
         "native_files_program": NATIVE_TESTING_FILES_PROGRAM,
         "website_settings_program": WEBSITE_SETTINGS_PROGRAM,
         "workflow_environment": workflow_environment,
-        "ssh_key_path": source_environment.get("DATA_WORKFLOW_SSH_KEY", ""),
-        "ssh_directory": source_environment.get("DATA_WORKFLOW_SSH_DIR", ""),
+        "ssh_key_path": source_environment.get(
+            "DATA_WORKFLOW_SSH_KEY", runtime_environment.get("DATA_WORKFLOW_SSH_KEY", "")
+        ),
+        "ssh_directory": source_environment.get(
+            "DATA_WORKFLOW_SSH_DIR", runtime_environment.get("DATA_WORKFLOW_SSH_DIR", "")
+        ),
     }
     return spec
 
@@ -790,7 +803,7 @@ class TestingProviderDenied(Exception):
 
 def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False)
+        stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
@@ -896,6 +909,33 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
         # Keep the receipt even on success: original-key readback remains possible.
     finally:
         os.close(directory)
+
+
+def restore_lock_path(namespace):
+    return Path(tempfile.gettempdir()) / (namespace + "-copy.lock")
+
+
+def discard_interrupted_restore_staging(staging):
+    if staging.exists():
+        shutil.rmtree(staging)
+
+
+def unpause_runner_left_by_interrupted_landing(containers):
+    if containers["script-runner"][1].get("State", {}).get("Status") == "paused":
+        docker("unpause", containers["script-runner"][0])
+
+
+def move_staged_filestore_into_volume(runner, staged, destination):
+    docker("pause", runner)
+    try:
+        if destination.resolve() != destination:
+            raise RuntimeError("Testing filestore is aliased")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            os.rename(destination, staged.parent / "replaced-filestore")
+        os.rename(staged, destination)
+    finally:
+        docker("unpause", runner)
 
 
 def restore_main():
@@ -1045,12 +1085,15 @@ def restore_main():
             artifacts=files['artifacts']
         print(prefix+json.dumps({'type':'complete','runner':containers['script-runner'][1]['Id'],'resume':present=='1','artifacts':artifacts}),flush=True)
         return
+    unpause_runner_left_by_interrupted_landing(containers)
     present = docker("exec", "-i", containers["database"][0], "sh", "-c",
         'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
         "_", database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
     if present not in {"0", "1"}:
         raise RuntimeError("Fresh testing database inventory is ambiguous")
     resume = present == "1"
+    if gen.get('clean_snapshot_enabled'):
+        retire_clean_snapshots(spec)
     staged_bytes = 0
     assembly_bytes = 0
     if not resume and gen.get('drill_storage_budget') and gen.get('source_mode') == 'container-export':
@@ -1060,7 +1103,11 @@ def restore_main():
         files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
         staged_bytes = sum(item['size'] for item in files['chunks'])
         assembly_bytes = sum(capture[part]['size'] for part in ('database', 'filestore'))
-    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes):
+    data_backing = Path(json.loads(docker("volume", "inspect", namespace + "-data"))[0]["Mountpoint"]).resolve(strict=True)
+    restore_staging = restore_staging_path(data_backing)
+    discard_interrupted_restore_staging(restore_staging)
+    clones = {}
+    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes, clone_decisions=clones):
         raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
@@ -1082,7 +1129,7 @@ def restore_main():
                 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*", source[key]):
                     raise RuntimeError("Unsupported restore source coordinate")
             path = source["ODOO_UPSTREAM_FILESTORE_PATH"]
-            if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path):
+            if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path) or (source["ODOO_UPSTREAM_USER"] == "root" and len(Path(path).parts) == 1):
                 raise RuntimeError("Unsupported restore source filestore")
             destination = source["ODOO_UPSTREAM_USER"] + "@" + source["ODOO_UPSTREAM_HOST"]
             ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
@@ -1102,17 +1149,26 @@ def restore_main():
             ssh.extend(["-i", key_path, "-o", "IdentitiesOnly=yes", "-o", "UserKnownHostsFile=" + str(ssh_directory / "known_hosts")])
             # The host's existing identity is used only by these two fixed source reads.
             # No key, agent socket or SSH directory enters an application container.
-            remote = shlex.join(["sudo", "-u", source["ODOO_UPSTREAM_DB_USER"], "pg_dump", "-Fc", "--", source["ODOO_UPSTREAM_DB_NAME"]])
-            staging = Path(tempfile.mkdtemp(prefix=namespace + "-copy-"))
+            remote = shlex.join(
+                ["sudo", "-u", source["ODOO_UPSTREAM_DB_USER"], "pg_dump", "-Fc", "--", source["ODOO_UPSTREAM_DB_NAME"]]
+                if source["ODOO_UPSTREAM_USER"] == "root"
+                else ["pg_dump", "-U", source["ODOO_UPSTREAM_DB_USER"], "-Fc", source["ODOO_UPSTREAM_DB_NAME"]]
+            )
+            restore_staging.mkdir(mode=0o700)
+            staging = restore_staging
             dump = staging / "database.dump"
             with dump.open("xb") as output:
                 command([*ssh, destination, remote], stdout=output)
             filestore = staging / "filestore"
             filestore.mkdir()
-            command(["rsync", "-a", "--safe-links", "--no-devices", "--no-specials", "--protect-args",
+            rsync_options = (
+                ["-a", "--safe-links", "--no-devices", "--no-specials", "--protect-args"]
+                if source["ODOO_UPSTREAM_USER"] == "root"
+                else ["-a", "--no-links", "--no-devices", "--no-specials"]
+            )
+            command(["rsync", *rsync_options,
                 "-e", shlex.join(ssh), destination + ":" + path.rstrip("/") + "/", str(filestore) + "/"])
-            docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
-            docker("cp", str(filestore) + "/.", runner + ":/volumes/data/filestore/" + database)
+            move_staged_filestore_into_volume(runner, filestore, data_backing / "filestore" / database)
             docker("cp", str(dump), runner + ":" + dump_path)
             docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
         uid = docker("exec", runner, "id", "-u").decode().strip()
@@ -1140,6 +1196,11 @@ def restore_main():
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
+        if gen.get('clean_snapshot_enabled'):
+            snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot'))
+            print('clean_testing_snapshot_completed=true')
+            print('clean_snapshot_database_sha256=' + snapshot['database_sha256'])
+            print('clean_snapshot_filestore_sha256=' + snapshot['filestore_sha256'])
         # Emit only the established value-free protocol markers, never runner logs.
         for line in output.splitlines():
             if re.fullmatch(r"(?:website_bootstrap_[a-z_]+|odoo_[a-z_]+)=(?:true|false|[0-9]+)", line):
@@ -1164,7 +1225,7 @@ def restore_main():
 
 
 def main():
-    global inspection_only
+    global inspection_only, inherited_lock_descriptors
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     inspection_only = bool(spec.get('inspection_only'))
     namespace = spec["generation"]["namespace"]
@@ -1173,18 +1234,20 @@ def main():
     if spec.get('inspection_only') and not spec.get('verification_only'):
         restore_main()
         return
-    path = str(Path(tempfile.gettempdir()) / (namespace + "-copy.lock"))
+    path = restore_lock_path(namespace)
     # This coordination file is disposable across host reboot/tmp cleanup. Its
     # existence is not copy evidence; every execution uses the same flock inode.
     descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        inherited_lock_descriptors = (descriptor,)
         restore_main()
     finally:
         os.close(descriptor)
 
 
 __LP_STORAGE_MAINTENANCE_LIBRARY__
+__LP_CLEAN_SNAPSHOT_LIBRARY__
 
 inspection_predicate = ReadbackPredicate.NATIVE_READ
 inspection_only = False
@@ -1219,7 +1282,7 @@ FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
     "__LP_STORAGE_MAINTENANCE_LIBRARY__", STORAGE_MAINTENANCE_LIBRARY
-)
+).replace("__LP_CLEAN_SNAPSHOT_LIBRARY__", CLEAN_TESTING_SNAPSHOT_LIBRARY)
 
 
 def _testing_generation_hold_blocks_read(

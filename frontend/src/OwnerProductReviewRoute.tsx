@@ -18,8 +18,9 @@ import { loadDevFixtures } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { productReviewLookupFromSearch } from "./route-model";
 import { AppLink, productTopicsPath, useAppSearchParams } from "./router";
+import { needsNothingFromClient, untestedReason } from "./release-review-model";
 import { safeExternalUrl } from "./url";
-import { OwnerReleaseReviewRoute } from "./OwnerReleaseReviewRoute";
+import { ClientTestNotes, OwnerReleaseReviewRoute } from "./OwnerReleaseReviewRoute";
 
 import type {
   GitHubHumanIdentityResponse,
@@ -120,7 +121,7 @@ export function OwnerProductReviewRoute({
   const searchParams = useAppSearchParams();
   const product = searchParams.get("product");
   return product ? <>
-    <p><AppLink to={productTopicsPath(product)}>Topics to discuss</AppLink></p>
+    <p className="owner-review-topics"><AppLink to={productTopicsPath(product)}>Topics to discuss</AppLink></p>
     <OwnerReleaseReviewRoute key={product} product={product} fixtureMode={fixtureMode} />
   </> : <OwnerPreviewReviewRoute fixtureMode={fixtureMode} />;
 }
@@ -209,12 +210,16 @@ function OwnerPreviewReviewRoute({
         </>
       ) : review ? (
         <>
-        <p><AppLink to={productTopicsPath(review.product)}>Topics to discuss</AppLink></p>
+        <p className="owner-review-topics"><AppLink to={productTopicsPath(review.product)}>Topics to discuss</AppLink></p>
         <ProductReviewCard
           historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
           review={review}
-          onDecided={setReview}
+          onDecided={(decided) => setReview((current) => ({
+            ...decided,
+            pull_request_title: current?.pull_request_title ?? "",
+            client_test_notes: current?.client_test_notes ?? "",
+          }))}
           onRefresh={() => loadReview()}
         />
         </>
@@ -262,6 +267,7 @@ function ProductReviewCard({
         <p className="eyebrow">Product</p>
         <h2>{review.display_name || review.product}</h2>
       </header>
+      {review.pull_request_title ? <h3>{review.pull_request_title}</h3> : null}
       <div className="owner-review-links">
         {previewUrl ? (
           <a
@@ -290,6 +296,7 @@ function ProductReviewCard({
           Preview version {review.head_sha.slice(0, 7)}
         </p>
       ) : null}
+      <ProductReviewNotes review={review} />
       {review.latest_decision ? (
         <LatestDecision
           key={review.latest_decision.record_id}
@@ -316,6 +323,23 @@ function ProductReviewCard({
         <OwnerReviewState>{cannotDecideMessage(review)}</OwnerReviewState>
       )}
     </article>
+  );
+}
+
+function ProductReviewNotes({ review }: { review: ProductReviewResponse }) {
+  if (!review.pull_request_title) {
+    return <OwnerReviewState>The test notes could not be loaded. Open the pull request to read them.</OwnerReviewState>;
+  }
+  const reason = untestedReason(review.client_test_notes);
+  return (
+    <section aria-label="What to check">
+      <h4>What to check</h4>
+      {needsNothingFromClient(review.client_test_notes) ? (
+        <p>{reason ? `Nothing for you to test: ${reason}` : "Nothing for you to test."}</p>
+      ) : (
+        <ClientTestNotes notes={review.client_test_notes} />
+      )}
+    </section>
   );
 }
 

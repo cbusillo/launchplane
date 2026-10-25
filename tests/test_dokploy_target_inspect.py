@@ -55,6 +55,23 @@ def _fake_target_payload(
 
 
 class DokployTargetInspectTests(unittest.TestCase):
+    def test_application_endpoint_summary_distinguishes_default_custom_and_unknown(self) -> None:
+        cases: tuple[tuple[dict[str, object], str, int | None], ...] = (
+            ({"endpointSpecSwarm": None, "ports": []}, "provider_default", 0),
+            ({"endpointSpecSwarm": {}, "ports": []}, "provider_default", 0),
+            ({"endpointSpecSwarm": {"Mode": "vip"}, "ports": [{}]}, "vip", 1),
+            ({"endpointSpecSwarm": {"Mode": "dnsrr"}, "ports": []}, "dnsrr", 0),
+            ({"endpointSpecSwarm": {"Mode": "synthetic-secret"}}, "unknown", None),
+            ({}, "unknown", None),
+        )
+        for payload, mode, port_count in cases:
+            with self.subTest(payload=payload):
+                summary = summarize_dokploy_target_payload(
+                    target_type="application", target_id="app-fixture", payload=payload
+                )
+                self.assertEqual(summary.get("endpoint"), {"mode": mode, "port_count": port_count})
+                self.assertNotIn("synthetic-secret", str(summary))
+
     def test_summarize_payload_redacts_env_values_and_keeps_identity_fields(self) -> None:
         summary = summarize_dokploy_target_payload(
             target_type="compose",
@@ -105,6 +122,7 @@ class DokployTargetInspectTests(unittest.TestCase):
                         project_name="odoo",
                         domains=("cm-website-prod.shinycomputers.com",),
                         public_hosts=("example.com", "www.example.com"),
+                        env={"ODOO_UPSTREAM_USER": "synthetic-reader-not-for-output"},
                         updated_at="2026-06-14T00:00:00Z",
                         source_label="test",
                     )
@@ -161,6 +179,8 @@ class DokployTargetInspectTests(unittest.TestCase):
         self.assertEqual(tracked_target["target_name"], "cm-prod")
         self.assertEqual(tracked_target["public_hosts"], list(stored_target.public_hosts))
         self.assertEqual(tracked_target["domains"], list(stored_target.domains))
+        self.assertEqual(tracked_target["env_keys"], sorted(stored_target.env))
+        self.assertNotIn("synthetic-reader-not-for-output", str(tracked_target))
         self.assertEqual(provider_target_record["display_name"], "cm-prod")
         self.assertEqual(
             provider_target_record["provider_evidence"],

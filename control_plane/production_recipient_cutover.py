@@ -1,5 +1,7 @@
 """Accepted-release worker integration for independent private production recipients."""
 
+from control_plane.contracts.production_consumer_reads import ProductionConsumerReview
+
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 
 from collections.abc import Callable
@@ -87,6 +89,9 @@ class RecipientCutoverRequest(BaseModel):
     writer_binding_id: str = Field(min_length=1)
     destination_backup_operation_id: str = Field(min_length=1)
     readiness_url: str = Field(min_length=1)
+    consumer_review: ProductionConsumerReview | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")

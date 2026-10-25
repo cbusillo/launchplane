@@ -5,6 +5,7 @@ import re
 from typing import Literal
 
 import click
+import yaml
 
 from control_plane.dokploy import api
 from control_plane.dokploy.source import DokployTargetDefinition
@@ -138,10 +139,16 @@ def render_odoo_raw_compose_file(
     runtime_port: int = 8069,
     publish_host_ports: bool = True,
     mount_workflow_ssh: bool = True,
+    protect_workflow_ssh: bool = False,
     isolated_testing: bool = False,
     private_backend_alias: str = "",
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
+    preview_filestore: dict[str, object] | None = None,
 ) -> str:
+    if preview_filestore is not None and (publish_host_ports or mount_workflow_ssh):
+        raise ValueError("A preview filestore requires private ports and no source identity.")
+    if protect_workflow_ssh and not mount_workflow_ssh:
+        raise ValueError("Protected workflow SSH requires its source mount.")
     if private_backend_alias and (
         not isolated_testing
         or domain_hosts
@@ -175,11 +182,15 @@ def render_odoo_raw_compose_file(
       - "${ODOO_WEB_HOST_PORT:-8069}:8069"
       - "${ODOO_LONGPOLL_HOST_PORT:-8072}:8072"
 """
-    workflow_ssh_mounts = (
-        "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/home/ubuntu/.ssh:ro\n"
-        "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/root/.ssh:ro\n"
-        if mount_workflow_ssh
-        else ""
+    workflow_ssh_mounts = ""
+    if mount_workflow_ssh:
+        if not protect_workflow_ssh:
+            workflow_ssh_mounts += (
+                "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/home/ubuntu/.ssh:ro\n"
+            )
+        workflow_ssh_mounts += "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/root/.ssh:ro\n"
+    workflow_security = (
+        '    security_opt: ["no-new-privileges:true"]' if protect_workflow_ssh else ""
     )
     # Dokploy adds `default` to domain-enabled services. Make that very network
     # private for testing, so provider conversion cannot add an outbound bridge.
@@ -196,7 +207,7 @@ def render_odoo_raw_compose_file(
     testing_networks = "  default:\n    internal: true\n" if isolated_testing else ""
     web_extra_hosts = (
         ""
-        if isolated_testing
+        if isolated_testing or not publish_host_ports
         else '    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
     )
     cron_threads = '"0"' if isolated_testing else "${ODOO_MAX_CRON_THREADS:-2}"
@@ -206,7 +217,7 @@ def render_odoo_raw_compose_file(
     # Keep this intentionally close to odoo-devkit/docker-compose.yml. Launchplane
     # renders the image reference directly so Dokploy git checkout state cannot
     # decide what Odoo artifact is deployed.
-    return f"""x-odoo-base: &odoo-base
+    compose_file = f"""x-odoo-base: &odoo-base
   image: {rendered_image_reference}
   pull_policy: always
   restart: unless-stopped
@@ -323,6 +334,7 @@ services:
 
   script-runner:
     <<: *odoo-base
+{workflow_security}
 {private_network}
     volumes:
       - odoo_data:/volumes/data
@@ -364,6 +376,20 @@ networks:
   dokploy-network:
     external: true
 """
+    if preview_filestore is None:
+        return compose_file
+    compose = yaml.safe_load(compose_file)
+    compose["volumes"]["odoo_filestore"] = preview_filestore
+    for service in ("web", "script-runner"):
+        compose["services"][service]["volumes"].append(
+            {
+                "type": "volume",
+                "source": "odoo_filestore",
+                "target": "/volumes/data/filestore/${ODOO_DB_NAME:?missing}",
+                "volume": {"nocopy": True},
+            }
+        )
+    return yaml.safe_dump(compose, sort_keys=False)
 
 
 _COMPOSE_DEFAULT_PATTERN = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")

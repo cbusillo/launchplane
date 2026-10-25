@@ -87,11 +87,6 @@ from tests import test_legacy_preview_reconciliation as legacy_preview_tests
 from tests import test_legacy_odoo_preview_reconciliation as legacy_odoo_tests
 from tests.http_app_test_support import _asgi_request
 from control_plane import authz_grant_service, authz_policy_activation
-from control_plane.authz_candidate_preparation import (
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-)
 from tests.support.retired_approval_history import _policy as _change_impact_policy
 from tests.support.retired_approval_history import _audit as _change_impact_audit
 from control_plane.contracts.retired_change_impact_audit import (
@@ -193,14 +188,11 @@ from control_plane.contracts.privileged_operation import (
     ManagedSecretReencryptionPlanInput,
     PRIVILEGED_SECRET_OPERATION_APPROVE_ACTION,
     PrivilegedOperationActor,
-    PrivilegedOperationApproval,
     PrivilegedOperationEventRecord,
     PrivilegedOperationRecord,
-    build_privileged_operation_id,
     privileged_operation_evidence_digest,
     privileged_operation_record_digest,
     privileged_operation_request_digest,
-    privileged_operation_pre_state_digest,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -258,22 +250,14 @@ from control_plane.service_auth import (
 )
 from control_plane.storage.postgres import (
     LaunchplaneMergeTrainBatchLandingPlanRow,
-    LaunchplanePrivilegedOperationRow,
     DbOnlyMutationRequest,
-    LaunchplaneEveryCodeWorkRequestRow,
     LaunchplaneOwnerControlIssuedChallengeRow,
     MutationReservationResult,
-    OrdinaryAgentDeliveryActivationConflictError,
     OrdinaryAgentPersistenceError,
     OutboxWithIdempotencyRequest,
     PostgresRecordStore,
     LaunchplaneIdempotencyRow,
 )
-from tests.test_ordinary_agent_activation_storage import (
-    _event as _activation_event,
-    _record as _activation_record,
-)
-from tests.test_privileged_operation import _record as _privileged_operation_record
 from control_plane.storage.factory import (
     PrivilegedOperationWorkerSchemaError,
     build_privileged_operation_worker_store,
@@ -967,49 +951,6 @@ def _every_code_work_request() -> EveryCodeWorkRequestRecord:
         queued_at="2026-07-13T09:00:00Z",
         updated_at="2026-07-13T09:00:00Z",
     )
-
-
-class _BlockingEveryCodeFinishStore(PostgresRecordStore):
-    def __init__(
-        self,
-        *,
-        database_url: str,
-        finish_row_synced: threading.Event,
-        release_finish: threading.Event,
-    ) -> None:
-        super().__init__(database_url=database_url)
-        self._finish_row_synced = finish_row_synced
-        self._release_finish = release_finish
-
-    def _sync_every_code_work_request_row(
-        self,
-        row: LaunchplaneEveryCodeWorkRequestRow,
-        record: EveryCodeWorkRequestRecord,
-    ) -> None:
-        super()._sync_every_code_work_request_row(row, record)
-        if record.state == "done":
-            self._finish_row_synced.set()
-            if not self._release_finish.wait(timeout=10):
-                raise TimeoutError("timed out waiting to release Every Code finish transaction")
-
-
-class _BlockingAuthzLockStore(PostgresRecordStore):
-    def __init__(
-        self,
-        *,
-        database_url: str,
-        lock_acquired: threading.Event,
-        release_lock_holder: threading.Event,
-    ) -> None:
-        super().__init__(database_url=database_url)
-        self._test_lock_acquired = lock_acquired
-        self._test_release_lock_holder = release_lock_holder
-
-    def _lock_active_authz_policy(self, session: Any) -> None:
-        super()._lock_active_authz_policy(session)
-        self._test_lock_acquired.set()
-        if not self._test_release_lock_holder.wait(timeout=10):
-            raise TimeoutError("timed out waiting to release authorization lock holder")
 
 
 def _mutation_reservation(
@@ -4268,13 +4209,13 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_preview_drop_startup_joins_an_already_applied_delivery_drop(self) -> None:
         from control_plane.storage.migrations.versions import (
             e7c1d5e9a3b6_drop_retired_delivery_tables as held,
-            da72490fce13_join_topics_retirement as topics_join,
+            a5d9f1b3c7e4_join_archive_topics_retirement as archive_join,
         )
 
         with _isolated_postgres_database() as url:
             alembic_command.upgrade(_alembic_config(url), held.revision)
-            self.assertEqual(migrate_schema(database_url=url), topics_join.revision)
-            self.assertEqual(migrate_schema(database_url=url), topics_join.revision)
+            self.assertEqual(migrate_schema(database_url=url), archive_join.revision)
+            self.assertEqual(migrate_schema(database_url=url), archive_join.revision)
 
     def test_preview_drop_refuses_busy_table_and_retained_dependency(self) -> None:
         from control_plane.storage.migrations.versions import (
@@ -5741,12 +5682,6 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
-    def test_nonruntime_registration_competes_for_product_and_repository(self) -> None:
-        from tests.test_nonruntime_products import assert_registration_race
-
-        with _store_for_fresh_head_database() as store:
-            assert_registration_race(self, store)
-
     def test_discussion_topic_retries_are_atomic_on_independent_connections(self) -> None:
         from control_plane.contracts.discussion_topic import DiscussionTopicInput
 
@@ -5772,6 +5707,64 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             self.assertNotEqual(added[0], closed[0])
             self.assertEqual(store.list_discussion_topics("site-b"), ())
             self.assertEqual(len(store.list_discussion_topics("site-a", include_closed=True)), 1)
+
+    def test_delivery_failure_aggregation_keeps_event_time_across_mixed_offset_reminders(
+        self,
+    ) -> None:
+        from control_plane.production_delivery_monitor import (
+            _canonical_time,
+            _delivery_failure_reference,
+            _observe,
+            record_production_delivery_failure,
+        )
+        from control_plane.storage.delivery_evidence import DeliveryFailureObservation
+        from tests.test_public_ingress_monitor import _profile
+
+        profile = _profile()
+        lane = profile.lanes[0]
+        began = datetime.now(timezone.utc)
+        with _store_for_fresh_head_database() as store:
+            store.write_product_profile_record(profile)
+            for moment in (began, began + timedelta(seconds=2)):
+                record_production_delivery_failure(
+                    store,
+                    profile,
+                    lane,
+                    candidate="fixture-artifact",
+                    reason="deployment_failed",
+                    trace_id="fixture-operation",
+                    observed_at=moment.isoformat(),
+                )
+            incident = store.list_public_ingress_incident_records(status="open")[0]
+            observation = store.read_public_ingress_observation_record(
+                incident.latest_observation_id
+            )
+            reference = _delivery_failure_reference(
+                DeliveryFailureObservation(
+                    summary=observation.summary,
+                    observed_at=observation.observed_at,
+                    target_url=observation.targets[0].url,
+                )
+            )
+            _observe(
+                store,
+                profile,
+                lane,
+                check_name=incident.check_name,
+                failed=True,
+                summary=observation.summary,
+                reason="deployment_failed",
+                observed_at=(began + timedelta(minutes=1))
+                .astimezone(timezone(timedelta(hours=-4)))
+                .isoformat(),
+                failure_reference=reference,
+            )
+            compact = store.list_delivery_failure_observations(incident_id=incident.incident_id)
+            self.assertEqual(len(compact), 1)
+            self.assertEqual(
+                _canonical_time(compact[0].observed_at), _canonical_time(began.isoformat())
+            )
+            self.assertEqual(_delivery_failure_reference(compact[0]), reference)
 
     def test_delivery_projection_uses_canonical_times_and_candidate_identities(self) -> None:
         from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
@@ -5873,11 +5866,12 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     for incident in store.list_public_ingress_incident_records(status="open")
                 )
             )
+            case.now += timedelta(seconds=1)
             success = record.model_copy(
                 update={
                     "record_id": failed.record_id,
                     "deploy": record.deploy.model_copy(
-                        update={"finished_at": (case.now + timedelta(seconds=1)).isoformat()}
+                        update={"finished_at": case.now.isoformat()}
                     ),
                 }
             )
@@ -7244,174 +7238,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 for store in stores:
                     store.close()
 
-    def test_delivery_administration_removal_and_activation_install_serialize_both_orders(
-        self,
-    ) -> None:
-        def arrange(
-            database_url: str,
-        ) -> tuple[
-            PostgresRecordStore,
-            LaunchplaneAuthzPolicyRecord,
-            LaunchplaneAuthzPolicyRecord,
-            Any,
-            Any,
-        ]:
-            store = PostgresRecordStore(database_url=database_url)
-            policy = LaunchplaneAuthzPolicy(
-                schema_version=2,
-                github_humans=(
-                    GitHubHumanPolicyRule(
-                        managed_set_id=(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID),
-                        managed_rule_id=(ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID),
-                        github_ids=(123,),
-                        roles=("admin",),
-                        products=("launchplane",),
-                        contexts=("launchplane",),
-                        actions=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_ACTIONS,
-                    ),
-                ),
-            )
-            active = store.seed_authz_policy_if_absent(
-                LaunchplaneAuthzPolicyRecord(
-                    record_id="delivery-administration-race-active",
-                    source="test:delivery-administration-race",
-                    updated_at="2026-09-12T16:00:00Z",
-                    policy=policy,
-                )
-            )
-            replacement = LaunchplaneAuthzPolicyRecord(
-                record_id="delivery-administration-race-removed",
-                revision=active.revision + 1,
-                source="test:delivery-administration-race",
-                updated_at="2026-09-12T16:01:00Z",
-                policy=LaunchplaneAuthzPolicy(schema_version=2),
-            )
-            source_actor = PrivilegedOperationActor(
-                identity_type="github_human", github_id=123, login="postgres-pilot"
-            )
-            source = _privileged_operation_record().model_copy(
-                update={
-                    "operation_id": build_privileged_operation_id(
-                        github_id=123,
-                        source_event_id="delivery-administration-race",
-                    ),
-                    "requested_by": source_actor,
-                }
-            )
-            approval = PrivilegedOperationApproval(
-                approver=source_actor,
-                descriptor_id=source.descriptor_id,
-                descriptor_version=source.descriptor_version,
-                request_digest=source.request_digest,
-                evidence_digest=source.evidence_digest,
-                plan_digest=source.evidence.plan_digest,
-                pre_state_digest=privileged_operation_pre_state_digest(source.evidence),
-                policy_record_id=active.record_id,
-                policy_revision=active.revision,
-                policy_sha256=active.policy_sha256,
-                policy_source=active.source,
-                managed_set_id=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
-                managed_rule_id=ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
-                expires_at=source.expires_at,
-                reason="Approve the bounded activation setup.",
-                rollback_class="key_retained",
-            )
-            source = source.model_copy(update={"status": "approved", "approval": approval})
-            with store._session_factory() as session:
-                session.add(
-                    LaunchplanePrivilegedOperationRow(
-                        operation_id=source.operation_id,
-                        descriptor_id=source.descriptor_id,
-                        status=source.status,
-                        requester_github_id=source_actor.github_id,
-                        created_at=source.created_at,
-                        updated_at=source.updated_at,
-                        expires_at=source.expires_at,
-                        payload=source.model_dump(mode="json"),
-                    )
-                )
-                session.commit()
-            activation = _activation_record(
-                operation_id=source.operation_id,
-                installed_at=active.updated_at,
-                expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-            )
-            return (
-                store,
-                active,
-                replacement,
-                activation,
-                _activation_event(
-                    activation,
-                    action="installed",
-                    source_operation_id=activation.source_setup_operation_id,
-                ),
-            )
-
-        for first_action in ("activation", "removal"):
-            with self.subTest(first_action=first_action), _head_postgres_database() as url:
-                base_store, active, replacement, activation, activation_event = arrange(url)
-                lock_acquired = threading.Event()
-                release_winner = threading.Event()
-                winner = _BlockingAuthzLockStore(
-                    database_url=url,
-                    lock_acquired=lock_acquired,
-                    release_lock_holder=release_winner,
-                )
-                loser = PostgresRecordStore(database_url=url)
-                try:
-
-                    def install(store: PostgresRecordStore) -> str:
-                        try:
-                            return store.install_ordinary_agent_delivery_activation(
-                                activation, activation_event
-                            ).status
-                        except OrdinaryAgentDeliveryActivationConflictError:
-                            return "conflict"
-
-                    def remove(store: PostgresRecordStore) -> str:
-                        return store.compare_and_write_authz_policy_record(
-                            expected_record=active,
-                            replacement_record=replacement,
-                        ).status
-
-                    first = install if first_action == "activation" else remove
-                    second = remove if first_action == "activation" else install
-                    with ThreadPoolExecutor(max_workers=2) as executor:
-                        first_future = executor.submit(first, winner)
-                        self.assertTrue(lock_acquired.wait(timeout=10))
-                        second_future = executor.submit(second, loser)
-                        time.sleep(0.1)
-                        self.assertFalse(second_future.done())
-                        release_winner.set()
-                        outcomes = (
-                            first_future.result(timeout=10),
-                            second_future.result(timeout=10),
-                        )
-
-                    if first_action == "activation":
-                        self.assertEqual(
-                            outcomes, ("written", "authz_policy_delivery_activation_active")
-                        )
-                        self.assertEqual(
-                            len(base_store.list_ordinary_agent_delivery_activation_records()), 1
-                        )
-                        self.assertEqual(
-                            base_store.list_authz_policy_records(status="active")[0], active
-                        )
-                    else:
-                        self.assertEqual(outcomes, ("written", "conflict"))
-                        self.assertEqual(
-                            base_store.list_ordinary_agent_delivery_activation_records(), ()
-                        )
-                        self.assertEqual(
-                            base_store.list_authz_policy_records(status="active")[0], replacement
-                        )
-                finally:
-                    winner.close()
-                    loser.close()
-                    base_store.close()
-
     def test_owner_control_challenge_issuance_serializes_one_active_operation(self) -> None:
         with _store_for_fresh_head_database() as store:
             private_key = Ed25519PrivateKey.generate()
@@ -8432,102 +8258,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 second_store.close()
 
         self.assertEqual(completed.state, "done")
-
-    def test_every_code_pr_close_waits_for_fresh_finish_and_preserves_higher_fence(
-        self,
-    ) -> None:
-        with _store_for_fresh_head_database() as store:
-            record = _every_code_work_request()
-            store.write_every_code_work_request_record(record)
-            stale_claim = store.claim_every_code_work_request_record(
-                request_id=record.request_id,
-                host="worker-old",
-                claimed_at="2026-07-13T09:01:00Z",
-                lease_seconds=60,
-            )
-            assert stale_claim is not None
-            recovered = store.recover_stale_every_code_work_request_record(
-                expected_record=stale_claim,
-                recovered_at="2026-07-13T09:03:00Z",
-            )
-            assert recovered is not None
-            fresh_claim = store.claim_every_code_work_request_record(
-                request_id=record.request_id,
-                host="worker-new",
-                claimed_at="2026-07-13T09:04:00Z",
-            )
-            assert fresh_claim is not None
-
-            finish_row_synced = threading.Event()
-            release_finish = threading.Event()
-            close_started = threading.Event()
-            close_finished = threading.Event()
-            finish_store = _BlockingEveryCodeFinishStore(
-                database_url=store.database_url,
-                finish_row_synced=finish_row_synced,
-                release_finish=release_finish,
-            )
-            close_store = PostgresRecordStore(database_url=store.database_url)
-
-            def finish_fresh_claim() -> EveryCodeWorkRequestRecord:
-                return finish_store.update_every_code_work_request_status_record(
-                    request_id=record.request_id,
-                    update=EveryCodeWorkRequestStatusUpdate(
-                        state="done",
-                        host="worker-new",
-                        fencing_token=fresh_claim.fencing_token,
-                        updated_at="2026-07-13T09:05:00Z",
-                        result_pr_url="https://github.com/cbusillo/code/pull/1700",
-                        result_summary="Worker completed from the newer claim.",
-                    ),
-                )
-
-            def close_pull_request() -> EveryCodeWorkRequestRecord | None:
-                close_started.set()
-                try:
-                    return close_store.close_every_code_work_request_for_pull_request_record(
-                        request_id=stale_claim.request_id,
-                        expected_lifecycle_id=fresh_claim.lifecycle_id,
-                        pr_url="https://github.com/cbusillo/code/pull/1700",
-                        merged=True,
-                        closed_at="2026-07-13T09:06:00Z",
-                    )
-                finally:
-                    close_finished.set()
-
-            executor = ThreadPoolExecutor(max_workers=2)
-            try:
-                finish_future = executor.submit(finish_fresh_claim)
-                self.assertTrue(finish_row_synced.wait(timeout=5))
-                close_future = executor.submit(close_pull_request)
-                self.assertTrue(close_started.wait(timeout=5))
-                self.assertFalse(close_finished.wait(timeout=0.1))
-                release_finish.set()
-                finished = finish_future.result(timeout=10)
-                closed = close_future.result(timeout=10)
-            finally:
-                release_finish.set()
-                executor.shutdown(wait=True)
-                finish_store.close()
-                close_store.close()
-
-            loaded = store.read_every_code_work_request_record(record.request_id)
-
-        self.assertEqual(stale_claim.fencing_token, 1)
-        self.assertNotEqual(stale_claim.lifecycle_id, fresh_claim.lifecycle_id)
-        self.assertEqual(finished.fencing_token, 2)
-        self.assertIsNotNone(closed)
-        assert closed is not None
-        self.assertEqual(closed.state, "done")
-        self.assertEqual(closed.lifecycle_id, fresh_claim.lifecycle_id)
-        self.assertEqual(closed.fencing_token, 2)
-        self.assertEqual(closed.claimed_by_host, "worker-new")
-        self.assertEqual(
-            closed.result_summary,
-            "Linked pull request merged: https://github.com/cbusillo/code/pull/1700\n"
-            "Worker completed from the newer claim.",
-        )
-        self.assertEqual(loaded, closed)
 
     def test_every_code_claim_commits_replay_evidence_atomically(self) -> None:
         with _store_for_fresh_head_database() as store:
@@ -15557,6 +15287,31 @@ class RealPostgresTestingCandidateTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         fixture.test_lost_creation_reply_preserves_old_copy_and_never_repeats_effect()
+
+
+class RealPostgresTestingAddressTests(unittest.TestCase):
+    def test_canonical_publication_and_original_key_recovery(self) -> None:
+        from tests import test_testing_address as address_tests
+
+        cases = (
+            address_tests.TestingAddressTests.test_canonical_amendment_preserves_copy_and_original_receipts,
+            address_tests.TestingAddressTests.test_health_refusal_rolls_back_every_canonical_record,
+            address_tests.TestingAddressTests.test_expiry_during_canonical_transaction_rolls_back_every_record,
+            address_tests.TestingAddressTests.test_lost_metadata_reply_completes_from_committed_receipt,
+            address_tests.TestingAddressTests.test_lost_route_reply_recovers_original_attempt_before_canonical_publication,
+            address_tests.TestingAddressTests.test_original_key_cancellation_restores_route_after_profile_changes,
+            address_tests.TestingAddressTests.test_lost_inverse_reply_settles_before_cancellation_completes,
+            address_tests.TestingAddressTests.test_http_original_key_cancellation,
+        )
+        for case in cases:
+            with self.subTest(case=case.__name__), _head_postgres_database() as url:
+                fixture = address_tests.TestingAddressTests()
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    case(fixture)
+                finally:
+                    fixture.doCleanups()
 
 
 class RealPostgresTestingPublicationTests(unittest.TestCase):

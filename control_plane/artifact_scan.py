@@ -57,7 +57,6 @@ def is_artifact_scan_activation(
     if (
         existing is None
         or not existing.is_active
-        or not existing.is_managed_runtime
         or existing.image.scan_enabled
         or not replacement.image.scan_enabled
     ):
@@ -110,7 +109,7 @@ def qualify_product_artifact(record_store: object, *, product: str) -> ArtifactS
         profile = store.read_product_profile_record(product)
     except FileNotFoundError:
         raise ValueError("An active product profile is required.") from None
-    if not profile.is_active or not profile.is_managed_runtime:
+    if not profile.is_active:
         raise ValueError("An active product profile is required.")
     try:
         identity = product_repository_identity(store, profile)

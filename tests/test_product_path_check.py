@@ -204,7 +204,7 @@ class ProductPathCheckTests(unittest.TestCase):
                     },
                 )
                 store = Mock()
-                store.list_product_reconcile_requests.return_value = (record,)
+                store.read_product_reconcile_request.return_value = record
                 inputs = read_path_check_inputs(
                     path="testing",
                     profile=_profile(),
@@ -247,8 +247,8 @@ class ProductPathCheckTests(unittest.TestCase):
                     "control_plane.product_path_check.read_staff_testing_hold", return_value=None
                 ),
             ):
-                store.list_product_reconcile_requests.return_value = (
-                    record.model_copy(update={"state": state}),
+                store.read_product_reconcile_request.return_value = record.model_copy(
+                    update={"state": state}
                 )
                 inputs = read_path_check_inputs(
                     path="testing",
@@ -956,6 +956,7 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 ("testing_deploy", "unknown"),
             ],
         )
+        self.assertEqual(check["steps"][-1]["code"], "no_reconcile_record")
         self.assertEqual(rollback.status_code, 200, rollback.text)
         self.assertEqual(rollback.json()["check"]["path"], "rollback")
         rollback_check = rollback.json()["check"]

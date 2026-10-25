@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from fnmatch import fnmatchcase
 import hashlib
 import json
@@ -2457,23 +2456,6 @@ def execute_managed_authz_policy_reconcile(
                 expected_revision=current_record.revision,
                 expected_policy_sha256=current_record.policy_sha256,
                 candidate_policy_sha256=authz_policy_sha256(updated_policy),
-            )
-        elif transition.kind in {"v2_to_v3_enable", "v3_enable_or_expand"}:
-            if immutable_applying_github_id < 1:
-                raise AuthzPolicySafetyError(
-                    code="authz_policy_applying_admin_removed",
-                    message="Ordinary authority enabling requires an immutable human administrator.",
-                )
-            from control_plane.ordinary_agent_activation import (
-                resolve_authz_policy_schema_v3_enable_evidence,
-            )
-
-            schema_v3_write_evidence = resolve_authz_policy_schema_v3_enable_evidence(
-                record_store,
-                current_record=current_record,
-                candidate_policy=updated_policy,
-                github_id=immutable_applying_github_id,
-                observed_at=datetime.fromisoformat(now_timestamp()),
             )
     diff = managed_diff.model_dump(mode="json")
     audit = authz_managed_policy_reconcile_audit_payload(

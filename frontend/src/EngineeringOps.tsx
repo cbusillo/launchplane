@@ -1,12 +1,10 @@
 import {
   ArrowRight,
-  Boxes,
   KeyRound,
   ShieldCheck,
   Wrench,
 } from "lucide-react";
 
-import { EngineeringEveryCodeRoute } from "./EngineeringEveryCodeRoute";
 import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
 import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernanceProjectionRoute";
 import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
@@ -36,14 +34,6 @@ const ENGINEERING_SURFACES = [
     label: "Read only",
     title: "Governance evidence",
     view: "governance-projection" as const,
-  },
-  {
-    detail:
-      "Review bounded work-request summaries, provenance, active claims, and completion evidence.",
-    icon: Boxes,
-    label: "Read only",
-    title: "Every Code",
-    view: "every-code" as const,
   },
   {
     detail:
@@ -84,9 +74,6 @@ export function EngineeringOpsRoute({
 }) {
   if (view === "github-delivery") {
     return <EngineeringGitHubDeliveryRoute actorId={actorId} />;
-  }
-  if (view === "every-code") {
-    return <EngineeringEveryCodeRoute fixtureMode={fixtureMode} />;
   }
   if (view === "merge-train") {
     return <EngineeringMergeTrainRoute fixtureMode={fixtureMode} />;

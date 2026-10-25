@@ -29,14 +29,14 @@ def emit_rehearsal_result(result):
 def command_failure_scope(spec,root):
     try:
         yield
-    except RehearsalCommandFailure as error:
-        diagnostic=error.diagnostic
-        cause=error.__context__
+    except Exception as error:
+        diagnostic=None
+        cause=error
         while cause is not None:
             if isinstance(cause,RehearsalCommandFailure):
                 diagnostic=cause.diagnostic
             cause=cause.__context__
-        if (root/(spec.get('receipt_action',spec['action'])+'.started')).is_file():
+        if diagnostic is not None and (root/(spec.get('receipt_action',spec['action'])+'.started')).is_file():
             try:
                 retain_command_failure(spec,root,diagnostic)
             except OSError:

@@ -1800,7 +1800,7 @@ def register_product_profile_read_routes(
                 message="Reading reconcile requests requires database storage.",
             )
         records = cast(ProductReconcileRequestReader, record_store).list_product_reconcile_requests(
-            product=profile.product
+            product=profile.product, limit=None
         )
         return ProductReconcileRequestsResponse(
             trace_id=trace_id,

@@ -94,6 +94,14 @@ provider effect retains the original key and custody. A matching complete
 configuration can be adopted by original-key apply/reconciliation after a lost reply; an uncertain create
 is fenced and never repeated with another key.
 
+Preparation also materializes the reviewed raw Compose file in the recipient's
+own Dokploy directory under that same host execution fence. Dokploy's converted
+Compose read requires this file even before deployment. Matching files replay;
+different files and symlink paths refuse. Preparation preserves other files,
+including the runtime environment file, and binds the compared source bytes into
+the resource evidence before requesting the actual provider render. A saved provider configuration alone never
+qualifies the recipient.
+
 Before any provider effect, a rejected attempt may be replaced by a fresh reviewed
 plan and a new key only when its reservation is gone and it has no provider IDs.
 The compare-and-write retains the complete prior attempt in custody history.
@@ -513,3 +521,65 @@ A writer dispatch with no terminal host witness stays unknown, including a
 pre-witness host refusal after schedule dispatch. Its reserved target cannot be
 reused or abandoned by guessing that the queued job will never run. The narrower
 per-operation host-fence recovery is tracked in [#3811](https://github.com/cbusillo/launchplane/issues/3811).
+
+## Actual consumer reads before retirement
+
+The cutover review can include `consumer_review`: up to sixteen required Odoo
+consumers (`product` plus either a stable `environment` or `preview_id`) and a
+`coordination_reference` for external tools and agents. This list belongs to the
+reviewed cutover intent. Missing review authority keeps qualification unknown;
+discovering fewer accessible consumers never reduces the reviewed set. The
+reference records separately owned external coordination, not an external query.
+`required_populated_roles` names the reviewed subset of the fixed table roles
+that must have rows. An omitted or empty population review stays unknown; it is
+not permission to invent a requirement that every optional business table holds
+data. Every required query table is still queried.
+
+`GET /v1/products/{product}/production-recipient/consumer-reads?context=...`
+performs fresh service qualification. It requires `operations.read` on the source
+production lane and each consumer's exact runtime instance. It accepts no SQL,
+endpoint, account, password or runtime override. Deleted, inaccessible,
+unsupported or changed members remain unknown. The uncached, value-free result
+includes service start/end times, publication and source observation references,
+and one closed result per reviewed consumer. It grants no retirement permission;
+a replayed response cannot substitute for a fresh read. Consumers run concurrently
+within the fixed membership bound, so adding members does not serialize their
+30-second witnesses. Capacity contention returns `busy: true` and retains every
+reviewed member as unknown. At the membership and request bounds, up to 32
+consumer sessions and 32 witness sessions may coexist; provider transport or
+caller/proxy timeouts remain unknown outcomes, never successful evidence.
+
+The reader verifies the installed artifact, importer/settings/payload and TLS
+source. It uses the installed pure settings resolver and connection method
+without loading Odoo or running an importer. Current managed password/version
+and desired, delivered and applied settings are compared privately. Only the
+selected source's keyed expected-value digests reach the consumer, never the
+service's managed plaintext password. The existing account must
+have read-only grants. A read-only transaction checks the selected database and
+queries one constant from every required product-owned table with `LIMIT 1`.
+Query capability and populated data have separate results. Overall verification
+requires both plus a corroborated destination; empty tables cannot qualify.
+
+A fresh nonce stays on that same connection in a bounded SELECT while the
+service checks the published recipient's MariaDB process list through the
+existing provider terminal transport. Matching the live connection, database and
+nonce on the verified recipient/storage corroborates the destination independently
+of DNS, configuration equality or copied rows. Missing transport corroboration
+leaves destination unknown. Each successful read takes about 30 seconds for this
+witness. Container, transport and statement deadlines bound execution; connections
+roll back and close in every outcome. Raw rows, database names, accounts,
+credentials, grants and driver messages never reach the response.
+
+Qualification also requires a fresh service health observation of the exact
+published runtime and a successful incremental cycle started after publication.
+Source authority, the selected identity-bearing private check, runtime, artifact,
+cycle and consumer applied settings are rechecked around I/O. A new monitor row
+does not invalidate the proof. A newer successful incremental cycle also qualifies
+on unchanged publication/runtime custody. A fresh healthy running successor may
+retain the entry success only while that completed observation remains fresh.
+Failed, stale, overdue, replayed, malformed or foreign-runtime evidence never
+borrows an older success. Inventory/binding bookkeeping and secret validation
+timestamps do not change custody; mutation callers retain their strict guards. This proves neither
+universal invoice history nor unique-ID/parent reconciliation, accepted bootstrap,
+post-cutover elapsed time, recovery eligibility or exclusive old-resource custody.
+Those remain the retirement and source-data validation gates' responsibilities.

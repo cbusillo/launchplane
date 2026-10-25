@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 import json
 import unittest
 from collections.abc import Iterator
@@ -663,13 +664,14 @@ class OwnerReviewStatusTests(unittest.TestCase):
             ],
         )
 
-    def test_director_standing_does_not_publish_a_pending_preview_review(self) -> None:
-        for body, expected in (
-            ("## Client test notes\nTry the approval buttons.", "neutral"),
-            ("", "failure"),
+    def test_director_standing_publishes_a_pending_preview_review_only_for_the_label(self) -> None:
+        for body, labels, expected in (
+            ("## Client test notes\nTry the approval buttons.", (), "neutral"),
+            ("", (), "failure"),
+            ("## Client test notes\nTry the approval buttons.", ("owner-review",), "pending"),
         ):
-            with self.subTest(body=body):
-                github = _GitHub()
+            with self.subTest(body=body, labels=labels):
+                github = _GitHub(labels=labels)
                 github.body = body
                 profile = _profile().model_copy(
                     update={"release_on_acceptance": "director_standing"}
@@ -735,7 +737,9 @@ class OwnerReviewStatusTests(unittest.TestCase):
             self.store.write_product_review_decision_record(saved)
             for review in ("required", "engineering", "director_standing"):
                 with self.subTest(decision=decision, review=review):
-                    github = _GitHub(labels=() if review == "engineering" else ("owner-review",))
+                    github = _GitHub(labels=("owner-review",) if review == "required" else ())
+                    if review == "director_standing":
+                        github.body = "## Client test notes\nTry the changed page."
                     selected_profile = (
                         profile.model_copy(update={"release_on_acceptance": "director_standing"})
                         if review == "director_standing"
@@ -772,7 +776,9 @@ class OwnerReviewStatusTests(unittest.TestCase):
                 self.store.write_product_review_decision_record(saved)
             for review in ("required", "engineering", "director_standing"):
                 with self.subTest(decision=decision, review=review):
-                    github = _GitHub(labels=() if review == "engineering" else ("owner-review",))
+                    github = _GitHub(labels=("owner-review",) if review == "required" else ())
+                    if review == "director_standing":
+                        github.body = "## Client test notes\nTry the changed page."
                     profile = _profile()
                     if review == "director_standing":
                         profile = profile.model_copy(
@@ -821,7 +827,7 @@ class OwnerReviewStatusTests(unittest.TestCase):
                 )
                 self.assertEqual(result.state, "pending")
 
-    def test_pure_dependabot_update_publishes_neutral_without_inviting_client(self) -> None:
+    def test_pure_dependency_update_publishes_neutral_without_inviting_client(self) -> None:
         class DependabotGitHub(_GitHub):
             def __call__(self, **kwargs: object) -> object:
                 if "/compare/" in str(kwargs["path"]):
@@ -829,13 +835,15 @@ class OwnerReviewStatusTests(unittest.TestCase):
                 value = super().__call__(**kwargs)
                 if str(kwargs["path"]).endswith(f"/pulls/{_PULL_REQUEST}"):
                     assert isinstance(value, dict)
-                    value["user"] = {"login": "dependabot[bot]", "type": "Bot"}
+                    value["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
                     value["base"] = {
+                        "ref": "main",
                         "sha": "base",
                         "repo": {"id": 5150, "full_name": self.repository},
                     }
                 return value
 
+        seed_dependency_policy(self.store, repository=_REPOSITORY)
         github = DependabotGitHub(labels=())
         github.body = "Bumps a dependency."
         self._publish(github)

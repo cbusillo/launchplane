@@ -27,6 +27,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.product_reconcile import product_reconcile_target_key
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupAuthorityReadModel,
 )
@@ -649,11 +650,13 @@ def read_path_check_inputs(
 def _testing_reconcile_plan(
     record_store: object, profile: LaunchplaneProductProfileRecord
 ) -> dict[str, object] | None:
-    requests = cast(ProductReconcileRequestReader, record_store).list_product_reconcile_requests(
-        product=profile.product
-    )
-    testing = next((record for record in requests if record.target_kind == "testing"), None)
-    if testing is None:
+    try:
+        testing = cast(ProductReconcileRequestReader, record_store).read_product_reconcile_request(
+            product_reconcile_target_key(
+                product=profile.product, target_kind="testing", pull_request_number=None
+            )
+        )
+    except FileNotFoundError:
         return None
     return {
         **product_reconcile_request_view(testing).last_plan,

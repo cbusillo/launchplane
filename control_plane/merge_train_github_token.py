@@ -42,7 +42,7 @@ def invalidate_cached_merge_train_github_token(token: str) -> None:
 def resolve_merge_train_github_token(
     *,
     source: MergeTrainGitHubTokenSource,
-    control_plane_root: Path,
+    control_plane_root: Path | None = None,
     repository: str = "",
     raise_resolution_errors: bool = False,
     include_permissions: Literal[False] = False,
@@ -53,7 +53,7 @@ def resolve_merge_train_github_token(
 def resolve_merge_train_github_token(
     *,
     source: MergeTrainGitHubTokenSource,
-    control_plane_root: Path,
+    control_plane_root: Path | None = None,
     repository: str = "",
     raise_resolution_errors: bool = False,
     include_permissions: Literal[True],
@@ -63,7 +63,7 @@ def resolve_merge_train_github_token(
 def resolve_merge_train_github_token(
     *,
     source: MergeTrainGitHubTokenSource,
-    control_plane_root: Path,
+    control_plane_root: Path | None = None,
     repository: str = "",
     raise_resolution_errors: bool = False,
     include_permissions: bool = False,

@@ -16,6 +16,13 @@ do not authorize that request. Instance rules still require explicit selectors.
 Registering a new driver route must not retroactively change existing actions
 into exclusively instance-scoped actions.
 
+`generic_web_rollback.execute` supports instance selectors for both the production
+recipient inverse and rollback release recovery. Historical context-only rules
+remain loadable but cannot authorize these instance-target requests under
+schema v2/v3. Product, context and caller selectors still apply. This action
+grants no production promotion or driver rollback action. Accepted-release
+rollback grants retain their existing production scope.
+
 If an active stored policy fails model or digest validation at startup, the
 service keeps an empty authorization runtime and logs a bounded validation
 error. It neither seeds nor falls back to bootstrap grants, and does not rewrite
@@ -40,16 +47,6 @@ access to an invalid policy or silently starting with bootstrap authority.
   operation succeed. Fixing the refusing tool's rule through a reviewed source
   change, as [Denial Handling](#denial-handling) requires, is not such a
   workaround.
-
-The [feedback continuation foundation](every-code-feedback-resume.md), which is
-not continued and remains unwired in code, defines
-`every_code_feedback_resume.request` and
-`every_code_feedback_resume.execute` as separate exclusively instance-scoped
-actions. Structural immutable-ID human matching and exact authenticated worker
-matching produce policy provenance only; they create no grant, live route or
-execution authority. The webhook-specific human predicate does not synthesize a
-browser identity or expand browser role permissions. New live grants and worker
-enablement remain a Director decision and need their rollout approvals.
 
 `owner-control` channel-session, issued-challenge, and shadow-verification event
 records are inert verification evidence, not authorization policy or grants.
@@ -77,7 +74,8 @@ implement that bridge.
 Repository inventory follows the same authority boundary. Its
 `repository_inventory.read` and `repository_inventory.write` actions use the
 Launchplane service scope (`product=launchplane`, `context=launchplane`), but
-defining those actions grants neither one. Active tracked inventory records are
+defining those actions grants neither one to other identities; the Director's
+authenticated agents use the standing permission below. Active tracked inventory records are
 repository-record evidence for the redacted repository-scope read model;
 retired records contribute no active inventory membership. When authorization
 rules are the only remaining active source, the read model reports stale
@@ -116,6 +114,22 @@ transport to its existing browser/bearer mutation path; other terminal mutation
 restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
+
+Repository inventory apply also inherits that standing permission, for tracked
+and retired records alike. A record identifies one immutable GitHub repository;
+it cannot install the Delivery App, widen its installed permissions, grant
+access, accept a release or change merge policy, and token minting still checks
+the exact repository id and name. The Director's `local_operator` may apply;
+terminal transport may dry-run, which is an inert plan, but cannot apply.
+Append-only revisions, current-record comparison, idempotency and PostgreSQL
+storage still govern apply.
+
+[Service settings](service-runtime-settings.md) apply also inherits that
+standing permission. It writes only keys declared non-secret in source, on
+Launchplane's own service context, and cannot touch credentials, access, merge
+authority or a product's lanes. The Director's `local_operator` may apply;
+terminal transport is refused. Reviewed plan digest, idempotency and
+current-record comparison still govern apply.
 
 The expected-config declaration path remains additive for the authenticated
 Director agent. It may add a positive external-provider purpose to an existing
@@ -413,8 +427,12 @@ preview, with evidence and binding checks. These observations qualify cleanup
 only; they cannot admit runtime sync or another preview mutation. Unknown facts hold cleanup. Testing
 observations retain their separate service-collector requirement. Same-key
 observation and lifecycle finalization remain available after evidence expires.
-An active, unique service
-preview is required. A staff hold or recorded `in_use`, `only_copy` or shared
+A unique service preview is required. A fresh issued refresh plan can rebuild
+an owned destroyed preview whose provider target still exists, retaining its
+history until the new generation passes. The issued plan must postdate the
+recorded teardown authority; unknown teardown
+authority and stale plans still refuse. Other disposable-lane operations do not
+gain permission from destroyed history. A staff hold or recorded `in_use`, `only_copy` or shared
 resource report refuses refresh even after that report expires or its binding
 changes. Resolve the real exception first through the existing target-policy or
 `/v1/disposable-lanes/observations` clear path; expiry never clears it. Positive reports confer no admission on this path and are not required.
@@ -429,8 +447,9 @@ Docker-reported backing directories, and complete container mount inventory (inc
 stopped containers). Foreign consumers, writable parent mounts, unknown backing,
 host networking or published ports refuse. Read-only administrative parent mounts
 are allowed; exact/child consumers are protected. Existing data is inspected,
-never emptied or deleted. The qualified Director refresh generates a compose with no host ports or host
-SSH mounts. Existing scoped/source-reconciler SSH behavior is unchanged. Managed integration-key filtering and exact managed-source authority
+never emptied or deleted by inspection. The qualified Director refresh generates a compose with no host ports;
+its data source and SSH mounts follow the [Odoo preview data-source policy](preview-workflow-contract.md#route-handoff).
+Managed integration-key filtering and exact managed-source authority
 remain in force; no template source allowance is inherited.
 
 The schedule receipt binds the target/project/volumes, is consumed immediately,
@@ -979,19 +998,17 @@ through 30 days without requiring typed record IDs, digests, issue IDs, or
 free-form reasons. The planner rejects any setup expiry beyond 30 days.
 
 This descriptor makes no provider call, installs no authorization grant,
-registers no ordinary worker, and derives no guarded readiness. The schema-v3
-write transition is separately mediated: a complete reviewed policy candidate
-may add or change exactly one ordinary rule only when it matches a current,
-unrevoked typed activation and its executed setup provenance. Exact ordinary-rule
-removal and unrelated schema-v3 maintenance remain possible after activation
-revocation or expiry; raw schema-v3 seed and unbound replacement stay fenced.
-Runtime capability evidence records installed schema and compiled
-parser/storage/write-handler support. `policy_v3_write_supported` reports the
-presence of this mediated typed handler and is not itself authority or a raw
-write bypass. Qualification and guarded-worker support remain separate.
+registers no ordinary worker, and derives no guarded readiness. New setups and
+revocations are refused, and the activation writers are deleted; stored
+activation records remain readable history.
 
-Activation remains a separately Director-approved DB-native administration event;
-it is not authorized by landing code.
+A schema-v3 policy write that adds or changes any ordinary rule, including a
+v2-to-v3 migration, is refused with `ordinary_authority_retired`, at both the
+service and the storage compare-and-write. Exact ordinary-rule removal and
+other schema-v3 maintenance remain possible with maintenance evidence; raw
+schema-v3 seed and unbound replacement stay fenced. Historical
+`runtime_capability_at_setup` and `policy_v3_write_supported` values on stored
+records are history only, not authority.
 
 ### Preparing Agent Delivery Administration
 
@@ -1195,8 +1212,8 @@ which can deploy. The product's testing overview exposes **Review lift** and
 **Lift testing hold** only to the service-verified signed-in administrator.
 The existing testing-hold endpoints accept that browser session, with origin,
 fetch-metadata and single-use CSRF protection on the review and apply requests.
-The card displays the stored reason, recorder, time and an HTTPS issue link
-recorded in the reason. Missing historical metadata is shown as not recorded.
+The card displays the stored purpose, reason, recorder, time and an HTTPS issue
+link recorded in the reason. Missing historical metadata is shown as not recorded.
 The administrator
 reviews the current hold, supplies an audit reason and confirms that testing
 can deploy before submitting its digest-bound lift. The existing authenticated
@@ -1207,8 +1224,9 @@ administrator can explicitly start a separate review of the current hold;
 the earlier key is shown as unverified in this tab across reloads. Closing the
 tab or clearing its storage discards this local history, not the service's audit
 receipt. This does not claim the earlier request failed or succeeded.
-Isolation staging interlocks retain
-their separate activation flow.
+The same card lifts an isolation staging interlock: the review and apply
+name its purpose, and the lift requests no testing reconcile. The Director's
+agent keeps its separate activation flow.
 The Director's agent can set a testing hold but not lift one.
 The authenticated Director agent has the separate bounded
 [disposable rehearsal continuation](operations.md#odoo-instance-override-contracts):

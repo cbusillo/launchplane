@@ -177,6 +177,20 @@ class PreparationRecoveryTests(unittest.TestCase):
         self.assertEqual(self.run_preparation().status, "replayed")
         self.assert_negative(self.run_preparation("future-key"))
 
+    def test_completed_refusal_and_replay_preserve_capability_locations(self) -> None:
+        result = self.run_preparation()
+        self.assert_negative(result)
+        receipt = result.response_payload["result"]
+        self.assertTrue(receipt.get("failure_program_sites"))
+        observed = self.adapter.inspect_original(receipt["allocation_operation_key"])["programs"][0]
+        self.assertEqual(
+            receipt["failure_program_sites"], list(observed.failure_program_sites or ())
+        )
+        self.assertEqual(receipt["failure_program_sha256"], observed.failure_program_sha256)
+        calls = list(self.capability_calls)
+        self.assertEqual(self.run_preparation().response_payload["result"], receipt)
+        self.assertEqual(self.capability_calls, calls)
+
     def test_original_key_recovers_lost_refusal_without_dispatching_another_program(self) -> None:
         self.lose_reply = True
         self.capability_status = "done"

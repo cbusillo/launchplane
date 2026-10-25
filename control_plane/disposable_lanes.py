@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
-from typing import Protocol
+from typing import Literal, Protocol
 
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -225,7 +225,7 @@ def require_disposable_lane(
     instance: str,
     retirement: bool = False,
     separation_only: bool = False,
-    preview_refresh: bool = False,
+    preview_operation: Literal["refresh", "destroy"] | None = None,
     same_artifact_restart: bool = False,
     restart_running: bool = False,
     recovery: bool = False,
@@ -291,7 +291,7 @@ def require_disposable_lane(
             or instance != "testing"
             or retirement
             or separation_only
-            or preview_refresh
+            or preview_operation
             or hold.purpose != "staff_testing"
             or hold.recorded_by != testing_hold_actor
             or hold.rehearsal is None
@@ -317,12 +317,12 @@ def require_disposable_lane(
         target_id=target_id,
         instance=instance,
         usage=evidence.usage if evidence else "unknown",
-        require_unused=not (preview_refresh or retirement),
+        require_unused=not (preview_operation or retirement),
         now=now,
         runtime_stopped=runtime_stopped,
     )
     down_recovery = (
-        recovery and not (preview_refresh or retirement) and usage.reason == "verified_down"
+        recovery and not (preview_operation or retirement) and usage.reason == "verified_down"
     )
     if same_artifact_restart and (not restart_running or down_recovery):
         if instance != "testing" or preview is not None:
@@ -336,17 +336,15 @@ def require_disposable_lane(
                 "Recovery is held by use, needed data or shared production resources."
             )
         return ""
-    if preview_refresh:
-        # Overall direction makes previews disposable unless there is an actual
-        # protected use or needed copy. No source produces a universal positive
-        # occupancy/custody fact. Resource safety is checked separately against
-        # the real Docker host immediately before refresh effects.
+    if preview_operation:
         if not owned_preview or profile.driver_id != "odoo":
-            raise DisposableLaneSafetyUnknown(
-                "Refresh qualification requires an owned Odoo preview."
-            )
-        if preview is not None and preview.state != "active":
-            raise DisposableLaneSafetyUnknown("Only an active existing preview can be refreshed.")
+            raise DisposableLaneSafetyUnknown("Preview operations require an owned Odoo preview.")
+        if (
+            preview_operation == "refresh"
+            and preview is not None
+            and preview.state not in {"active", "destroyed"}
+        ):
+            raise DisposableLaneSafetyUnknown("The preview lifecycle does not admit a refresh.")
         if evidence is not None and (
             usage.protected
             or evidence.data == "only_copy"
@@ -436,6 +434,8 @@ def resolve_disposable_preview(
     profile: LaunchplaneProductProfileRecord,
     context: str,
     instance: str,
+    *,
+    allow_destroyed: bool = False,
 ) -> PreviewRecord:
     """Resolve an actual uniquely owned preview; a slug alone is never authority."""
     if instance == "prod" or context != profile.preview.context:
@@ -463,7 +463,7 @@ def resolve_disposable_preview(
             profile.repository,
             profile.repository.partition("/")[2],
         }
-        or matches[0].state == "destroyed"
+        or (matches[0].state == "destroyed" and not allow_destroyed)
     ):
         raise DisposableLaneSafetyUnknown(
             "The preview is absent, ambiguous or owned by another product."

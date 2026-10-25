@@ -130,6 +130,8 @@ class CapacityHostProgramTests(unittest.TestCase):
         self.identifier = "a" * 64
         self.identifiers = [self.identifier]
         self.pool: object = [{"Base": "172.22.0.0/22", "Size": 24}]
+        self.daemon_id: object = "fixture-daemon"
+        self.server_errors: object = None
         self.networks: object = [
             {
                 "Id": self.identifier,
@@ -149,8 +151,9 @@ class CapacityHostProgramTests(unittest.TestCase):
                 raise PermissionError("executable permission failure")
             if denial and arguments[0] == denial_command:
                 return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=denial)
+            value: object
             if arguments[:2] == ["docker", "info"]:
-                value = self.pool
+                value = {"id": self.daemon_id, "pools": self.pool, "errors": self.server_errors}
             elif arguments[:3] == ["docker", "network", "inspect"]:
                 value = self.networks
             elif arguments[0] == "ip" and "route" in arguments:
@@ -204,7 +207,14 @@ class CapacityHostProgramTests(unittest.TestCase):
             )
 
     def test_incomplete_reads_and_inventory_churn_never_report_capacity(self) -> None:
-        for field, value in (("pool", None), ("networks", []), ("routes", []), ("changed", True)):
+        for field, value in (
+            ("pool", {}),
+            ("pool", ""),
+            ("pool", False),
+            ("networks", []),
+            ("routes", []),
+            ("changed", True),
+        ):
             with self.subTest(field=field), patch.object(self, field, value):
                 self.list_calls = 0
                 self.assertEqual(self.run_program(), {"type": "failed"})
@@ -221,6 +231,35 @@ class CapacityHostProgramTests(unittest.TestCase):
         self.assertEqual(
             self.run_program(denial=b"permission denied", denial_command="ip"), {"type": "failed"}
         )
+
+    def test_builtin_pools_still_exclude_networks_and_host_routes(self) -> None:
+        unconfigured_pools: tuple[None | list[object], ...] = (None, [])
+        for pools in unconfigured_pools:
+            with self.subTest(pools=pools), patch.object(self, "pool", pools):
+                self.list_calls = 0
+                result = self.run_program()
+                self.assertEqual(result["type"], "complete")
+                self.assertGreater(result["result"]["free_slots"], BRIDGE_NETWORK_CAPACITY_MARGIN)
+                self.assertLess(result["result"]["free_slots"], result["result"]["total_slots"])
+                with patch.object(
+                    self, "routes", [{"dst": "172.16.0.0/12"}, {"dst": "192.168.0.0/16"}]
+                ):
+                    exhausted = self.run_program()
+                self.assertEqual(exhausted["type"], "complete")
+                self.assertEqual(exhausted["result"]["free_slots"], 0)
+
+    def test_successful_cli_exit_cannot_hide_missing_server_evidence(self) -> None:
+        self.pool = None
+        for field, value in (
+            ("daemon_id", ""),
+            ("daemon_id", None),
+            ("server_errors", ["connection failed"]),
+            ("server_errors", "invalid"),
+        ):
+            with self.subTest(field=field), patch.object(self, field, value):
+                self.assertEqual(self.run_program(), {"type": "failed"})
+        self.server_errors = ["authorization denied by plugin"]
+        self.assertEqual(self.run_program(), {"type": "denied"})
 
     def test_executable_permission_failure_is_unavailable_without_a_daemon_denial(self) -> None:
         for binary in ("docker", "ip"):

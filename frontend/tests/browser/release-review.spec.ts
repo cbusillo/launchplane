@@ -61,6 +61,25 @@ test("A new invitation has its own progress and formatted linked PR checks", { t
   expect(writes).toEqual(["POST"]);
 });
 
+test("A qualified private release uses the service checklist to enable acceptance", async ({ page }) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=products");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("products");
+  });
+  response.review.checklist.testing_url = "";
+  response.review.checklist_complete = true;
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.goto("/ui/owner-review?product=example-site");
+  const accept = page.getByRole("button", { name: "Accept release", exact: true });
+  await expect(accept).toBeEnabled();
+  response.review.checklist_complete = false;
+  await page.reload();
+  await expect(accept).toBeDisabled();
+});
+
 test("Invitation notes failures are visible to engineering and clear after correction", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();

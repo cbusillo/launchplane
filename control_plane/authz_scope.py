@@ -4,6 +4,7 @@ from functools import lru_cache
 
 from control_plane.action_effects import (
     AGENT_READ_ROLE_ACTION,
+    BACKUP_CONTINUATION_ACTION,
     GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION,
     ODOO_CONNECTION_ISOLATION_ACTIONS,
 )
@@ -46,6 +47,7 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "production_backup_authority.plan",
         "production_backup_authority.write",
         "production_backup_gate.execute",
+        BACKUP_CONTINUATION_ACTION,
         "promotion.write",
         "promotion.read",
         "route_binding.external.apply",
@@ -75,6 +77,7 @@ _DUAL_SCOPE_AUTHZ_ACTIONS = frozenset(
     {
         AGENT_READ_ROLE_ACTION,
         "generic_web_prod_promotion.dry_run",
+        "generic_web_rollback.execute",
         "driver.read",
         "ingress_route.apply",
         "ingress_route.plan",

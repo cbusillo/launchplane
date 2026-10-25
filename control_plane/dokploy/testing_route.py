@@ -4,7 +4,7 @@ from copy import deepcopy
 import hashlib
 from ipaddress import ip_address
 import json
-from typing import Any, Self
+from typing import Annotated, Any, Self
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
@@ -16,6 +16,12 @@ from control_plane.dokploy.compose import TESTING_CONNECTION_CSP
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.traefik_cutover import http_route_payload
 
+type TestingRouteHost = Annotated[str, Field(pattern=r"^[a-zA-Z0-9.-]+$")]
+
+
+def testing_route_rule(host: str, aliases: tuple[str, ...] = ()) -> str:
+    return " || ".join(f"Host(`{name}`)" for name in (host, *aliases))
+
 
 def select_testing_route_raw(
     raw: dict[str, Any],
@@ -23,6 +29,7 @@ def select_testing_route_raw(
     points: tuple[str, ...],
     external_middlewares: tuple[str, ...] | None = None,
     discover_external_redirects: bool = False,
+    aliases: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     routers = raw.get("routers")
     if not isinstance(routers, dict):
@@ -61,8 +68,8 @@ def select_testing_route_raw(
             raise RuntimeError("Applied router inventory is incomplete")
         if external_middlewares is not None and canonical_acme_challenge(name, item):
             continue
-        if (points and not set(item["entryPoints"]) & set(points)) or not host_rule_may_match(
-            str(item.get("rule") or ""), host
+        if (points and not set(item["entryPoints"]) & set(points)) or not any(
+            host_rule_may_match(str(item.get("rule") or ""), name) for name in (host, *aliases)
         ):
             continue
         selected[name] = {
@@ -148,7 +155,11 @@ class UnavailableTestingRoutePreimage(FrozenRecord):
 class TestingLaneRoute(FrozenRecord):
     product: str = Field(min_length=1)
     context: str = Field(min_length=1)
-    host: str = Field(pattern=r"^[a-zA-Z0-9.-]+$")
+    host: TestingRouteHost
+    aliases: tuple[TestingRouteHost, ...] = Field(
+        default=(), max_length=1, exclude_if=lambda value: not value
+    )
+    address_only: bool = Field(default=False, exclude_if=lambda value: not value)
     route_id: str = Field(pattern=r"^lp-testing-route-[a-f0-9]{32}$")
     old_backend: str | None
     new_backend: str
@@ -177,12 +188,14 @@ class TestingLaneRoute(FrozenRecord):
 
     @model_validator(mode="after")
     def validate_lane(self) -> Self:
+        if len({name.casefold() for name in (self.host, *self.aliases)}) != 1 + len(self.aliases):
+            raise ValueError("Testing route hostnames must be distinct.")
         if bool(self.application_file_name) != bool(self.application_file_sha256):
             raise ValueError("The original application route requires its exact file identity.")
         if self.route_id != testing_route_id(self.product, self.context):
             raise ValueError("Testing traffic identity belongs to another lane.")
-        if self.old_backend == self.new_backend:
-            raise ValueError("Testing traffic needs an independent successor.")
+        if (self.old_backend == self.new_backend) != self.address_only:
+            raise ValueError("Only an address amendment can preserve the current backend.")
         if (self.old_backend is None) != (self.unavailable_preimage is not None):
             raise ValueError("Unavailable predecessor routing requires its distinct preimage.")
         for backend in (self.old_backend, self.new_backend):
@@ -213,14 +226,44 @@ class TestingLaneRoute(FrozenRecord):
             raise ValueError("Testing traffic requires an owned route template.")
         if set(http.get("services", {})) != {self.route_id} or any(
             not isinstance(router, dict)
-            or router.get("rule") != f"Host(`{self.host}`)"
+            or router.get("rule") != testing_route_rule(self.host, self.aliases)
             or router.get("service") != self.route_id
             or not router.get("entryPoints")
             or not set(router["entryPoints"]) <= set(self.public_entrypoints)
             for router in routers.values()
         ):
             raise ValueError("Testing route template crosses its admitted host or service.")
+        if self.aliases and any(
+            "tls" in router
+            and (
+                not isinstance(router["tls"], dict)
+                or router["tls"].get("domains")
+                != [{"main": name} for name in (self.host, *self.aliases)]
+            )
+            for router in routers.values()
+        ):
+            raise ValueError("Testing aliases require independent hostname certificates.")
         return self
+
+
+def amend_testing_route_address(before: TestingLaneRoute, hostname: str) -> TestingLaneRoute:
+    if before.aliases or hostname.casefold() == before.host.casefold():
+        raise ValueError("Address amendment requires a new canonical host and its original alias.")
+    payload = before.model_dump(mode="json")
+    payload.update(
+        host=hostname,
+        aliases=[before.host],
+        address_only=True,
+        old_backend=before.new_backend,
+        unavailable_preimage=None,
+        application_file_name="",
+        application_file_sha256="",
+    )
+    for router in payload["template"]["http"]["routers"].values():
+        router["rule"] = testing_route_rule(hostname, (before.host,))
+        if "tls" in router:
+            router["tls"]["domains"] = [{"main": hostname}, {"main": before.host}]
+    return TestingLaneRoute.model_validate(payload)
 
 
 def testing_route_id(product: str, context: str) -> str:
@@ -335,7 +378,7 @@ def canonical_acme_challenge(name: str, router: dict[str, Any]) -> bool:
 
 
 def possible_lane_routers(
-    raw: dict[str, Any], host: str, entrypoints: tuple[str, ...]
+    raw: dict[str, Any], host: str, entrypoints: tuple[str, ...], aliases: tuple[str, ...] = ()
 ) -> dict[str, dict[str, Any]]:
     routers = raw.get("routers")
     if not isinstance(routers, dict):
@@ -350,8 +393,8 @@ def possible_lane_routers(
             raise ValueError("Applied testing router inventory is incomplete.")
         if canonical_acme_challenge(name, router):
             continue
-        if set(router["entryPoints"]) & set(entrypoints) and host_rule_may_match(
-            str(router.get("rule") or ""), host
+        if set(router["entryPoints"]) & set(entrypoints) and any(
+            host_rule_may_match(str(router.get("rule") or ""), name) for name in (host, *aliases)
         ):
             matches[name] = router
     return matches
@@ -417,6 +460,7 @@ def compile_testing_route(
     public_entrypoints: tuple[str, ...],
     owned_document: dict[str, Any] | None = None,
     recorded_template: dict[str, Any] | None = None,
+    aliases: tuple[str, ...] = (),
     application_document: dict[str, Any] | None = None,
     application_file_name: str = "",
     application_file_sha256: str = "",
@@ -433,6 +477,7 @@ def compile_testing_route(
         public_entrypoints=public_entrypoints,
         owned_document=owned_document,
         recorded_template=recorded_template,
+        aliases=aliases,
         application_document=application_document,
         application_file_name=application_file_name,
         application_file_sha256=application_file_sha256,
@@ -459,6 +504,7 @@ def _compile_testing_route(
     public_entrypoints: tuple[str, ...],
     owned_document: dict[str, Any] | None = None,
     recorded_template: dict[str, Any] | None = None,
+    aliases: tuple[str, ...] = (),
     application_document: dict[str, Any] | None = None,
     application_file_name: str = "",
     application_file_sha256: str = "",
@@ -470,7 +516,9 @@ def _compile_testing_route(
     receipt. A filename alone never authorizes adopting an unrecorded file.
     """
     identifier = testing_route_id(product, context)
-    matches = possible_lane_routers(raw, host, public_entrypoints)
+    if aliases and recorded_template is None:
+        raise ValueError("Retained testing hostnames require recorded route authority.")
+    matches = possible_lane_routers(raw, host, public_entrypoints, aliases)
     legacy = {
         name: router_configuration(router)
         for name, router in matches.items()
@@ -571,6 +619,7 @@ def _compile_testing_route(
             product=product,
             context=context,
             host=host,
+            aliases=aliases,
             route_id=identifier,
             old_backend=old_backend,
             new_backend=new_backend,
@@ -616,30 +665,6 @@ def _compile_testing_route(
             not isinstance(reference, str) for reference in references
         ):
             raise ValueError("Testing predecessor middleware is malformed.")
-        # Service names can differ only after every service has been bound to
-        # the same observed backend above. Keep all aliases in legacy_routers:
-        # observation must still reject drift in any of them after takeover.
-        behavior = {
-            **configuration,
-            "rule": f"Host(`{host}`)",
-            "entryPoints": sorted(set(points)),
-            "priority": priority,
-            "middlewares": [
-                reference if "@" in reference else reference + "@" + provider
-                for reference in references
-            ],
-        }
-        service = str(router.get("service") or "")
-        service = service if "@" in service else service + "@" + provider
-        behavior["loadBalancer"] = raw["services"][service]["loadBalancer"]
-        behavior.pop("service", None)
-        group = tuple(sorted(set(points)))
-        if used_entrypoints & set(points):
-            if equivalents.get(group) != behavior:
-                raise ValueError("Testing predecessor aliases have conflicting routing behavior.")
-            continue
-        equivalents[group] = behavior
-        used_entrypoints.update(points)
         middlewares = []
         for reference in router.get("middlewares", []):
             if not isinstance(reference, str):
@@ -669,6 +694,24 @@ def _compile_testing_route(
             and connection_middleware + "@file" not in middlewares
         ):
             middlewares.append(connection_middleware + "@file")
+        behavior = {
+            **configuration,
+            "rule": f"Host(`{host}`)",
+            "entryPoints": sorted(set(points)),
+            "priority": priority,
+            "middlewares": middlewares,
+        }
+        service = str(router.get("service") or "")
+        service = service if "@" in service else service + "@" + provider
+        behavior["loadBalancer"] = raw["services"][service]["loadBalancer"]
+        behavior.pop("service", None)
+        group = tuple(sorted(set(points)))
+        if used_entrypoints & set(points):
+            if equivalents.get(group) != behavior:
+                raise ValueError("Testing predecessor aliases have conflicting routing behavior.")
+            continue
+        equivalents[group] = behavior
+        used_entrypoints.update(points)
         tls = configuration.get("tls")
         if tls is not None and (
             not isinstance(tls, dict) or set(tls) - {"certResolver", "options"}
@@ -729,6 +772,7 @@ def compile_unavailable_testing_route(
     static_configuration: str,
     configured_compose: str,
     recorded_template: dict[str, Any] | None = None,
+    aliases: tuple[str, ...] = (),
     recorded_backend: str | None = None,
 ) -> TestingLaneRoute:
     static = yaml.safe_load(static_configuration)
@@ -736,6 +780,8 @@ def compile_unavailable_testing_route(
         raise ValueError("The managed proxy's listener configuration is unavailable.")
     identifier = testing_route_id(product, context)
     template = deepcopy(recorded_template)
+    if aliases and template is None:
+        raise ValueError("Retained testing hostnames require recorded route authority.")
     if template is None:
         if file_content is not None:
             raise ValueError("The existing testing route has no recorded template authority.")
@@ -900,8 +946,10 @@ def compile_unavailable_testing_route(
                 "certificatesResolvers", {}
             ):
                 raise ValueError("The testing template's certificate resolver is unavailable.")
-    raw = select_testing_route_raw(raw, host, points, testing_route_external_middlewares(template))
-    matches = possible_lane_routers(raw, host, points)
+    raw = select_testing_route_raw(
+        raw, host, points, testing_route_external_middlewares(template), aliases=aliases
+    )
+    matches = possible_lane_routers(raw, host, points, aliases)
     if file_content is None:
         if matches:
             raise ValueError("An unavailable Docker predecessor still has applied testing routers.")
@@ -918,11 +966,13 @@ def compile_unavailable_testing_route(
             public_entrypoints=points,
             owned_document=json.loads(file_content),
             recorded_template=recorded_template,
+            aliases=aliases,
         )
     return TestingLaneRoute(
         product=product,
         context=context,
         host=host,
+        aliases=aliases,
         route_id=identifier,
         old_backend=None,
         new_backend=new_backend,
@@ -1003,7 +1053,11 @@ def require_original_testing_route_applied(plan: TestingLaneRoute, raw: dict[str
     if preimage is None:
         raise ValueError("Original unavailable ingress requires its admitted preimage.")
     current = select_testing_route_raw(
-        raw, plan.host, plan.public_entrypoints, testing_route_external_middlewares(plan.template)
+        raw,
+        plan.host,
+        plan.public_entrypoints,
+        testing_route_external_middlewares(plan.template),
+        aliases=plan.aliases,
     )
     for section in ("routers", "services", "middlewares"):
         for name in plan.template["http"].get(section, {}):
@@ -1024,6 +1078,7 @@ def observe_testing_route(
             plan.host,
             plan.public_entrypoints,
             testing_route_external_middlewares(plan.template),
+            aliases=plan.aliases,
         )
         for name in testing_route_external_middlewares(plan.template):
             current = scoped["middlewares"].get(name)
@@ -1034,7 +1089,7 @@ def observe_testing_route(
                 raise TestingRouteAuthorityChanged("Original testing redirect changed.")
         if owned_document == original and scoped == preimage.raw:
             return None
-    matches = possible_lane_routers(raw, plan.host, plan.public_entrypoints)
+    matches = possible_lane_routers(raw, plan.host, plan.public_entrypoints, plan.aliases)
     owned = plan.template["http"]["routers"]
     names = {name + "@file" for name in owned}
     for name, router in matches.items():

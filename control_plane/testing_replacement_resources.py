@@ -78,6 +78,26 @@ class TestingResourcePreparationRefused(ValueError):
     """A clean refusal before a provider effect; a fresh plan can proceed."""
 
 
+class NativeTestingRebuildRequired(ValueError):
+    code = "native_testing_rebuild_required"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This native testing lane must use its same-address testing rebuild; "
+            "legacy replacement cannot allocate another generation hostname."
+        )
+
+
+def require_legacy_testing_target(
+    store: PostgresRecordStore, target: DokployTargetRecord, target_id: str
+) -> None:
+    if (
+        target.source_label == "service:testing-rebuild"
+        or store.find_testing_candidate_by_target(target_id) is not None
+    ):
+        raise NativeTestingRebuildRequired()
+
+
 class TestingReplacementResourcesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -224,6 +244,7 @@ def resource_context(
     )
     if target.target_type != "compose" or provider.target_id != target_id.target_id:
         raise ValueError("The tracked testing target does not agree with its provider binding.")
+    require_legacy_testing_target(store, target, target_id.target_id)
     if target.policies.staff_testing_hold is not None:
         raise ValueError("A staff-testing hold protects this lane.")
     if target.pending_public_host_effects and not (

@@ -106,17 +106,13 @@ Treat this file as the launch checklist for each engineering session in
   typecheck, build, inspection, and docs-freshness gates.
 - During the [Q326 trial](docs/style/testing.md#local-test-loop), routine
   changes use focused local tests plus lint, type checks, and IDE inspection.
-  The full sharded suite runs in CI and must be green before the checked
-  `gh-pr.py ready` handoff and merge. Under the approved Q375 refinement,
-  safety-classified changes also run whole test modules for touched safety
-  areas locally; the complete suite runs only in CI.
-  [Testing style](docs/style/testing.md#local-test-loop) owns classification
-  and module selection.
+  [Testing style](docs/style/testing.md#local-test-loop) owns safety-module
+  selection, Q778 focused PR CI, checked Ready evidence and the full candidate
+  merge gate.
 - Changes to agent instructions, execution guidance, approval or safety rules,
   credential handling, or destructive helpers need review by another model
   before delivery. Use the `model-review` skill and its finding-disposition
   rules; record the provider/model and how findings were handled in the PR.
-  Reviewer approval is not a merge or completion gate.
 - Add targeted tests whenever contract or storage behavior changes. Broaden to
   affected-area modules or integration gates when the changed behavior or a
   failure justifies it; complete-suite proof stays in CI.

@@ -46,6 +46,33 @@
     },
     "operations": [
       {
+        "idempotency": "body",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "continue_backup_v1_products__product__releases__decision_record_id__backup_continuation_post",
+        "path": "/v1/products/{product}/releases/{decision_record_id}/backup-continuation",
+        "purpose": "Review or requeue only a proved pre-capture failure under the original accepted release; retain failed history and unknown-effect fences.",
+        "response_statuses": [
+          "200",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_digest"
+        ],
+        "schema_fingerprint_sha256": "58db8a0b3f3df37db61c4601e028c49feebe958c318d45a43a250598dfdd4382",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -493,6 +520,36 @@
           "reviewed_plan_sha256"
         ],
         "schema_fingerprint_sha256": "3963867c5c058922f309d9303f21605cd0e7cb6f9e139d18a4ae8440f634ae8b",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "amend_native_testing_address",
+        "path": "/v1/products/{product}/testing-address",
+        "purpose": "Amend the current native Odoo testing lane's canonical hostname from exact retained custody, preserving its copy, original hostname and operation fences; verify both public runtime identities before publishing canonical metadata. Cancel an unpublished amendment under its original request and key to restore the route preimage.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "535f901764568d1524de5200f4dcde9accda388481881f327afdeca509186a71",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1105,8 +1162,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "bdc4a1071f447e2501dcb32633ef1447a016ba08"
+    "source_commit_sha": "9c40c6ad89a36b6f9bdc8b10c3c05b4929bdd6b2"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "9c115c988f15d8667da33aca574b136fc9724de7074dced918097a06f84c327f"
+  "semantic_digest_sha256": "add374185c8f7019ba5b0032939043da091942a4523f6ac54b2574921797f632"
 }

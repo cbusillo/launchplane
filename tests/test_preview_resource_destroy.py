@@ -89,6 +89,29 @@ class PreviewResourceDestroyTests(unittest.TestCase):
                     self.assertEqual(result.status, "fail")
                     request.assert_not_called()
 
+    def test_readback_not_found_never_claims_resource_deletion(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        requests: list[dict[str, object]] = []
+        refusal = DokployRequestFailed(
+            method="GET", path="/api/compose.one", detail="Not Found", status_code=404
+        )
+
+        def checkpoint(phase: str) -> None:
+            raise refusal
+
+        result = _run_destroy_with_fake_requests(
+            requests=requests,
+            response_by_path={"/api/domain.byComposeId": []},
+            resource_type="compose",
+            resource_id="owned-preview",
+            missing_resource_is_clean=True,
+            before_provider_mutation=checkpoint,
+        )
+        self.assertEqual(result.status, "fail")
+        self.assertEqual([item.name for item in result.steps], ["domain_lookup"])
+        self.assertFalse(any(item.get("method") == "POST" for item in requests))
+
     def test_destroy_application_deletes_all_domains_and_application(self) -> None:
         requests: list[dict[str, object]] = []
 

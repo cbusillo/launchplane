@@ -85,6 +85,19 @@ function ReleaseRunProgress({ run, refreshFailed }: { run: ClientReleaseRunView;
   </section>;
 }
 
+export function ClientTestNotes({ notes }: { notes: string }) {
+  return <div className="release-review-notes"><Markdown skipHtml urlTransform={url => safeExternalUrl(url)?.toString() ?? ""} components={{
+    h1: ({ children }) => <h5>{children}</h5>,
+    h2: ({ children }) => <h5>{children}</h5>,
+    h3: ({ children }) => <h5>{children}</h5>,
+    h4: ({ children }) => <h5>{children}</h5>,
+    h5: ({ children }) => <h5>{children}</h5>,
+    h6: ({ children }) => <h5>{children}</h5>,
+    a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <>{children}</>,
+    img: ({ alt }) => <>{alt}</>,
+  }}>{notes.trim() || "Test notes are missing for this change."}</Markdown></div>;
+}
+
 function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull request changes between these versions." }: { items: readonly ReleaseReviewItem[]; viewerIsOwner: boolean; emptyMessage?: string }) {
   const grouped = groupReleaseItems(items);
   function changeTitle(item: ReleaseReviewItem) {
@@ -94,16 +107,7 @@ function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull req
   return <>
         {grouped.checks.length ? <ol className="release-review-checklist">{grouped.checks.map(item => <li key={item.url}>
           <h4>{changeTitle(item)}</h4>
-          <div className="release-review-notes"><Markdown skipHtml urlTransform={url => safeExternalUrl(url)?.toString() ?? ""} components={{
-            h1: ({ children }) => <h5>{children}</h5>,
-            h2: ({ children }) => <h5>{children}</h5>,
-            h3: ({ children }) => <h5>{children}</h5>,
-            h4: ({ children }) => <h5>{children}</h5>,
-            h5: ({ children }) => <h5>{children}</h5>,
-            h6: ({ children }) => <h5>{children}</h5>,
-            a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <>{children}</>,
-            img: ({ alt }) => <>{alt}</>,
-          }}>{item.owner_test_notes.trim() || "Test notes are missing for this change."}</Markdown></div>
+          <ClientTestNotes notes={item.owner_test_notes} />
             {!viewerIsOwner && item.preview_era_notes ? <span data-testid={`release-notes-adjustment-${item.pull_request_number}`}>PR #{item.pull_request_number}: test notes adjusted for the testing site.</span> : null}
             {item.already_reviewed ? <span>{`${viewerIsOwner ? "You" : "The Client"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
         </li>)}</ol> : <p>{items.length ? "No changes from this repository need you to test them." : emptyMessage}</p>}
@@ -225,7 +229,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   // The Director keeps the current testing checklist so a further hotfix can
   // bind it; other viewers review the already-live fix's saved checklist.
   const reviewingHotfix = activeHotfix && !response?.can_start_temporary_hotfix;
-  const incomplete = !checklist || !(reviewingHotfix || testingUrl) || response?.review.checklist_complete !== true;
+  const incomplete = !checklist || response?.review.checklist_complete !== true;
   const hasChanges = !!checklist && (
     checklist.production.artifact_id !== checklist.candidate.artifact_id
     || checklist.production.source_commit !== checklist.candidate.source_commit
@@ -314,7 +318,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && hasChanges && !activeHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
         <h3>Ask {client} to review this release now</h3>
-        <p>A release with only engineering changes waits for the next release that has something for {client} to check. If this one must go live sooner, such as a security or reliability fix, say why in plain words. Launchplane sends {client} a release review with your reason; nothing goes live until {client} accepts it. If {client} was already asked about this release, nothing new is sent.</p>
+        <p>Launchplane automatically asks {client} to review every qualified release, including engineering changes. You can also send a request now with a reason in plain words; nothing goes live until {client} accepts it. If {client} was already asked about this release, the existing request and its reason stay unchanged.</p>
         <label><span>Why this release cannot wait</span><textarea value={urgentReason} maxLength={1000} disabled={busy} onChange={event => setUrgentReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
           <button className="button" type="button" disabled={busy || incomplete || !urgentReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>

@@ -1565,9 +1565,9 @@ metadata. Use the configured public Launchplane URL so its origin matches
 calling through a different origin fails closed. Bearer-token and GitHub Actions
 OIDC callers do not use this browser preflight.
 
-Normal Launchplane deployment does not mutate authorization policy. It deploys
-the reviewed image and may reconcile runtime key-safety policy, but authz grants
-remain DB-backed service state. This prevents a checked-in catalog or ordinary
+Normal Launchplane deployment does not mutate authorization or runtime
+key-safety policy. It deploys the reviewed image; authz grants and key-safety
+rules remain DB-backed service state. This prevents a checked-in catalog or ordinary
 image rollout from silently expanding or replacing live authority.
 
 The former append-oriented authz maintenance bridge is retired. Do not add
@@ -2013,6 +2013,23 @@ refusal, not a failed delivery: it records a skipped
 notification. It neither changes production nor resolves any existing incident.
 Failures after a deploy starts, other rejections, and uncertain outcomes remain
 delivery incidents.
+An artifact's later successful production delivery resolves its delivery incident.
+A failed generic-web rollback deployment also recovers when a later rollback on
+the same production lane passes, even when its target artifact differs. Every
+failure retained in the incident must identify a failed rollback deployment for
+that artifact or source. Recovery must follow the newest failure, including
+failures merged into the incident between monitor passes. New generic-web
+in-place deployment evidence records forward or rollback intent; legacy promotion-recovery
+and drill deployments retain recognition by their rollback record ID suffix, and
+two-slot switch-backs by their recorded deploy mode. Unmarked legacy admin
+rollbacks, provider-recovered records without original intent, and Odoo deployments
+retain matching-artifact recovery only. Reminders do not move the actual failure
+time. Different failures at the same time retain distinct observations, while an
+exact replay is idempotent. A concurrent new failure defers recovery to the next
+monitor pass without opening a monitoring-unavailable incident.
+Recovery uses the ordinary passing observation and preserves the original failure.
+Runtime health alone, a newer forward delivery of another artifact, an unsuccessful
+rollback, or a rollback on another lane cannot resolve that failure.
 The service's independent delivery-monitor thread checks terminal deployment,
 promotion and queued Odoo release failures once per minute, including products
 without HTTP health checks. As with other incidents, existing matching
@@ -2698,6 +2715,19 @@ null. The ID itself is not added to the task output. This uses the existing task
 read and proves neither that a container still exists nor that its image is
 immutable. It changes no readiness, image, capability or settlement verdict.
 
+Task diagnostics also retain bounded, redacted `error` and `message`, the
+provider's `status_timestamp`, and its integer `exit_code`. Missing or malformed
+fields remain null; these facts use the existing task read and add no container
+inspection. Application testing failures retain that bounded runtime snapshot as
+JSON in `post_deploy_update.evidence.application_runtime_failure` on the deployment
+record, before task churn can erase the candidate. Existing failure evidence is
+preserved on recovery. Diagnostics do not enter recovery digests or alter rollout
+qualification. Application log tails have no task attribution or complete-history
+guarantee, so old-image output must not be assigned to a failed candidate.
+Bind each task error with that task's own deployment record ID and image.
+Unknown or unqualified outcomes may have no retained failure snapshot; missing
+evidence does not prove that no task failed.
+
 The read rechecks provider placement and the tracked lane binding before
 returning. `diagnostic_complete`, task coverage, observation time and
 `details_truncated` disclose partial or bounded results; image agreement is
@@ -3134,6 +3164,10 @@ Conventional onboarding creates new products only.
   refuse every unreviewed provider-only key. Both consumers recheck retirement
   intent and application declarations before writing. Execution uses the current
   approved configuration; an earlier replacement plan does not freeze it.
+  For a sanitized testing generation, recorded upstream and workflow SSH source
+  settings remain restore inputs rather than application settings. Existing
+  provider entries for those recorded inputs are omitted on replacement without
+  being misclassified as unrecorded drift; unknown provider keys still refuse.
   Clearing intent does not
   restore removed values; recovery requires a separately reviewed application
   configuration or managed secret update. Do not roll the service back to a
@@ -5326,6 +5360,81 @@ changes no configuration, binding, account, grants, runtime, source data or
 business data, and invokes no importer, deployment or synchronization.
 
 
+#### Installed importer prerequisites
+
+`GET /v1/products/{product}/environments/testing/odoo-source-prerequisites`
+is a separate fixed, value-free read requiring the product's existing
+`operations.read` authority. It accepts no query parameters or caller-supplied
+SQL, paths, endpoints or credentials, and returns `Cache-Control: no-store`.
+It does not use an Odoo HTTP account or initialize an Odoo registry.
+
+The service binds the current runtime to its verified release artifact and the
+canonical complete source inventory. The host verifies the actual Docker image's
+immutable repository digest, then brackets execution with container/image
+inspection. The container checks the fixed importer producer, getter, client and
+package files against the tenant inventory. It also verifies the shared
+`launchplane_settings` package, applier and pure payload producer against a
+unique complete addon source inventory at `/opt/project/addons/shared`.
+Missing or ambiguous shared provenance remains unknown. It rejects symlinks, code-overlay
+mounts and duplicate addon copies across configured roots, platform addons,
+the image's `/odoo` framework/community roots and existing data-addon version
+directories. It neither creates directories nor imports Odoo. Legacy, missing,
+incomplete or ambiguous provenance remains unknown.
+
+Each supported installed producer supplies `PARAMETER_KEYS`,
+`OPTION_PARAMETER_KEYS`, `resolve_connection_settings` and the password-free
+`resolve_connection_options`. The reader compiles the same verified producer
+bytes it hashed, suppresses producer output and consumes that producer's own
+defaults and parsing. Launchplane contains no copy of the tenant defaults.
+A bounded local PostgreSQL transaction explicitly requests and verifies
+read-only mode, reads only those parameter keys and the installation states of the fixed
+importers and shared applier, then rolls back and closes. An addon must be installed
+before its effective settings are reported. No source database connection,
+import, synchronization, account, configuration or lifecycle change occurs.
+
+The closed response reports per-option `explicit`, `empty`, `absent` or
+`unknown` input provenance and effective agreement between authority, delivered
+and applied settings. Optional inputs use the verified connection producer's
+parsing and defaults. Omission from authority or delivered overrides does not
+clear a persisted Odoo parameter: when such a parameter is present, comparison
+for that omitted field stays unknown. A missing persisted optional parameter
+can resolve through the installed producer's default.
+Origins concern consumed producer keys: a constant enabled SSL setting can have
+an absent `use_ssl` input, as with the Fishbowl producer that ignores that key.
+Authority options come from the site's typed instance-override literals,
+normalized by the verified installed shared payload producer. Secret-backed
+option authority, conflicting legacy runtime inputs, retired keys and target
+overlays remain unknown. Global settings are not site delivery authority.
+Delivered settings come exclusively from `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64`,
+using that same installed decoder and selected-key resolver. Legacy per-field
+environment variables are never a delivery fallback. The parser fixture is an
+immutable source artifact; tests do not read a sibling checkout or implement a
+second production parser. Missing or malformed payloads cannot become valid
+full delivered settings. Authority resolves only nonsecret options.
+Full delivered/applied settings and
+their password comparison stay inside the container, and their option
+projections must agree with the password-free resolver before evidence is used.
+Raw values, settings objects, passwords, hashes and exception text are never
+returned. Host and service independently validate the bounded, closed frame.
+
+TLS fields describe **configuration only**: `disabled`,
+`verification_disabled`, `enabled_with_verification` or `unknown`.
+`use_ssl=False` is always disabled even when certificate verification is enabled.
+These fields prove no handshake, privileges or credential safety. Safe binding
+selection, stored password-reference agreement and current version metadata are
+separate evidence. `managed_password_value_agreement` remains unknown: equality
+of applied and delivered passwords does not attest the selected managed value.
+This read supplies prerequisite evidence and does not replace or make the
+existing source-grant gate pass.
+
+The service rechecks authority, artifact, selection and delivered environment;
+the host rechecks image/container state; the container rereads local parameters,
+module state, configuration, roots and verified files. Drift discards evidence.
+Reads have a bounded concurrency limit, local SQL timeouts, a container timeout
+with forced cleanup and a provider deadline. Missing runtime support remains
+unknown and requires qualification after delivery; source tests do not qualify
+a live runtime.
+
 #### Runtime-origin source grants
 
 `GET /v1/products/{product}/environments/testing/odoo-source-grants` is the
@@ -5430,8 +5539,9 @@ health-alert policies and historical delivery evidence intact.
 ### Prepared retired-delivery table migration
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup targets discussion-topic
-revision `b81ca763d924`, which follows the separately approved Q533
+`RETIRED_TABLES` in that revision. Normal service startup targets the
+non-runtime profile archive `a4c8e0f2b6d3` (see below), which follows
+discussion-topic revision `b81ca763d924` and the separately approved Q533
 preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
 `e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
 and a green PR do not authorize applying the drop to the shared database.
@@ -5584,3 +5694,25 @@ A release that changes startup's migration target can activate the transition
 during automatic deployment. Complete the deployed-image qualification before
 that release reaches main. Image rollback then returns to this qualified
 compatibility image without downgrading the hostname schema.
+
+### Non-runtime profile archive
+
+Release revision `a4c8e0f2b6d3` follows the topics revision. It copies every
+product profile whose payload names a classification other than
+`managed_runtime` into `launchplane_product_profile_archive`, with
+`migration:nonruntime-product-retirement` as its source and a fixed reason,
+then deletes those profile rows. Runtime profiles, repository inventory and
+every other record stay as they are. A database with no such rows only gains
+the empty archive table.
+
+Empty joins keep every recognized branch reachable without applying a held
+step. A database that already applied the delivery drop or its joins joins at
+`a5d9f1b3c7e4`; a hostname-only schema joins at `a6e0a2c4d8f5`; the
+hostname/retirement and compatibility joins reach the graph head
+`a7f1b3d5e9a6`. Explicitly requesting the delivery drop from the archive
+revision joins at `a5d9f1b3c7e4`; a hostname-only schema still refuses it.
+Hostname activation must target a join that includes this revision.
+
+Downgrade refuses. Images from before this revision reject it, so an image
+rollback across it needs this image or a later one; the hostname compatibility
+image above is no longer a rollback target once the archive has run.

@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -6086,6 +6087,15 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self, refused_path: str = "/api/domain.delete", *, real_inputs: bool = False
     ) -> list[str]:
         self.advance_preview_recovery_grace = True
+        self.enterContext(
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources",
+                return_value="fixture-inspected-binding",
+            )
+        )
+        self.enterContext(
+            patch("control_plane.odoo_preview_resources.require_preview_resource_binding")
+        )
         calls: list[str] = []
         domain_exists = True
 
@@ -6275,6 +6285,17 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             first = self.run_once()
+        self.assertEqual(first.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(calls.count("/api/compose.delete"), 1)
+        reservation = self.store.read_idempotency_record(
+            scope=reconcile_reservation_scope("site"),
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=str(first.last_plan["preview_plan_id"]),
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "reconcile_required")
+        self.assertEqual(reservation.provider_effect_phase, "compose_destroy")
+
         # A later phase with a present compose returns unknown without retrying.
         for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
             self.request("preview", 5)
@@ -6322,6 +6343,17 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             first = self.run_once()
+        self.assertEqual(first.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(calls.count("/api/domain.delete"), 1)
+        reservation = self.store.read_idempotency_record(
+            scope=reconcile_reservation_scope("site"),
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=str(first.last_plan["preview_plan_id"]),
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "reconcile_required")
+        self.assertEqual(reservation.provider_effect_phase, "domain_delete")
+
         with patch.object(
             self.store, "checkpoint_mutation_provider_effect", side_effect=OSError("DB unavailable")
         ):
@@ -6965,7 +6997,7 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.run_once()
         self.assertFalse(self.driver.changes)
 
-    def test_director_standing_preview_needs_valid_notes_without_a_client_invitation(self) -> None:
+    def test_director_standing_preview_invites_review_only_for_an_explicit_label(self) -> None:
         payload = _generic_web_preview_profile().model_dump(mode="json")
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         payload["release_on_acceptance"] = "director_standing"
@@ -6973,21 +7005,21 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
         self.github.add_run(50, PR_HEAD, event="pull_request")
-        for body, labels in (
-            ("## Client test notes\nTry the approval buttons.", []),
-            (
-                "## Client test notes\nTry the changed page.",
-                [{"name": "owner-review"}],
-            ),
-        ):
-            with self.subTest(body=body, labels=labels):
-                self.github.pull_request.update(body=body, labels=labels)
-                self.request("preview", 5)
-                result = self.reconcile()
-                self.assertIn(result["action"], ("apply", "none"))
-                self.assertIs(result["owner_review_requested"], False)
-                for comment in self.comments.on(5):
-                    self.assertNotIn("@site-owner", cast(str, comment["body"]))
+        self.github.pull_request.update(
+            body="## Client test notes\nTry the approval buttons.", labels=[]
+        )
+        self.request("preview", 5)
+        result = self.reconcile()
+        self.assertIn(result["action"], ("apply", "none"))
+        self.assertIs(result["owner_review_requested"], False)
+        for comment in self.comments.on(5):
+            self.assertNotIn("@site-owner", cast(str, comment["body"]))
+        self.github.pull_request.update(labels=[{"name": "owner-review"}])
+        self.request("preview", 5)
+        result = self.reconcile()
+        self.assertIn(result["action"], ("apply", "none"))
+        self.assertIs(result["owner_review_requested"], True)
+        self.github.pull_request.update(labels=[])
         self.github.pull_request["body"] = ""
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["action"], "wait")
@@ -7871,6 +7903,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         )
 
     def test_pure_dependabot_without_build_requests_no_client_review(self) -> None:
+        seed_dependency_policy(self.store, repository=REPOSITORY)
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         self.store.write_product_profile_record(
@@ -7879,9 +7912,9 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.github.pull_request.update(
             {
                 "body": "Bumps a dependency.",
-                "user": {"login": "dependabot[bot]", "type": "Bot"},
+                "user": {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
                 "head": {"sha": PR_HEAD, "repo": {"full_name": REPOSITORY}},
-                "base": {"sha": DEPLOYABLE, "repo": {"full_name": REPOSITORY}},
+                "base": {"ref": "main", "sha": DEPLOYABLE, "repo": {"full_name": REPOSITORY}},
             }
         )
         read = self.github.get_json

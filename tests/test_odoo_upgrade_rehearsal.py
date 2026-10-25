@@ -2570,28 +2570,44 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         (root / ".execution.lock").touch()
         error_text = "psycopg2.errors.UndefinedColumn: column legacy_code does not exist"
         secret = "fixture-password-do-not-export"
-        with patch.object(
-            self.host["subprocess"],
-            "run",
-            side_effect=[
-                subprocess.CompletedProcess([], 1, b"", b"transient startup error"),
-                subprocess.CompletedProcess(
-                    [], 7, b"initialization stopped", (error_text + "\nPASSWORD=" + secret).encode()
-                ),
-                subprocess.CompletedProcess([], 9, b"", b"cleanup also failed"),
-            ],
+        for cleanup in (
+            subprocess.CompletedProcess([], 9, b"", b"cleanup also failed"),
+            RuntimeError("Candidate stop inventory is unverified"),
         ):
-            with self.assertRaises(self.host["RehearsalCommandFailure"]) as failure:
-                with self.host["command_failure_scope"](spec, root):
-                    try:
-                        self.host["command"](["transient-child"])
-                    except self.host["RehearsalCommandFailure"]:
-                        pass
-                    try:
-                        self.host["command"](["fixture-child"])
-                    finally:
-                        self.host["command"](["cleanup-child"])
-        self.assertEqual(failure.exception.diagnostic["exit_status"], 9)
+            self.host["command_failure_path"](spec, root).unlink(missing_ok=True)
+            with (
+                self.subTest(cleanup=type(cleanup).__name__),
+                patch.object(
+                    self.host["subprocess"],
+                    "run",
+                    side_effect=[
+                        subprocess.CompletedProcess([], 1, b"", b"transient startup error"),
+                        subprocess.CompletedProcess(
+                            [],
+                            7,
+                            b"initialization stopped",
+                            (error_text + "\nPASSWORD=" + secret).encode(),
+                        ),
+                        cleanup,
+                    ],
+                ),
+            ):
+                expected_error = (
+                    RuntimeError
+                    if isinstance(cleanup, RuntimeError)
+                    else self.host["RehearsalCommandFailure"]
+                )
+                with self.assertRaises(expected_error):
+                    with self.host["command_failure_scope"](spec, root):
+                        try:
+                            self.host["command"](["transient-child"])
+                        except self.host["RehearsalCommandFailure"]:
+                            pass
+                        try:
+                            self.host["command"](["fixture-child"])
+                        finally:
+                            self.host["command"](["cleanup-child"])
+                self.assertEqual(self.host["read_command_failure"](spec, root)["exit_status"], 7)
         diagnostic = self.host["read_command_failure"](spec, root)
         self.assertEqual(
             diagnostic["step"],
@@ -2657,6 +2673,26 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         self.assertFalse(observed["completed"])
         self.assertEqual(path.read_bytes(), original)
 
+    def test_empty_warning_only_filestore_capture_is_not_an_archive(self) -> None:
+        import sys
+
+        _, root, _ = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        warning = b"tar: .: file changed as we read it\n"
+        self.assertTrue(self.host["filestore_tar_warning_only"](1, warning, False))
+        with self.assertRaises(RuntimeError):
+            self.host["bounded_capture"](
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys;sys.stderr.write(" + repr(warning.decode()) + ");sys.exit(1)",
+                ],
+                root / "empty.tar",
+                1024,
+                filestore=True,
+            )
+
     def test_capture_failure_discards_output_and_preserves_exit_status(self) -> None:
         import sys
         from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTIC_TAIL_LIMIT
@@ -2664,22 +2700,26 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         spec, root, _ = self.storage_fixture(
             {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
         )
-        (root / "verify.started").touch()
-        with self.assertRaises(self.host["RehearsalCommandFailure"]):
-            with self.host["command_failure_scope"](spec, root):
-                self.host["bounded_capture"](
-                    [
-                        sys.executable,
-                        "-c",
-                        f"import sys;sys.stdout.write('private capture bytes');sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_TAIL_LIMIT * 3});sys.stderr.write('\\ncapture child error');sys.exit(7)",
-                    ],
-                    root / "partial.dump",
-                    1024,
-                )
-        diagnostic = self.host["read_command_failure"](spec, root)
-        self.assertEqual(diagnostic["exit_status"], 7)
-        self.assertEqual(diagnostic["error_text"], "")
-        self.assertNotIn("private capture bytes", str(diagnostic))
+        for name, output in (("verbose", "private capture bytes"), ("quiet", "")):
+            with self.subTest(name=name):
+                capture_root = root / name
+                capture_root.mkdir()
+                (capture_root / "verify.started").touch()
+                with self.assertRaises(self.host["RehearsalCommandFailure"]):
+                    with self.host["command_failure_scope"](spec, capture_root):
+                        self.host["bounded_capture"](
+                            [
+                                sys.executable,
+                                "-c",
+                                f"import sys;sys.stdout.write({output!r});sys.stderr.buffer.write(b'x'*{REHEARSAL_DIAGNOSTIC_TAIL_LIMIT * 3});sys.stderr.write('\\ncapture child error');sys.exit(7)",
+                            ],
+                            capture_root / "partial.dump",
+                            1024,
+                        )
+                diagnostic = self.host["read_command_failure"](spec, capture_root)
+                self.assertEqual(diagnostic["exit_status"], 7)
+                self.assertEqual(diagnostic["error_text"], "")
+                self.assertNotIn("private capture bytes", str(diagnostic))
 
     @staticmethod
     def attachment_mismatch_fixture() -> dict[str, Any]:
@@ -3614,6 +3654,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         spec = {
             "record": {
                 "rehearsal_id": self.identifier,
+                "product": "fixture",
                 "storage": budget,
                 "state": "switched",
                 "intent_sha256": hashlib.sha256(b"fixture").hexdigest(),
@@ -3776,6 +3817,13 @@ class RehearsalHostSafetyTests(unittest.TestCase):
 
     def test_capacity_groups_devices_and_reserves_nonroot_available_bytes_once(self) -> None:
         from types import SimpleNamespace
+
+        real_read = Path.read_text
+
+        def read(path: Path, *args: Any, **kwargs: Any) -> str:
+            return "" if path == Path("/proc/self/mountinfo") else real_read(path, *args, **kwargs)
+
+        self.enterContext(patch.object(Path, "read_text", read))
 
         spec, root, containers = self.storage_fixture(
             {

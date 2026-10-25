@@ -69,6 +69,7 @@ from control_plane.contracts.privileged_operation_worker_heartbeat import (
     privileged_operation_worker_identity_sha256,
 )
 from control_plane.durable_operation_authorization import (
+    durable_operation_administrator_grant_allows,
     managed_github_id_explicit_action_rule_allows,
     managed_github_id_action_allows,
     managed_github_id_rule_allows,
@@ -354,6 +355,7 @@ def _construct_approver_authorization(
         instances=(backup_policy.instance,) if backup_policy else ("global",),
         managed_set_id=approval.managed_set_id,
         managed_rule_id=approval.managed_rule_id,
+        grant=approval.grant,
         policy_record_id=policy_record.record_id,
         policy_revision=policy_record.revision,
         policy_schema_version=policy_schema_version,
@@ -364,7 +366,7 @@ def _construct_approver_authorization(
             identity_type="github_human",
             login=approval.approver.login,
             github_id=approval.approver.github_id,
-            role="read_only",
+            role="admin" if approval.grant == "policy_administrator" else "read_only",
         ),
     )
 
@@ -374,6 +376,10 @@ def _approver_is_still_authorized(
     authorization: DurableOperationAuthorization,
     policy_record: LaunchplaneAuthzPolicyRecord,
 ) -> bool:
+    if authorization.grant == "policy_administrator":
+        return durable_operation_administrator_grant_allows(
+            authorization=authorization, policy_record=policy_record
+        )
     authorization_reader = (
         managed_github_id_explicit_action_rule_allows
         if authorization.action.startswith("ordinary_agent_delivery_activation.")
@@ -407,7 +413,11 @@ def _authorize_approved_operation(
         authorization=authorization,
         policy_record=policy_record,
     ):
-        raise ValueError("approval_managed_rule_drift")
+        raise ValueError(
+            "approval_policy_admin_drift"
+            if approval.grant == "policy_administrator"
+            else "approval_managed_rule_drift"
+        )
     if record.descriptor_id == "managed-authz-policy-set" and not (
         managed_github_id_action_allows(
             policy=policy_record.policy,

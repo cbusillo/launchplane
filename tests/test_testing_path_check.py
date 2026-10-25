@@ -13,6 +13,7 @@ from control_plane.contracts.product_profile_record import ProductOdooLaneDataPo
 from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
 from control_plane.odoo_walkthrough import WalkthroughPrerequisite
 from control_plane.testing_replacement_bootstrap import BootstrapPrerequisiteCode
+from control_plane.testing_replacement_resources import NativeTestingRebuildRequired
 from control_plane.odoo_testing_usage import OdooTestingUsage
 from control_plane.secrets import write_secret_value, LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR
 from tests import test_testing_replacement_resources as resources
@@ -80,6 +81,29 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             f"/v1/products/{self.fixture.profile.product}/path-check?{self.query}",
             headers={"Authorization": "Bearer local-operator-token"},
         )
+
+    async def test_native_copy_redirects_legacy_generation_without_blocking_account_reads(
+        self,
+    ) -> None:
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"source_label": "service:testing-rebuild"})
+        )
+        for intent, state in (("generation", "blocked"), ("provision", "clear")):
+            with self.subTest(intent=intent):
+                self.query = urlencode({"path": "testing", "intent": intent})
+                response = await self.read()
+                self.assertEqual(response.status_code, 200, response.text)
+                step = next(
+                    item
+                    for item in response.json()["check"]["steps"]
+                    if item["step_id"] == "testing_resources"
+                )
+                self.assertEqual(step["state"], state)
+                if state == "blocked":
+                    self.assertEqual(step["code"], NativeTestingRebuildRequired.code)
 
     async def test_default_testing_read_preserves_deploy_scope_without_copy_probes(self) -> None:
         with (

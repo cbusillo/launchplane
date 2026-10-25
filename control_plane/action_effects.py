@@ -8,6 +8,7 @@ from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ACTION, WALKTHR
 
 ActionEffect = Literal["read", "plan", "projection_sync", "write"]
 AGENT_READ_ROLE_ACTION = "agent.read"
+BACKUP_CONTINUATION_ACTION = "client_release_backup.continue"
 GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION = "generic_web_deploy_recovery.plan"
 ODOO_CONNECTION_ISOLATION_ACTIONS = MappingProxyType(
     {
@@ -125,6 +126,10 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "ingress_route.plan": ActionDeclaration("plan"),
         "inventory.read": ActionDeclaration("read"),
         "launchplane_service.read": ActionDeclaration("read"),
+        "launchplane_service.runtime_settings.apply": ActionDeclaration(
+            "write", "service", director_agent_write=True
+        ),
+        "launchplane_service.runtime_settings.plan": ActionDeclaration("plan", "service"),
         "launchplane_service.reconcile_odoo_workers": ActionDeclaration("write"),
         "launchplane_service.reconcile_verireel_workers": ActionDeclaration("write"),
         "launchplane_service_deploy.execute": ActionDeclaration("write"),
@@ -227,6 +232,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         # A pending-request withdrawal records the Director's routing decision.
         # It cannot replace a Client decision, accept a release or change access.
         "product_review.withdraw": ActionDeclaration("write", director_agent_write=True),
+        BACKUP_CONTINUATION_ACTION: ActionDeclaration("write", director_agent_write=True),
         "product_retirement.apply": ActionDeclaration("write"),
         "product_retirement.plan": ActionDeclaration("write"),
         "production_backup_authority.read": ActionDeclaration("read"),
@@ -239,7 +245,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "public_ingress_monitor.run_once": ActionDeclaration("write"),
         "public_ingress_notification_policy.apply": ActionDeclaration("write"),
         "repository_inventory.read": ActionDeclaration("read"),
-        "repository_inventory.write": ActionDeclaration("write"),
+        "repository_inventory.write": ActionDeclaration("write", director_agent_write=True),
         "route_binding.apply": ActionDeclaration("write"),
         "route_binding.external.apply": ActionDeclaration("write"),
         "route_binding.external.plan": ActionDeclaration("plan"),

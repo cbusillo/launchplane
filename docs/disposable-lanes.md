@@ -584,6 +584,15 @@ For testing, caller-supplied usage, custody and isolation values are stored as
 unknown. Observations retain their actor as provenance;
 historical observer names confer no permission. Preview refresh and retirement
 keep their existing protective-report rules.
+Explicit Director-agent teardown of an exact owned Odoo preview uses the same
+protective-report qualification as refresh. Known use, a needed copy or shared
+resources remain holds even after a report expires. Missing positive preview
+observations alone do not block teardown; reviewed-plan, target ownership,
+executor fences and provider-resource guards still apply before every effect.
+Odoo teardown inspects its generated storage once outside the mutation lock,
+then rechecks placement, volume environment and raw compose binding inside the lock
+before each deletion. Missing owned resources can converge; foreign volume
+declarations, shared consumers and incomplete inventories remain held.
 
 Scheduled preview cleanup tears down a preview when its PR is confirmed closed
 or merged, without usage, custody, data-origin or isolation observations. An
@@ -652,7 +661,8 @@ filesystem namespace. Unsupported backing options, shared consumers, incomplete
 or conflicting inspection and changed target placement/resources refuse. Unrelated
 container churn and disjoint stale bind sources are not protected use. It neither
 clears existing data nor creates a positive custody report. The qualified Director
-refresh omits host SSH mounts and retains managed integration/source filtering.
+refresh follows the [Odoo preview data-source policy](preview-workflow-contract.md#route-handoff)
+and retains managed integration/source filtering.
 
 Managed settings, aliases, protection reports, overrides and key policy are frozen
 for each bounded dispatch, with a lock timeout. Deploy/job waits hold no global
@@ -1126,6 +1136,14 @@ remove integration connections and retain the lane's public address. A candidate
 uses its own manual host schedule, so preparation cannot replace the serving
 lane's data-workflow schedule.
 
+For an existing non-root SSH reader, upstream capture requests `pg_dump -U ROLE
+-Fc DATABASE` and uses rsync for regular filestore files without links, devices
+or special files. The source can restrict that login to those two reads. Root
+readers retain their existing command for the database role. A restricted filestore
+namespace may be `/`. Upgrade rehearsal capture and sizing still require their
+separate remote tar and Python read capabilities; selecting a restricted reader
+does not authorize those commands or qualify a rehearsal.
+
 Before each provider effect the caller rechecks its exclusive operation lease,
 authority, holds, usage and physical custody. Configuration and deployment
 intent are persisted first. A continuation only accepts the exact configuration
@@ -1277,6 +1295,86 @@ Legacy managed and external bindings keep their existing paths and bounded failu
 reporting. Manual/browser single-binding reconcile identifies the native controller
 as the supported renewal path rather than returning a provider-domain error.
 
+### Changing a native testing canonical address
+
+Address-plan refusals retain their trace and sanitized source sites in the
+service cause log; responses and logs omit raw provider errors and request values.
+
+`POST /v1/products/{product}/testing-address` amends the current published Odoo
+testing lane without replacing its copy. The Director agent supplies `context`,
+`retirement_operation_id`, `reservation_operation_id`, `hostname`, and `reason`.
+`instance` is always `testing`. The retirement ID identifies the original
+retirement inspection; the reservation ID identifies the separate retained
+allocation or generation that actually reserves the requested hostname. These
+may be different operations. Production is outside this operation.
+
+Use `mode: dry-run` first. The service saves an immutable private plan and returns
+its `plan_sha256`, current target ID, new canonical hostname and retained original
+hostname. Review that result, then send the same request with `mode: apply`,
+`reviewed_plan_sha256`, and one stable `Idempotency-Key`. `mode: readback` uses the
+same reviewed hash. The installed Launchplane service helper's transport supplies
+the existing credential; no provider credential, caller-supplied topology or new
+grant is an input. Generated agent/OpenAPI contracts describe this service API.
+The reviewed reason is retained in the immutable plan and applied receipt.
+
+The plan requires exact retained hostname custody in the same product/context,
+a superseded original recipient operation, complete credential-visible provider
+domain membership, and stopped recipients on the existing testing server. The
+old recipients must have automatic deploys and schedules disabled. Their dormant
+router labels must remain strictly below the existing lane-owned priority, with
+known listeners. Foreign domains, matching foreign routers, automatic restart
+policies and incomplete observations refuse qualification. The original executor
+locks and all retained custody hashes are rechecked; no old fence is released.
+The retained recipient facts form the comparison digest. Unrelated provider
+membership is not part of that digest. A full census runs immediately before
+each actual route dispatch, including retries of an unsent or busy writer.
+A continuing original that only observes its recorded writer needs no new census.
+The bounded census runs in the worker; dispatch rechecks its lease and physical
+fence afterward. Matching
+applied or dormant TCP routers also refuse qualification because
+[TCP routing precedes HTTP routing](https://doc.traefik.io/traefik/reference/routing-configuration/tcp/routing/router/).
+
+The existing physical route fence writes one owned document with a rule for the
+new hostname and the original hostname. Backend, TLS resolver/options, middleware
+and listeners stay the same. Each hostname gets a separate `tls.domains` main
+entry so its certificate order and renewal remain independent; see
+[Traefik ACME domain definition](https://doc.traefik.io/traefik/reference/install-configuration/tls/certificate-resolvers/acme/#domain-definition).
+Original-attempt receipts settle an uncertain writer before another
+dispatch. Both HTTPS origins must return the current testing runtime identity
+before one transaction updates the lane base URL, binding provenance and canonical
+Odoo override intent. The original publication, candidate, restore generation,
+retirement and resources remain unchanged. A lost metadata reply resolves from
+the committed address receipt. Preserve the original request and key on any
+unknown outcome; do not clear old operation fences or edit publication history.
+The metadata transaction checks the original lease again immediately before commit.
+
+If the unpublished amendment cannot finish, send `mode: apply` with
+`operation: cancel`, the original reviewed hash, reason and `Idempotency-Key`.
+Cancellation settles and excludes the original forward writer before restoring
+the recorded owned-file preimage through the same fenced mechanism. Its own
+uncertain inverse must settle before cancellation can complete. Once an inverse
+exists, forward amendment and its readback refuse until cancellation finishes;
+the original operation cannot change direction while a late inverse may run.
+It can preserve
+later inventory, runtime and unrelated profile edits while restoring the route;
+it never overwrites a different copy or binding. `mode: readback` with
+`operation: cancel` and the same key verifies the restored preimage. Completed
+cancellation permits a fresh plan and key; it does not certify public health.
+An already committed canonical publication cannot be cancelled by this path;
+retrieve its original amend result instead. Database uncertainty retains the
+original fence until the publication transaction can be observed conclusively.
+After a matching canonical commit, readback checks the same current copy and its
+fresh runtime identity without depending on retained containers remaining present.
+Original retained operation and custody records must still match.
+
+Native refresh and later rebuild admission resolve this additive address receipt.
+A later rebuild keeps the original hostname as an alias. Ordinary deploy and
+release checks continue to validate the original copy custody, and completed
+restore rendering uses the amended canonical address without rewriting its
+generation witness. After amendment readback, reapply the testing canonical Odoo
+settings through the existing supported service operation. The address amendment
+does not itself deploy, restore, start or delete an application.
+
 ## Native testing worker integration
 
 The existing durable target-replacement action accepts testing-only
@@ -1355,7 +1453,10 @@ remains outside takeover and above every application winner. A changed internal
 route on an application listener still refuses. Duplicate Docker router families
 may describe one predecessor only when every alias binds the same physically
 verified backend and has equivalent host, listeners, effective priority,
-middleware, TLS and load-balancer behavior. The plan retains every alias for
+middleware, TLS and load-balancer behavior. Middleware equivalence uses the
+emitted route after preserving or adding the required testing connection CSP;
+an alias may omit that managed header when its resulting middleware order agrees.
+Unknown Docker middleware and other routing differences still refuse. The plan retains every alias for
 subsequent drift checks and emits one owned winner per equivalent group. It
 never deletes a live router or changes proxy configuration to make admission pass.
 
@@ -1518,8 +1619,16 @@ generated credential provenance. It does not record an artifact, reserve a copy,
 create a lease or dispatch a mutation. Its `candidate_verification: pending`
 does not prove a new copy or completed restore. The worker still checks the
 source, generated values, independent resources, health and identity before
-cutover. The machine target-replacement plan route supports the same native
-read without a provider write.
+cutover. The authenticated Director agent can also inspect these inputs, read a known
+testing operation, and look up its own original key and exact intent. These
+three reads still require database storage and an active administrator policy.
+For lookup, Director callers supply the exact original native apply envelope,
+including the original omission of optional fields. Its raw fingerprint must
+match the stored original; the lookup never replays that request. Human lookup
+retains its typed browser body, original scope and fingerprint check. These reads do
+not change submission, settlement or resume authority. The machine
+target-replacement plan route supports the same native read without a provider
+write.
 
 `POST /v1/products/{product}/testing-rebuild` takes the inspected build/source
 pair, a concrete reason and the original request key. Existing administrator
@@ -1891,6 +2000,13 @@ or forward-fix with compatible readers; retaining additive tables through schema
 rollback does not make old code a supported continuation.
 
 ## Bootstrap a qualified fresh Odoo testing generation
+
+Native-published testing lanes use their native same-address rebuild. Legacy
+resource admission, bootstrap planning and path inspection return
+`native_testing_rebuild_required` before allocating replacement resources on
+such a lane. The existing legacy generation and original-key continuation stay
+available on their original recipients; this rule does not block a previously
+allocated legacy copy merely because its lane has a base URL.
 
 After resource qualification and the testing-only `upstream_restore` data policy,
 `POST /v1/products/{product}/testing-replacement-bootstrap` binds that exact
@@ -3011,7 +3127,8 @@ volumes, credentials, database names, cron and connections are isolated.
 Before a rehearsal prepare creates credentials or dispatches its first provider
 create, Launchplane reads the selected server's IPv4 bridge-network headroom
 over Dokploy's existing registered-server terminal transport. The fixed reader
-uses the daemon's effective `DefaultAddressPools`, complete network IPAM and
+uses the daemon's configured `DefaultAddressPools`, or Docker's built-in local
+pools when the custom-pool list is null or empty, complete network IPAM and
 all IPv4 route tables. Each overlapping allocation or non-default route consumes
 the pool slots it intersects; duplicate overlaps count once. The rehearsal needs
 one private bridge plus two spare slots. Exactly that headroom passes.
@@ -3020,7 +3137,7 @@ that pool unavailable to admission even if Docker would otherwise allocate it.
 
 HTTP 409 `host_bridge_network_capacity_short` means the measured free capacity
 is below that requirement. `host_bridge_network_capacity_unavailable` means
-capacity is unproved, including absent daemon pool evidence, malformed or
+capacity is unproved, including failed daemon reads, malformed or
 incomplete reads, or network inventory changing during the read. Neither
 refusal creates credentials or provider placement, and a fresh pre-effect
 operation reservation is released. Provider authorization denials retain their
@@ -3396,8 +3513,18 @@ key and new evidence file:
    source recovery tuple, clones it, and runs OpenUpgrade under the target
    artifact. Strict connection readback gates private web startup.
 2. `simulate-final` uses the already sanitized source copy. It simulates the
-   final capture and switches only the rehearsal web's database to the final
-   upgraded copy. It never recaptures or fences the real business system.
+   final capture and upgrades the final copy. A separate `pre-switch-web`
+   candidate uses the same immutable image, sanitized database, local settings
+   and internal network while the normal private `web` endpoint stays stopped.
+   Exact runtime identity, HTTP health/login, the fixed product-owned synthetic
+   business scenarios and a fresh connection-isolation readback must pass before
+   starting that normal endpoint. The candidate is stopped before the switch;
+   its stopped container stays in owned rehearsal inventory for retirement.
+   An interrupted candidate is stopped by its exact project/service selection;
+   it has no restart policy. Supported retirement and abandonment admit an owned
+   running candidate for their existing guarded stop/disposal path.
+   It never recaptures or fences the real business system. `rebuild-final`
+   uses the same pre-switch checks after restoring preserved inputs.
 3. `validate-business` runs the candidate image’s fixed product-owned entrypoint on the
    switched final upgraded copy, as described below. It neither repeats an
    upgrade nor seals a snapshot.
@@ -3468,6 +3595,11 @@ once per attempt. Conflicting evidence for the same attempt refuses publication.
 The saved host receipt and pending business outcome retain the original times;
 readback neither stamps the observation again nor repeats the effect. An
 interruption before the receipt is saved leaves its missing boundaries unknown.
+Pre-switch verification also saves a private, attempt-bound `.pre-switch.json`
+receipt before starting the normal endpoint. If the switch is interrupted,
+original-key readback returns that retained T4 proof with `completed: false`;
+it does not repeat the committed synthetic scenarios or invent T5. The original
+effect marker continues to fence replay.
 
 The timing field is excluded from the record's reviewed binding and omitted
 when empty. Existing recovery receipts and record hashes remain compatible.
@@ -3481,7 +3613,7 @@ published timing history with the existing recovery metadata.
 | `T2` | The first `sql_sanitized` stamp emitted by the rehearsal copy runner, after committed SQL-only sanitization and independent integration readback, before registry startup. Later post-hook sanitization stamps do not replace it. |
 | Upgrade | `module_update_completed`, after exact declared module witnesses and installed/pending-state checks. |
 | `T3` | `before_web`, after the final connection readback and before opening the web gate. `web_started` records the subsequent private web start. |
-| `T4` | Unavailable: the current lifecycle has no distinct pre-switch HTTP verification step. Before-web isolation and post-start health do not supply that missing boundary. |
+| `T4` | `pre_switch_verified`, after the separate candidate passes exact image/source/product/deployment identity and private HTTP health/login, and script-runner passes the product-owned committed business scenarios against that same final database followed by fresh connection isolation. `pre_switch_validation` retains that passing receipt under the simulation/rebuild attempt. No public route is involved. |
 | `T5` | `private_switch_verified`, after the private health/identity and login checks pass. |
 | `T6` | Bounded by `product_started` and `receipt_observed` for the first committed product validation, which must have passed. The product verifies its writes through a fresh cursor before returning the receipt. These bounds do not claim the exact commit instant. |
 
@@ -3496,11 +3628,26 @@ a completed operation; forward clock jumps cannot be detected from UTC stamps
 alone. Production capture and source sanitization remain separate
 `execute` terms and are never added to the simulated pause.
 
-`measured_window.complete` remains false because `T4` is unavailable. Bounded
-pause evidence does not complete a runbook criterion requiring all `T0`–`T6`
-boundaries. Legacy records have no timing field and remain unmeasured; neither
-elapsed durations nor later observations backfill their missing times. Product
-commit uncertainty, including an unverified pending postcheck, stays unknown.
+`measured_window.complete` is true only when that same lineage also has its
+ordered T4 stamp and passing, candidate-bound pre-switch business receipt.
+Older timed receipts without T4 keep their partial bounds and an explicit
+unavailable boundary. Untimed legacy records remain unmeasured; neither elapsed
+durations nor later observations backfill missing times. T4's synthetic writes
+are separate from the first accepted post-switch validation that bounds T6.
+These timestamps measure this simulated lifecycle; they do not replace the
+consuming product's browser, authentication, canonical URL/logo, integration
+and release acceptance requirements. Product commit uncertainty, including an
+unverified pending postcheck, stays unknown.
+The `pre-switch-verification` elapsed term measures candidate checks separately
+from `private-switch`, which starts after T4.
+Older `private-switch` values also included before-web readback and gate
+publication; use UTC boundaries when comparing those generations.
+The final upgraded snapshot's
+business-history hash includes the latest simulation/rebuild's pre-switch
+receipt followed by the preserved post-switch validation journal. An older
+candidate's pre-switch receipt is excluded after rebuild; historical post-switch
+receipts remain in that journal. Legacy histories retain
+their original hash when they contain no pre-switch receipt.
 
 #### Private product business validation
 

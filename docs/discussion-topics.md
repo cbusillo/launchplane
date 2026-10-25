@@ -60,8 +60,8 @@ returns to the same product page.
 
 The service lifespan runs an opt-in scheduler once a minute. Configuration is
 the JSON string `LAUNCHPLANE_DISCUSSION_REMINDERS` in the database-backed
-`launchplane` context runtime-settings record. Use the existing authenticated
-runtime-settings service API to maintain it. There is no process-environment,
+`launchplane` context runtime-settings record. Maintain it through
+[service settings](service-runtime-settings.md). There is no process-environment,
 global-setting or product-setting fallback. No configuration means no delivery.
 This source change creates no schedule or topic records.
 

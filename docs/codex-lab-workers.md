@@ -45,23 +45,10 @@ the state needed to reuse the same request and worktree.
 The retained worktree remains worker-owned and is not a workspace for manual
 processes: terminal-process cleanup continues during polling.
 
-A signed linked-PR close or merge event records closure even if execution
-already finished. The closure marker prefixes the existing result summary;
-it describes the PR, not the execution outcome. That metadata does not change
-the completed execution's outcome, fencing token, or finish time. First
-observed closure remains final for this request even if the PR is reopened.
-Once closure is recorded, ordinary
-cleanup may remove the saved workspace under its existing safety checks.
-Terminal requests without a result PR remain eligible for cleanup. Dirty or
-uninspectable worktrees continue to be protected independently.
-
-Cleanup reconciliation also preserves workspaces awaiting PR feedback and
-reports `awaiting_pull_request_feedback`. A missed closure event can therefore
-retain disk state; absence of closure evidence is not permission to delete it.
-For a missed event, an authorized repository admin can redeliver the
-original GitHub webhook through GitHub's delivery interface. Launchplane still
-validates the signed event and its request/PR match. Do not replace missing
-closure evidence with a local record edit or manual deletion.
+Historical PR-closure summaries remain readable. The removed Every Code webhook
+and its orphan handlers no longer record new closure deliveries. Existing
+cleanup checks still retain workspaces awaiting closure evidence; absence of
+that evidence is not permission for a local record edit or workspace deletion.
 
 Workspace retention alone does not enable production feedback relaunch. The
 current service status API rejects terminal-to-running transitions, while the
@@ -78,8 +65,7 @@ of old-fence or wrong-host callbacks after an authorized rerun and fresh claim.
 Rejected writes must preserve the complete stored request. This is service
 contract evidence, not PostgreSQL concurrency or positive feedback-resume
 acceptance. The existing PostgreSQL integration gate separately covers claims,
-heartbeats, stale recovery, status fencing, and completion racing linked-PR
-closure.
+heartbeats, stale recovery and status fencing.
 
 The worker test module's `_EveryCodeApiHandler` is a transport fixture with
 direct record writes; its successful reruns and feedback sessions do not prove
@@ -88,12 +74,6 @@ tests establish workspace retention only. Issue
 [#2328](https://github.com/cbusillo/launchplane/issues/2328), which tracked the
 service-backed implementation, was closed on 2026-09-23 when `DIRECTION.md` was
 adopted; no open issue continues it.
-
-The [feedback continuation foundation](every-code-feedback-resume.md) adds strict
-contracts, isolated SQL evidence and inert launch protocol tests. It does not
-wire the deployed worker or prove positive service-backed restart. A distinct
-exact session handoff receipt and supported admin recovery remain mandatory
-before production enablement.
 
 The current Codex Lab session client maps this provenance into the Discord Blue
 [remote agent session contract](https://github.com/cbusillo/discord-blue/blob/main/docs/agent-session-protocol.md).

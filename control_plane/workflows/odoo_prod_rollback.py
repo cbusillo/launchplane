@@ -546,6 +546,7 @@ def execute_odoo_prod_rollback(
                 release_website_settings=release_decision.checklist.production_website_settings
                 if release_decision is not None
                 else None,
+                restore_release_website_settings=release_decision is not None,
                 release_operation=True,
             )
         deployment_record = typed_record_store.read_deployment_record(

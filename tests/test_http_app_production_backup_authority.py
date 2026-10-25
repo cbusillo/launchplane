@@ -465,6 +465,9 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(ready.status_code, 200)
             self.assertEqual(ready.json()["authority"]["state"], "ready")
+            self.assertEqual(
+                ready.json()["policy_configuration"], dry_envelope.policy.model_dump(mode="json")
+            )
             self.assertNotIn("proxmox.example.invalid", ready.text)
             self.assertNotIn("pbs-production", ready.text)
             store.close()

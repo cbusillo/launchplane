@@ -11,7 +11,7 @@ import json
 import re
 import secrets
 from time import monotonic
-from typing import Any, Literal, overload
+from typing import Any, Literal, NamedTuple, overload
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import LargeBinary, Text, case, cast, func, select, text
@@ -116,11 +116,19 @@ def snapshot_failure_diagnostics(error: Exception) -> dict[str, Any]:
     return result
 
 
+class _ScrubbedItem(NamedTuple):
+    schema: Mapping[str, Any]
+    root: Mapping[str, Any]
+    value: Any
+
+
 class _Scrubber:
     def __init__(self) -> None:
         self._salt = secrets.token_bytes(32)
         self._numbers: dict[str, int] = {}
         self._used_numbers: set[int] = set()
+        self._scrubbed_items_by_source: dict[tuple[int, int, str, bool, bytes], _ScrubbedItem] = {}
+        self._cached_source_bytes = 0
 
     def _digest(self, value: str) -> str:
         return hmac.new(self._salt, value.encode(), hashlib.sha256).hexdigest()
@@ -277,7 +285,7 @@ class _Scrubber:
         if isinstance(value, list):
             positional = schema.get("prefixItems", [])
             return [
-                self.scrub(
+                self._scrub_list_item(
                     item,
                     positional[index] if index < len(positional) else schema.get("items", {}),
                     root,
@@ -310,6 +318,28 @@ class _Scrubber:
                 pseudonym = self.number(str(value))
                 return float(pseudonym) if isinstance(value, float) else pseudonym
         return value
+
+    def _scrub_list_item(
+        self,
+        value: Any,
+        schema: Mapping[str, Any],
+        root: Mapping[str, Any],
+        name: str,
+        *,
+        declared: bool,
+    ) -> Any:
+        if not isinstance(value, dict):
+            return self.scrub(value, schema, root, name, declared=declared)
+        source = json.dumps(value, separators=(",", ":")).encode()
+        key = (id(schema), id(root), name, declared, hashlib.sha256(source).digest())
+        cached = self._scrubbed_items_by_source.get(key)
+        if cached is not None and cached.schema is schema and cached.root is root:
+            return cached.value
+        scrubbed = self.scrub(value, schema, root, name, declared=declared)
+        if self._cached_source_bytes + len(source) <= SNAPSHOT_MAX_BYTES:
+            self._cached_source_bytes += len(source)
+            self._scrubbed_items_by_source[key] = _ScrubbedItem(schema, root, scrubbed)
+        return scrubbed
 
 
 def _normalized(normalize: Callable[[Any], Any], value: object) -> Any:
@@ -373,6 +403,11 @@ def export_stored_record_snapshot(
     deadline = monotonic() + 20
     encoder = SnapshotRowEncoder() if format_version == 2 else None
     active_policy_count = 0
+    nested_schemas = {
+        "dry_run_result": MergeTrainDryRunResult.model_json_schema(),
+        "snapshot": MergeTrainDryRunSnapshot.model_json_schema(),
+        "worker_step_result": MergeTrainWorkerStepResult.model_json_schema(),
+    }
 
     def refuse(reason: str) -> SnapshotUnavailable:
         return SnapshotUnavailable(
@@ -476,12 +511,7 @@ def export_stored_record_snapshot(
                             inventory.append(EnvironmentInventory.model_validate(raw["payload"]))
                     payload = scrubber.scrub(raw["payload"], schema, schema)
                     if model_type is MergeTrainRunRecord:
-                        for key, nested_type in (
-                            ("dry_run_result", MergeTrainDryRunResult),
-                            ("snapshot", MergeTrainDryRunSnapshot),
-                            ("worker_step_result", MergeTrainWorkerStepResult),
-                        ):
-                            nested_schema = nested_type.model_json_schema()
+                        for key, nested_schema in nested_schemas.items():
                             if key in raw["payload"]:
                                 payload[key] = scrubber.scrub(
                                     raw["payload"][key], nested_schema, nested_schema

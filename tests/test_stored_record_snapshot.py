@@ -163,18 +163,6 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         profiles = (
             LaunchplaneProductProfileRecord.model_validate(secrets),
             LaunchplaneProductProfileRecord.model_validate(drill),
-            LaunchplaneProductProfileRecord.model_validate(
-                {
-                    "schema_version": secrets["schema_version"],
-                    "product": "retired-site",
-                    "display_name": "Retired",
-                    "repository": "cbusillo/retired-site",
-                    "lifecycle_state": "retired",
-                    "classification": "out_of_scope",
-                    "updated_at": secrets["updated_at"],
-                    "source": "test",
-                }
-            ),
             transport,
             _dns_profile().model_copy(update={"product": "dns-expectations"}),
         )
@@ -720,6 +708,97 @@ class StoredRecordSnapshotTests(unittest.TestCase):
             del value
             retained = tracemalloc.get_traced_memory()[0] - baseline
             self.assertLess(retained, source_value_size * 4)
+        finally:
+            if not already_tracing:
+                tracemalloc.stop()
+
+    def _store_policy_history(self, revisions: int) -> None:
+        record = self.store.list_authz_policy_records()[0]
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=tuple(
+                GitHubActionsPolicyRule(
+                    repository=f"private/example-{index}",
+                    workflow_refs=(
+                        f"private/example-{index}/.github/workflows/deploy.yml@refs/heads/main",
+                    ),
+                    products=(f"product-{index}",),
+                    contexts=(f"context-{index}",),
+                    actions=("launchplane_service.read",),
+                )
+                for index in range(40)
+            ),
+            github_humans=self.policy.github_humans,
+        )
+        current = LaunchplaneAuthzPolicyRecord.model_validate(
+            {**record.model_dump(mode="json"), "policy": policy, "policy_sha256": ""}
+        ).model_dump(mode="json")
+        with self.store._engine.begin() as connection:
+            connection.execute(
+                update(LaunchplaneAuthzPolicyRow).values(
+                    policy_sha256=current["policy_sha256"], payload=current
+                )
+            )
+            for revision in range(2, revisions + 1):
+                historical = dict(
+                    current, record_id=f"history-{revision}", revision=revision, status="superseded"
+                )
+                connection.execute(
+                    insert(LaunchplaneAuthzPolicyRow).values(
+                        **{key: historical[key] for key in ("record_id", "status", "source")},
+                        revision=revision,
+                        updated_at=historical["updated_at"],
+                        policy_sha256=historical["policy_sha256"],
+                        payload=historical,
+                    )
+                )
+
+    def test_export_cost_follows_distinct_rules_not_history_length(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        def scrubbed_strings() -> int:
+            with patch.object(
+                _Scrubber, "string", autospec=True, side_effect=_Scrubber.string
+            ) as string:
+                self.store.export_stored_record_snapshot(format_version=2)
+            return string.call_count
+
+        self._store_policy_history(1)
+        one_revision = scrubbed_strings()
+        self._store_policy_history(11)
+        ten_more_revisions = scrubbed_strings() - one_revision
+        self.assertLess(ten_more_revisions, one_revision)
+
+    def test_repeated_items_scrub_under_their_own_schema(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        scrubber = _Scrubber()
+        with patch("control_plane.stored_record_snapshot.id", create=True, return_value=0):
+            for retained in (True, False, True):
+                item_schema = {"properties": {"kind": {"enum": ["code-word"]}}} if retained else {}
+                schema = {"items": item_schema}
+                scrubbed = scrubber.scrub([{"kind": "code-word"}], schema, schema)
+                self.assertEqual(scrubbed[0]["kind"] == "code-word", retained)
+
+    def test_repeated_item_cache_retains_at_most_one_row_bound(self) -> None:
+        import gc
+        import tracemalloc
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        row_bound = 64 * 1024
+        gc.collect()
+        already_tracing = tracemalloc.is_tracing()
+        if not already_tracing:
+            tracemalloc.start()
+        try:
+            baseline = tracemalloc.get_traced_memory()[0]
+            scrubber = _Scrubber()
+            with patch("control_plane.stored_record_snapshot.SNAPSHOT_MAX_BYTES", row_bound):
+                for index in range(64):
+                    scrubber.scrub([{f"key-{index}-{field}": True for field in range(256)}], {}, {})
+            gc.collect()
+            retained = tracemalloc.get_traced_memory()[0] - baseline
+            self.assertLess(retained, row_bound * 8)
         finally:
             if not already_tracing:
                 tracemalloc.stop()

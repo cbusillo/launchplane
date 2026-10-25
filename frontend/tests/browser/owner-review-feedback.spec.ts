@@ -144,3 +144,32 @@ for (const action of ["Accept", "Request changes"]) {
     expect(submitted[1]).toMatchObject({ reviewed_head_sha: current.head_sha, reviewed_preview_url: current.preview_url, reviewed_generation_id: current.preview_generation_id });
   });
 }
+
+test("the Client sees the change title and what to check before deciding", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308");
+  const card = page.locator(".owner-review-card");
+  await expect(card.getByRole("heading", { name: "Show the repair price on each model" })).toBeVisible();
+  await expect(card.getByRole("heading", { name: "What to check" })).toBeVisible();
+  await expect(card.locator(".release-review-notes li")).toHaveText(["Open iPhone 15 repairs.", "Confirm each repair shows its price."]);
+  await expect(card.locator(".release-review-notes strong")).toHaveText("iPhone 15");
+  const notesBox = await card.locator(".release-review-notes").boundingBox();
+  const acceptBox = await page.getByRole("button", { name: "Accept", exact: true }).boundingBox();
+  expect(notesBox!.y).toBeLessThan(acceptBox!.y);
+  await expect(page.getByRole("link", { name: "Topics to discuss" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("owner-review-notes.png"), fullPage: true });
+  await page.getByRole("button", { name: "Accept", exact: true }).click();
+  await expect(page.getByLabel("Recorded decision")).toContainText("Accepted");
+  await expect(card.locator(".release-review-notes li")).toHaveCount(2);
+});
+
+for (const [scenario, message] of [
+  ["missing-notes", "Test notes are missing for this change."],
+  ["nothing-to-test", "Nothing for you to test: CI tests only."],
+  ["notes-unavailable", "The test notes could not be loaded. Open the pull request to read them."],
+]) {
+  test(`the review explains when there is nothing to read: ${scenario}`, async ({ page }) => {
+    await page.goto(`/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=${scenario}`);
+    await expect(page.locator(".owner-review-card")).toContainText(message);
+  });
+}

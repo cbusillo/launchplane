@@ -22,6 +22,7 @@ from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRe
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
+    MergeTrainRepositoryPolicy,
     normalize_merge_train_policy_timestamp,
 )
 from control_plane.ordinary_agent_delivery_authorization_inputs import _read_current_inventory
@@ -138,6 +139,10 @@ class PrivilegedOperationPlannerError(RuntimeError):
 
 
 class PrivilegedOperationPlanningStoreError(TypeError):
+    pass
+
+
+class MergeTrainTargetNotReadyError(PrivilegedOperationPlannerError):
     pass
 
 
@@ -437,6 +442,38 @@ def _policy_key_payloads(record: MergeTrainPolicyRecord) -> dict[str, dict[str, 
     }
 
 
+def merge_train_target_setting_gaps(
+    repository_policy: MergeTrainRepositoryPolicy,
+) -> tuple[str, ...]:
+    from control_plane.merge_train_github import (
+        MergeTrainGitHubError,
+        UrllibMergeTrainGitHubTransport,
+        merge_train_target_setting_gaps as read_setting_gaps,
+    )
+    from control_plane.merge_train_github_token import resolve_merge_train_github_token
+
+    repository = repository_policy.repository
+    token = resolve_merge_train_github_token(
+        source=repository_policy.github_token, repository=repository, include_permissions=True
+    )
+    if not token:
+        return (
+            f"Launchplane cannot read {repository} with its merge-train GitHub App. "
+            f"Install the App on {repository}.",
+        )
+    try:
+        return read_setting_gaps(
+            transport=UrllibMergeTrainGitHubTransport(token=token),
+            repository=repository,
+            base_branch=repository_policy.base_branch,
+            enqueue_label=repository_policy.enqueue_label,
+        )
+    except MergeTrainGitHubError as error:
+        raise PrivilegedOperationPlannerError(
+            f"Merge-train policy planning could not read {repository} branch settings."
+        ) from error
+
+
 def plan_managed_merge_train_policy_import(
     record_store: object,
     request: PrivilegedOperationRequest,
@@ -473,6 +510,18 @@ def plan_managed_merge_train_policy_import(
         raise PrivilegedOperationPlannerError(
             "Merge-train policy import planning found an invalid active policy record."
         ) from error
+    legacy_ids = {
+        target.policy_key: set(target.enqueue.dependency_update_github_user_ids)
+        for target in active_record.policy.policies
+    }
+    if any(
+        set(target.enqueue.dependency_update_github_user_ids)
+        - legacy_ids.get(target.policy_key, set())
+        for target in request.record.policy.policies
+    ):
+        raise PrivilegedOperationPlannerError(
+            "Configure dependency_update_bots with an explicit metadata format and allowed update types."
+        )
     candidate_record = request.record
     if (
         candidate_record.record_id == active_record.record_id
@@ -514,6 +563,19 @@ def plan_managed_merge_train_policy_import(
             if active_payloads[policy_key] == candidate_payloads[policy_key]
         )
     )
+    candidate_policies = {
+        repository_policy.policy_key: repository_policy
+        for repository_policy in candidate_record.policy.policies
+    }
+    setting_gaps = tuple(
+        gap
+        for policy_key in added_keys
+        for gap in merge_train_target_setting_gaps(candidate_policies[policy_key])
+    )
+    if setting_gaps:
+        raise MergeTrainTargetNotReadyError(
+            "The merge train cannot land on this target yet. " + " ".join(setting_gaps)
+        )
     preparation_context = request.preparation_context
     if preparation_context is not None:
         if (

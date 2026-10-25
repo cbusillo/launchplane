@@ -1,9 +1,14 @@
 import unittest
 import json
+from types import SimpleNamespace
+from datetime import datetime, timezone
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+from control_plane.odoo_preview_apply_execution import OdooPreviewProviderMutationAdapter
 from email.message import Message
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal, cast
 from unittest.mock import ANY, Mock, patch
 from urllib.error import HTTPError, URLError
 
@@ -14,6 +19,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetIntegrati
 
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy import compose as dokploy_compose
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -392,6 +398,12 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             mutate.assert_not_called()
 
     def setUp(self) -> None:
+        self.preview_resources = self.enterContext(
+            patch("control_plane.odoo_preview_resources.require_existing_preview_resources")
+        )
+        self.preview_resource_binding = self.enterContext(
+            patch("control_plane.odoo_preview_resources.require_preview_resource_binding")
+        )
         self.enterContext(
             patch("control_plane.dokploy.memory_capacity.require_preview_host_memory_capacity")
         )
@@ -1619,6 +1631,99 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
     def test_apply_refresh_creates_updates_deploys_and_smokes_compose(self) -> None:
         self._assert_refresh_readback_allowances(())
 
+    def test_source_free_preview_does_not_restore_copied_template_upstream_settings(self) -> None:
+        self._assert_refresh_readback_allowances(
+            (),
+            source_environment={
+                "ODOO_UPSTREAM_HOST": "source.example.test",
+                "ODOO_UPSTREAM_USER": "root",
+            },
+        )
+
+    def test_preview_with_upstream_source_restores_before_serving(self) -> None:
+        self._assert_refresh_readback_allowances(
+            (),
+            source_environment={
+                "ODOO_UPSTREAM_HOST": "source.example.test",
+                "ODOO_UPSTREAM_USER": "upstream-reader",
+                "ODOO_UPSTREAM_DB_NAME": "source",
+                "ODOO_UPSTREAM_DB_USER": "upstream-reader",
+                "ODOO_UPSTREAM_FILESTORE_PATH": "/",
+                "DATA_WORKFLOW_SSH_DIR": "/var/lib/source-reader",
+                "BOOTSTRAP": "true",
+                "NO_SANITIZE": "true",
+                "ENV_OVERRIDE_DISABLE_CRON": "false",
+            },
+            restore_upstream=True,
+        )
+
+    def test_preview_refuses_incomplete_or_root_upstream_before_provider_effects(self) -> None:
+        source = {
+            "ODOO_UPSTREAM_HOST": "source.example.test",
+            "ODOO_UPSTREAM_USER": "upstream-reader",
+            "ODOO_UPSTREAM_DB_NAME": "source",
+            "ODOO_UPSTREAM_DB_USER": "upstream-reader",
+            "ODOO_UPSTREAM_FILESTORE_PATH": "/",
+            "DATA_WORKFLOW_SSH_DIR": "/var/lib/source-reader",
+        }
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        for override in (
+            {"ODOO_UPSTREAM_HOST": ""},
+            {"ODOO_UPSTREAM_USER": "root"},
+            {"DATA_WORKFLOW_SSH_DIR": ""},
+            {"DATA_WORKFLOW_SSH_DIR": "/root/.ssh/"},
+            {"DATA_WORKFLOW_SSH_DIR": "/home/ubuntu/.ssh"},
+            {"DATA_WORKFLOW_SSH_DIR": "/root//.ssh/."},
+            {"DATA_WORKFLOW_SSH_DIR": "/var/lib/reader/../../root/.ssh"},
+            {"DATA_WORKFLOW_SSH_DIR": "//root/.ssh"},
+            {"DATA_WORKFLOW_SSH_DIR": "//"},
+            {"DATA_WORKFLOW_SSH_DIR": "/home"},
+        ):
+            with (
+                self.subTest(override=override),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload"
+                ) as fetch,
+            ):
+                result = execute_odoo_preview_dokploy_apply(
+                    control_plane_root=ANY,
+                    restore_upstream=True,
+                    request=OdooPreviewDokployApplyRequest(
+                        dry_run_plan=dry_run,
+                        manifest=artifact_manifest_v2(),
+                        environment_values={**_environment_values(), **source, **override},
+                    ),
+                )
+                self.assertEqual(result.status, "fail")
+                self.assertFalse(result.provider_effect_attempted)
+                fetch.assert_not_called()
+
+        for directory in (
+            "/var/lib/source-reader/",
+            "//var/lib/source-reader",
+            "/var/lib/./source-reader",
+            "/var/lib/source-reader ",
+        ):
+            with self.subTest(directory=directory):
+                request = OdooPreviewDokployApplyRequest(
+                    dry_run_plan=dry_run,
+                    manifest=artifact_manifest_v2(),
+                    environment_values={**source, "DATA_WORKFLOW_SSH_DIR": directory},
+                )
+                rendered = _preview_refresh_environment_values(
+                    request=request, restore_upstream=True
+                )
+                self.assertEqual(rendered["DATA_WORKFLOW_SSH_DIR"], source["DATA_WORKFLOW_SSH_DIR"])
+
     def test_explicit_read_only_source_allowance_reaches_post_deploy_readback(self) -> None:
         self._assert_refresh_readback_allowances(
             (
@@ -1649,11 +1754,31 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             previous_source=marker,
         )
 
+    def test_snapshot_restore_uses_the_same_schedule_binding_as_preview_exclusion(self) -> None:
+        snapshot = CleanTestingSnapshot(
+            product=_runtime_plan().product,
+            context="independent-context",
+            snapshot_id="a" * 64,
+            server_id="server-nonprod",
+            database_sha256="b" * 64,
+            filestore_sha256="c" * 64,
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            storage_budget=OdooTestingDrillStorageBudget(
+                database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+            ),
+        )
+        self._assert_refresh_readback_allowances((), snapshot=snapshot)
+        self._assert_refresh_readback_allowances((), snapshot=snapshot, fail_preparation=True)
+
     def _assert_refresh_readback_allowances(
         self,
         allowances: tuple[DokployTargetIntegrationAllowance, ...],
         *,
         previous_source: str = "",
+        source_environment: dict[str, str] | None = None,
+        restore_upstream: bool = False,
+        snapshot: CleanTestingSnapshot | None = None,
+        fail_preparation: bool = False,
     ) -> str:
         manifest = artifact_manifest_v2(odoo_install_modules=("cm_website",))
         dry_run = build_odoo_preview_dokploy_dry_run(
@@ -1665,7 +1790,28 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 domain_certificate_type="letsencrypt",
             )
         )
+        dry_run.clean_snapshot = snapshot
         requests: list[dict[str, object]] = []
+
+        def filestore_preparation(**kwargs: Any) -> dict[str, object] | None:
+            if snapshot is None:
+                return None
+            if kwargs["apply"]:
+                self.assertTrue(sync_source.called)
+                self.assertTrue(update_env.called)
+                kwargs["dispatch_guard"](lambda: None)
+                if fail_preparation:
+                    raise click.ClickException("Interrupted overlay allocation")
+            return {
+                "name": _environment_values()["ODOO_DATA_VOLUME"] + "-filestore",
+                "driver": "local",
+                "driver_opts": {
+                    "type": "overlay",
+                    "device": "overlay",
+                    "o": "lowerdir=/snapshot,upperdir=/upper,workdir=/work,userxattr",
+                },
+                "labels": {"io.launchplane.preview-snapshot": snapshot.snapshot_id},
+            }
 
         def _fake_dokploy_request(**kwargs: object) -> object:
             requests.append(dict(kwargs))
@@ -1696,6 +1842,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                         "composeId": "compose-cm-pr-45",
                         "environmentId": "env-cm-preview",
                         "serverId": "server-nonprod",
+                        "appName": dry_run.compose_name,
                         "env": f"{PREVIEW_FISHBOWL_SOURCE_ENV_KEY}={previous_source}"
                         if previous_source
                         else "",
@@ -1703,8 +1850,17 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             ) as fetch_target_payload,
             patch(
+                "control_plane.preview_filestore.prepare_preview_filestore",
+                side_effect=filestore_preparation,
+            ) as prepare_filestore,
+            patch("control_plane.workflows.odoo_preview_runtime._delete_compose") as delete_compose,
+            patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
             ) as sync_source,
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.render_odoo_raw_compose_file",
+                wraps=dokploy_compose.render_odoo_raw_compose_file,
+            ) as render_compose,
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
             ) as update_env,
@@ -1725,7 +1881,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_post_deploy."
                 "run_compose_post_deploy_update",
-                return_value=_module_update_evidence(),
+                return_value={**_module_update_evidence(), "upstream_restore_requested": "true"},
             ) as module_update,
             patch(
                 "control_plane.workflows.odoo_preview_runtime._wait_for_smoke_check",
@@ -1733,12 +1889,15 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         ):
             result = execute_odoo_preview_dokploy_apply(
                 control_plane_root=ANY,
+                restore_upstream=restore_upstream,
+                restore_clean_snapshot=snapshot is not None,
                 integration_allowances=allowances,
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
                     manifest=manifest,
                     environment_values={
                         **_environment_values(),
+                        **(source_environment or {}),
                         dokploy_post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload",
                         dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
                         "ODOO_ADDONS_PATH": (
@@ -1748,7 +1907,20 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             )
 
+        if fail_preparation:
+            self.assertEqual(result.status, "fail")
+            delete_compose.assert_not_called()
+            trigger_deployment.assert_not_called()
+            module_update.assert_not_called()
+            return ""
         self.assertEqual(result.status, "pass")
+        if snapshot is not None:
+            self.assertEqual(prepare_filestore.call_args.kwargs["snapshot"], snapshot)
+            self.assertEqual(prepare_filestore.call_args.kwargs["project"], dry_run.compose_name)
+        self.assertEqual(
+            result.module_install_update_evidence.get("upstream_restore_requested"),
+            str(restore_upstream).lower(),
+        )
         self.assertEqual(result.compose_id, "compose-cm-pr-45")
         self.assertTrue(result.created_compose)
         self.assertEqual(
@@ -1763,6 +1935,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(create_payload["environmentId"], "env-cm-preview")
         self.assertEqual(create_payload["serverId"], "server-nonprod")
         sync_source.assert_called_once()
+        self.assertEqual(render_compose.call_args.kwargs["mount_workflow_ssh"], restore_upstream)
         _, sync_kwargs = sync_source.call_args
         self.assertNotIn("ODOO_WEB_HOST_PORT", sync_kwargs["compose_file"])
         self.assertNotIn("ODOO_LONGPOLL_HOST_PORT", sync_kwargs["compose_file"])
@@ -1800,6 +1973,44 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         wait_deploy.assert_called_once()
         module_update.assert_called_once()
+        if snapshot is not None:
+            self.assertEqual(
+                module_update.call_args.kwargs["clean_preview_image_reference"],
+                render_compose.call_args.kwargs["image_reference"],
+            )
+            adapter = SimpleNamespace(
+                _apply_request=SimpleNamespace(apply=SimpleNamespace(dry_run_plan=dry_run)),
+                _control_plane_root=Path("."),
+                _database_url=None,
+                schedule_binding=None,
+            )
+            with (
+                patch(
+                    "control_plane.dokploy.source.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch.object(dokploy_api, "fetch_dokploy_target_payload", return_value={}),
+                patch.object(
+                    dokploy_post_deploy,
+                    "_resolve_dokploy_schedule_runtime",
+                    return_value=("server", "fixture-lookup", "fixture-app", "server-nonprod"),
+                ),
+            ):
+                OdooPreviewProviderMutationAdapter.capture_schedule_binding(cast(Any, adapter))
+                actual = dokploy_post_deploy.compose_data_workflow_binding(
+                    host="https://dokploy.example",
+                    token="token",
+                    target_definition=module_update.call_args.kwargs["target_definition"],
+                )
+            self.assertEqual(actual.model_dump(mode="json"), adapter.schedule_binding)
+        self.assertEqual(
+            module_update.call_args.kwargs.get("run_destructive_restore", False),
+            restore_upstream,
+        )
+        self.assertEqual(
+            module_update.call_args.kwargs["preview_ssh_source_directory"],
+            env_map.get("DATA_WORKFLOW_SSH_DIR", "") if restore_upstream else "",
+        )
         # Only an explicitly selected read-only source can reach this readback.
         preview_target = module_update.call_args.kwargs["target_definition"]
         self.assertEqual(preview_target.instance, "pr-45")
@@ -1809,15 +2020,27 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             bool(previous_source) and not allowances,
         )
 
+        for key, value in {
+            dokploy_post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload",
+            dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
+            **(
+                {"BOOTSTRAP": "false", "NO_SANITIZE": "false", "ENV_OVERRIDE_DISABLE_CRON": "true"}
+                if restore_upstream
+                else {}
+            ),
+        }.items():
+            self.assertEqual(
+                module_update.call_args.kwargs["workflow_environment_overrides"][key], value
+            )
+        self.assertEqual(result.module_install_update_status, "pass")
         self.assertEqual(
-            module_update.call_args.kwargs["workflow_environment_overrides"],
+            result.module_install_update_evidence,
             {
-                dokploy_post_deploy.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload",
-                dokploy_post_deploy.LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY: "true",
+                **_module_update_evidence(),
+                "upstream_restore_requested": str(restore_upstream).lower(),
+                **({"clean_snapshot_restore_requested": "true"} if snapshot is not None else {}),
             },
         )
-        self.assertEqual(result.module_install_update_status, "pass")
-        self.assertEqual(result.module_install_update_evidence, _module_update_evidence())
         self.assertIn("module_install_update", [step.name for step in result.steps])
         smoke_check.assert_called_once()
         return env_map.get(PREVIEW_FISHBOWL_SOURCE_ENV_KEY, "")
@@ -2353,9 +2576,19 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 provider_operation_title="Launchplane operation deploy",
                 provider_effect_phase="deploy_trigger",
             )
+            prepared = observe_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                context_name="cm-preview",
+                request=request,
+                database_url=None,
+                provider_operation_title="Launchplane operation deploy",
+                provider_effect_phase="preview_filestore_prepare",
+            )
 
         self.assertEqual(observation.outcome, "unknown")
         self.assertFalse(observation.retry_safe)
+        self.assertTrue(prepared.retry_safe)
+        self.assertEqual(prepared.outcome, "absent")
 
     def test_apply_create_blocks_missing_template_compose_id_before_provider_fetch(
         self,
@@ -2599,9 +2832,21 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         requests: list[dict[str, object]] = []
         domain_deleted = False
+        guarded = False
+
+        @contextmanager
+        def guard() -> Iterator[None]:
+            nonlocal guarded
+            guarded = True
+            try:
+                yield
+            finally:
+                guarded = False
 
         def _fake_dokploy_request(**kwargs: object) -> object:
             nonlocal domain_deleted
+            if kwargs.get("method") == "POST":
+                self.assertTrue(guarded)
             requests.append(dict(kwargs))
             if kwargs["path"] in {"/api/project.all", "/api/compose.search"}:
                 return []
@@ -2619,6 +2864,16 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ]
             return {}
 
+        def inspect(**kwargs: object) -> str:
+            self.assertFalse(guarded)
+            return "inspected-binding"
+
+        def recheck(**kwargs: object) -> None:
+            self.assertTrue(guarded)
+            self.assertEqual(kwargs["binding"], "inspected-binding")
+
+        self.preview_resource_binding.side_effect = recheck
+        self.preview_resources.side_effect = inspect
         with (
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
@@ -2638,6 +2893,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
                     environment_values=_environment_values(),
                 ),
+                provider_mutation_guard=guard,
             )
 
         self.assertEqual(result.status, "pass")
@@ -2652,6 +2908,186 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         assert isinstance(delete_payload, dict)
         self.assertEqual(delete_payload["composeId"], "compose-cm-pr-45")
         self.assertTrue(delete_payload["deleteVolumes"])
+        from control_plane.odoo_preview_resources import preview_resource_environment
+
+        self.assertEqual(self.preview_resources.call_count, 1)
+        self.assertEqual(self.preview_resource_binding.call_count, 2)
+        for call in self.preview_resources.call_args_list:
+            self.assertEqual(
+                call.kwargs["environment"], preview_resource_environment(dry_run.compose_name)
+            )
+
+    def test_destroy_refuses_unsafe_resources_before_any_provider_mutation(self) -> None:
+        self.preview_resources.side_effect = click.ClickException("Unsafe resource fixture")
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target())
+            )
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                return_value=[],
+            ) as provider,
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                record_store=preview_target_inventory(),
+                preview_context="fixture-preview",
+                request=OdooPreviewDokployApplyRequest(dry_run_plan=plan),
+            )
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(
+            any(call.kwargs.get("method") == "POST" for call in provider.call_args_list)
+        )
+
+    def test_destroy_readback_refusal_preserves_actual_effect_custody(self) -> None:
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        for scenario in ("first-domain", "compose-only", "after-domain", "post-failure"):
+            attempted = scenario in {"after-domain", "post-failure"}
+            checkpoint = Mock()
+            with self.subTest(scenario=scenario):
+                self.preview_resource_binding.side_effect = (
+                    [None, click.ClickException("Target changed")]
+                    if scenario == "after-domain"
+                    else None
+                    if scenario == "post-failure"
+                    else click.ClickException("Target changed")
+                )
+
+                def provider(**kwargs: object) -> object:
+                    if kwargs.get("method") == "POST" and scenario == "post-failure":
+                        raise click.ClickException("Provider transport failed")
+                    if kwargs["path"] == "/api/domain.byComposeId":
+                        return (
+                            []
+                            if scenario == "compose-only"
+                            else [{"domainId": "owned-domain", "host": plan.domain_host}]
+                        )
+                    return {}
+
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                        side_effect=provider,
+                    ) as calls,
+                ):
+                    result = execute_odoo_preview_dokploy_apply(
+                        control_plane_root=Path("."),
+                        record_store=preview_target_inventory(),
+                        preview_context="fixture-preview",
+                        request=OdooPreviewDokployApplyRequest(dry_run_plan=plan),
+                        provider_effect_checkpoint=checkpoint,
+                    )
+                self.assertEqual(result.status, "fail" if attempted else "blocked")
+                self.assertEqual(result.provider_effect_attempted, attempted)
+                self.assertEqual(
+                    [
+                        call.kwargs["path"]
+                        for call in calls.call_args_list
+                        if call.kwargs.get("method") == "POST"
+                    ],
+                    ["/api/domain.delete"] if attempted else [],
+                )
+
+                self.assertEqual(checkpoint.call_count, 1 if attempted else 0)
+
+    def test_destroy_absence_change_before_first_post_is_no_effect(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target())
+            )
+        )
+        self.preview_resources.side_effect = DokployRequestFailed(
+            method="GET", path="/api/compose.one", detail="Not Found", status_code=404
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._read_absent_preview_compose_inventory",
+                side_effect=[(), click.ClickException("Inventory unavailable")],
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                return_value=[],
+            ) as calls,
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                record_store=preview_target_inventory(),
+                preview_context="fixture-preview",
+                request=OdooPreviewDokployApplyRequest(dry_run_plan=plan),
+            )
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(result.provider_effect_attempted)
+        self.assertFalse(any(call.kwargs.get("method") == "POST" for call in calls.call_args_list))
+
+    def test_destroy_missing_lookup_requires_complete_independent_absence(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target())
+            )
+        )
+        self.preview_resources.side_effect = DokployRequestFailed(
+            method="GET", path="/api/compose.one", detail="Not Found", status_code=404
+        )
+        present = [
+            {
+                "environments": [
+                    {
+                        "environmentId": "fixture",
+                        "composes": [{"composeId": plan.compose_ref, "name": plan.compose_name}],
+                    }
+                ]
+            }
+        ]
+        for inventory, search in ((present, []), ([], {"total": 1, "items": []}), ([{}], [])):
+            with self.subTest(inventory=inventory, search=search):
+
+                def provider(**kwargs: object) -> object:
+                    return inventory if kwargs["path"] == "/api/project.all" else search
+
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                        side_effect=provider,
+                    ) as calls,
+                ):
+                    result = execute_odoo_preview_dokploy_apply(
+                        control_plane_root=Path("."),
+                        record_store=preview_target_inventory(),
+                        preview_context="fixture-preview",
+                        request=OdooPreviewDokployApplyRequest(dry_run_plan=plan),
+                    )
+                self.assertEqual(result.status, "blocked")
+                self.assertFalse(result.provider_effect_attempted)
+                self.assertFalse(
+                    any(call.kwargs.get("method") == "POST" for call in calls.call_args_list)
+                )
 
     def test_apply_destroy_treats_missing_compose_without_domains_as_clean(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(
@@ -2710,6 +3146,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
 
     def test_apply_destroy_treats_missing_compose_after_domain_delete_as_clean(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        self.preview_resources.side_effect = DokployRequestFailed(
+            method="GET", path="/api/compose.one", detail="Not Found", status_code=404
+        )
         dry_run = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
                 runtime_plan=_runtime_plan(operation="destroy", target=_target()),

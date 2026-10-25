@@ -84,8 +84,6 @@ Service implementation ownership is split by runtime responsibility:
   configuration, policy and provider composition, OAuth/session wiring,
   FastAPI application construction, startup validation, Uvicorn execution, and
   store cleanup.
-- `control_plane/every_code_github_webhook.py` is retired domain code awaiting
-  deletion under #1313; it is not registered as HTTP ingress.
 - `control_plane/http_app.py` owns FastAPI composition, dependency injection,
   remaining core and mutation route registration, and the independent signed
   GitHub App and trusted-maintenance receiver callables. Domain modules under
@@ -469,8 +467,6 @@ remaining domain and storage removal is tracked in #2437.
 - Every Code local automation work-request routes (Every Code is retired; see
   `DIRECTION.md`. These routes and the Every Code sections below remain only
   until their readers move):
-  - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
-    human-session, and Every Code worker-token callers)
   - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
   - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
@@ -699,8 +695,8 @@ replace an uncertain operation with a new key. The direct generic-web promotion
 binding always rewrites the generated request to `dry_run=true`; live promotion
 remains the separate product-owned workflow-dispatch path.
 
-The Engineering Ops browser routes consume the generated Every Code summary,
-merge-train policy-target, and controller-status read models directly.
+The Engineering Ops browser routes consume the generated merge-train
+policy-target and controller-status read models directly.
 Merge-train UI is status-only: target selection comes exclusively
 from `GET /v1/work-graph/merge-train/policy-targets`, while controller and
 legacy worker POST routes are never derived from data or invoked dynamically.
@@ -1179,16 +1175,6 @@ service has recorded a matching Director-agent dry-run for the same payload. The
 requests still use Launchplane records, redacted responses, runtime key-safety
 policy, and managed secret storage. Terminal-agent credentials remain read-only.
 
-`GET /v1/every-code/summary` returns a compact agent-safe projection of Every
-Code work requests. It requires `every_code_work_request.read` for
-product/context `launchplane` and supports `repository`, `issue_number`,
-`state`, `limit`, and `offset` query parameters. Summary entries include source
-links, state, summary status, claim metadata, timestamps, result PR URL, and
-safe rerun guidance. They intentionally omit raw webhook delivery ids, error
-messages, issue bodies, prompt text, local checkout paths, and local worker
-hostnames. Entries include compact agent-context provenance and evidence so
-callers can tell recorded request state apart from source-of-truth links.
-
 `GET /v1/previews/readiness` returns a compact agent-safe projection of Every
 Code preview gate records. It requires `every_code_preview_gate.read` for
 product/context `launchplane` and supports `repository`, `pr_number`, `status`,
@@ -1434,7 +1420,7 @@ preview context; awareness entries do not imply Launchplane runtime ownership.
 `GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
 for public-safe skill preflight. It requires `product_environment.read` for
 product/context `launchplane`, accepts an optional `repository` filter, and
-composes the existing repo-product mapping, Every Code summary, preview
+composes the existing repo-product mapping, preview
 readiness, and optional exact tenant-admission projections under named sections.
 Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
 writes no
@@ -2006,6 +1992,22 @@ Writes require `product_profile.write` for the profile product in the
 Launchplane service context, validate the profile write contract before storage,
 and preserve optional `Idempotency-Key` replay/conflict behavior.
 
+#### Testing storage requirements
+
+A Director agent may use the same conditional profile POST to configure only
+`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes` within
+one existing active Odoo testing lane's `odoo_testing_drill_storage`. Read the
+current profile and strong `ETag`, preserve every other field, and submit the
+reviewed replacement with that `If-Match` and a stable `Idempotency-Key`.
+The service requires all four positive integer requirements and preserves
+existing `retained_copy_bindings` exactly, including an empty list when first
+configuring storage. Mixed edits, budget removal, production lanes, scoped
+agents and inactive or non-Odoo products refuse. Existing atomic profile
+compare-and-write, stale-revision rejection and original-key replay remain in force.
+Read the profile back after acceptance or an uncertain response. This records
+working-headroom requirements; it neither qualifies actual capacity nor starts
+a restore, capture, drill or disposal.
+
 The testing-restore-policy route is a bounded Director-agent exception for
 ordinary testing preparation. It accepts only an owned Odoo testing context,
 mode, reason and reviewed plan digest. It derives the production source from
@@ -2503,14 +2505,14 @@ After apply, `next_actions` can require `live_target_runtime_apply`; helpers
 should surface that action and stop. Applying product-config records does not by
 itself guarantee the live target process has been synchronized.
 
-Runtime key-safety policy reconciliation uses
-`POST /v1/runtime-key-safety/policies/apply`. It is restricted to workflows with
+Runtime key-safety policy writes use
+`POST /v1/runtime-key-safety/policies/apply`. It is restricted to callers with
 `runtime_key_safety.write` for product/context `launchplane`, requires DB-backed
 storage, and writes metadata-only policy records for managed runtime secret
 binding keys. Optional `Idempotency-Key` headers preserve replay/conflict
 semantics for retry-safe service calls. It merges requested rules into the
-latest active policy by binding key so deploy-time bootstrap can add required
-classifications without dropping existing policy coverage. Request and response
+latest active policy by binding key, so a write can add classifications without
+dropping existing policy coverage. Request and response
 payloads must not include secret plaintext. Rules can carry exact
 context/instance scope and explicit preview instance patterns for dynamic PR
 lanes; policy apply merges those scopes additively without making checked-in
@@ -2822,7 +2824,10 @@ either `context` and `instance` to inspect the current tracked target, or
 requires `dokploy_target.inspect` authz for product/context `launchplane`, reads
 Dokploy through Launchplane-managed secrets, and returns a redacted identity
 summary only: target ids, names, project/environment/server identity, domain
-summaries, source metadata, and environment key names/counts. It must not return
+summaries, source metadata, and environment key names/counts. The tracked target's
+`env_keys` lists stored override names separately from the provider's observed
+environment keys, so source-setting precedence can be checked without values.
+It must not return
 raw provider payloads or environment values. A tracked target's `public_hosts`
 returns its stored product-config hostname intent separately from origin `domains`
 and the provider's observed domain summaries. Compare those lists before HTTP
@@ -3143,8 +3148,6 @@ For reviewed reconciliation of provider-absent legacy preview history, see
   human-session callers)
 - `GET /v1/dokploy/inventory` (native FastAPI for bearer-token and
   human-session callers)
-- `GET /v1/every-code/summary` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
 - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
   human-session, and Every Code worker-token callers)
 - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
@@ -4384,6 +4387,8 @@ Launchplane's fixed description, the kind of fix (`code`, `grant`,
 `owner_approval`, `client_acceptance`, `by_hand` or `wait`) and the record ids
 it read. `testing` checks the lane, the staff-testing hold and the last
 reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
+Testing reads its exact current reconcile target; preview history does not
+limit that lookup.
 A completed `already_deployed` no-op is clear when the recorded current and
 desired artifact ids, commit SHAs and immutable image digests all match and the
 plan is not held. It cites the artifact id without inventing a deploy operation.

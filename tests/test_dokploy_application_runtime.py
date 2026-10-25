@@ -14,6 +14,7 @@ from control_plane.dokploy.application_runtime import (
     application_runtime_matches,
     fetch_application_runtime,
     MAX_APPLICATION_ENVIRONMENT_KEYS,
+    MAX_APPLICATION_TASK_DETAIL_LENGTH,
 )
 from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
 from datetime import datetime, timezone
@@ -374,6 +375,60 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                     )
                     self.assertNotIn("private-", str(summary))
                     self.assertFalse(observed.ready)
+
+    def test_failed_task_diagnostics_preserve_errors_without_credentials(self) -> None:
+        def task_summary(observed: ApplicationRuntimeObservation) -> dict[str, object]:
+            summary = summarize_application_runtime(
+                observed, expected_image=_IMAGE, observed_at=datetime.now(timezone.utc)
+            )
+            tasks = summary["tasks"]
+            assert isinstance(tasks, list)
+            task = tasks[0]
+            assert isinstance(task, dict)
+            return task
+
+        exit_code = 23
+        timestamp = "2026-10-20T03:08:27.123456789Z"
+        failure = {
+            "State": "failed",
+            "Err": "task: non-zero exit (23); APP_TOKEN=synthetic-private-token",
+            "Message": "Authorization: Bearer synthetic-private-header",
+            "Timestamp": timestamp,
+            "ContainerStatus": {"ContainerID": _CONTAINER_ID, "ExitCode": exit_code},
+        }
+        self.task["Status"] = failure
+        observed = self.read()
+        task = task_summary(observed)
+        error = task["error"]
+        assert isinstance(error, str)
+        self.assertIn("non-zero exit", error)
+        self.assertEqual(task["exit_code"], exit_code)
+        self.assertEqual(task["status_timestamp"], timestamp)
+        self.assertNotIn("synthetic-private", str(asdict(observed)))
+        self.assertNotIn("Authorization", str(task))
+        self.assertFalse(observed.ready)
+
+        self.task["Status"] = {"State": "failed"}
+        missing = task_summary(self.read())
+        for field in ("error", "message", "status_timestamp", "exit_code"):
+            self.assertIsNone(missing[field])
+
+        long_message = "task failed " * 1000
+        self.task["Status"] = {
+            "State": "failed",
+            "Err": {"APP_TOKEN": "synthetic-private-invalid"},
+            "Message": long_message,
+            "Timestamp": "synthetic-private-invalid-date",
+            "ContainerStatus": {"ContainerID": _CONTAINER_ID, "ExitCode": True},
+        }
+        malformed = task_summary(self.read())
+        self.assertIsNone(malformed["error"])
+        self.assertIsNone(malformed["exit_code"])
+        self.assertIsNone(malformed["status_timestamp"])
+        message = malformed["message"]
+        assert isinstance(message, str)
+        self.assertLessEqual(len(message), MAX_APPLICATION_TASK_DETAIL_LENGTH)
+        self.assertNotIn("synthetic-private", str(malformed))
 
     def test_exact_convergence_proves_actual_image_digest_and_exposes_no_values(self) -> None:
         observed = self.read()

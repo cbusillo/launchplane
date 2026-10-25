@@ -171,7 +171,7 @@ _DRILL_STEPS = (
     ClientReleaseStep("backup", 2),
     ClientReleaseStep("promote", 2),
 )
-ROLLBACK_DRILL_CODE_CHANGED_AT = "2026-10-24T15:00:00Z"
+ROLLBACK_DRILL_CODE_CHANGED_AT = "2026-10-24T19:25:37Z"
 
 
 class ClientReleaseFailureView(BaseModel):
@@ -1078,7 +1078,7 @@ def _record_standing_acceptance(
     if (
         checklist is None
         or checklist.production == checklist.candidate
-        or checklist_blockers(checklist)
+        or checklist_blockers(checklist, profile=profile)
     ):
         return
     existing = review.latest_decision

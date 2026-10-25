@@ -16,6 +16,8 @@ from pydantic import BaseModel
 
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
+    DeliveryFailureObservation,
+    normalized_time,
     FILESYSTEM_TYPES,
     filesystem_index,
     source_changed,
@@ -57,7 +59,6 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
     claim_every_code_work_request,
-    close_every_code_work_request_for_pull_request,
     heartbeat_every_code_work_request,
     recover_stale_every_code_work_request,
 )
@@ -275,7 +276,7 @@ from control_plane.storage.product_authority_bundle import (
     odoo_instance_override_records_match,
     SecretRecordConflictError,
     require_bundle_context_owner,
-    require_product_profile_writes,
+    require_absent_products,
     ProductAuthorityBundle,
     ProductProfileConflictError,
     ProviderTargetWrite,
@@ -397,12 +398,6 @@ class FilesystemRecordStore:
             return self._write_model_locked(record_type, record_id, model)
 
     def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
-        if isinstance(model, LaunchplaneProductProfileRecord):
-            require_product_profile_writes(
-                (model,),
-                self._list_product_profile_records_locked(),
-                inventory_records=self._iter_repository_inventory_records_locked(),
-            )
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
@@ -547,12 +542,7 @@ class FilesystemRecordStore:
             return
         with self._product_authority_bundle_lock():
             profiles = self._list_product_profile_records_locked()
-            require_product_profile_writes(
-                bundle.product_profiles,
-                profiles,
-                inventory_records=self._iter_repository_inventory_records_locked(),
-                absent_product_ids=bundle.absent_product_ids,
-            )
+            require_absent_products(bundle.absent_product_ids, profiles)
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
             for model_type, record_type, expected_records in (
@@ -1247,11 +1237,6 @@ class FilesystemRecordStore:
                 return "replayed"
             self._write_model_locked(record_type, record.record_id, record)
             return "written"
-
-    def _iter_repository_inventory_records_locked(self) -> Iterator[RepositoryInventoryRecord]:
-        yield from self._list_models_locked(
-            RepositoryInventoryRecord, "launchplane_repository_inventory_records"
-        )
 
     def list_repository_inventory_records(
         self,
@@ -3093,31 +3078,6 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
-    def close_every_code_work_request_for_pull_request_record(
-        self,
-        *,
-        request_id: str,
-        expected_lifecycle_id: str,
-        pr_url: str,
-        merged: bool,
-        closed_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            if record.lifecycle_id != expected_lifecycle_id:
-                return None
-            closed_record = close_every_code_work_request_for_pull_request(
-                record,
-                pr_url=pr_url,
-                merged=merged,
-                closed_at=closed_at,
-            )
-            if closed_record is None:
-                return None
-            self._write_model(record_type, request_id, closed_record)
-            return closed_record
-
     def claim_every_code_work_request_record(
         self,
         *,
@@ -4606,6 +4566,15 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def read_public_ingress_observation_record(
+        self, record_id: str
+    ) -> PublicIngressObservationRecord:
+        return self._read_model(
+            PublicIngressObservationRecord,
+            "launchplane_public_ingress_observations",
+            record_id,
+        )
+
     def list_public_ingress_observation_records(
         self,
         *,
@@ -4640,6 +4609,27 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def list_delivery_failure_observations(
+        self, *, incident_id: str
+    ) -> tuple[DeliveryFailureObservation, ...]:
+        failures: dict[str, DeliveryFailureObservation] = {}
+        for observation in self._list_models(
+            PublicIngressObservationRecord, "launchplane_public_ingress_observations"
+        ):
+            if observation.incident_id != incident_id or observation.status != "fail":
+                continue
+            previous = failures.get(observation.summary)
+            observed_at = observation.observed_at
+            target_url = observation.targets[0].url if observation.targets else ""
+            if previous is not None:
+                if normalized_time(previous.observed_at) < normalized_time(observed_at):
+                    observed_at = previous.observed_at
+                target_url = max(target_url, previous.target_url)
+            failures[observation.summary] = DeliveryFailureObservation(
+                summary=observation.summary, observed_at=observed_at, target_url=target_url
+            )
+        return tuple(failures[summary] for summary in sorted(failures))
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> Path:
         return self._write_model("launchplane_public_ingress_incidents", record.incident_id, record)

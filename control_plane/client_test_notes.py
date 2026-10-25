@@ -54,4 +54,6 @@ def change_client_review(
     if pure_dependency_update and not override:
         return ClientTestNotes(False)
     intent = body_client_test_notes(body, review_override=override)
-    return ClientTestNotes(False, intent.error) if director_standing else intent
+    if director_standing and not override:
+        return ClientTestNotes(False, intent.error)
+    return intent

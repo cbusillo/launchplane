@@ -2,6 +2,7 @@ import base64
 from contextlib import closing, redirect_stdout
 import io
 import hashlib
+import shutil
 import tarfile
 import json
 import os
@@ -21,6 +22,7 @@ from control_plane.dokploy.compose import (
 )
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -32,6 +34,7 @@ from control_plane.odoo_testing_restore import (
     TestingCredentialsOverlap,
     TestingCredentialVersionsMissing,
     FreshOdooTestingGeneration,
+    FreshRestoreScriptArguments,
     generation_binding,
     build_fresh_testing_restore_script,
     fresh_testing_restore_spec,
@@ -150,6 +153,174 @@ class TestingCredentialProofTests(unittest.TestCase):
 
 
 class FreshTestingHostProgramTests(unittest.TestCase):
+    spec: dict[str, Any]
+    arguments: FreshRestoreScriptArguments
+
+    def test_resumed_copy_checks_snapshot_capacity_before_capturing(self) -> None:
+        from types import SimpleNamespace
+
+        self.existing_database = True
+        self.resume_verified = True
+        self.containers["web"]["State"]["Running"] = False
+        self.spec["generation"].update(
+            clean_snapshot_enabled=True,
+            drill_storage_budget=dict(
+                database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+            ),
+        )
+        (self.data_backing / "filestore" / self.database).mkdir(parents=True)
+        popen = subprocess.Popen
+
+        def dump(_arguments: list[str], **kwargs: Any) -> Any:
+            return popen([sys.executable, "-c", "print('fixture snapshot')"], **kwargs)
+
+        with (
+            patch("os.statvfs", return_value=SimpleNamespace(f_bavail=0, f_frsize=1)),
+            patch("subprocess.Popen", side_effect=dump) as capture,
+        ):
+            status, output = self.run_program()
+
+        self.assertNotEqual(status, 0, output)
+        capture.assert_not_called()
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
+    def test_coordinate_only_source_uses_bound_runtime_ssh_directory(self) -> None:
+        directory = self.root / "source-reader"
+        directory.mkdir()
+        identity = directory / "id_rsa"
+        identity.write_text("fixture identity")
+        (directory / "known_hosts").write_text("fixture host")
+        self.arguments["source_environment"] = self.spec["source"]
+        self.arguments["runtime_environment"] = {"DATA_WORKFLOW_SSH_DIR": str(directory)}
+        self.spec = fresh_testing_restore_spec(**self.arguments)
+
+        status, output = self.run_program()
+
+        self.assertEqual(status, 0, output)
+        command = next(command for command in self.calls if command[0] == "ssh")
+        self.assertEqual(command[command.index("-i") + 1], str(identity))
+        self.assertIn("UserKnownHostsFile=" + str(directory / "known_hosts"), command)
+
+    def test_explicit_source_ssh_identity_precedes_bound_runtime_metadata(self) -> None:
+        self.arguments["runtime_environment"] = {
+            "DATA_WORKFLOW_SSH_KEY": "/other/identity",
+            "DATA_WORKFLOW_SSH_DIR": "/other/ssh",
+        }
+        self.spec = fresh_testing_restore_spec(**self.arguments)
+
+        status, output = self.run_program()
+
+        self.assertEqual(status, 0, output)
+        command = next(command for command in self.calls if command[0] == "ssh")
+        source = self.arguments["source_environment"]
+        self.assertEqual(command[command.index("-i") + 1], source["DATA_WORKFLOW_SSH_KEY"])
+        self.assertIn(
+            "UserKnownHostsFile=" + source["DATA_WORKFLOW_SSH_DIR"] + "/known_hosts", command
+        )
+
+    def test_coordinate_only_source_uses_bound_runtime_ssh_identity(self) -> None:
+        runtime = {
+            "DATA_WORKFLOW_SSH_KEY": "/reader/identity",
+            "DATA_WORKFLOW_SSH_DIR": "/reader/ssh",
+        }
+        self.arguments["source_environment"] = self.spec["source"]
+        self.arguments["runtime_environment"] = runtime
+        self.spec = fresh_testing_restore_spec(**self.arguments)
+
+        status, output = self.run_program()
+
+        self.assertEqual(status, 0, output)
+        command = next(command for command in self.calls if command[0] == "ssh")
+        self.assertEqual(command[command.index("-i") + 1], runtime["DATA_WORKFLOW_SSH_KEY"])
+
+    def test_snapshot_headroom_is_required_before_stopping_testing(self) -> None:
+        from types import SimpleNamespace
+
+        budget = dict(
+            database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+        )
+        self.spec["generation"].update(clean_snapshot_enabled=True, drill_storage_budget=budget)
+        self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.root)}}
+        available = (
+            sum(budget.values()) + (budget["database_bytes"] + budget["filestore_bytes"]) // 2
+        )
+        with (
+            patch("pathlib.Path.home", return_value=self.root),
+            patch("os.statvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)),
+        ):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
+    def test_clean_snapshot_is_captured_before_testing_can_serve_staff(self) -> None:
+        self.spec["generation"]["clean_snapshot_enabled"] = True
+        self.spec["generation"]["drill_storage_budget"] = {
+            "database_bytes": 1024,
+            "filestore_bytes": 1024,
+            "staging_bytes": 1024,
+            "reserve_bytes": 1024,
+        }
+        self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.root)}}
+        self.clones = True
+        source = self.data_backing / "filestore" / self.database
+        original = self.command
+        popen = subprocess.Popen
+
+        def capture(arguments: list[str], **kwargs: Any) -> Any:
+            self.calls.append(arguments)
+            self.assertNotIn(["docker", "start", "web"], self.calls)
+            lock = os.stat(self.tmp / (self.gen.namespace + "-copy.lock")).st_ino
+            inherited = [os.fstat(descriptor).st_ino for descriptor in kwargs["pass_fds"]]
+            self.assertIn(lock, inherited)
+            return popen([sys.executable, "-c", "print('clean database dump')"], **kwargs)
+
+        def snapshot_command(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[:2] == ["docker", "stop"]:
+                self.containers["web"]["State"]["Running"] = False
+            if arguments[:2] == ["cp", "-a"]:
+                shutil.copytree(arguments[-2], arguments[-1], dirs_exist_ok=True)
+                self.calls.append(arguments)
+                return subprocess.CompletedProcess(arguments, 0, stdout=b"", stderr=b"")
+            return original(arguments, **kwargs)
+
+        with (
+            patch("pathlib.Path.home", return_value=self.root),
+            patch("subprocess.Popen", side_effect=capture),
+            patch.object(self, "command", side_effect=snapshot_command),
+        ):
+            status, output = self.run_program()
+            from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
+
+            library: dict[str, Any] = {}
+            exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+            snapshot = library["clean_snapshot_root"](
+                self.spec["copy_binding_sha256"], create=False
+            )
+        self.assertEqual(status, 0, output)
+        self.assertIn("clean_testing_snapshot_completed=true", output.splitlines())
+        self.assertTrue(any(call[:3] == ["cp", "-a", "--reflink=always"] for call in self.calls))
+        self.assertIn(["docker", "start", "web"], self.calls)
+        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"production attachment")
+        (source / "attachment").write_bytes(b"staff changed testing")
+        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"production attachment")
+        self.spec["copy_binding_sha256"] = "d" * 64
+        self.calls.clear()
+        with (
+            patch("pathlib.Path.home", return_value=self.root),
+            patch(
+                "subprocess.Popen",
+                side_effect=lambda arguments, **kwargs: popen(
+                    [sys.executable, "-c", "raise SystemExit(1)"], **kwargs
+                ),
+            ),
+            patch.object(self, "command", side_effect=snapshot_command),
+        ):
+            status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+        self.assertFalse((snapshot.parent / self.spec["copy_binding_sha256"]).exists())
+        self.assertEqual((snapshot / "filestore/attachment").read_bytes(), b"production attachment")
+
     def test_attachment_refusal_reaches_schedule_readback_without_private_output(self) -> None:
         original = self.command
         marker = f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}"
@@ -238,8 +409,13 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
+        self.tmp = self.root
+        self.clones = False
+        self.staged_inode = 0
+        self.inherited_descriptors: list[list[int]] = []
         self.gen = generation()
         self.database = self.gen.namespace.replace("-", "_")
+        self.data_backing = self.root / (self.gen.namespace + "-data") / "_data"
         source = {
             "ODOO_UPSTREAM_HOST": "source.invalid",
             "ODOO_UPSTREAM_USER": "restore-reader",
@@ -249,7 +425,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             "DATA_WORKFLOW_SSH_KEY": "/existing/read-only-identity",
             "DATA_WORKFLOW_SSH_DIR": "/existing/ssh",
         }
-        self.spec: dict[str, Any] = fresh_testing_restore_spec(
+        self.arguments = FreshRestoreScriptArguments(
             generation=self.gen,
             compose_project=self.gen.namespace,
             image_reference="registry.invalid/odoo@sha256:" + "f" * 64,
@@ -262,6 +438,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             clear_stale_lock=False,
             data_workflow_lock_path="/volumes/data/.fixture_workflow_lock",
         )
+        self.spec = fresh_testing_restore_spec(**self.arguments)
         self.containers: dict[str, dict[str, Any]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
         self.calls: list[list[str]] = []
@@ -274,8 +451,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.gate_hash = ""
         for suffix in ("data", "logs", "db"):
             name = self.gen.namespace + "-" + suffix
-            backing = self.root / name
-            backing.mkdir()
+            backing = self.root / name / "_data"
+            backing.mkdir(parents=True)
             self.volumes[name] = {
                 "Driver": "local",
                 "Options": {},
@@ -320,10 +497,21 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 
         self.calls.append(command)
+        self.inherited_descriptors.append(
+            [os.fstat(descriptor).st_ino for descriptor in kwargs.get("pass_fds", ())]
+        )
         result = b""
         if command[0] in {"ssh", "rsync"}:
             if command[0] == "ssh":
                 kwargs["stdout"].write(b"fixture dump")
+            else:
+                staged = Path(command[-1]) / "attachment"
+                staged.write_bytes(b"production attachment")
+                self.staged_inode = staged.stat().st_ino
+        elif command[:2] == ["cp", "--reflink=always"]:
+            if not self.clones:
+                return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"")
+            shutil.copyfile(command[-2], command[-1])
         elif command[:2] == ["docker", "ps"]:
             result = "\n".join(self.containers).encode()
         elif command[:2] == ["docker", "inspect"]:
@@ -387,7 +575,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 ["copy", encoded] + (["fixture:"] if self.spec.get("inspection_only") else []),
             ),
             patch("subprocess.run", side_effect=self.command),
-            patch("tempfile.gettempdir", return_value=str(self.root)),
+            patch("tempfile.gettempdir", return_value=str(self.tmp)),
+            patch("pathlib.Path.home", return_value=self.root),
+            patch("time.sleep"),
             redirect_stdout(output),
         ):
             try:
@@ -407,6 +597,62 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             except SystemExit as error:
                 status = int(error.code or 0)
         return status, output.getvalue()
+
+    def test_ssh_restore_stages_on_disk_outside_tmp(self) -> None:
+        self.tmp = self.root / "tmp"
+        self.tmp.mkdir()
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        staged = Path(next(call for call in self.calls if call[0] == "rsync")[-1])
+        self.assertFalse(staged.is_relative_to(self.tmp))
+        self.assertTrue(staged.is_relative_to(self.root))
+        self.assertFalse(staged.exists())
+
+    def test_staged_filestore_moves_into_testing_without_a_copy(self) -> None:
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        landed = self.data_backing / "filestore" / self.database / "attachment"
+        self.assertEqual(landed.stat().st_ino, self.staged_inode)
+        self.assertLess(
+            self.calls.index(["docker", "pause", "script-runner"]),
+            self.calls.index(["docker", "unpause", "script-runner"]),
+        )
+        self.assertFalse(
+            any(call[:2] == ["docker", "cp"] and "filestore" in call[2] for call in self.calls)
+        )
+        self.assertFalse(any(call[0] == "cp" for call in self.calls))
+
+    def test_every_restore_child_process_holds_the_restore_lock(self) -> None:
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        lock = os.stat(self.tmp / (self.gen.namespace + "-copy.lock")).st_ino
+        for call, inherited in zip(self.calls, self.inherited_descriptors, strict=True):
+            if call[0] in {"ssh", "rsync", "docker", "cp"}:
+                self.assertIn(lock, inherited, call)
+
+    def test_runner_left_paused_by_an_interrupted_landing_is_resumed_first(self) -> None:
+        self.containers["script-runner"]["State"]["Status"] = "paused"
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        resumed = self.calls.index(["docker", "unpause", "script-runner"])
+        first_runner_exec = next(
+            index
+            for index, call in enumerate(self.calls)
+            if call[:2] == ["docker", "exec"] and "script-runner" in call
+        )
+        self.assertLess(resumed, first_runner_exec)
+
+    def test_interrupted_restore_staging_is_discarded_on_the_next_run(self) -> None:
+        library: dict[str, Any] = {}
+        exec(STORAGE_MAINTENANCE_LIBRARY, library)
+        staging = library["restore_staging_path"](self.data_backing)
+        (staging / "filestore").mkdir(parents=True)
+        (staging / "filestore/attachment").write_bytes(b"production attachment")
+        self.existing_database = True
+        self.resume_verified = True
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertFalse(staging.exists())
 
     def test_new_copy_starts_without_performing_inline_disposal(self) -> None:
         previous = "lp_drill_" + "b" * 32
@@ -455,9 +701,22 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         import shlex
 
         remote_arguments = shlex.split(remote)
-        self.assertEqual(remote_arguments[-1], self.spec["source"]["ODOO_UPSTREAM_DB_NAME"])
-        self.assertIn("pg_dump", remote_arguments)
-        self.assertIn("--", remote_arguments)
+        source_settings = self.spec["source"]
+        self.assertEqual(
+            remote_arguments,
+            [
+                "pg_dump",
+                "-U",
+                source_settings["ODOO_UPSTREAM_DB_USER"],
+                "-Fc",
+                source_settings["ODOO_UPSTREAM_DB_NAME"],
+            ],
+        )
+        transfer = next(call for call in self.calls if call[0] == "rsync")
+        self.assertEqual(
+            set(transfer[1 : transfer.index("-e")]),
+            {"-a", "--no-links", "--no-devices", "--no-specials"},
+        )
         self.assertEqual(len([call for call in self.calls if call[0] == "ssh"]), 1)
         copies = [call for call in self.calls if call[:2] == ["docker", "cp"]]
         self.assertTrue(copies)
@@ -480,6 +739,33 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             timeout=2,
             check=True,
         )
+
+    def test_root_source_preserves_database_owner_dump(self) -> None:
+        self.spec["source"]["ODOO_UPSTREAM_USER"] = "root"
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        remote = next(call[-1] for call in self.calls if call[0] == "ssh")
+        import shlex
+
+        source = self.spec["source"]
+        self.assertEqual(
+            shlex.split(remote),
+            [
+                "sudo",
+                "-u",
+                source["ODOO_UPSTREAM_DB_USER"],
+                "pg_dump",
+                "-Fc",
+                "--",
+                source["ODOO_UPSTREAM_DB_NAME"],
+            ],
+        )
+
+    def test_root_source_cannot_capture_a_filesystem_root_as_filestore(self) -> None:
+        self.spec["source"].update(ODOO_UPSTREAM_USER="root", ODOO_UPSTREAM_FILESTORE_PATH="///./")
+        status, _ = self.run_program()
+        self.assertNotEqual(status, 0)
+        self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
 
     def test_database_mount_at_another_path_refuses_before_source_capture(self) -> None:
         self.containers["database"]["Mounts"][0]["Destination"] = "/other-database"
@@ -1167,6 +1453,15 @@ class TestingCopyBoundaryTests(unittest.TestCase):
     def test_resume_rejects_a_copy_from_another_generation_without_dropping_it(self) -> None:
         self.boundary_case("foreign-witness", phase="resume")
 
+    def test_preview_resume_rejects_the_inherited_testing_snapshot_witness(self) -> None:
+        self.boundary_case(
+            "foreign-witness",
+            phase="resume",
+            instance="preview",
+            restore_binding="preview-attempt-binding",
+            inherited_witness="testing-snapshot-binding",
+        )
+
     def boundary_case(
         self,
         fault: str,
@@ -1175,6 +1470,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
         instance: str = "testing",
         sanitize_only: bool = False,
         native_attachment: str = "",
+        restore_binding: str = "fixture-copy-binding",
+        inherited_witness: str = "",
     ) -> None:
         import logging
         import sqlite3
@@ -1278,7 +1575,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     "INSERT INTO ir_config_parameter VALUES (?, ?)",
                     (
                         TESTING_COPY_COMPLETION_PARAMETER,
-                        "foreign-copy" if fault == "foreign-witness" else "fixture-copy-binding",
+                        inherited_witness
+                        or ("foreign-copy" if fault == "foreign-witness" else restore_binding),
                     ),
                 )
             connection.commit()
@@ -1434,7 +1732,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                         "fixture-spec",
                         base64.b64encode(b"fixture readback").decode(),
                         phase,
-                        "fixture-copy-binding",
+                        restore_binding,
                         "container-export" if native_attachment else "ssh",
                     ],
                 ),
@@ -1463,7 +1761,17 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     exec(compile(program, "<copy-runner>", "exec"), {})
                 else:
                     with self.assertRaises(RuntimeError):
-                        exec(compile(TESTING_COPY_RUNNER, "<copy-runner>", "exec"), {})
+                        exec(
+                            compile(
+                                "expected_copy_instance = "
+                                + repr(instance)
+                                + "\n"
+                                + TESTING_COPY_RUNNER,
+                                "<copy-runner>",
+                                "exec",
+                            ),
+                            {},
+                        )
             if fault == "normal":
                 if sanitize_only:
                     self.assertNotIn("registry", events)

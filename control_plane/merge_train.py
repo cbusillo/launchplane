@@ -355,6 +355,8 @@ def build_merge_train_dry_run_result(
         planned_dependency_heads=planned_dependency_heads,
         planned_handoff_heads=planned_handoff_heads,
     )
+    if batch_landing and new_candidate:
+        queue = _defer_unsupported_stacks(policy=policy, snapshot=snapshot, queue=queue)
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
         # Accepted features start a batch; remaining planned heads keep its
@@ -527,6 +529,46 @@ def merge_train_snapshot_of(
                 if pull_request.number in numbers
             )
         }
+    )
+
+
+def _defer_unsupported_stacks(
+    *,
+    policy: MergeTrainPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    queue: tuple[MergeTrainQueueEntry, ...],
+) -> tuple[MergeTrainQueueEntry, ...]:
+    child_bases = {
+        pr.base_ref for pr in snapshot.pull_requests if pr.base_ref != snapshot.base_branch
+    }
+    stacked_roots = {pr.number for pr in snapshot.pull_requests if pr.head_ref in child_bases}
+    refusals: dict[int, tuple[str, ...]] = {}
+    for entry in queue:
+        if (
+            not entry.eligible
+            or entry.number not in stacked_roots
+            or entry.required_checks_status == "fail"
+            or entry.mergeable == "conflicting"
+        ):
+            continue
+        discovery = discover_merge_train_stack(
+            policy=policy, snapshot=snapshot, root_pull_request_number=entry.number
+        )
+        if discovery.status == "unsupported":
+            refusals[entry.number] = discovery.unsupported_reasons
+    if not refusals or not any(entry.eligible and entry.number not in refusals for entry in queue):
+        return queue
+    return tuple(
+        entry.model_copy(
+            update={
+                "eligible": False,
+                "ineligible_reasons": (*entry.ineligible_reasons, *refusals[entry.number]),
+                "deferred_reasons": refusals[entry.number],
+            }
+        )
+        if entry.number in refusals
+        else entry
+        for entry in queue
     )
 
 
@@ -794,7 +836,7 @@ def _build_queue_entry(
         ineligible_reasons.append(f"held by {repository_policy.blocked_label} label")
     is_dependency_update = (
         pull_request.actor_id is not None
-        and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
+        and repository_policy.enqueue.dependency_bot(pull_request.actor_id) is not None
     )
     label_refusal = enqueue_label_refusal(
         repository_policy, labels=pull_request.labels, label_actors=pull_request.label_actors

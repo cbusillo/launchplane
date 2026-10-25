@@ -13,11 +13,16 @@ are never included. A failed lookup leaves the profile unchanged; it does not
 fall back to another credential. Service logs include the same failure stage.
 
 Products recorded with `release_on_acceptance: director_standing` do not wait
-for a Client-preview check at merge admission or receive preview-review invitations,
-even when the PR has test notes or an old review label. The Director's standing
-direction supplies acceptance; note validation and engineering checks still
-apply. Production release remains on the gated path
-described in [release-review.md](release-review.md), including its checklist-note validation.
+for a Client-preview check at merge admission or receive preview-review invitations
+when the PR only has test notes. The Director's standing direction supplies
+acceptance; note validation and engineering checks still apply. The product's
+review label is an explicit hold: with it, the change waits for the recorded
+Client's preview review like any other product, and the label still requires
+real test notes. A product without a serving preview cannot record that
+acceptance, so its labeled change stays held until the request is withdrawn
+through [pending request withdrawal](#withdrawing-a-pending-request). Withdrawal
+returns the change to standing acceptance; a saved Client rejection still vetoes it.
+Production release remains on the gated path described in [release-review.md](release-review.md), including its checklist-note validation.
 
 The Client named on the product profile reviews a preview at `/ui/owner-review`.
 Launchplane requests review when a pull request has real `Client test notes`
@@ -119,8 +124,8 @@ the veto. Decisions for another product, pull request or former Client do not
 veto this change. Acceptance remains bound to the reviewed head or proven carry.
 For a Director-standing product, the Director signs in as the recorded Client,
 opens the change's `/ui/owner-review` page and accepts its current serving preview.
-Standing acceptance suppresses invitations; it does not prevent that explicit
-decision. A serving preview remains required by the normal review path.
+Without the review label, standing acceptance suppresses invitations; it does
+not prevent that explicit decision. A serving preview remains required by the normal review path.
 The consuming product's release acceptance remains required.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
@@ -128,6 +133,8 @@ Launchplane accepts a product-review decision.
 A preview invitation's first visible line names **Change review (preview)** and
 asks whether this one change is exactly right. It links that change's preview
 and explains that Accept approves the change while nothing goes live yet.
+The review page shows the pull request's title and its Client test notes under
+**What to check**, read from the pull request when the page loads.
 The separate release invitation is described in [release-review.md](release-review.md).
 
 A Client does not need an authorization policy role to sign in. When GitHub

@@ -55,6 +55,7 @@ from pathlib import Path
 
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
+    DeliveryFailureObservation,
     install_triggers,
     metadata as delivery_evidence_metadata,
     register_source_events,
@@ -88,6 +89,7 @@ from typing import (
 from pydantic import BaseModel, JsonValue
 
 if TYPE_CHECKING:
+    from control_plane.clean_testing_snapshot import CleanTestingSnapshot
     from control_plane.merge_train_wake import MergeTrainEventReceipt
     from control_plane.testing_replacement_resources import TestingReplacementResourcesRequest
     from control_plane.testing_verification import TestingVerification
@@ -151,10 +153,7 @@ from control_plane.contracts.solo_administration_confirmation import (
 )
 from control_plane.contracts.authz_denial_record import AuthzDenialRecord
 from control_plane.authz_candidate_preparation import (
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID,
-    ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID,
     ordinary_agent_delivery_administration_removed,
-    ordinary_agent_delivery_administration_state,
 )
 from control_plane.contracts.authz_policy_record import (
     AuthzPolicyCompareWriteResult,
@@ -165,12 +164,9 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.authz_policy_write_transition import (
     AuthzPolicyGitHubActionsCallerBinding,
     AuthzPolicyImmutableHumanCallerBinding,
-    AuthzPolicySchemaV3MaintenanceEvidence,
-    AuthzPolicySchemaV3OrdinaryEnableEvidence,
     AuthzPolicySchemaV3TransitionDeniedError,
     AuthzPolicySchemaV3WriteEvidence,
     classify_authz_policy_schema_v3_transition,
-    require_authz_policy_source_status,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 
@@ -236,7 +232,6 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
     claim_every_code_work_request,
-    close_every_code_work_request_for_pull_request,
     heartbeat_every_code_work_request,
     recover_stale_every_code_work_request,
 )
@@ -419,7 +414,6 @@ from control_plane.contracts.product_owner import (
     ProductOwnerRoutingRecord,
 )
 from control_plane.contracts.privileged_operation import (
-    ManagedAuthzPolicySetHumanEvidence,
     PrivilegedOperationConflictError,
     PrivilegedOperationEventRecord,
     PrivilegedOperationEventWriteStatus,
@@ -543,6 +537,12 @@ from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationAuditRecord,
     validate_runner_lane_registration_audit_identity,
 )
+from control_plane.contracts.guest_capture_credential import (
+    GUEST_CAPTURE_BINDING_PREFIX,
+    guest_capture_credential_from_event,
+    GuestCaptureBoundary,
+    GuestCaptureCredential,
+)
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -573,11 +573,7 @@ from control_plane.repository_inventory import (
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationEvent,
-    OrdinaryAgentDeliveryActivationExecutionEvidence,
     OrdinaryAgentDeliveryActivationRecord,
-    OrdinaryAgentDeliveryActivationReference,
-    OrdinaryAgentDeliveryActivationSetupHumanEvidence,
-    OrdinaryAgentDeliveryActivationSetupRequest,
 )
 from control_plane.contracts.ordinary_agent_session_lifecycle import (
     OrdinaryAgentSessionRecord,
@@ -658,7 +654,7 @@ from control_plane.storage.product_authority_bundle import (
     SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
-    require_product_profile_writes,
+    require_absent_products,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -668,7 +664,6 @@ from control_plane.storage.product_authority_bundle import (
 )
 from control_plane.storage.schema_invariants import (
     RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
-    ordinary_agent_delivery_activation_schema_capability,
     verify_postgres_schema_invariants,
 )
 
@@ -711,56 +706,6 @@ class _OdooOverridePayloadJson(TypeDecorator[PayloadDict]):
         if not isinstance(x, dict) or not isinstance(y, dict):
             return x is y
         return json.dumps(x, sort_keys=True) == json.dumps(y, sort_keys=True)
-
-
-OrdinaryAgentDeliveryActivationWriteStatus = Literal["written", "replayed"]
-
-
-class OrdinaryAgentDeliveryActivationWriteResult(NamedTuple):
-    status: OrdinaryAgentDeliveryActivationWriteStatus
-    record: OrdinaryAgentDeliveryActivationRecord
-    event: OrdinaryAgentDeliveryActivationEvent
-
-
-class OrdinaryAgentDeliveryActivationStore(Protocol):
-    def read_ordinary_agent_delivery_activation_record(
-        self, activation_id: str
-    ) -> OrdinaryAgentDeliveryActivationRecord: ...
-
-    def list_ordinary_agent_delivery_activation_records(
-        self, *, limit: int | None = None
-    ) -> tuple[OrdinaryAgentDeliveryActivationRecord, ...]: ...
-
-    def read_ordinary_agent_delivery_activation_event(
-        self, event_id: str
-    ) -> OrdinaryAgentDeliveryActivationEvent: ...
-
-    def list_ordinary_agent_delivery_activation_event_records(
-        self, *, activation_id: str = "", limit: int | None = None
-    ) -> tuple[OrdinaryAgentDeliveryActivationEvent, ...]: ...
-
-    def install_ordinary_agent_delivery_activation(
-        self,
-        record: OrdinaryAgentDeliveryActivationRecord,
-        event: OrdinaryAgentDeliveryActivationEvent,
-        *,
-        predecessor: (
-            OrdinaryAgentDeliveryActivationRecord | OrdinaryAgentDeliveryActivationReference | None
-        ) = None,
-        predecessor_event: OrdinaryAgentDeliveryActivationEvent | None = None,
-    ) -> OrdinaryAgentDeliveryActivationWriteResult: ...
-
-    def revoke_ordinary_agent_delivery_activation(
-        self,
-        record: OrdinaryAgentDeliveryActivationRecord,
-        event: OrdinaryAgentDeliveryActivationEvent,
-    ) -> OrdinaryAgentDeliveryActivationWriteResult: ...
-
-    def recover_ordinary_agent_delivery_activation_by_source_operation(
-        self, source_operation_id: str
-    ) -> tuple[OrdinaryAgentDeliveryActivationRecord, OrdinaryAgentDeliveryActivationEvent]: ...
-
-    def ordinary_agent_delivery_activation_schema_capability(self) -> tuple[str, str, bool]: ...
 
 
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
@@ -6455,6 +6400,22 @@ class PostgresRecordStore(HumanSessionStore):
             payload=self._payload_dict(event),
         )
 
+    def _write_secret_audit_event_in_session(
+        self, session: Session, event: SecretAuditEvent
+    ) -> None:
+        if event.event_id.startswith(GUEST_CAPTURE_BINDING_PREFIX):
+            pin = guest_capture_credential_from_event(event)
+            row = session.get(LaunchplaneSecretAuditEventRow, event.event_id)
+            if row is None:
+                raise ValueError("Guest capture bindings must be created through guest enrollment.")
+            current = guest_capture_credential_from_event(
+                SecretAuditEvent.model_validate(row.payload)
+            )
+            if current != pin:
+                raise ValueError("Guest capture binding cannot be replaced.")
+            return
+        session.merge(self._secret_audit_event_row(event))
+
     def _environment_inventory_row(self, record: EnvironmentInventory) -> LaunchplaneInventoryRow:
         return LaunchplaneInventoryRow(
             context=record.context,
@@ -6819,15 +6780,13 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ProductProfileConflictError(
                         "Product profile changed during bundle write."
                     )
-            if bundle.product_profiles or bundle.absent_product_ids:
-                require_product_profile_writes(
-                    bundle.product_profiles,
+            if bundle.absent_product_ids:
+                require_absent_products(
+                    bundle.absent_product_ids,
                     (
                         self._read_product_profile_payload(row.payload)
                         for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                     ),
-                    inventory_records=self._iter_repository_inventory_records(session),
-                    absent_product_ids=bundle.absent_product_ids,
                 )
             if guard_provider is not None:
                 guard_provider(session)
@@ -7124,11 +7083,8 @@ class PostgresRecordStore(HumanSessionStore):
                     step_name="write_secret_binding",
                 )
             for event in bundle.secret_audit_events:
-                self._merge_authority_row(
-                    session,
-                    self._secret_audit_event_row(event),
-                    step_name="write_secret_audit_event",
-                )
+                self._write_secret_audit_event_in_session(session, event)
+                self._after_product_authority_bundle_step("write_secret_audit_event")
             for inventory_record in bundle.environment_inventory:
                 self._merge_authority_row(
                     session,
@@ -7504,6 +7460,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> Literal["written", "replayed"]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_production_backup_retention_write(session)
             self._lock_product_authority_bundle_write(session)
             rows = session.scalars(
                 select(LaunchplaneProductionBackupTargetRow)
@@ -7585,6 +7542,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> Literal["written", "replayed"]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_production_backup_retention_write(session)
             self._lock_product_authority_bundle_write(session)
             policy_rows = session.scalars(
                 select(LaunchplaneProductionBackupPolicyRow)
@@ -7620,6 +7578,12 @@ class PostgresRecordStore(HumanSessionStore):
                 session.merge(self._production_backup_policy_row(plan.superseded_current_record))
                 session.flush()
             session.add(self._production_backup_policy_row(record))
+            session.flush()
+            from control_plane.storage.guest_capture_bindings import (
+                seed_guest_capture_bindings_in_session,
+            )
+
+            seed_guest_capture_bindings_in_session(self, session)
             session.commit()
         return "written"
 
@@ -7673,6 +7637,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> ProductionBackupAuthorityWriteResult:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_production_backup_retention_write(session)
             self._lock_product_authority_bundle_write(session)
             plan = self._plan_production_backup_authority_in_session(
                 session=session,
@@ -7713,6 +7678,7 @@ class PostgresRecordStore(HumanSessionStore):
                     idempotency_record=reservation,
                 )
             assert reservation_row is not None
+            self._lock_production_backup_retention_write(session)
             self._lock_product_authority_bundle_write(session)
             try:
                 plan = self._plan_production_backup_authority_in_session(
@@ -7810,6 +7776,11 @@ class PostgresRecordStore(HumanSessionStore):
                 session.flush()
             session.add(self._production_backup_policy_row(envelope.policy))
         session.flush()
+        from control_plane.storage.guest_capture_bindings import (
+            seed_guest_capture_bindings_in_session,
+        )
+
+        seed_guest_capture_bindings_in_session(self, session)
 
     def _idempotency_row(self, record: LaunchplaneIdempotencyRecord) -> LaunchplaneIdempotencyRow:
         return LaunchplaneIdempotencyRow(
@@ -7938,6 +7909,35 @@ class PostgresRecordStore(HumanSessionStore):
         if for_update and not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
         return statement
+
+    def _lock_production_backup_retention_write(self, session: Any) -> None:
+        if self.database_dialect_name == "postgresql":
+            session.execute(
+                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                {"lock_name": "launchplane:production-backup-retention"},
+            )
+
+    @contextmanager
+    def production_backup_retention_guard(self) -> Iterator[None]:
+        previous = getattr(self._disposable_authority_context, "observation_read_session", None)
+        with self._session_factory() as session:
+            if self.database_dialect_name == "postgresql":
+                acquired = session.scalar(
+                    text(
+                        "select pg_try_advisory_xact_lock_shared(hashtextextended(:lock_name, 0))"
+                    ),
+                    {"lock_name": "launchplane:production-backup-retention"},
+                )
+                if not acquired:
+                    raise ValueError("Backup authority is changing; skip pruning.")
+            else:
+                session.execute(text("BEGIN"))
+            self._disposable_authority_context.observation_read_session = session
+            try:
+                yield
+            finally:
+                self._disposable_authority_context.observation_read_session = previous
+                session.rollback()
 
     def _begin_serialized_write(self, session: Any) -> None:
         if self.database_url.startswith("sqlite"):
@@ -13350,6 +13350,196 @@ class PostgresRecordStore(HumanSessionStore):
 
             yield checkpoint
 
+    def read_clean_testing_snapshot(
+        self, product: str, context: str
+    ) -> "CleanTestingSnapshot | None":
+        from control_plane.clean_testing_snapshot import (
+            CLEAN_SNAPSHOT_SCOPE,
+            CLEAN_SNAPSHOT_ROUTE,
+            CleanTestingSnapshot,
+        )
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(LaunchplaneIdempotencyRow)
+                .where(
+                    LaunchplaneIdempotencyRow.scope == CLEAN_SNAPSHOT_SCOPE,
+                    LaunchplaneIdempotencyRow.route_path == CLEAN_SNAPSHOT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key.like("capture:%"),
+                    LaunchplaneIdempotencyRow.payload["response_payload"]["product"].as_string()
+                    == product,
+                    LaunchplaneIdempotencyRow.payload["response_payload"]["context"].as_string()
+                    == context,
+                )
+                .order_by(
+                    LaunchplaneIdempotencyRow.payload["response_payload"]["captured_at"]
+                    .as_string()
+                    .desc(),
+                    LaunchplaneIdempotencyRow.record_id.desc(),
+                )
+                .limit(1)
+            )
+            if row is None:
+                return None
+            return CleanTestingSnapshot.model_validate(
+                LaunchplaneIdempotencyRecord.model_validate(row.payload).response_payload
+            )
+
+    def clean_snapshot_retirement_candidates(
+        self, product: str, context: str, server_id: str, *, now: datetime | None = None
+    ) -> tuple["CleanTestingSnapshot", ...]:
+        from control_plane.clean_testing_snapshot import (
+            CLEAN_SNAPSHOT_SCOPE,
+            CLEAN_SNAPSHOT_ROUTE,
+            CleanTestingSnapshot,
+        )
+        from control_plane.odoo_preview_apply_http import (
+            ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+            ODOO_PREVIEW_APPLY_ROUTE,
+        )
+        from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
+
+        observed = now or datetime.now(timezone.utc)
+        with self._session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(LaunchplaneIdempotencyRow)
+                    .where(
+                        or_(
+                            and_(
+                                LaunchplaneIdempotencyRow.route_path == CLEAN_SNAPSHOT_ROUTE,
+                                LaunchplaneIdempotencyRow.scope == CLEAN_SNAPSHOT_SCOPE,
+                            ),
+                            and_(
+                                LaunchplaneIdempotencyRow.route_path
+                                == ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
+                                LaunchplaneIdempotencyRow.payload["response_payload"]["result"][
+                                    "dry_run_plan"
+                                ]["clean_snapshot"]["snapshot_id"]
+                                .as_string()
+                                .is_not(None),
+                                LaunchplaneIdempotencyRow.payload["response_payload"]["result"][
+                                    "plan_provenance"
+                                ]["expires_at"].as_string()
+                                >= observed.isoformat(),
+                            ),
+                            and_(
+                                LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
+                                LaunchplaneIdempotencyRow.state.in_(
+                                    ("running", "reconcile_required")
+                                ),
+                            ),
+                        )
+                    )
+                    .limit(10001)
+                )
+            )
+            if len(rows) > 10000:
+                return ()
+            captures = []
+            pinned: set[str] = set()
+            for row in rows:
+                record = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+                if (
+                    record.route_path == CLEAN_SNAPSHOT_ROUTE
+                    and record.scope == CLEAN_SNAPSHOT_SCOPE
+                ):
+                    snapshot = CleanTestingSnapshot.model_validate(record.response_payload)
+                    if (snapshot.product, snapshot.context, snapshot.server_id) != (
+                        product,
+                        context,
+                        server_id,
+                    ):
+                        continue
+                    if record.idempotency_key.startswith("capture:"):
+                        captures.append(snapshot)
+                    else:
+                        pinned.add(snapshot.snapshot_id)
+                elif record.route_path == ODOO_PREVIEW_APPLY_INPUTS_ROUTE:
+                    plan = OdooPreviewApplyInputsResult.model_validate(
+                        record.response_payload.get("result")
+                    )
+                    if plan.plan_provenance is None:
+                        return ()
+                    if (
+                        plan.plan_provenance.expires_at > observed
+                        and plan.dry_run_plan.clean_snapshot is not None
+                    ):
+                        pinned.add(plan.dry_run_plan.clean_snapshot.snapshot_id)
+                elif record.state in {"running", "reconcile_required"}:
+                    intent = self._original_mutation_intent(session, record)
+                    if not intent:
+                        return ()
+                    pending = [intent]
+                    while pending:
+                        item = pending.pop()
+                        if isinstance(item, dict):
+                            snapshot_id = item.get("snapshot_id")
+                            if isinstance(snapshot_id, str):
+                                pinned.add(snapshot_id)
+                            pending.extend(item.values())
+                        elif isinstance(item, list):
+                            pending.extend(item)
+            captures.sort(
+                key=lambda item: datetime.fromisoformat(item.captured_at.replace("Z", "+00:00")),
+                reverse=True,
+            )
+            pinned.update(item.snapshot_id for item in captures[:2])
+            return tuple(item for item in captures if item.snapshot_id not in pinned)
+
+    def write_clean_testing_snapshot(self, record: "CleanTestingSnapshot") -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._write_clean_testing_snapshot(session, record)
+            session.commit()
+
+    def _write_clean_testing_snapshot(
+        self, session: Session, record: "CleanTestingSnapshot"
+    ) -> None:
+        from control_plane.clean_testing_snapshot import (
+            CLEAN_SNAPSHOT_SCOPE,
+            CLEAN_SNAPSHOT_ROUTE,
+            CleanTestingSnapshot,
+            snapshot_lane_key,
+        )
+
+        key = "capture:" + record.snapshot_id
+        self._lock_landing_authority(
+            session, CLEAN_SNAPSHOT_SCOPE + ":" + snapshot_lane_key(record.product, record.context)
+        )
+        row = session.scalar(
+            self._idempotency_statement(
+                scope=CLEAN_SNAPSHOT_SCOPE,
+                route_path=CLEAN_SNAPSHOT_ROUTE,
+                idempotency_key=key,
+                for_update=True,
+            )
+        )
+        if row is not None:
+            previous = CleanTestingSnapshot.model_validate(
+                LaunchplaneIdempotencyRecord.model_validate(row.payload).response_payload
+            )
+            if previous.model_dump(exclude={"captured_at"}) != record.model_dump(
+                exclude={"captured_at"}
+            ):
+                raise ValueError("A clean capture receipt cannot be replaced.")
+            return
+        payload = record.model_dump(mode="json")
+        receipt = LaunchplaneIdempotencyRecord(
+            record_id=build_launchplane_mutation_reservation_id(
+                scope=CLEAN_SNAPSHOT_SCOPE, route_path=CLEAN_SNAPSHOT_ROUTE, idempotency_key=key
+            ),
+            scope=CLEAN_SNAPSHOT_SCOPE,
+            route_path=CLEAN_SNAPSHOT_ROUTE,
+            idempotency_key=key,
+            request_fingerprint=canonical_json_sha256(payload),
+            response_status_code=200,
+            response_trace_id=record.snapshot_id,
+            recorded_at=record.captured_at,
+            response_payload=payload,
+        )
+        session.merge(self._idempotency_row(receipt))
+
     def read_native_testing_copy_capture(self, binding: str) -> NativeTestingCopyCapture | None:
         with self._session_factory() as session:
             row = session.get(LaunchplaneNativeTestingCopyCaptureRow, binding)
@@ -15421,6 +15611,7 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.testing_replacement_resources import (
             resource_request_payload,
             resource_context,
+            require_legacy_testing_target,
         )
         from control_plane.disposable_lanes import (
             disposable_lane_binding_sha256,
@@ -15449,6 +15640,7 @@ class PostgresRecordStore(HumanSessionStore):
                 target_id = self.read_dokploy_target_id_record(
                     context_name=request.context, instance_name="testing"
                 )
+                require_legacy_testing_target(self, target, target_id.target_id)
                 preparation = DisposableTestingResourcePreparation(
                     operation_id=request.operation_id,
                     product=product,
@@ -16152,6 +16344,27 @@ class PostgresRecordStore(HumanSessionStore):
                         generation_row.payload = payload["previous_generation"]
                         payload["selection_restored"] = True
                         self._sync_idempotency_row(receipt_row, receipt)
+            from control_plane.clean_testing_snapshot import completed_operation_snapshot
+
+            try:
+                snapshot = completed_operation_snapshot(self, record)
+                if snapshot is not None:
+                    self._write_clean_testing_snapshot(session, snapshot)
+                    assert record.result is not None
+                    record.result.post_deploy_override_evidence = {
+                        **record.result.post_deploy_override_evidence,
+                        "clean_snapshot_published": "true",
+                    }
+            except ValueError:
+                logging.getLogger(__name__).warning(
+                    "Clean snapshot publication refused for completed operation %s",
+                    record.operation_id,
+                )
+                if record.result is not None:
+                    record.result.post_deploy_override_evidence = {
+                        **record.result.post_deploy_override_evidence,
+                        "clean_snapshot_published": "false",
+                    }
             self._sync_odoo_stable_target_replacement_operation_row(row, record)
             if (
                 record.instance == "testing"
@@ -18178,6 +18391,52 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(record),
             )
         )
+
+    def continue_precapture_backup_operation(
+        self,
+        *,
+        expected: VeriReelProdBackupGateOperationRecord,
+        resumed: VeriReelProdBackupGateOperationRecord,
+        expected_backup: BackupGateRecord,
+    ) -> bool:
+        from control_plane.client_release_backup_continuation import require_precapture_failure
+
+        require_precapture_failure(expected)
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                select(LaunchplaneVeriReelProdBackupGateOperationRow)
+                .where(
+                    LaunchplaneVeriReelProdBackupGateOperationRow.operation_id
+                    == expected.operation_id
+                )
+                .with_for_update()
+            )
+            backup_row = session.scalar(
+                select(LaunchplaneBackupGateRow)
+                .where(LaunchplaneBackupGateRow.record_id == expected.backup_record_id)
+                .with_for_update()
+            )
+            if (
+                row is None
+                or backup_row is None
+                or self._read_payload(
+                    model_type=VeriReelProdBackupGateOperationRecord, payload=row.payload
+                )
+                != expected
+                or self._read_payload(model_type=BackupGateRecord, payload=backup_row.payload)
+                != expected_backup
+                or resumed.previous_attempt != expected
+                or resumed.previous_backup != expected_backup
+                or resumed.status != "pending"
+                or resumed.operation_id != expected.operation_id
+                or resumed.binding != expected.binding
+                or resumed.authorization != expected.authorization
+            ):
+                return False
+            self._sync_verireel_prod_backup_gate_operation_row(row, resumed)
+            session.commit()
+            return True
 
     def _sync_verireel_prod_backup_gate_operation_row(
         self,
@@ -22351,12 +22610,6 @@ class PostgresRecordStore(HumanSessionStore):
         assert insert_error is not None
         raise insert_error
 
-    def _iter_repository_inventory_records(
-        self, session: Any
-    ) -> Iterator[RepositoryInventoryRecord]:
-        for row in session.scalars(select(LaunchplaneRepositoryInventoryRow)):
-            yield self._read_payload(model_type=RepositoryInventoryRecord, payload=row.payload)
-
     def list_repository_inventory_records(
         self,
         *,
@@ -22566,41 +22819,6 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
             offset=offset,
         )
-
-    def close_every_code_work_request_for_pull_request_record(
-        self,
-        *,
-        request_id: str,
-        expected_lifecycle_id: str,
-        pr_url: str,
-        merged: bool,
-        closed_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        with self._session_factory() as session:
-            statement = (
-                select(LaunchplaneEveryCodeWorkRequestRow)
-                .where(LaunchplaneEveryCodeWorkRequestRow.request_id == request_id)
-                .limit(1)
-            )
-            if not self.database_url.startswith("sqlite"):
-                statement = statement.with_for_update()
-            row = session.scalar(statement)
-            if row is None:
-                raise FileNotFoundError(request_id)
-            record = self._read_payload(model_type=EveryCodeWorkRequestRecord, payload=row.payload)
-            if record.lifecycle_id != expected_lifecycle_id:
-                return None
-            closed_record = close_every_code_work_request_for_pull_request(
-                record,
-                pr_url=pr_url,
-                merged=merged,
-                closed_at=closed_at,
-            )
-            if closed_record is None:
-                return None
-            self._sync_every_code_work_request_row(row, closed_record)
-            session.commit()
-            return closed_record
 
     def claim_every_code_work_request_record(
         self,
@@ -27985,64 +28203,6 @@ class PostgresRecordStore(HumanSessionStore):
         return activation_event
 
     @staticmethod
-    def _sync_ordinary_agent_delivery_activation_row(
-        row: LaunchplaneOrdinaryAgentDeliveryActivationRow,
-        record: OrdinaryAgentDeliveryActivationRecord,
-    ) -> None:
-        replacement = PostgresRecordStore._ordinary_agent_delivery_activation_row(record)
-        for column_name in (
-            "desired_state",
-            "effective_state",
-            "revision",
-            "updated_at",
-            "revoked_at",
-            "superseded_by_activation_id",
-            "superseded_at",
-            "activation_sha256",
-            "payload",
-        ):
-            setattr(row, column_name, getattr(replacement, column_name))
-
-    @staticmethod
-    def _ordinary_agent_delivery_activation_scope_filters(
-        record: OrdinaryAgentDeliveryActivationRecord,
-    ) -> tuple[object, ...]:
-        return (
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.repository_id
-            == record.scope.target.repository_id,
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.base_branch
-            == record.scope.target.base_branch,
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.managed_set_id
-            == record.scope.managed_set_id,
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.managed_rule_id
-            == record.scope.managed_rule_id,
-        )
-
-    def _lock_ordinary_agent_delivery_activation_scope(
-        self, session: Any, record: OrdinaryAgentDeliveryActivationRecord
-    ) -> None:
-        if self.database_dialect_name != "postgresql":
-            return
-        scope = record.scope
-        lock_name = ":".join(
-            (
-                "launchplane",
-                "ordinary-agent-delivery-activation",
-                str(scope.target.repository_id),
-                scope.target.base_branch,
-                scope.managed_set_id,
-                scope.managed_rule_id,
-            )
-        )
-        session.execute(
-            text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
-            {"lock_name": lock_name},
-        )
-
-    def _after_ordinary_agent_delivery_activation_write_step(self, _step_name: str) -> None:
-        return None
-
-    @staticmethod
     def _validate_ordinary_agent_delivery_activation_event_result(
         *,
         record: OrdinaryAgentDeliveryActivationRecord,
@@ -28190,391 +28350,6 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Activation recovery requires source_operation_id.")
         with self._session_factory() as session:
             return self._ordinary_agent_delivery_activation_operation_outcome(session, normalized)
-
-    def install_ordinary_agent_delivery_activation(
-        self,
-        record: OrdinaryAgentDeliveryActivationRecord,
-        event: OrdinaryAgentDeliveryActivationEvent,
-        *,
-        predecessor: (
-            OrdinaryAgentDeliveryActivationRecord | OrdinaryAgentDeliveryActivationReference | None
-        ) = None,
-        predecessor_event: OrdinaryAgentDeliveryActivationEvent | None = None,
-    ) -> OrdinaryAgentDeliveryActivationWriteResult:
-        if (
-            record.revision != 1
-            or record.desired_state != "guarded"
-            or record.effective_state != "qualification_only"
-            or record.revoked_at
-            or record.superseded_at
-            or record.installed_at != event.occurred_at
-            or record.updated_at != event.occurred_at
-            or event.action != "installed"
-            or event.source_operation_id != record.source_setup_operation_id
-        ):
-            raise OrdinaryAgentDeliveryActivationConflictError(
-                "Activation setup must install revision one as qualification-only."
-            )
-        self._validate_ordinary_agent_delivery_activation_event_result(record=record, event=event)
-        predecessor_reference = record.predecessor
-        if (predecessor_reference is None) != (predecessor is None):
-            raise OrdinaryAgentDeliveryActivationConflictError(
-                "Activation setup predecessor does not match the persisted record."
-            )
-        if isinstance(predecessor, OrdinaryAgentDeliveryActivationReference):
-            if predecessor != predecessor_reference:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation setup predecessor does not match the persisted record."
-                )
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            self._lock_active_authz_policy(session)
-            self._lock_ordinary_agent_delivery_activation_scope(session, record)
-            source_row = session.scalar(
-                select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
-                    LaunchplaneOrdinaryAgentDeliveryActivationRow.source_setup_operation_id
-                    == record.source_setup_operation_id
-                )
-            )
-            if source_row is not None:
-                replay_record, replay_event = (
-                    self._ordinary_agent_delivery_activation_operation_outcome(
-                        session, record.source_setup_operation_id
-                    )
-                )
-                if replay_record != record or replay_event != event:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation setup replay changed the persisted outcome."
-                    )
-                if predecessor_reference is not None:
-                    replay_predecessor_row = session.get(
-                        LaunchplaneOrdinaryAgentDeliveryActivationRow,
-                        predecessor_reference.activation_id,
-                    )
-                    if replay_predecessor_row is None:
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation setup replay lost its predecessor."
-                        )
-                    replay_predecessor = self._ordinary_agent_delivery_activation_from_row(
-                        replay_predecessor_row
-                    )
-                    if replay_predecessor.desired_state == "revoked":
-                        if (
-                            predecessor_event is not None
-                            or replay_predecessor.revision != predecessor_reference.revision
-                            or replay_predecessor.activation_sha256
-                            != predecessor_reference.activation_sha256
-                        ):
-                            raise OrdinaryAgentDeliveryActivationConflictError(
-                                "Activation setup replay changed its revoked predecessor."
-                            )
-                    else:
-                        if (
-                            predecessor_event is None
-                            or replay_predecessor.superseded_by_activation_id
-                            != record.activation_id
-                            or predecessor_event.previous_revision != predecessor_reference.revision
-                            or predecessor_event.previous_activation_sha256
-                            != predecessor_reference.activation_sha256
-                        ):
-                            raise OrdinaryAgentDeliveryActivationConflictError(
-                                "Activation setup replay changed its superseded predecessor."
-                            )
-                        stored_predecessor_event_row = session.get(
-                            LaunchplaneOrdinaryAgentDeliveryActivationEventRow,
-                            predecessor_event.event_id,
-                        )
-                        if stored_predecessor_event_row is None or (
-                            self._ordinary_agent_delivery_activation_event_from_row(
-                                stored_predecessor_event_row
-                            )
-                            != predecessor_event
-                        ):
-                            raise OrdinaryAgentDeliveryActivationConflictError(
-                                "Activation setup replay changed its superseded event."
-                            )
-                        self._validate_ordinary_agent_delivery_activation_event_result(
-                            record=replay_predecessor,
-                            event=predecessor_event,
-                        )
-                    if (
-                        isinstance(predecessor, OrdinaryAgentDeliveryActivationRecord)
-                        and replay_predecessor != predecessor
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation setup replay changed its predecessor projection."
-                        )
-                return OrdinaryAgentDeliveryActivationWriteResult(
-                    "replayed", replay_record, replay_event
-                )
-
-            source_operation_row = session.scalar(
-                select(LaunchplanePrivilegedOperationRow).where(
-                    LaunchplanePrivilegedOperationRow.operation_id
-                    == record.source_setup_operation_id
-                )
-            )
-            if source_operation_row is not None:
-                source_operation = self._read_payload(
-                    model_type=PrivilegedOperationRecord,
-                    payload=source_operation_row.payload,
-                )
-                approval = source_operation.approval
-                if (
-                    approval is not None
-                    and approval.managed_set_id
-                    == ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_SET_ID
-                ):
-                    active_policy_record = self._locked_active_authz_policy_record(session)
-                    if (
-                        approval.managed_rule_id
-                        != ORDINARY_AGENT_DELIVERY_ADMINISTRATION_MANAGED_RULE_ID
-                        or ordinary_agent_delivery_administration_state(
-                            active_policy_record.policy,
-                            github_id=approval.approver.github_id,
-                        )
-                        != "active"
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation setup lost its delivery administration authority."
-                        )
-
-            statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
-                *cast(Any, self._ordinary_agent_delivery_activation_scope_filters(record))
-            )
-            if self.database_dialect_name == "postgresql":
-                statement = statement.with_for_update()
-            scope_rows = tuple(session.scalars(statement).all())
-            current_rows = tuple(
-                row for row in scope_rows if row.revoked_at is None and row.superseded_at is None
-            )
-            if len(current_rows) > 1:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation scope has multiple current records."
-                )
-            if predecessor_reference is None:
-                if scope_rows or predecessor_event is not None:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation replacement requires an exact predecessor."
-                    )
-            else:
-                scope_records = tuple(
-                    (row, self._ordinary_agent_delivery_activation_from_row(row))
-                    for row in scope_rows
-                )
-                if not scope_records:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation predecessor was not found in the exact scope."
-                    )
-                newest_installed_at = max(
-                    datetime.fromisoformat(stored.installed_at) for _, stored in scope_records
-                )
-                newest = tuple(
-                    (row, stored)
-                    for row, stored in scope_records
-                    if datetime.fromisoformat(stored.installed_at) == newest_installed_at
-                )
-                if len(newest) != 1:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation history does not have one latest predecessor."
-                    )
-                predecessor_row, stored_predecessor = newest[0]
-                if predecessor_row.activation_id != predecessor_reference.activation_id:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation setup requires the exact latest predecessor."
-                    )
-                if (
-                    predecessor_reference.revision != stored_predecessor.revision
-                    or predecessor_reference.activation_sha256
-                    != stored_predecessor.activation_sha256
-                ):
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation predecessor revision or digest changed."
-                    )
-                if datetime.fromisoformat(record.installed_at) <= newest_installed_at:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation setup must be installed after its latest predecessor."
-                    )
-                if stored_predecessor.desired_state == "revoked":
-                    if current_rows or predecessor_event is not None:
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Revoked activation predecessor cannot be rewritten."
-                        )
-                    if (
-                        isinstance(predecessor, OrdinaryAgentDeliveryActivationRecord)
-                        and predecessor != stored_predecessor
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Revoked activation predecessor projection changed."
-                        )
-                else:
-                    if current_rows != (predecessor_row,) or predecessor_event is None:
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Current guarded predecessor requires one superseded event."
-                        )
-                    occurred_at = datetime.fromisoformat(
-                        predecessor_event.occurred_at.replace("Z", "+00:00")
-                    )
-                    expires_at = datetime.fromisoformat(
-                        stored_predecessor.activation_expires_at.replace("Z", "+00:00")
-                    )
-                    if occurred_at < expires_at:
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Guarded activation predecessor has not expired."
-                        )
-                    superseded_payload = stored_predecessor.model_dump(mode="json")
-                    superseded_payload.update(
-                        {
-                            "revision": stored_predecessor.revision + 1,
-                            "updated_at": predecessor_event.occurred_at,
-                            "superseded_by_activation_id": record.activation_id,
-                            "superseded_at": predecessor_event.occurred_at,
-                            "activation_sha256": "",
-                        }
-                    )
-                    superseded = OrdinaryAgentDeliveryActivationRecord.model_validate(
-                        superseded_payload
-                    )
-                    if (
-                        isinstance(predecessor, OrdinaryAgentDeliveryActivationRecord)
-                        and predecessor != superseded
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation predecessor projection is not the exact supersession."
-                        )
-                    if (
-                        predecessor_event.action != "superseded"
-                        or predecessor_event.source_operation_id != record.source_setup_operation_id
-                        or predecessor_event.previous_revision != stored_predecessor.revision
-                        or predecessor_event.previous_activation_sha256
-                        != stored_predecessor.activation_sha256
-                    ):
-                        raise OrdinaryAgentDeliveryActivationConflictError(
-                            "Activation predecessor event is not an exact supersession."
-                        )
-                    self._validate_ordinary_agent_delivery_activation_event_result(
-                        record=superseded,
-                        event=predecessor_event,
-                    )
-                    self._sync_ordinary_agent_delivery_activation_row(predecessor_row, superseded)
-                    session.add(
-                        self._ordinary_agent_delivery_activation_event_row(predecessor_event)
-                    )
-                    self._after_ordinary_agent_delivery_activation_write_step(
-                        "superseded_predecessor"
-                    )
-            session.add(self._ordinary_agent_delivery_activation_row(record))
-            self._after_ordinary_agent_delivery_activation_write_step("activation_inserted")
-            session.add(self._ordinary_agent_delivery_activation_event_row(event))
-            self._after_ordinary_agent_delivery_activation_write_step("installed_event_inserted")
-            try:
-                session.commit()
-            except IntegrityError as error:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation setup conflicted with another exact-scope mutation."
-                ) from error
-            return OrdinaryAgentDeliveryActivationWriteResult("written", record, event)
-
-    def revoke_ordinary_agent_delivery_activation(
-        self,
-        record: OrdinaryAgentDeliveryActivationRecord,
-        event: OrdinaryAgentDeliveryActivationEvent,
-    ) -> OrdinaryAgentDeliveryActivationWriteResult:
-        if event.action != "revoked" or event.activation_id != record.activation_id:
-            raise OrdinaryAgentDeliveryActivationConflictError(
-                "Activation revocation requires one exact revoked event."
-            )
-        self._validate_ordinary_agent_delivery_activation_event_result(record=record, event=event)
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
-                LaunchplaneOrdinaryAgentDeliveryActivationRow.activation_id == record.activation_id
-            )
-            if self.database_dialect_name == "postgresql":
-                statement = statement.with_for_update()
-            row = session.scalar(statement)
-            if row is None:
-                raise FileNotFoundError(record.activation_id)
-            current = self._ordinary_agent_delivery_activation_from_row(row)
-            operation_event_rows = tuple(
-                session.scalars(
-                    select(LaunchplaneOrdinaryAgentDeliveryActivationEventRow)
-                    .where(
-                        LaunchplaneOrdinaryAgentDeliveryActivationEventRow.source_operation_id
-                        == event.source_operation_id,
-                        LaunchplaneOrdinaryAgentDeliveryActivationEventRow.action.in_(
-                            ("installed", "revoked")
-                        ),
-                    )
-                    .order_by(LaunchplaneOrdinaryAgentDeliveryActivationEventRow.event_id)
-                    .limit(2)
-                ).all()
-            )
-            if operation_event_rows:
-                if len(operation_event_rows) != 1:
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation source operation has multiple terminal outcomes."
-                    )
-                existing_event = self._ordinary_agent_delivery_activation_event_from_row(
-                    operation_event_rows[0]
-                )
-                recovered_record, recovered_event = (
-                    self._ordinary_agent_delivery_activation_operation_outcome(
-                        session, event.source_operation_id
-                    )
-                )
-                if (
-                    existing_event != event
-                    or recovered_event != event
-                    or recovered_record != record
-                ):
-                    raise OrdinaryAgentDeliveryActivationConflictError(
-                        "Activation revocation replay changed the persisted outcome."
-                    )
-                return OrdinaryAgentDeliveryActivationWriteResult(
-                    "replayed", recovered_record, recovered_event
-                )
-            if current.desired_state == "revoked" or current.superseded_at:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation revocation target is already terminal."
-                )
-            if (
-                event.previous_revision != current.revision
-                or event.previous_activation_sha256 != current.activation_sha256
-            ):
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation revocation predecessor revision or digest changed."
-                )
-            expected_payload = current.model_dump(mode="json")
-            expected_payload.update(
-                {
-                    "desired_state": "revoked",
-                    "effective_state": "revoked",
-                    "revision": current.revision + 1,
-                    "updated_at": event.occurred_at,
-                    "revoked_at": event.occurred_at,
-                    "activation_sha256": "",
-                }
-            )
-            expected = OrdinaryAgentDeliveryActivationRecord.model_validate(expected_payload)
-            if expected != record:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation revocation changed fields outside the exact terminal transition."
-                )
-            self._sync_ordinary_agent_delivery_activation_row(row, record)
-            self._after_ordinary_agent_delivery_activation_write_step("activation_revoked")
-            session.add(self._ordinary_agent_delivery_activation_event_row(event))
-            self._after_ordinary_agent_delivery_activation_write_step("revoked_event_inserted")
-            try:
-                session.commit()
-            except IntegrityError as error:
-                raise OrdinaryAgentDeliveryActivationConflictError(
-                    "Activation revocation conflicted with another exact mutation."
-                ) from error
-            return OrdinaryAgentDeliveryActivationWriteResult("written", record, event)
-
-    def ordinary_agent_delivery_activation_schema_capability(self) -> tuple[str, str, bool]:
-        return ordinary_agent_delivery_activation_schema_capability(self._engine)
 
     def _after_ordinary_agent_enrollment_write_step(self, _step_name: str) -> None:
         return None
@@ -28819,48 +28594,13 @@ class PostgresRecordStore(HumanSessionStore):
     def _deny_authz_policy_schema_v3(reason_code: str) -> NoReturn:
         raise AuthzPolicySchemaV3TransitionDeniedError(reason_code)
 
-    def _after_authz_policy_schema_v3_lock_step(self, _step_name: str) -> None:
-        return None
-
-    def _locked_authz_transition_operation(
-        self, session: Any, operation_id: str
-    ) -> PrivilegedOperationRecord:
-        statement = select(LaunchplanePrivilegedOperationRow).where(
-            LaunchplanePrivilegedOperationRow.operation_id == operation_id
-        )
-        if self.database_dialect_name == "postgresql":
-            statement = statement.with_for_update()
-        row = session.scalar(statement)
-        if row is None:
-            self._deny_authz_policy_schema_v3("source_operation_missing")
-        assert row is not None
-        try:
-            record = self._read_payload(model_type=PrivilegedOperationRecord, payload=row.payload)
-        except ValueError:
-            self._deny_authz_policy_schema_v3("source_operation_payload_invalid")
-        if (
-            row.operation_id != record.operation_id
-            or row.descriptor_id != record.descriptor_id
-            or row.status != record.status
-            or row.requester_github_id != getattr(record.requested_by, "github_id", 0)
-            or row.created_at != record.created_at
-            or row.updated_at != record.updated_at
-            or row.expires_at != record.expires_at
-        ):
-            self._deny_authz_policy_schema_v3("source_operation_projection_mismatch")
-        return record
-
-    def _require_authz_policy_schema_v3_write_evidence_locked(
+    def _require_authz_policy_schema_v3_write_evidence(
         self,
         *,
-        session: Any,
         current_record: LaunchplaneAuthzPolicyRecord,
         replacement_record: LaunchplaneAuthzPolicyRecord | None,
         evidence: AuthzPolicySchemaV3WriteEvidence | None,
-        confirmation_consumption: SoloAdministrationConfirmationConsumptionBinding | None = None,
     ) -> None:
-        # A null replacement is an exact-CAS no-op.  It deliberately performs no
-        # fresh authority decision, including after a schema-3 activation expires.
         if replacement_record is None:
             return
         if (
@@ -28871,12 +28611,7 @@ class PostgresRecordStore(HumanSessionStore):
                 current_record.policy, replacement_record.policy
             )
             return
-        try:
-            transition = classify_authz_policy_schema_v3_transition(
-                current_record.policy, replacement_record.policy
-            )
-        except AuthzPolicySchemaV3TransitionDeniedError:
-            raise
+        classify_authz_policy_schema_v3_transition(current_record.policy, replacement_record.policy)
         if evidence is None:
             self._deny_authz_policy_schema_v3("write_evidence_missing")
         assert evidence is not None
@@ -28926,208 +28661,6 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             self._deny_authz_policy_schema_v3("candidate_administrator_quorum_unsatisfied")
 
-        if transition.kind == "v3_maintenance":
-            if not isinstance(evidence, AuthzPolicySchemaV3MaintenanceEvidence):
-                self._deny_authz_policy_schema_v3("maintenance_evidence_required")
-            return
-        if transition.kind not in {"v2_to_v3_enable", "v3_enable_or_expand"} or not isinstance(
-            evidence, AuthzPolicySchemaV3OrdinaryEnableEvidence
-        ):
-            self._deny_authz_policy_schema_v3("ordinary_enable_evidence_required")
-        assert isinstance(evidence, AuthzPolicySchemaV3OrdinaryEnableEvidence)
-
-        activation_statement = select(LaunchplaneOrdinaryAgentDeliveryActivationRow).where(
-            LaunchplaneOrdinaryAgentDeliveryActivationRow.activation_id == evidence.activation_id
-        )
-        if self.database_dialect_name == "postgresql":
-            activation_statement = activation_statement.with_for_update()
-        activation_row = session.scalar(activation_statement)
-        if activation_row is None:
-            self._deny_authz_policy_schema_v3("activation_missing")
-        assert activation_row is not None
-        try:
-            activation = self._ordinary_agent_delivery_activation_from_row(activation_row)
-        except (ValueError, OrdinaryAgentDeliveryActivationConflictError):
-            self._deny_authz_policy_schema_v3("activation_projection_mismatch")
-        setup_operation = self._locked_authz_transition_operation(
-            session, activation.source_setup_operation_id
-        )
-        policy_operation = self._locked_authz_transition_operation(
-            session, activation.policy_package.policy_operation_id
-        )
-
-        self._lock_repository_inventory_write(
-            session, repository_id=str(activation.scope.target.repository_id)
-        )
-        inventory_statement = (
-            select(LaunchplaneRepositoryInventoryRow)
-            .where(
-                LaunchplaneRepositoryInventoryRow.repository_id
-                == str(activation.scope.target.repository_id)
-            )
-            .order_by(LaunchplaneRepositoryInventoryRow.inventory_revision.desc())
-            .limit(1)
-        )
-        if self.database_dialect_name == "postgresql":
-            inventory_statement = inventory_statement.with_for_update()
-        inventory_row = session.scalar(inventory_statement)
-        if inventory_row is None:
-            self._deny_authz_policy_schema_v3("inventory_missing")
-        assert inventory_row is not None
-        try:
-            inventory = self._read_payload(
-                model_type=RepositoryInventoryRecord, payload=inventory_row.payload
-            )
-        except ValueError:
-            self._deny_authz_policy_schema_v3("inventory_binding_mismatch")
-        if (
-            inventory_row.record_id != inventory.record_id
-            or inventory_row.repository_id != inventory.repository_id
-            or inventory_row.repository_owner_id != inventory.repository_owner_id
-            or inventory_row.repository != inventory.repository
-            or inventory_row.inventory_state != inventory.inventory_state
-            or inventory_row.inventory_revision != inventory.inventory_revision
-            or inventory.record_id != activation.inventory.record_id
-            or inventory.inventory_revision != activation.inventory.revision
-            or inventory.inventory_digest != activation.inventory.inventory_sha256
-            or inventory.inventory_state != activation.inventory.state
-            or int(inventory.repository_id) != activation.scope.target.repository_id
-            or inventory.repository.casefold() != activation.scope.target.repository.casefold()
-        ):
-            self._deny_authz_policy_schema_v3("inventory_binding_mismatch")
-
-        if self.database_dialect_name == "postgresql":
-            versions = tuple(session.scalars(text("select version_num from alembic_version")))
-            if len(versions) != 1 or versions[0] not in RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS:
-                self._deny_authz_policy_schema_v3("database_revision_incompatible")
-
-        # Confirmation lifecycle writes lock this row independently. Acquire it
-        # after every activation/source/inventory lock so expiry is evaluated
-        # against a database timestamp sampled after the final mutable lock.
-        if confirmation_consumption is not None:
-            confirmation_statement = (
-                select(LaunchplaneSoloAdministrationConfirmationRow.confirmation_id)
-                .where(
-                    LaunchplaneSoloAdministrationConfirmationRow.confirmation_id
-                    == confirmation_consumption.confirmation_id
-                )
-                .limit(1)
-            )
-            if self.database_dialect_name == "postgresql":
-                confirmation_statement = confirmation_statement.with_for_update()
-            if session.scalar(confirmation_statement) is None:
-                raise FileNotFoundError(confirmation_consumption.confirmation_id)
-            self._after_authz_policy_schema_v3_lock_step("confirmation")
-        db_now = datetime.fromisoformat(self._database_mutation_timestamp(session))
-
-        expected_key = transition.added_or_changed_ordinary_rule_keys[0].split("\x1f", 1)
-        package = activation.policy_package
-        scope = activation.scope
-        if (
-            activation.activation_id != evidence.activation_id
-            or activation.revision != evidence.activation_revision
-            or activation.activation_sha256 != evidence.activation_sha256
-            or activation.source_setup_operation_id != evidence.source_setup_operation_id
-            or activation.desired_state != "guarded"
-            or activation.effective_state not in {"qualification_only", "guarded"}
-            or activation.revoked_at
-            or activation.superseded_at
-            or db_now >= datetime.fromisoformat(activation.activation_expires_at)
-            or (scope.managed_set_id, scope.managed_rule_id) != tuple(expected_key)
-            or scope.target.repository_id != evidence.repository_id
-            or scope.target.repository.casefold() != evidence.repository.casefold()
-            or scope.target.base_branch != evidence.base_branch
-            or scope.managed_set_id != evidence.managed_set_id
-            or scope.managed_rule_id != evidence.managed_rule_id
-            or package.policy_operation_id != evidence.policy_operation_id
-            or package.request_sha256 != evidence.policy_request_sha256
-            or package.evidence_sha256 != evidence.policy_evidence_sha256
-            or package.plan_sha256 != evidence.policy_plan_sha256
-            or package.desired_set_sha256 != evidence.desired_set_sha256
-            or package.candidate_policy_sha256 != evidence.candidate_policy_sha256
-        ):
-            self._deny_authz_policy_schema_v3("activation_binding_mismatch")
-
-        if (
-            setup_operation.descriptor_id != "ordinary-agent-delivery-activation"
-            or setup_operation.status != "executed"
-            or not isinstance(setup_operation.request, OrdinaryAgentDeliveryActivationSetupRequest)
-            or not isinstance(
-                setup_operation.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
-            )
-            or setup_operation.approval is None
-            or not isinstance(
-                setup_operation.execution, OrdinaryAgentDeliveryActivationExecutionEvidence
-            )
-            or setup_operation.execution.action != "setup"
-            or setup_operation.execution.result_status != "ok"
-            or not setup_operation.execution.changed
-            or setup_operation.execution.reconciliation_required
-        ):
-            self._deny_authz_policy_schema_v3("setup_operation_inadmissible")
-        assert isinstance(setup_operation.request, OrdinaryAgentDeliveryActivationSetupRequest)
-        assert isinstance(
-            setup_operation.evidence, OrdinaryAgentDeliveryActivationSetupHumanEvidence
-        )
-        assert setup_operation.approval is not None
-        assert isinstance(
-            setup_operation.execution, OrdinaryAgentDeliveryActivationExecutionEvidence
-        )
-        setup_evidence = setup_operation.evidence
-        setup_request = setup_operation.request
-        if (
-            canonical_json_sha256(setup_operation.approval.model_dump(mode="json"))
-            != activation.source_setup_approval_sha256
-            or setup_evidence.scope != activation.scope
-            or setup_evidence.policy_package != activation.policy_package
-            or setup_evidence.inventory != activation.inventory
-            or setup_evidence.activation_expires_at != activation.activation_expires_at
-            or setup_evidence.predecessor != activation.predecessor
-            or setup_request.policy_operation_id != activation.policy_package.policy_operation_id
-            or setup_request.repository_inventory_record_id != activation.inventory.record_id
-            or setup_request.activation_expires_at != activation.activation_expires_at
-            or setup_request.predecessor != activation.predecessor
-        ):
-            self._deny_authz_policy_schema_v3("setup_operation_binding_mismatch")
-        try:
-            installed, installed_event = self._ordinary_agent_delivery_activation_operation_outcome(
-                session, activation.source_setup_operation_id
-            )
-        except (FileNotFoundError, ValueError, OrdinaryAgentDeliveryActivationConflictError):
-            self._deny_authz_policy_schema_v3("installed_outcome_invalid")
-        execution = setup_operation.execution
-        if (
-            installed_event.action != "installed"
-            or installed_event.sequence != 1
-            or execution.activation_id != installed.activation_id
-            or execution.activation_revision != installed.revision
-            or execution.activation_sha256 != installed.activation_sha256
-            or execution.desired_state != installed.desired_state
-            or execution.effective_state != installed.effective_state
-            or execution.source_operation_id != activation.source_setup_operation_id
-        ):
-            self._deny_authz_policy_schema_v3("installed_outcome_mismatch")
-
-        try:
-            require_authz_policy_source_status(
-                status=policy_operation.status,
-            )
-        except AuthzPolicySchemaV3TransitionDeniedError:
-            raise
-        if (
-            policy_operation.descriptor_id != "managed-authz-policy-set"
-            or not isinstance(policy_operation.evidence, ManagedAuthzPolicySetHumanEvidence)
-            or canonical_json_sha256(policy_operation.request.model_dump(mode="json"))
-            != package.request_sha256
-            or canonical_json_sha256(policy_operation.evidence.model_dump(mode="json"))
-            != package.evidence_sha256
-            or policy_operation.evidence.plan_digest != package.plan_sha256
-            or policy_operation.evidence.diff.desired_set_sha256 != package.desired_set_sha256
-            or policy_operation.evidence.diff.desired_policy_sha256
-            != package.candidate_policy_sha256
-        ):
-            self._deny_authz_policy_schema_v3("policy_source_binding_mismatch")
-
     def _compare_and_write_authz_policy_locked(
         self,
         *,
@@ -29165,12 +28698,10 @@ class PostgresRecordStore(HumanSessionStore):
                 session.commit()
             return AuthzPolicyCompareWriteResult(status="stale", current_record=current_record)
 
-        self._require_authz_policy_schema_v3_write_evidence_locked(
-            session=session,
+        self._require_authz_policy_schema_v3_write_evidence(
             current_record=current_record,
             replacement_record=replacement_record,
             evidence=schema_v3_write_evidence,
-            confirmation_consumption=confirmation_consumption,
         )
 
         removes_delivery_administration = (
@@ -29358,14 +28889,6 @@ class PostgresRecordStore(HumanSessionStore):
             # Same order as bundle writes, which may check context ownership.
             self._lock_product_authority_bundle_write(session)
             self._lock_landing_authority(session, landing_authority.product_profile(record.product))
-            require_product_profile_writes(
-                (record,),
-                (
-                    self._read_product_profile_payload(row.payload)
-                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
-                ),
-                inventory_records=self._iter_repository_inventory_records(session),
-            )
             session.merge(self._product_profile_row(record))
             session.commit()
 
@@ -29696,14 +29219,6 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="history_conflict")
-        require_product_profile_writes(
-            (replacement_record,),
-            (
-                self._read_product_profile_payload(item.payload)
-                for item in session.scalars(select(LaunchplaneProductProfileRow)).all()
-            ),
-            inventory_records=self._iter_repository_inventory_records(session),
-        )
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id
@@ -31305,6 +30820,42 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
         return records
+
+    def list_delivery_failure_observations(
+        self, *, incident_id: str
+    ) -> tuple[DeliveryFailureObservation, ...]:
+        row = LaunchplanePublicIngressObservationRow
+        summary = row.payload["summary"].as_string()
+        observed = (
+            func.julianday(row.observed_at)
+            if self.database_dialect_name == "sqlite"
+            else sql_cast(row.observed_at, DateTime(timezone=True))
+        )
+        ranked = (
+            select(
+                summary.label("summary"),
+                row.observed_at,
+                func.max(row.payload["targets"][0]["url"].as_string())
+                .over(partition_by=summary)
+                .label("target_url"),
+                func.row_number()
+                .over(partition_by=summary, order_by=(observed, row.record_id))
+                .label("position"),
+            )
+            .where(row.incident_id == incident_id, row.status == "fail")
+            .subquery()
+        )
+        with self._session_factory() as session:
+            return tuple(
+                DeliveryFailureObservation(
+                    summary=summary, observed_at=observed_at, target_url=url or ""
+                )
+                for summary, observed_at, url in session.execute(
+                    select(ranked.c.summary, ranked.c.observed_at, ranked.c.target_url)
+                    .where(ranked.c.position == 1)
+                    .order_by(ranked.c.summary)
+                )
+            )
 
     def list_public_ingress_history_records(
         self,
@@ -33429,6 +32980,8 @@ class PostgresRecordStore(HumanSessionStore):
         instance: str,
         expected_records: tuple[SecretRecord, ...],
         expected_bindings: tuple[SecretBinding, ...],
+        expected_capture_state: dict[str, list[dict[str, Any]]],
+        guest_capture_credential: GuestCaptureCredential | None,
         replacements: tuple[SecretBinding, ...],
         mutation: DbOnlyMutationRequest,
         reason: str,
@@ -33446,6 +32999,12 @@ class PostgresRecordStore(HumanSessionStore):
                 return status, reservation
             assert reservation_row is not None
             self._lock_product_authority_bundle_write(session)
+            from control_plane.storage.guest_capture_bindings import enrollment_state
+
+            if enrollment_state(session, context, instance) != expected_capture_state:
+                raise SecretCopySourceConflictError(
+                    "Guest capture authority changed before commit."
+                )
             profile_row = session.scalar(
                 select(LaunchplaneProductProfileRow)
                 .where(
@@ -33524,8 +33083,33 @@ class PostgresRecordStore(HumanSessionStore):
                         "source": "backup-worker-rebinding",
                     },
                 )
-                session.merge(self._secret_audit_event_row(event))
+                self._write_secret_audit_event_in_session(session, event)
                 self._after_product_authority_bundle_step("rebind_worker_credential")
+            session.flush()
+            if guest_capture_credential is not None:
+                from control_plane.guest_capture_credentials import plan_guest_capture_credential
+                from control_plane.storage.guest_capture_bindings import (
+                    enroll_guest_capture_binding_in_session,
+                )
+
+                future = {binding.binding_id: binding for binding in bindings}
+                future.update({binding.binding_id: binding for binding in replacements})
+                candidate = plan_guest_capture_credential(
+                    guest_capture_credential.boundary,
+                    tuple(
+                        record
+                        for record in records
+                        if record.secret_id in guest_capture_credential.secret_ids
+                    ),
+                    tuple(future.values()),
+                    context,
+                    instance,
+                )
+                if candidate != guest_capture_credential:
+                    raise ValueError("Reviewed capture credential changed.")
+                enroll_guest_capture_binding_in_session(
+                    self, session, candidate, expected_capture_state
+                )
             completion = complete_launchplane_mutation_reservation(
                 reservation,
                 response_status_code=mutation.response_status_code,
@@ -33536,6 +33120,44 @@ class PostgresRecordStore(HumanSessionStore):
             self._sync_idempotency_row(reservation_row, completion)
             session.commit()
             return "written", completion
+
+    def read_guest_capture_binding(
+        self, boundary: "GuestCaptureBoundary"
+    ) -> "GuestCaptureCredential | None":
+        from control_plane.storage.guest_capture_bindings import read_guest_capture_binding
+
+        with self._session_factory() as session:
+            return read_guest_capture_binding(session, boundary)
+
+    def guest_capture_enrollment_state(
+        self, context: str, instance: str
+    ) -> dict[str, list[dict[str, Any]]]:
+        from control_plane.storage.guest_capture_bindings import enrollment_state
+
+        with self._session_factory() as session:
+            return enrollment_state(session, context, instance)
+
+    def seed_guest_capture_bindings(self) -> int:
+        from control_plane.storage.guest_capture_bindings import (
+            seed_guest_capture_bindings_in_session,
+        )
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            count = seed_guest_capture_bindings_in_session(self, session)
+            session.commit()
+            return count
+
+    def guest_capture_secret_ids(self) -> frozenset[str]:
+        from control_plane.storage.guest_capture_bindings import guest_capture_bindings
+
+        with self._session_factory() as session:
+            return frozenset(
+                identifier
+                for binding in guest_capture_bindings(session)
+                for identifier in binding.secret_ids
+            )
 
     def write_secret_version(self, version: SecretVersion) -> None:
         self._write_row(self._secret_version_row(version))
@@ -33589,11 +33211,16 @@ class PostgresRecordStore(HumanSessionStore):
 
     def create_product_retirement_secret_audit_event(self, event: SecretAuditEvent) -> None:
         with self._session_factory() as session:
-            session.add(self._secret_audit_event_row(event))
+            if event.event_id.startswith(GUEST_CAPTURE_BINDING_PREFIX):
+                self._write_secret_audit_event_in_session(session, event)
+            else:
+                session.add(self._secret_audit_event_row(event))
             session.commit()
 
     def write_secret_audit_event(self, event: SecretAuditEvent) -> None:
-        self._write_row(self._secret_audit_event_row(event))
+        with self._session_factory() as session:
+            self._write_secret_audit_event_in_session(session, event)
+            session.commit()
 
     def write_secret_rotations(
         self,
@@ -33630,7 +33257,7 @@ class PostgresRecordStore(HumanSessionStore):
                 self._after_product_authority_bundle_step("write_secret_rotation_version")
                 session.merge(self._secret_row(record))
                 self._after_product_authority_bundle_step("write_secret_rotation_record")
-                session.merge(self._secret_audit_event_row(event))
+                self._write_secret_audit_event_in_session(session, event)
                 self._after_product_authority_bundle_step("write_secret_rotation_audit")
             if idempotency_record is not None:
                 session.merge(self._idempotency_row(idempotency_record))

@@ -116,7 +116,7 @@ class SharedReleaseReviewTests(unittest.TestCase):
             {source.repository for source in review.checklist.shared_sources},
             {"example/shared-addons", "example/disable-online"},
         )
-        self.assertEqual(checklist_blockers(review.checklist), ())
+        self.assertEqual(checklist_blockers(review.checklist, profile=profile()), ())
         for source in review.checklist.shared_sources:
             self.assertEqual((source.production_commit, source.candidate_commit), (BASE, HEAD))
             self.assertEqual(source.items[0].owner_test_notes, self.github.notes)
@@ -218,7 +218,7 @@ class SharedReleaseReviewTests(unittest.TestCase):
         assert review.checklist is not None
         self.assertEqual(review.checklist.items, ())
         self.assertTrue(review.checklist.shared_sources)
-        self.assertEqual(checklist_blockers(review.checklist), ())
+        self.assertEqual(checklist_blockers(review.checklist, profile=profile()), ())
 
     def test_missing_shared_notes_and_batch_notes_or_uncovered_commits_block(self) -> None:
         for notes, uncovered in (
