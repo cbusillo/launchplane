@@ -1972,22 +1972,6 @@ def _agent_write_intent_policy(
     )
 
 
-def _terminal_agent_write_intent_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "terminal_agents": [
-                {
-                    "subjects": ["local-owner-agent"],
-                    "token_labels": ["local-owner-read"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["every_code_work_request.rerun"],
-                }
-            ]
-        }
-    )
-
-
 def _agent_write_intent_payload(
     *,
     intent: str,

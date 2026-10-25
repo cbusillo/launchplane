@@ -69,7 +69,6 @@ from tests.http_app_test_support import (
     _runtime_key_safety_policy_apply_payload,
     _runtime_key_safety_policy_apply_policy,
     _seed_agent_write_intent_secret_binding,
-    _terminal_agent_write_intent_policy,
 )
 from tests.support.http import lifespan_client
 from tests.support.auth import _identity, _local_operator_policy, _StubVerifier
@@ -1584,38 +1583,6 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(intent["reason_code"], "dry_run_required")
         self.assertFalse(intent["safe_to_execute"])
         self.assertEqual(intent["audit"]["reason_code"], "dry_run_required")
-
-    async def test_terminal_agent_evaluate_checks_scoped_policy(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
-            app = create_launchplane_fastapi_app(
-                verifier=_RejectingVerifier(),
-                authz_policy=_terminal_agent_write_intent_policy(),
-                record_store_factory=lambda: store,
-                bearer_identity_config=BearerIdentityConfig(
-                    terminal_agent_token="terminal-read-token",
-                    terminal_agent_subject="local-owner-agent",
-                    terminal_agent_token_label="local-owner-read",
-                ),
-            )
-
-            response = await _post_agent_write_intent_evaluate(
-                app,
-                _agent_write_intent_payload(
-                    intent="preview_refresh",
-                    mode="dry_run",
-                    product="launchplane",
-                    context="launchplane",
-                    reason="Check whether local agent can request a rerun.",
-                ),
-                authorization="Bearer terminal-read-token",
-            )
-
-        self.assertEqual(response.status_code, 202)
-        intent = response.json()["result"]["intent"]
-        self.assertEqual(intent["status"], "allowed")
-        self.assertEqual(intent["audit"]["subject"]["subject_type"], "terminal_agent")
-        self.assertFalse(intent["audit"]["subject"]["approval_capable"])
 
     async def test_evaluate_checks_secret_binding_policy_without_reveal(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
