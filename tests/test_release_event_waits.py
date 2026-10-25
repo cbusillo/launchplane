@@ -1,4 +1,5 @@
 from copy import deepcopy
+from email.message import Message
 from urllib.error import HTTPError
 import click
 from typing import Any
@@ -45,7 +46,7 @@ class ReleaseEventWaitTests(unittest.TestCase):
         self.incomplete_search = False
         self.hidden_search = False
         self.renew_on_post = False
-        self.trusted_ids = (701,)
+        self.trusted_ids: tuple[int, ...] = (701,)
         self.actor_id = 701
         self.issued = GitHubAppInstallationToken(
             token="fixture",
@@ -123,7 +124,7 @@ class ReleaseEventWaitTests(unittest.TestCase):
         if "/compare/" in path:
             if self.comparison == "missing":
                 try:
-                    raise HTTPError(path, 404, "Not found", {}, None)
+                    raise HTTPError(path, 404, "Not found", Message(), None)
                 except HTTPError as error:
                     raise click.ClickException("Source comparison unavailable") from error
             return {"status": self.comparison}
@@ -135,7 +136,7 @@ class ReleaseEventWaitTests(unittest.TestCase):
         if path.endswith("/8"):
             if self.gone_issue:
                 try:
-                    raise HTTPError(path, 410, "Gone", {}, None)
+                    raise HTTPError(path, 410, "Gone", Message(), None)
                 except HTTPError as error:
                     raise click.ClickException("Issue gone") from error
             return {**self.issue, "number": 8, "body": "<!-- github-plan:wait invalid -->"}
