@@ -129,18 +129,10 @@ def _github_search_url(query: str) -> str:
     return f"https://github.com/issues?q={quote_plus(query)}"
 
 
-def _github_pulls_url(query: str) -> str:
-    return f"https://github.com/pulls?q={quote_plus(query)}"
-
-
 def _preview_validation_queue_url(*, issue_author: str) -> str:
     return _github_search_url(
         f"is:open is:issue author:{issue_author} label:{EVERY_CODE_PREVIEW_READY_LABEL}"
     )
-
-
-def _merge_queue_url(*, merge_owner: str) -> str:
-    return _github_pulls_url(f"is:open is:pr assignee:{merge_owner}")
 
 
 def _render_preview_checklist(record: EveryCodeWorkRequestRecord) -> list[str]:
@@ -164,10 +156,8 @@ def _render_every_code_preview_ready_issue_comment(
     marker: str,
     issue_author: str,
     record: EveryCodeWorkRequestRecord,
-    pr_number: int,
     anchor_pr_url: str,
     preview_url: str,
-    merge_owner: str,
 ) -> str:
     lines = [
         marker,
@@ -182,14 +172,9 @@ def _render_every_code_preview_ready_issue_comment(
     lines.extend(
         [
             "",
-            "When it looks right, comment `/preview ok` on this issue.",
-            "If it needs changes, comment `/preview changes <what needs to change>`.",
-            "",
             f"Your preview queue: {_preview_validation_queue_url(issue_author=issue_author)}",
         ]
     )
-    if merge_owner:
-        lines.append(f"Merge queue: {_merge_queue_url(merge_owner=merge_owner)}")
     return "\n".join(lines)
 
 
@@ -230,25 +215,6 @@ def _github_pull_request_author_and_head_branch(
         return pr_author, ""
     reference = head.get("ref")
     return pr_author, reference.strip() if isinstance(reference, str) else ""
-
-
-def _github_repository_user_owner_login(*, owner: str, repo: str, token: str) -> str:
-    payload = github_api_request(
-        path=f"/repos/{owner}/{repo}",
-        token=token,
-    )
-    if not isinstance(payload, dict):
-        raise click.ClickException(
-            f"GitHub repository response for {owner}/{repo} must be an object."
-        )
-    owner_payload = payload.get("owner")
-    if not isinstance(owner_payload, dict):
-        return ""
-    owner_type = owner_payload.get("type")
-    login = owner_payload.get("login")
-    if owner_type != "User" or not isinstance(login, str):
-        return ""
-    return login.strip()
 
 
 def pull_request_client_review(
@@ -373,23 +339,6 @@ def _github_remove_label(
         return
 
 
-def _github_assign_user(
-    *, owner: str, repo: str, issue_number: int, assignee: str, token: str
-) -> None:
-    if not assignee.strip():
-        return
-    payload = github_api_request(
-        path=f"/repos/{owner}/{repo}/issues/{issue_number}/assignees",
-        token=token,
-        method="POST",
-        body={"assignees": [assignee]},
-    )
-    if not isinstance(payload, dict):
-        raise click.ClickException(
-            f"GitHub assignee response for {owner}/{repo}#{issue_number} must be an object."
-        )
-
-
 def _notify_every_code_preview_ready_source_issue(
     *,
     control_plane_root: Path,
@@ -442,7 +391,6 @@ def _notify_every_code_preview_ready_source_issue(
         if not issue_author:
             return "skipped_no_issue_author"
 
-        merge_owner = _github_repository_user_owner_login(owner=owner, repo=repo, token=token)
         _github_add_labels(
             owner=owner,
             repo=repo,
@@ -470,10 +418,8 @@ def _notify_every_code_preview_ready_source_issue(
             marker=marker,
             issue_author=issue_author,
             record=record,
-            pr_number=pr_number,
             anchor_pr_url=anchor_pr_url,
             preview_url=preview_url.strip(),
-            merge_owner=merge_owner,
         )
         existing_comment = find_github_issue_comment_by_marker(
             owner=owner,
