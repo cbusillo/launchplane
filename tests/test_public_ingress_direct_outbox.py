@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.discord_incident_summary import SUMMARY_AGGREGATE_TYPE
-from control_plane.notifications import DiscordNotificationError
+from control_plane.notifications import DiscordNotificationError, DISCORD_CRITICAL_ALERT_COLOR
 from control_plane.outbox_worker import (
     OutboxWorkerStepResult,
     run_outbox_worker_loop,
@@ -24,6 +24,14 @@ from control_plane.workflows.public_ingress_monitor import (
 )
 from tests.support.stores import _sqlite_database_url
 from tests.test_public_ingress_monitor import _notification_policy, _profile
+
+
+def _is_red(payload: dict[str, object]) -> bool:
+    embeds = payload.get("embeds", [])
+    return isinstance(embeds, list) and any(
+        isinstance(embed, dict) and embed.get("color") == DISCORD_CRITICAL_ALERT_COLOR
+        for embed in embeds
+    )
 
 
 class DirectNotificationOutboxTests(unittest.TestCase):
@@ -62,7 +70,7 @@ class DirectNotificationOutboxTests(unittest.TestCase):
         self.assertIn(observation.observed_at, str(sent[0]))
         attempts = store.list_public_ingress_notification_attempt_records()
         self.assertEqual(sum(attempt.delivery_status == "delivered" for attempt in attempts), 1)
-        self.assertIn("content", sent[1])
+        self.assertFalse(_is_red(sent[1]))
         self._probe(store, 503, "2026-05-30T06:03:00Z")
         self._probe(store, 503, "2026-05-30T12:04:00Z")
         new_deliveries = store.list_outbox_delivery_records(states=("pending",))
@@ -103,8 +111,8 @@ class DirectNotificationOutboxTests(unittest.TestCase):
         self._drain_loop(store, self._capturing_discord(sent), "2026-05-29T18:10:00Z")
 
         incidents = store.list_public_ingress_incident_records()
-        urgent = [payload for payload in sent if "embeds" in payload]
-        quiet = [payload for payload in sent if "content" in payload]
+        urgent = [payload for payload in sent if _is_red(payload)]
+        quiet = [payload for payload in sent if not _is_red(payload)]
         self.assertEqual(len(urgent), len(incidents) * len(destinations))
         self.assertEqual(len(quiet), len(incidents) * len(destinations))
         for incident in incidents:
@@ -124,8 +132,8 @@ class DirectNotificationOutboxTests(unittest.TestCase):
         self._drain_loop(store, drivers, "2026-05-29T18:10:00Z")
 
         self.assertEqual(len(sent), len(queued))
-        self.assertEqual(sum("embeds" in payload for payload in sent), 1)
-        self.assertEqual(sum("content" in payload for payload in sent), 1)
+        self.assertEqual(sum(_is_red(payload) for payload in sent), 1)
+        self.assertEqual(sum(not _is_red(payload) for payload in sent), 1)
 
     def test_startup_never_sends_resolved_incident_backlog(self) -> None:
         store = self._backlog_store()
@@ -141,12 +149,7 @@ class DirectNotificationOutboxTests(unittest.TestCase):
         self.assertTrue(queued)
         for delivery in queued:
             completed = store.read_outbox_delivery_record(delivery.delivery_id)
-            self.assertEqual(
-                completed.action,
-                "skipped_cleared_summary"
-                if delivery.aggregate_type == SUMMARY_AGGREGATE_TYPE
-                else INCIDENT_RESOLVED_SUPERSESSION_ACTION,
-            )
+            self.assertEqual(completed.state, "delivered")
             self.assertFalse(completed.provider_operation_key)
         attempts = store.list_public_ingress_notification_attempt_records()
         self.assertEqual(

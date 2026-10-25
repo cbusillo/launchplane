@@ -127,6 +127,8 @@ from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.lane_runtime_verification import lane_expected_runtime_identity
 from control_plane.notifications import (
     DiscordNotificationError,
+    DiscordNotificationNotSentError,
+    DISCORD_CRITICAL_ALERT_COLOR,
     post_discord_webhook,
     public_discord_url_error,
     public_url_error,
@@ -136,6 +138,7 @@ from control_plane.discord_incident_summary import (
     build_discord_incident_summary_delivery,
     deliver_discord_incident_summary,
     discord_incident_needs_summary,
+    summary_incidents,
 )
 from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsProbeResult
@@ -1497,6 +1500,12 @@ def _public_ingress_notification_outbox_deliveries(
             for destination in policy.destinations:
                 if destination.status != "enabled":
                     continue
+                if (
+                    destination.kind == "discord"
+                    and event == "resolved"
+                    and incident.severity == "warning"
+                ):
+                    continue
                 if destination.kind == "discord" and discord_incident_needs_summary(
                     incident, event
                 ):
@@ -1504,7 +1513,7 @@ def _public_ingress_notification_outbox_deliveries(
                         record_store=record_store,
                         policy=policy,
                         destination=destination,
-                        incidents=incident_records,
+                        incidents=summary_incidents(record_store, policy, incident_records),
                         created_at=incident_event.occurred_at,
                     )
                     if summary is not None:
@@ -3565,7 +3574,7 @@ class PublicIngressNotificationDriverSet:
                     observation=observation,
                     email_sender=self.email_sender,
                     notification_body=notification_body,
-                    secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
+                    secret_resolver=lambda secret_name: self.resolve_secret(secret_name, incident),
                 )
             if destination.kind == "discord":
                 return _deliver_discord_notification(
@@ -3576,7 +3585,7 @@ class PublicIngressNotificationDriverSet:
                     discord_sender=self.discord_sender,
                     notification_body=notification_body,
                     drill=drill,
-                    secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
+                    secret_resolver=lambda secret_name: self.resolve_secret(secret_name, incident),
                 )
         except Exception as error:  # noqa: BLE001 - delivery failures are recorded per destination.
             return PublicIngressNotificationDelivery(
@@ -3584,6 +3593,7 @@ class PublicIngressNotificationDriverSet:
                 action="provider_error",
                 error_message=str(error) or error.__class__.__name__,
                 outcome_unknown=destination.kind == "discord"
+                and not isinstance(error, DiscordNotificationNotSentError)
                 and not (
                     isinstance(error, DiscordNotificationError) and 400 <= error.status_code < 500
                 ),
@@ -3594,7 +3604,7 @@ class PublicIngressNotificationDriverSet:
             error_message=f"Unsupported public ingress notification destination: {destination.kind}",
         )
 
-    def _resolve_secret(self, secret_name: str, incident: PublicIngressIncidentRecord) -> str:
+    def resolve_secret(self, secret_name: str, incident: PublicIngressIncidentRecord) -> str:
         if self.incident_secret_resolver is not None:
             return self.incident_secret_resolver(secret_name, incident)
         return self.secret_resolver(secret_name)
@@ -3732,7 +3742,7 @@ def deliver_public_ingress_notification_outbox_delivery(
                             record_store=record_store,
                             policy=policy,
                             destination=destination,
-                            incidents=(),
+                            incidents=summary_incidents(record_store, policy),
                             created_at=record.updated_at,
                         )
                         if summary is not None:
@@ -3743,9 +3753,14 @@ def deliver_public_ingress_notification_outbox_delivery(
                         record=record, reason="discord_summary"
                     )
                 if (
-                    incident.latest_material_event_id
-                    and attempt_payload.get("incident_event_id")
-                    and incident.latest_material_event_id != attempt_payload["incident_event_id"]
+                    incident.material_fingerprint_sha256
+                    and (
+                        observation := record_store.read_public_ingress_observation_record(
+                            str(attempt_payload["observation_id"])
+                        )
+                    ).material_fingerprint_sha256
+                    and incident.material_fingerprint_sha256
+                    != observation.material_fingerprint_sha256
                 ):
                     return _superseded_incident_outbox_delivery(
                         record=record, reason="material_state_changed"
@@ -4281,7 +4296,7 @@ def _deliver_discord_notification(
         if event == "resolved"
         else 0xED9B20
         if discord_incident_needs_summary(incident, event)
-        else 0xC62828
+        else DISCORD_CRITICAL_ALERT_COLOR
     )
     title = (
         "Testing delivery"

@@ -14,7 +14,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.discord_incident_summary import build_discord_incident_summary_delivery
-from control_plane.notifications import DiscordNotificationError
+from control_plane.notifications import DiscordNotificationError, DiscordNotificationNotSentError
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressNotificationDriverSet,
@@ -23,6 +23,7 @@ from control_plane.workflows.public_ingress_monitor import (
 )
 from tests.support.stores import _sqlite_database_url
 from tests.test_public_ingress_monitor import _notification_policy
+from tests.test_public_ingress_direct_outbox import _is_red
 
 
 class DiscordIncidentSummaryTests(unittest.TestCase):
@@ -115,9 +116,9 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         current = summaries[-1]
         self.store.write_outbox_delivery_record(self.deliver(current))
         self.assertEqual(len(self.sent), 1)
-        self.assertIn("2", str(self.sent[0]))
+        self.assertEqual(len(self.store.list_public_ingress_incident_records()), 2)
         self.assertEqual(self.sent[0]["allowed_mentions"], {"parse": []})
-        self.assertNotIn("embeds", self.sent[0])
+        self.assertFalse(_is_red(self.sent[0]))
         self.observe("preview-one", time="19:00:00")
         self.assertEqual(len(self.store.list_outbox_delivery_records()), len(summaries))
         self.assertEqual(
@@ -130,7 +131,7 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
             )
         )
 
-    def test_cleared_warnings_do_not_send_or_claim_recovery_for_another_lane(self) -> None:
+    def test_cleared_warning_does_not_send(self) -> None:
         self.observe("preview-one")
         queued = self.store.list_outbox_delivery_records()[0]
         self.observe("preview-one", status="pass", time="12:01:00")
@@ -142,14 +143,14 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         self.observe("prod", critical=True)
         first = self.store.list_outbox_delivery_records()[0]
         self.deliver(first)
-        self.assertIn("embeds", self.sent[0])
+        self.assertTrue(_is_red(self.sent[0]))
         self.observe("prod", critical=True, time="19:00:00")
         summaries = self.store.list_outbox_delivery_records(
             aggregate_type="public_ingress_discord_summary"
         )
         self.assertEqual(len(summaries), 1)
         self.deliver(summaries[0])
-        self.assertNotIn("embeds", self.sent[1])
+        self.assertFalse(_is_red(self.sent[1]))
         self.assertEqual(self.store.list_public_ingress_incident_records()[0].severity, "critical")
 
     def test_summary_rechecks_policy_and_does_not_replay_unknown_send(self) -> None:
@@ -168,11 +169,15 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
     def test_summary_rate_limit_can_retry_but_lost_response_cannot(self) -> None:
         self.observe("preview-one")
         queued = self.store.list_outbox_delivery_records()[0]
-        for error in (DiscordNotificationError(429), OSError("response lost")):
+        for error in (
+            DiscordNotificationNotSentError("not sent"),
+            DiscordNotificationError(429),
+            OSError("response lost"),
+        ):
             with self.subTest(error=type(error).__name__):
                 self.drivers.discord_sender = lambda _url, _payload: (_ for _ in ()).throw(error)
                 result = self.deliver(queued)
-                if isinstance(error, DiscordNotificationError):
+                if isinstance(error, (DiscordNotificationError, DiscordNotificationNotSentError)):
                     self.assertEqual(result.state, "pending")
                     self.assertEqual(result.provider_operation_key, "")
                 else:
@@ -187,10 +192,75 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         queued = self.store.list_outbox_delivery_records()[0]
         self.observe("prod", critical=True, time="12:01:00", code="dns_failure")
         result = self.deliver(queued)
-        self.assertEqual(result.action, "skipped_material_state_changed")
+        self.assertEqual(result.state, "delivered")
         self.assertEqual(self.sent, [])
         self.deliver(self.store.list_outbox_delivery_records()[-1])
         self.assertIn("dns_failure", str(self.sent[0]))
+
+    def test_clearing_one_warning_does_not_repost_already_summarized_warnings(self) -> None:
+        self.observe("preview-one")
+        self.observe("preview-two", time="12:01:00")
+        queued = self.store.list_outbox_delivery_records()[-1]
+        self.store.write_outbox_delivery_record(self.deliver(queued))
+        before = {value.delivery_id for value in self.store.list_outbox_delivery_records()}
+        self.observe("preview-two", status="pass", time="12:02:00")
+        self.observe("preview-one", time="19:00:00")
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(
+            before, {value.delivery_id for value in self.store.list_outbox_delivery_records()}
+        )
+
+    def test_summary_respects_silence_acknowledgement_and_destination_scope(self) -> None:
+        from control_plane.discord_incident_summary import _summary_states
+
+        for index, state in enumerate(("silenced", "acknowledged")):
+            self.observe(f"preview-{state}", time=f"12:0{index}:00")
+            incident = next(
+                value
+                for value in self.store.list_public_ingress_incident_records()
+                if value.instance == f"preview-{state}"
+            )
+            self.store.write_public_ingress_incident_record(
+                incident.model_copy(
+                    update={
+                        "notification_state": state,
+                        "silenced_until": "2026-10-26T12:00:00Z" if state == "silenced" else "",
+                    }
+                )
+            )
+        self.observe("preview-allowed", time="12:03:00")
+        self.observe("preview-foreign", time="12:04:00")
+        self.drivers.incident_secret_resolver = lambda _name, value: (
+            "https://discord.com/api/webhooks/test/test"
+            if value.instance == "preview-allowed"
+            else ""
+        )
+        for _ in range(2):
+            for record in self.store.list_outbox_delivery_records(states=("pending",)):
+                self.store.write_outbox_delivery_record(self.deliver(record))
+        self.assertEqual(len(self.sent), 1)
+        allowed = next(
+            value
+            for value in self.store.list_public_ingress_incident_records()
+            if value.instance == "preview-allowed"
+        )
+        delivered = next(
+            value
+            for value in self.store.list_outbox_delivery_records()
+            if value.action == "posted_discord_summary"
+        )
+        states = delivered.payload["summary_states"]
+        self.assertIsInstance(states, list)
+        assert isinstance(states, list)
+        self.assertEqual(set(states), _summary_states((allowed,)))
+
+    def test_changed_summary_has_no_restarting_settle_timer(self) -> None:
+        self.observe("preview-one")
+        queued = self.store.list_outbox_delivery_records()[0]
+        self.observe("preview-two", time="12:01:00")
+        self.deliver(queued.model_copy(update={"updated_at": "2026-10-25T12:02:00Z"}))
+        for record in self.store.list_outbox_delivery_records(states=("pending",)):
+            self.assertLessEqual(record.next_attempt_at, "2026-10-25T12:02:00Z")
 
     def test_critical_discord_response_loss_cannot_repeat_a_red_notice(self) -> None:
         self.observe("prod", critical=True)

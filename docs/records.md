@@ -1649,18 +1649,24 @@ records remain the source of truth for active public-ingress state.
 
 Discord pages only new critical incidents and material critical changes. Warnings
 and unchanged reminders use a plain-text, mention-free summary grouped by product,
-lane, check kind and failure code. A five-minute settling delay groups concurrent
-changes. Summaries reuse the notification outbox with aggregate type
+lane, check kind and failure code. Summaries reuse the notification outbox with aggregate type
 `public_ingress_discord_summary`; their identity binds the policy, destination and
 current incident occurrences and material fingerprints. Probe timestamps and
-reminder windows cannot create another copy of an unchanged summary.
+reminder windows cannot create another copy of an unchanged summary. Delivered
+summaries retain the material states they covered, so clearing another condition
+does not re-post those that remain. A new critical condition still pages at once.
 
 Before delivery, both paths re-read current state. Cleared incidents and obsolete
 material alerts are superseded. A changed summary queues its current replacement;
-an empty summary sends nothing. Summary receipts live in the outbox, independently
+an empty or already covered summary sends nothing. Silenced and acknowledged
+conditions are excluded. Lane-scoped destinations summarize only the conditions
+their managed secret covers. Routing revisions can retry previously unavailable
+destinations. Summary receipts live in the outbox, independently
 of per-incident attempt records. An interrupted Discord summary retains its send
-marker and cannot replay an unknown provider effect; an explicit rate-limit
-refusal may retry. Notification routing never changes measured health, incident
+marker and cannot replay an unknown provider effect. DNS and connection failures
+before any request bytes, and explicit rate-limit refusals, may retry. Discord
+reminder cadence no longer repeats the same material state after it was summarized.
+Notification routing never changes measured health, incident
 severity, acknowledgement, resolution or provider-operation fences.
 
 ## Every Code Feedback Resume Evidence
