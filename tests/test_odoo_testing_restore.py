@@ -156,6 +156,34 @@ class FreshTestingHostProgramTests(unittest.TestCase):
     spec: dict[str, Any]
     arguments: FreshRestoreScriptArguments
 
+    def test_resumed_copy_checks_snapshot_capacity_before_capturing(self) -> None:
+        from types import SimpleNamespace
+
+        self.existing_database = True
+        self.resume_verified = True
+        self.containers["web"]["State"]["Running"] = False
+        self.spec["generation"].update(
+            clean_snapshot_enabled=True,
+            drill_storage_budget=dict(
+                database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+            ),
+        )
+        (self.data_backing / "filestore" / self.database).mkdir(parents=True)
+        popen = subprocess.Popen
+
+        def dump(_arguments: list[str], **kwargs: Any) -> Any:
+            return popen([sys.executable, "-c", "print('fixture snapshot')"], **kwargs)
+
+        with (
+            patch("os.statvfs", return_value=SimpleNamespace(f_bavail=0, f_frsize=1)),
+            patch("subprocess.Popen", side_effect=dump) as capture,
+        ):
+            status, output = self.run_program()
+
+        self.assertNotEqual(status, 0, output)
+        capture.assert_not_called()
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
     def test_coordinate_only_source_uses_bound_runtime_ssh_directory(self) -> None:
         directory = self.root / "source-reader"
         directory.mkdir()

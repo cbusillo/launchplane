@@ -57,12 +57,13 @@ retiring the volume removes it too. Every child of a restore inherits its
 namespace lock, so staging is never removed while a child still runs.
 
 The space check charges the SSH filestore once, as staging, and the runner the
-dump. Copies from testing into the snapshot and from the snapshot into a new
-preview are charged zero only when a real `cp --reflink=always` probe between
-the same two filesystems succeeds; otherwise they are charged in full and
-refused when they do not fit. A copy admitted as a clone runs
-`cp --reflink=always` and fails rather than falling back to a full copy the
-check did not charge. Database restores are always charged in full. Demands on
+dump. Snapshot and preview filestores retain their full capacity budget even
+when a real `cp --reflink=always` probe proves block sharing. Cloning saves
+physical pool space, but dataset quotas can still charge each reference;
+the available filesystem bytes must cover the whole admitted budget and reserve.
+Each new capture rechecks its destination capacity, including when a restore resumes.
+A proved clone runs `cp --reflink=always` and fails rather than silently
+switching to a full copy. Database restores are also charged in full. Demands on
 datasets sharing a ZFS pool are summed, using the smallest available-space reading in that pool;
 other filesystems remain grouped by device. Dataset quotas can therefore make
 the shared-pool check more conservative.

@@ -600,12 +600,17 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 self.run_script()
         self.assertNotIn(["docker", "stop", "web"], self.calls)
 
-    def test_proven_clone_admits_a_preview_without_full_filestore_headroom(self) -> None:
+    def test_proven_clone_requires_full_guest_capacity_before_copying(self) -> None:
         budget = self.snapshot.storage_budget
         dump = (self.source / "database.dump").stat().st_size
-        available = budget.database_bytes + dump + budget.reserve_bytes
+        required = budget.database_bytes + budget.filestore_bytes + dump + budget.reserve_bytes
         self.clones = True
-        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)):
+        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=required - 1, f_frsize=1)):
+            with self.assertRaises(RuntimeError):
+                self.run_script()
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+        self.calls.clear()
+        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=required, f_frsize=1)):
             output = self.run_script()
         self.assertIn("clean_preview_snapshot_restored=true", output.splitlines())
         self.assertTrue(any(call[:3] == ["cp", "-a", "--reflink=always"] for call in self.calls))

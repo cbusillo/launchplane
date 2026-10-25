@@ -648,7 +648,7 @@ class HostCapacityTests(unittest.TestCase):
                         admitted,
                     )
 
-    def test_staged_filestore_is_charged_once_and_proven_clones_as_free(self) -> None:
+    def test_staging_is_charged_once_and_clones_keep_the_full_capacity_budget(self) -> None:
         import shutil
         import subprocess
 
@@ -711,8 +711,8 @@ class HostCapacityTests(unittest.TestCase):
                 self.assertFalse(admitted(120))
                 self.assertTrue(admitted(121))
                 clones = True
-                self.assertFalse(admitted(80))
-                self.assertTrue(admitted(81))
+                self.assertFalse(admitted(120))
+                self.assertTrue(admitted(121))
             self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
 
     def test_a_cloned_filestore_still_needs_the_reserve_on_its_own_filesystem(self) -> None:
