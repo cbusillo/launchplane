@@ -963,8 +963,7 @@ def run_odoo_stable_operation_worker_loop(
     error_count = 0
     consecutive_errors = 0
     last_sweep_at: float | None = None
-    last_client_release_advance_at: float | None = None
-    client_release_thread: Thread | None = None
+    client_release_stop_event = Event()
     invitation_thread: Thread | None = None
     last_invitation_advance_at: float | None = None
     config_scan_thread: Thread | None = None
@@ -983,15 +982,20 @@ def run_odoo_stable_operation_worker_loop(
             logging.exception("Rehearsal checkpoint sweep unavailable.")
 
     def advance_releases() -> None:
-        try:
-            advance_client_releases(
-                store=record_store,
-                control_plane_root=control_plane_root_path,
-                stop_event=worker_stop_event,
-                standing_review_backoff=standing_review_backoff,
+        while not worker_stop_event.is_set() and not client_release_stop_event.is_set():
+            started_at = time.monotonic()
+            try:
+                advance_client_releases(
+                    store=record_store,
+                    control_plane_root=control_plane_root_path,
+                    stop_event=worker_stop_event,
+                    standing_review_backoff=standing_review_backoff,
+                )
+            except Exception:
+                logging.exception("Client release advance failed.")
+            client_release_stop_event.wait(
+                max(0.0, CLIENT_RELEASE_ADVANCE_SECONDS - (time.monotonic() - started_at))
             )
-        except Exception:
-            logging.exception("Client release advance failed.")
 
     def invite_clients() -> None:
         try:
@@ -1014,6 +1018,10 @@ def run_odoo_stable_operation_worker_loop(
         except Exception:
             logging.exception("Product config-authority scan failed.")
 
+    client_release_thread = Thread(
+        target=advance_releases, name="client-release-advance", daemon=False
+    )
+    client_release_thread.start()
     try:
         while not worker_stop_event.is_set():
             if max_iterations is not None and iterations >= max_iterations:
@@ -1044,21 +1052,6 @@ def run_odoo_stable_operation_worker_loop(
                     )
                 except Exception:
                     logging.exception("Product reconcile sweep failed.")
-            if (
-                last_client_release_advance_at is None
-                or monotonic() - last_client_release_advance_at >= CLIENT_RELEASE_ADVANCE_SECONDS
-            ) and (client_release_thread is None or not client_release_thread.is_alive()):
-                # Queues the next step of each Client release; a second replica finds the
-                # same operation ids, so a race queues nothing twice.
-                last_client_release_advance_at = monotonic()
-                # Generic-web promotions may wait for deploy and rollback. Keep queued
-                # Odoo operations responsive, with only one release pass on this replica.
-                client_release_thread = Thread(
-                    target=advance_releases,
-                    name="client-release-advance",
-                    daemon=False,
-                )
-                client_release_thread.start()
             if (
                 last_invitation_advance_at is None
                 or monotonic() - last_invitation_advance_at >= CLIENT_RELEASE_ADVANCE_SECONDS
@@ -1112,8 +1105,8 @@ def run_odoo_stable_operation_worker_loop(
             worker_stop_event.wait(timeout=float(poll_seconds))
     finally:
         # Shutdown must not abandon an admitted promotion/rollback.
-        if client_release_thread is not None:
-            client_release_thread.join()
+        client_release_stop_event.set()
+        client_release_thread.join()
         if invitation_thread is not None:
             invitation_thread.join()
         if config_scan_thread is not None:
