@@ -78,15 +78,10 @@ GET /v1/agent/context
 It aggregates existing read models into named sections:
 
 - repo-product mapping
-- Every Code summary
 - preview readiness
 - exact tenant admission evaluation when the caller supplies the complete
   product, context, numeric repository and repository owner IDs, repository, pull-request
   number, head SHA, and base branch
-
-The Every Code section serves a retired design (see
-[DIRECTION.md](../DIRECTION.md#retired)); it remains until its code is deleted
-and is not to be extended.
 
 Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
 writes no records, fetches no issue bodies, and should preserve the underlying
@@ -105,7 +100,6 @@ Agents may call lower-level read models directly when they need a narrower
 surface:
 
 - `GET /v1/repo-product-mapping`
-- `GET /v1/every-code/summary`
 - `GET /v1/previews/readiness`
 - `GET /v1/work-graph/tenant-admission/evaluation`
 

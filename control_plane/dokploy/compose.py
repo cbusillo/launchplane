@@ -5,6 +5,7 @@ import re
 from typing import Literal
 
 import click
+import yaml
 
 from control_plane.dokploy import api
 from control_plane.dokploy.source import DokployTargetDefinition
@@ -142,7 +143,10 @@ def render_odoo_raw_compose_file(
     isolated_testing: bool = False,
     private_backend_alias: str = "",
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
+    preview_filestore: dict[str, object] | None = None,
 ) -> str:
+    if preview_filestore is not None and (publish_host_ports or mount_workflow_ssh):
+        raise ValueError("A preview filestore requires private ports and no source identity.")
     if protect_workflow_ssh and not mount_workflow_ssh:
         raise ValueError("Protected workflow SSH requires its source mount.")
     if private_backend_alias and (
@@ -213,7 +217,7 @@ def render_odoo_raw_compose_file(
     # Keep this intentionally close to odoo-devkit/docker-compose.yml. Launchplane
     # renders the image reference directly so Dokploy git checkout state cannot
     # decide what Odoo artifact is deployed.
-    return f"""x-odoo-base: &odoo-base
+    compose_file = f"""x-odoo-base: &odoo-base
   image: {rendered_image_reference}
   pull_policy: always
   restart: unless-stopped
@@ -372,6 +376,20 @@ networks:
   dokploy-network:
     external: true
 """
+    if preview_filestore is None:
+        return compose_file
+    compose = yaml.safe_load(compose_file)
+    compose["volumes"]["odoo_filestore"] = preview_filestore
+    for service in ("web", "script-runner"):
+        compose["services"][service]["volumes"].append(
+            {
+                "type": "volume",
+                "source": "odoo_filestore",
+                "target": "/volumes/data/filestore/${ODOO_DB_NAME:?missing}",
+                "volume": {"nocopy": True},
+            }
+        )
+    return yaml.safe_dump(compose, sort_keys=False)
 
 
 _COMPOSE_DEFAULT_PATTERN = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")
