@@ -17,6 +17,7 @@ import pymysql
 from control_plane import production_consumer_reads as reader, odoo_runtime_reads as reads
 from control_plane.odoo_runtime_source_prerequisites import SOURCE_ADDONS, PAYLOAD_ADDON
 from control_plane.contracts.production_consumer_reads import (
+    ConsumerTableRole,
     ConsumerReadEvidence,
     ProductionConsumerReview,
     ReviewedOdooConsumer,
@@ -157,6 +158,14 @@ def build_ssl_context(use_ssl,verify_ssl):
             for p in (payload_root / PAYLOAD_ADDON).rglob("*.py")
         }
         files["tls"] = {str(self.tls_path): hashlib.sha256(self.tls_path.read_bytes()).hexdigest()}
+        desired_payload = json.loads(
+            base64.b64decode(self.env["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"])
+        )
+        desired_keys = {
+            item["value"]["environment_variable"]
+            for item in desired_payload["config_parameters"]
+            if item["value"].get("environment_variable")
+        }
         spec = {
             "identity": self.fixture.identity.model_dump(mode="json"),
             "files": files,
@@ -170,14 +179,14 @@ def build_ssl_context(use_ssl,verify_ssl):
             "payload_root": str(payload_root),
             "mounts": [],
             "nonce": "a" * 32,
-            "desired_payload": json.loads(
-                base64.b64decode(self.env["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"])
-            ),
+            "desired_payload": desired_payload,
+            "required_populated_roles": sorted(CONSUMER_TABLE_ROLES),
             "desired_env_sha256": {
                 key: __import__("hmac")
                 .new(bytes.fromhex("a" * 32), value.encode(), hashlib.sha256)
                 .hexdigest()
                 for key, value in self.env.items()
+                if key in desired_keys
             },
             **changes,
         }
@@ -257,6 +266,54 @@ class ConsumerProgramTests(ConsumerProgramFixture):
         self.assertEqual(self.run_container()[-1]["result"]["query"], "unknown")
         self.mysql.close.assert_called_once()
 
+    def test_missing_or_extra_digest_coverage_never_uses_stale_container_values(self) -> None:
+        self.assertEqual(
+            self.run_container(desired_env_sha256={})[-1]["result"]["query"], "unknown"
+        )
+        self.assertEqual(
+            self.run_container(desired_env_sha256={"unknown": "f" * 64})[-1]["result"]["query"],
+            "unknown",
+        )
+        self.mysql.close.assert_not_called()
+
+    def test_connection_time_access_errors_are_failed_and_transport_is_unknown(self) -> None:
+        for code, expected in ((1045, "failed"), (1049, "failed"), (2013, "unknown")):
+            with (
+                self.subTest(code=code),
+                patch.object(
+                    self, "mysql_connect", side_effect=pymysql.err.OperationalError(code, PRIVATE)
+                ),
+            ):
+                self.assertEqual(self.run_container()[-1]["result"]["query"], expected)
+        self.mysql.close.assert_not_called()
+
+    def test_only_reviewed_population_roles_require_rows(self) -> None:
+        self.empty = True
+        self.assertEqual(
+            self.run_container(required_populated_roles=[])[-1]["result"],
+            {"query": "verified", "populated": "unknown"},
+        )
+        self.assertEqual(
+            self.run_container(required_populated_roles=[ConsumerTableRole.INVOICE_LINE.value])[-1][
+                "result"
+            ],
+            {"query": "verified", "populated": "failed"},
+        )
+        original = self.mysql_cursor.fetchmany.side_effect
+
+        def rows(limit: int) -> Any:
+            if self.child_table + "`" in self.sql:
+                return ((1,),)
+            return original(limit)
+
+        self.mysql_cursor.fetchmany.side_effect = rows
+        self.assertEqual(
+            self.run_container(required_populated_roles=[ConsumerTableRole.INVOICE_LINE.value])[-1][
+                "result"
+            ],
+            {"query": "verified", "populated": "verified"},
+        )
+
     def test_managed_delivered_applied_mismatch_never_connects(self) -> None:
         for layer in ("applied", "managed"):
             with self.subTest(layer=layer):
@@ -289,7 +346,9 @@ class CoverageTests(unittest.TestCase):
             "b" * 64,
             "observation",
             ProductionConsumerReview(
-                consumers=(self.first, self.second), coordination_reference="review-record"
+                consumers=(self.first, self.second),
+                coordination_reference="review-record",
+                required_populated_roles=(ConsumerTableRole.INVOICE_LINE,),
             ),
             {},
             "server",
@@ -408,7 +467,9 @@ class CoverageTests(unittest.TestCase):
         ):
             with self.assertRaises(NativeSourceAuthorizationDenied):
                 self.qualify()
-        read.assert_called_once()
+        self.assertEqual(
+            len(read.call_args_list), len({call.args[2] for call in read.call_args_list})
+        )
 
 
 class SourceCycleTests(unittest.TestCase):
@@ -457,6 +518,8 @@ class SourceCycleTests(unittest.TestCase):
             observed_at=self.now.isoformat(),
             status="pass",
             purpose="probe",
+            check_kind="private_http",
+            check_name="source-check",
             expected_runtime_identity=self.identity,
             targets=(self.target,),
             model_dump=lambda **kwargs: {"probe": "source"},
@@ -524,12 +587,57 @@ class SourceCycleTests(unittest.TestCase):
         refreshed = self.current()
         self.assertEqual(result.snapshot, refreshed.snapshot)
         self.assertNotEqual(result.observation, refreshed.observation)
-        self.assertEqual(
-            self.store.list_public_ingress_observation_records.call_args.kwargs["check_kind"],
-            self.store.read_product_profile_record.return_value.lanes[0]
-            .health_monitoring.checks[0]
-            .kind,
+
+    def test_running_successor_and_new_success_renew_without_accepting_failure(self) -> None:
+        from datetime import timedelta
+
+        before = self.current()
+        cycle = self.target.sync.cycle
+        self.target.sync.cycle = cycle.model_copy(
+            update={
+                "status": "running",
+                "cycle_id": "b" * 32,
+                "cycle_started_at": (self.now - timedelta(seconds=15)).isoformat(),
+                "cycle_finished_at": None,
+            }
         )
+        after = reader.current_source(
+            self.store, Path("/synthetic"), "source", "source", before.cycle
+        )
+        self.assertEqual(before.snapshot, after.snapshot)
+        self.assertEqual(before.cycle, after.cycle)
+        self.target.sync.cycle = cycle.model_copy(
+            update={
+                "cycle_id": "b" * 32,
+                "cycle_started_at": (self.now - timedelta(seconds=15)).isoformat(),
+                "cycle_finished_at": (self.now - timedelta(seconds=5)).isoformat(),
+            }
+        )
+        after = reader.current_source(
+            self.store, Path("/synthetic"), "source", "source", before.cycle
+        )
+        self.assertEqual(before.snapshot, after.snapshot)
+        assert before.cycle is not None and after.cycle is not None
+        self.assertGreater(after.cycle.finished, before.cycle.finished)
+        self.target.sync.cycle = cycle.model_copy(
+            update={"status": "failed", "freshness_status": "failed"}
+        )
+        with self.assertRaises(ValueError):
+            reader.current_source(self.store, Path("/synthetic"), "source", "source", before.cycle)
+
+    def test_irrelevant_newer_observations_do_not_displace_the_source_probe(self) -> None:
+        unrelated = SimpleNamespace(
+            purpose="probe", check_kind="provider", check_name="source-check"
+        )
+        reconciliation = SimpleNamespace(
+            purpose="reconciliation", check_kind="private_http", check_name="source-check"
+        )
+        self.store.list_public_ingress_observation_records.return_value = (
+            unrelated,
+            reconciliation,
+            self.observation,
+        )
+        self.assertEqual(self.current().observation, self.observation.record_id)
 
     def test_replayed_bootstrap_stale_future_failed_and_foreign_cycles_are_refused(self) -> None:
         from datetime import timedelta
@@ -724,8 +832,10 @@ class RealConsumerQueryTests(ConsumerProgramFixture):
                 grants += "GRANT SELECT ON synthetic_database." + table + " TO 'reader'@'%';"
         self.root_sql(grants)
         self.assertEqual(self.run_container()[-1]["result"]["query"], "failed")
-        self.root_sql("GRANT INSERT ON synthetic_database.* TO PUBLIC")
-        self.assertNotEqual(self.run_container()[-1]["result"]["query"], "verified")
+        self.root_sql(
+            "GRANT SELECT ON synthetic_database.* TO 'reader'@'%'; GRANT INSERT ON synthetic_database.* TO PUBLIC"
+        )
+        self.assertEqual(self.run_container()[-1]["result"]["query"], "unknown")
 
 
 class GrantClassificationTests(unittest.TestCase):
@@ -759,7 +869,11 @@ class ConsumerReadIntegrationTests(unittest.TestCase):
             "source",
             "b" * 64,
             "probe",
-            ProductionConsumerReview(consumers=(member,), coordination_reference="review"),
+            ProductionConsumerReview(
+                consumers=(member,),
+                coordination_reference="review",
+                required_populated_roles=(ConsumerTableRole.INVOICE_LINE,),
+            ),
             {},
             "source-server",
         )

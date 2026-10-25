@@ -4,20 +4,10 @@ from control_plane import odoo_source_probe
 from control_plane.odoo_source_prerequisite_programs import CONTAINER_LIBRARY, HOST_LIBRARY
 from control_plane.production_recipient_published_host import PUBLISHED_SOURCE_LIBRARY
 
-CONSUMER_TABLE_ROLES = frozenset(
-    {
-        "CUSTOMER_TABLE",
-        "CONTACT_TABLE",
-        "PRODUCT_TABLE",
-        "TICKET_TABLE",
-        "TICKET_PROPERTIES_TABLE",
-        "TICKET_COMMENT_TABLE",
-        "ESTIMATE_TABLE",
-        "ESTIMATE_LINE_ITEM_TABLE",
-        "INVOICE_TABLE",
-        "INVOICE_LINE_ITEM_TABLE",
-    }
-)
+from control_plane.contracts.production_consumer_reads import ConsumerTableRole
+
+CONSUMER_TABLE_ROLES = frozenset(role.value for role in ConsumerTableRole)
+
 
 GRANT_LIBRARY = (
     "import re, pymysql\nGrantStatus=str\n_READ_PRIVILEGES="
@@ -99,8 +89,9 @@ def bounded_connect(**kwargs):
     return pymysql.connect(**kwargs)
 
 def query_consumer(settings,open_connection,tables):
-    connection=open_connection(types.SimpleNamespace(_settings=settings))
+    connection=None
     try:
+        connection=open_connection(types.SimpleNamespace(_settings=settings))
         with connection.cursor() as cursor:
             cursor.execute('SHOW GRANTS')
             grants=classify_grants(cursor.fetchmany(129),mariadb_authentication=True)
@@ -112,28 +103,33 @@ def query_consumer(settings,open_connection,tables):
             database,identifier=cursor.fetchone()
             if database!=settings.database or type(identifier) is not int or not 0<identifier<2**64:
                 return {'query':'failed','populated':'unknown'}
+            required=set(spec['required_populated_roles'])
+            if not required <= TABLE_ROLES or len(required)!=len(spec['required_populated_roles']):
+                raise ValueError()
             populated=True
-            for table in tables.values():
+            for role,table in tables.items():
                 cursor.execute('SELECT 1 FROM `'+table+'` LIMIT 1')
                 rows=cursor.fetchmany(2)
                 if not isinstance(rows,(list,tuple)) or len(rows)>1 or any(row!=(1,) for row in rows):
                     raise ValueError()
-                populated=populated and bool(rows)
+                if role in required:
+                    populated=populated and bool(rows)
             output.write(json.dumps({'type':'connection','connection_id':identifier})+'\n')
             output.flush()
             cursor.execute("SELECT SLEEP(30), '"+spec['nonce']+"'")
             if cursor.fetchone()!=(0,spec['nonce']):
                 raise ValueError()
-            return {'query':'verified','populated':'verified' if populated else 'failed'}
+            return {'query':'verified','populated':'unknown' if not required else 'verified' if populated else 'failed'}
     except pymysql.MySQLError as error:
         if not error.args or error.args[0] not in {1044,1045,1049,1142,1143,1146}:
             return {'query':'unknown','populated':'unknown'}
         return {'query':'failed','populated':'unknown'}
     finally:
-        try:
-            connection.rollback()
-        finally:
-            connection.close()
+        if connection is not None:
+            try:
+                connection.rollback()
+            finally:
+                connection.close()
 
 def run_consumer():
     identity=spec['identity']
@@ -152,6 +148,10 @@ def run_consumer():
     if not installed.get(spec['addons']['repairshopr']) or not installed.get(spec['payload_addon']) or not installed.get('external_ids'):
         return {'query':'unsupported','populated':'unknown'}
     delivered=producer.resolve_config_parameters(payload,os.environ,keys=module.PARAMETER_KEYS)
+    desired_keys={item['value']['environment_variable'] for item in spec['desired_payload']['config_parameters']
+                  if item['value'].get('environment_variable')}
+    if desired_keys!=set(spec['desired_env_sha256']):
+        raise ValueError()
     for key,digest in spec['desired_env_sha256'].items():
         actual=os.environ.get(key)
         if not isinstance(actual,str) or not hmac.compare_digest(hmac.new(bytes.fromhex(spec['nonce']),actual.encode(),hashlib.sha256).hexdigest(),digest):

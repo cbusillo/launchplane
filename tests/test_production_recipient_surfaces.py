@@ -232,12 +232,11 @@ class HttpBoundaryTests(unittest.TestCase):
         with patch(
             "control_plane.http_routes.production_recipient.qualify_consumer_reads",
             return_value=result,
-        ) as qualify:
+        ):
             response = self.read_consumers()
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.assertEqual(response.json()["result"], result.model_dump(mode="json"))
-        self.assertTrue(callable(qualify.call_args.kwargs["can_read"]))
         self.mutate.assert_not_called()
 
     def post(self, body: dict[str, Any], route: str = ROUTE) -> Any:

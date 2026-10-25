@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import hmac
 import json
@@ -40,6 +41,7 @@ from control_plane.production_consumer_programs import (
 from control_plane.production_recipient import (
     ProductionRecipientAdapter,
     authority_snapshot,
+    authority_identity,
     custody,
     qualified_render,
     runtime_values,
@@ -56,6 +58,76 @@ _READ_SLOTS = threading.BoundedSemaphore(2)
 MAX_OBSERVATION_AGE = timedelta(minutes=5)
 
 
+@dataclass(frozen=True)
+class QualifiedSourceCycle:
+    reference: str
+    observed: datetime
+    started: datetime
+    finished: datetime
+
+
+def qualify_source_cycle(
+    observation: Any,
+    identity: dict[str, Any],
+    published: datetime,
+    now: datetime,
+    prior: QualifiedSourceCycle | None,
+) -> QualifiedSourceCycle:
+    observed = datetime.fromisoformat(observation.observed_at)
+    if (
+        published.utcoffset() != timedelta(0)
+        or observed.utcoffset() is None
+        or not published <= observed <= now
+        or now - observed > MAX_OBSERVATION_AGE
+        or observation.status != "pass"
+        or observation.expected_runtime_identity is None
+        or observation.expected_runtime_identity.model_dump(mode="json") != identity
+    ):
+        raise ValueError("The source observation does not qualify this publication.")
+    targets = [item for item in observation.targets if item.sync is not None]
+    if len(targets) != 1:
+        raise ValueError("The source cycle is ambiguous.")
+    target = targets[0]
+    cycle = target.sync.cycle
+    if (
+        target.status != "pass"
+        or target.runtime_identity_status != "match"
+        or target.observed_runtime_identity is None
+        or target.observed_runtime_identity.model_dump(mode="json") != identity
+        or cycle is None
+        or cycle.mode != "incremental"
+        or cycle.freshness_status != "fresh"
+        or cycle.cycle_started_at is None
+    ):
+        raise ValueError("A fresh incremental source cycle is required.")
+    started = datetime.fromisoformat(cycle.cycle_started_at)
+    if not published <= started <= observed:
+        raise ValueError("The source cycle is outside this publication.")
+    if cycle.status == "running" and prior is not None:
+        if started < prior.finished or now - prior.observed > MAX_OBSERVATION_AGE:
+            raise ValueError("The completed source cycle is stale or not a predecessor.")
+        return prior
+    if cycle.status != "success" or cycle.cycle_finished_at is None:
+        raise ValueError("A completed source cycle is required.")
+    finished = datetime.fromisoformat(cycle.cycle_finished_at)
+    if (
+        not started <= finished <= observed
+        or prior is not None
+        and (started < prior.started or finished < prior.finished)
+    ):
+        raise ValueError("The completed source cycle was replayed or is future-dated.")
+    return QualifiedSourceCycle(observation.record_id, observed, started, finished)
+
+
+def stable_source_authority(current: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(authority_identity(current))
+    for record in result.get("secrets", []):
+        record.pop("last_validated_at", None)
+    if result.get("inventory") is not None:
+        result["inventory"].pop("updated_at", None)
+    return result
+
+
 @dataclass(frozen=True, repr=False)
 class PublishedConsumerSource:
     snapshot: str
@@ -64,6 +136,7 @@ class PublishedConsumerSource:
     review: ProductionConsumerReview
     spec: dict[str, Any]
     server_id: str
+    cycle: QualifiedSourceCycle | None = None
 
 
 def reviewed_consumers(
@@ -76,12 +149,16 @@ def reviewed_consumers(
 
 
 def current_source(
-    store: PostgresRecordStore, root: Path, product: str, context: str
+    store: PostgresRecordStore,
+    root: Path,
+    product: str,
+    context: str,
+    prior: QualifiedSourceCycle | None = None,
 ) -> PublishedConsumerSource:
     record = custody(store, product, context)
     if record is None or record.phase != "published":
         raise ValueError("A current published recipient is required.")
-    require_owned_publication_rows(store, record)
+    require_owned_publication_rows(store, record, inventory_timestamp_required=False)
     current = authority_snapshot(store, product, context)
     adapter = ProductionRecipientAdapter(
         root, store, product, record.request, record.actor, record.scope, "", record.original_key
@@ -110,48 +187,22 @@ def current_source(
         instance_name="prod",
         check_name=checks[0].name,
         check_kind="private_http",
-        limit=1,
+        limit=64,
     )
-    if len(rows) != 1:
+    rows = tuple(
+        row
+        for row in rows
+        if row.purpose == "probe"
+        and row.check_kind == checks[0].kind
+        and row.check_name == checks[0].name
+    )
+    if not rows:
         raise ValueError("Current source-cycle evidence is required.")
     observation = rows[0]
     now = datetime.now(timezone.utc)
     published = datetime.fromisoformat(record.publication["published_at"])
-    observed = datetime.fromisoformat(observation.observed_at)
     identity = current["inventory"]["runtime_identity"]
-    if (
-        not published.utcoffset() == timedelta(0)
-        or observed.utcoffset() is None
-        or not published <= observed <= now
-        or now - observed > MAX_OBSERVATION_AGE
-        or observation.status != "pass"
-        or observation.purpose != "probe"
-        or observation.expected_runtime_identity is None
-        or observation.expected_runtime_identity.model_dump(mode="json") != identity
-    ):
-        raise ValueError("The source observation does not qualify this publication.")
-    targets = [item for item in observation.targets if item.sync is not None]
-    if len(targets) != 1:
-        raise ValueError("The source cycle is ambiguous.")
-    target = targets[0]
-    cycle = target.sync.cycle if target.sync is not None else None
-    if (
-        target.status != "pass"
-        or target.runtime_identity_status != "match"
-        or target.observed_runtime_identity is None
-        or target.observed_runtime_identity.model_dump(mode="json") != identity
-        or cycle is None
-        or cycle.status != "success"
-        or cycle.mode != "incremental"
-        or cycle.freshness_status != "fresh"
-        or cycle.cycle_started_at is None
-        or cycle.cycle_finished_at is None
-        or not published
-        <= datetime.fromisoformat(cycle.cycle_started_at)
-        <= datetime.fromisoformat(cycle.cycle_finished_at)
-        <= observed
-    ):
-        raise ValueError("A subsequent successful source cycle is required.")
+    cycle = qualify_source_cycle(observation, identity, published, now, prior)
     rendered = qualified_render(record, runtime_values(store, root, record, published=True))
     database_environment = rendered["services"][record.request.database_service].get(
         "environment", {}
@@ -179,15 +230,15 @@ def current_source(
         canonical_sha256(
             {
                 "record": record.model_dump(mode="json"),
-                "authority": current,
-                "cycle": cycle.model_dump(mode="json"),
+                "authority": stable_source_authority(current),
             }
         ),
         record.publication["published_sha256"],
-        observation.record_id,
+        cycle.reference,
         review,
         spec,
         record.request.destination_server_id,
+        cycle,
     )
 
 
@@ -251,14 +302,22 @@ def consumer_authority(
         for item in parameters
         if item["value"].get("environment_variable")
     }
+    if not keys <= environment.values.keys() or keys & environment.retired_keys:
+        raise ValueError("Every referenced runtime value must be current and unretired.")
     inputs = {
         "desired_payload": {"config_parameters": parameters},
-        "desired_env": {key: environment.values[key] for key in keys if key in environment.values},
+        "desired_env": {key: environment.values[key] for key in keys},
     }
+    metadata = authority.metadata.model_dump(mode="json")
+    for item in metadata.get("records", []):
+        item.pop("last_validated_at", None)
+    for item in metadata.get("bindings", []):
+        item.pop("created_at", None)
+        item.pop("updated_at", None)
     snapshot = json.dumps(
         {
             "override": override.model_dump(mode="json"),
-            "metadata": authority.metadata.model_dump(mode="json"),
+            "metadata": metadata,
             "runtime": authority.runtime.model_dump(mode="json"),
             "version": version.model_dump(mode="json"),
             "inputs": inputs,
@@ -380,6 +439,9 @@ def read_consumer(
             "payload_addon": PAYLOAD_ADDON,
             "payload_root": PAYLOAD_ROOT,
             "nonce": nonce,
+            "required_populated_roles": [
+                role.value for role in source_state.review.required_populated_roles
+            ],
             "container_program": program,
             **desired,
         },
@@ -412,6 +474,8 @@ def read_consumer(
     result = last["result"]
     if set(result) != {"query", "populated"}:
         raise ValueError("Invalid consumer evidence.")
+    if not source_state.review.required_populated_roles:
+        result = {**result, "populated": "unknown"}
     evidence = ConsumerReadEvidence(
         consumer=member,
         **result,
@@ -474,11 +538,13 @@ def qualify_consumer_reads(
 
         with ThreadPoolExecutor(max_workers=len(review.consumers)) as executor:
             members = list(executor.map(observe, review.consumers))
-        after = current_source(store, root, product, context)
+        after = current_source(store, root, product, context, current.cycle)
         if after.snapshot != current.snapshot:
             members = [ConsumerReadEvidence(consumer=item.consumer) for item in members]
-        verified = len(members) == len(current.review.consumers) and all(
-            item.status == "verified" for item in members
+        verified = (
+            bool(review.required_populated_roles)
+            and len(members) == len(current.review.consumers)
+            and all(item.status == "verified" for item in members)
         )
         return ProductionConsumerReadResult(
             status="verified" if verified else "unknown",

@@ -522,6 +522,10 @@ consumers (`product` plus either a stable `environment` or `preview_id`) and a
 reviewed cutover intent. Missing review authority keeps qualification unknown;
 discovering fewer accessible consumers never reduces the reviewed set. The
 reference records separately owned external coordination, not an external query.
+`required_populated_roles` names the reviewed subset of the fixed table roles
+that must have rows. An omitted or empty population review stays unknown; it is
+not permission to invent a requirement that every optional business table holds
+data. Every required query table is still queried.
 
 `GET /v1/products/{product}/production-recipient/consumer-reads?context=...`
 performs fresh service qualification. It requires `operations.read` on the source
@@ -533,7 +537,9 @@ and one closed result per reviewed consumer. It grants no retirement permission;
 a replayed response cannot substitute for a fresh read. Consumers run concurrently
 within the fixed membership bound, so adding members does not serialize their
 30-second witnesses. Capacity contention returns `busy: true` and retains every
-reviewed member as unknown.
+reviewed member as unknown. At the membership and request bounds, up to 32
+consumer sessions and 32 witness sessions may coexist; provider transport or
+caller/proxy timeouts remain unknown outcomes, never successful evidence.
 
 The reader verifies the installed artifact, importer/settings/payload and TLS
 source. It uses the installed pure settings resolver and connection method
@@ -560,8 +566,12 @@ Qualification also requires a fresh service health observation of the exact
 published runtime and a successful incremental cycle started after publication.
 Source authority, the selected identity-bearing private check, runtime, artifact,
 cycle and consumer applied settings are rechecked around I/O. A new monitor row
-for the same qualifying cycle does not invalidate the proof; changed authority
-or cycle does. This proves neither
+does not invalidate the proof. A newer successful incremental cycle also qualifies
+on unchanged publication/runtime custody. A fresh healthy running successor may
+retain the entry success only while that completed observation remains fresh.
+Failed, stale, overdue, replayed, malformed or foreign-runtime evidence never
+borrows an older success. Inventory/binding bookkeeping and secret validation
+timestamps do not change custody; mutation callers retain their strict guards. This proves neither
 universal invoice history nor unique-ID/parent reconciliation, accepted bootstrap,
 post-cutover elapsed time, recovery eligibility or exclusive old-resource custody.
 Those remain the retirement and source-data validation gates' responsibilities.

@@ -1,3 +1,4 @@
+from enum import StrEnum
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -17,16 +18,34 @@ class ReviewedOdooConsumer(BaseModel):
         return self
 
 
+class ConsumerTableRole(StrEnum):
+    CUSTOMER = "CUSTOMER_TABLE"
+    CONTACT = "CONTACT_TABLE"
+    PRODUCT = "PRODUCT_TABLE"
+    TICKET = "TICKET_TABLE"
+    TICKET_PROPERTIES = "TICKET_PROPERTIES_TABLE"
+    TICKET_COMMENT = "TICKET_COMMENT_TABLE"
+    ESTIMATE = "ESTIMATE_TABLE"
+    ESTIMATE_LINE = "ESTIMATE_LINE_ITEM_TABLE"
+    INVOICE = "INVOICE_TABLE"
+    INVOICE_LINE = "INVOICE_LINE_ITEM_TABLE"
+
+
 class ProductionConsumerReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     consumers: tuple[ReviewedOdooConsumer, ...] = Field(min_length=1, max_length=16)
     coordination_reference: str = Field(min_length=1, max_length=512)
+    required_populated_roles: tuple[ConsumerTableRole, ...] = Field(
+        default=(), max_length=len(ConsumerTableRole)
+    )
 
     @model_validator(mode="after")
     def unique_members(self) -> Self:
         if len(set(self.consumers)) != len(self.consumers):
             raise ValueError("Reviewed consumers must be unique.")
+        if len(set(self.required_populated_roles)) != len(self.required_populated_roles):
+            raise ValueError("Reviewed population roles must be unique.")
         return self
 
 
