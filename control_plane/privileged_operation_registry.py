@@ -510,6 +510,18 @@ def plan_managed_merge_train_policy_import(
         raise PrivilegedOperationPlannerError(
             "Merge-train policy import planning found an invalid active policy record."
         ) from error
+    legacy_ids = {
+        target.policy_key: set(target.enqueue.dependency_update_github_user_ids)
+        for target in active_record.policy.policies
+    }
+    if any(
+        set(target.enqueue.dependency_update_github_user_ids)
+        - legacy_ids.get(target.policy_key, set())
+        for target in request.record.policy.policies
+    ):
+        raise PrivilegedOperationPlannerError(
+            "Configure dependency_update_bots with an explicit metadata format and allowed update types."
+        )
     candidate_record = request.record
     if (
         candidate_record.record_id == active_record.record_id

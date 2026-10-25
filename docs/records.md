@@ -1668,23 +1668,13 @@ the retained record models and storage checks preserve historical evidence.
 Status: retired with Every Code; see the note under Every Code Feedback Resume
 Evidence.
 
-Every Code notification policy records are DB-backed Launchplane records under
-`launchplane_every_code_notification_policies`. They select enabled
-destinations for Every Code admin events, currently `work_request_blocked`,
-optionally scoped by repository. Policies store routing intent and managed
-secret references only; they must not store Discord webhook URLs or real
-admin destination values as source, workflow defaults, or checked-in config.
-
-Every Code notification attempt records are delivery evidence under
-`launchplane_every_code_notification_attempts`. Each attempt is keyed by the
-work-request id, event, policy, and destination. Attempts record pending,
-delivered, skipped, or failed status plus a bounded, provider-safe action or
-error. Launchplane writes a pending attempt before calling an external Discord
-webhook, then updates it after delivery returns, so retries have durable dispatch
-evidence instead of blindly sending duplicate notifications. When a worker
-reports a request as `blocked`, Launchplane writes the terminal work request
-first and then records each notification attempt so bot-auth or Discord delivery
-failures remain inspectable even when no Every Code session starts.
+Historical notification policy records remain under
+`launchplane_every_code_notification_policies`, and attempt evidence remains
+under `launchplane_every_code_notification_attempts`. Existing routing intent,
+managed-secret references and pending/delivered/skipped/failed evidence remain
+readable and restorable. The retired execution API no longer applies policies
+or sends blocked-request notifications; shared preview notification delivery
+continues independently.
 
 ## Product Review Decision Records
 
@@ -3018,70 +3008,22 @@ credential, runtime grant, or stored record is changed by this code retirement.
 
 ## Every Code Work Request Record
 
-Status: retired with Every Code; see the note under Every Code Feedback Resume
-Evidence. The local worker execution commands are removed.
+Every Code execution is retired by [DIRECTION.md](../DIRECTION.md). Existing
+request, feedback, preview-gate and notification evidence stays readable through
+the historical GET routes. The service no longer creates, claims, heartbeats,
+recovers, restarts or finishes Every Code requests, writes feedback/gates, or
+applies their notification policies.
 
-See [agent-context-boundary.md](agent-context-boundary.md) for the agent-facing
-rules that compose these records into public-safe context and scoped intent
-preflights.
-
-- One durable request per approved Every Code automation trigger.
-- Record the source, repository, issue number and URL, trigger label, trigger
-  actor, optional GitHub delivery id, queue/update timestamps, claim host, run
-  timestamps, PR URL, result summary, and blocked error message.
-- State is `queued`, `claimed`, `running`, `done`, or `blocked`. Workers claim a
-  queued request before reporting progress. Terminal states are immutable through
-  the service status route.
-- Every claim is atomic and sets three lease fields: `lease_expires_at` (ISO
-  timestamp when the lease lapses), `fencing_token` (monotonically increasing
-  integer equal to the cumulative claim count for this request id), and `attempt`
-  (same value, kept separately for readability). The fencing token starts at 1 on
-  the first claim and increments on every subsequent requeue-and-reclaim cycle.
-  Once a record has a non-zero fence, service status updates must carry that
-  exact `fencing_token`; missing and stale tokens are rejected before the row is
-  changed. Heartbeats enforce the same host-and-fence match, preventing
-  stale-holder writes after a lease expires and a new worker reclaims.
-- Workers send periodic heartbeats through `POST /v1/every-code/work-requests/heartbeat`
-  to extend `lease_expires_at` before it lapses. A heartbeat is rejected (409)
-  when the host or fencing token does not match, or when the request is already
-  terminal. Workers that die without heartbeating leave the record with an expired
-  lease and the recovery path handles it.
-- `POST /v1/every-code/work-requests/recover-stale` scans for claimed or running
-  records whose `lease_expires_at` has passed and applies a recovery policy:
-  `safe_requeue` (attempt ≤ 3) resets the record to `queued` with all lease
-  fields cleared so another worker can pick it up; `manual_review` (attempt > 3)
-  marks the record `blocked` with an error message requiring admin inspection
-  before any requeue. Recovery locks and compares the exact stale snapshot, so a
-  concurrent heartbeat or status transition wins cleanly instead of being
-  overwritten by a stale recovery decision.
-- Requests that were already active before lease fields existed migrate with an
-  expired lease and an exhausted safe-retry attempt. Their first recovery marks
-  them `blocked` for manual review instead of risking duplicate execution.
-- Worker-token claim and rerun requests use a stable synthetic idempotency scope.
-  PostgreSQL claim commits the claimed record and completed replay evidence in
-  one transaction; rerun uses compare-and-write with the completed response in
-  the same transaction. Same-key retries replay the original response, changed
-  payloads conflict, and a lost HTTP response does not permit a second claim or
-  rerun mutation.
-- The retired worker runner, daemon, session launchers, reconciliation and
-  completion CLI commands are removed. `launchplane every-code review-run-once`
-  remains the advisory engineering-review entrypoint. Historical record reads,
-  workspace paths and preview branch matching remain available.
-- The retired `POST /v1/every-code/github-webhook` route is removed. Label,
-  feedback, and close deliveries cannot change these records through it.
-  Existing persisted records are retained until the separately authorized
-  storage retirement; #1313 tracks the remaining retired domain code.
-
-- Historical Every Code feedback records retain their actor and source-issue
-  provenance. The removed webhook no longer ingests PR or issue comments.
-
-- Agent callers should prefer `GET /v1/every-code/summary` over raw work-request
-  reads when they only need status. The summary projection links back to the
-  issue and result PR, reports whether work is active, stuck, complete, or
-  rerunnable, and includes safe rerun guidance without exposing webhook delivery
-  ids, blocked error messages, issue bodies, prompt text, local checkout paths,
-  or local worker hostnames. Summary entries include compact agent-context
-  provenance and evidence for the source issue and recorded work-request state.
+Stored requests retain source and repository/issue provenance, timestamps,
+historical state, host, lease/fencing fields, result PR and completion evidence.
+Schemas, migrations, record decoders and restore/import paths remain intact.
+Removing the execution API does not delete or rewrite stored requests, saved
+workspaces, credentials or backups. Advisory engineering review and shared
+preview readiness/feedback continue through their existing supported routes.
+The retired runner, daemon, session launchers, reconciliation and completion
+commands are removed. `launchplane every-code review-run-once` remains the
+advisory engineering-review entrypoint; historical workspace paths and preview
+branch matching stay compatible.
 
 ## Agent Context, Authorization, and Merge Train Records
 
@@ -3092,7 +3034,7 @@ preflights.
   fields are bounded and redacted so provider-only internals, local paths, and
   secret-shaped values are not copied into agent context payloads.
 - Agent callers can use `GET /v1/agent/context` for a single read-only preflight
-  context. It aggregates the existing repo-product mapping, Every Code summary,
+  context. It aggregates the existing repo-product mapping,
   preview readiness and optional exact tenant-admission projections, then reports each
   section as available, unauthorized, or unavailable. It is not a persisted
   record and must not fetch or store issue bodies.
@@ -3121,9 +3063,9 @@ preflights.
   Execution routes treat these records as provenance, not credentials: they must
   perform their normal route-specific authorization and fail closed when the
   linked record is denied, stale, the wrong intent family, or mismatched on
-  product, context, route action, source, or idempotency binding. The first
-  consumer is Every Code rerun, which requires approved `every_code_rerun`
-  evidence before requeueing a terminal work request.
+  product, context, route action, source, or idempotency binding. Historical
+  Every Code rerun evidence remains readable; its retired execution route
+  no longer consumes that evidence.
 - Merge train repository policy is persisted as
   `launchplane_merge_train_policies` records. The active policy record is the
   Launchplane-owned authority for supported repository/base branch pairs,

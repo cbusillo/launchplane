@@ -549,22 +549,64 @@ existing reviewed-baseline operational policy route above; this source change
 does not change live policy. Recovery is an ordinary source revert through the
 train; explicit-label admission remains supported for the prior service.
 
-`dependency_update_github_user_ids` names dependency-update bots, for example
-Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
-request from one of them enqueues without the enqueue label only when every
-change commit on it is authored by that bot and signed by GitHub (committer
-`web-flow`, verified), nobody else force-pushed the branch, the commits match the
-pull request head the train read, and every dependency the update names stays
-within one major version. Transitive lockfile changes are not classified; the
-pull request's required checks still gate them. The adapter derives that from Dependabot's
-`updated-dependencies` commit trailer and the "from X to Y" lines, because the
-trailer often omits `update-type`. Balanced single- or double-quoted dependency
-names match the unquoted names in those version lines. A major version, a `0.x`
-minor bump, a changed version suffix, a non-version reference such as a commit SHA, an
-unparseable message, or a commit by anyone else leaves the pull request
-ineligible with `dependency update needs agent review`. The label still
-enqueues any trusted pull request as before. An empty list, the default, changes
-nothing and is omitted from the policy digest.
+`enqueue.dependency_update_bots` is the policy table for automatic dependency
+admission. Each row selects an immutable `github_user_id`, a `metadata_format`
+(`dependabot_trailer` or `renovate_metadata`) and nonempty
+`allowed_update_types` from `patch`, `minor` and `digest`. IDs must be unique
+and already belong to `trusted_automation_github_user_ids`. Bot type is still
+required. No login, ID or enabled update type is inferred in code. Adding or
+removing a bot that uses a supported format is a policy proposal for the
+signed-in admin, with no code change. Multiple identities can share a parser.
+
+For example, this illustrative row enables an already trusted test identity:
+
+```json
+{
+  "github_user_id": 711,
+  "metadata_format": "renovate_metadata",
+  "allowed_update_types": ["patch", "minor", "digest"]
+}
+```
+
+The legacy `dependency_update_github_user_ids` field stays readable for retained
+record and digest compatibility. It supplies no parser or admission authority.
+The managed proposal planner refuses new legacy ID entries while allowing
+existing ones to be preserved or removed. Existing records require an approved migration into the explicit table; an
+absent table withholds automatic admission. Ordinary checked Ready and trusted
+label admission remain supported while an admin reviews that migration.
+
+Every change commit must be authored by the configured bot and GitHub-signed
+(`web-flow`, verified), match the observed PR head and have no foreign
+force-push. The configured parser extracts all named updates. Dependabot uses
+its `updated-dependencies` trailer and the "from X to Y" lines; an omitted
+update-type is derived from those versions. Renovate uses one `Renovate-Updates`
+JSON array per commit, emitted by the shared preset's supported
+[`commitBody`](https://docs.renovatebot.com/configuration-options/#commitbody)
+and [`toJSON`/`toObject`](https://docs.renovatebot.com/templates/) helpers.
+
+Every update must have an allowed type and satisfy the same generic safety
+rule. Patch/minor metadata must agree with the version movement and stay within
+one major with an unchanged suffix; a `0.x` minor bump needs review. Digest
+updates need full old/new digests and identical nonempty branch/tag values.
+Majors, unknown types and incomplete evidence remain for agent review even
+when a bot is configured. Transitive lockfile changes are not classified;
+required checks still gate the PR.
+
+The train and Client-note consumers resolve the same repository/base policy.
+Removing a bot also removes its automatic dependency-only Client exemption.
+Release checklist readers use the current policy too; recorded engineering notes
+remain readable, but a removed bot cannot supply a new inferred exemption.
+Both formats require a complete immutable same-repository dependency-only diff.
+`workspace.toml` qualifies only when complete immutable TOML documents differ
+solely in exact devkit/runtime ref pins; shared-addon and other changes keep
+review. Workflows, application code, renames from code and unavailable evidence
+withhold admission. Explicit Client-review overrides remain enforced.
+
+Renovate automerge stays disabled; only the train lands changes. The empty table
+is omitted from policy serialization so it does not alter historical digests.
+After the schema deploys, use the existing managed merge-train policy proposal
+flow to migrate current bot identities and select their formats/types. The
+proposer cannot approve or apply; post its review URL for Chris as admin.
 
 The train's own base-refresh merge commits do not count as dependency changes
 when a persisted branch-refresh record binds the exact commit, repository, PR,

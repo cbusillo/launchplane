@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 
 from control_plane.contracts.data_provenance import (
-    agent_safe_host_label,
     safe_agent_context_text,
 )
 
@@ -29,10 +28,6 @@ class AgentContextSafetyTests(unittest.TestCase):
             safe_agent_context_text("   ", fallback="No detail recorded."),
             "No detail recorded.",
         )
-
-    def test_agent_safe_host_label_hides_local_topology(self) -> None:
-        self.assertEqual(agent_safe_host_label("Chris-Studio.local"), "claimed_local_worker")
-        self.assertEqual(agent_safe_host_label(""), "")
 
 
 if __name__ == "__main__":

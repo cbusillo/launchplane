@@ -232,7 +232,6 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
     claim_every_code_work_request,
-    close_every_code_work_request_for_pull_request,
     heartbeat_every_code_work_request,
     recover_stale_every_code_work_request,
 )
@@ -18393,6 +18392,52 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def continue_precapture_backup_operation(
+        self,
+        *,
+        expected: VeriReelProdBackupGateOperationRecord,
+        resumed: VeriReelProdBackupGateOperationRecord,
+        expected_backup: BackupGateRecord,
+    ) -> bool:
+        from control_plane.client_release_backup_continuation import require_precapture_failure
+
+        require_precapture_failure(expected)
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                select(LaunchplaneVeriReelProdBackupGateOperationRow)
+                .where(
+                    LaunchplaneVeriReelProdBackupGateOperationRow.operation_id
+                    == expected.operation_id
+                )
+                .with_for_update()
+            )
+            backup_row = session.scalar(
+                select(LaunchplaneBackupGateRow)
+                .where(LaunchplaneBackupGateRow.record_id == expected.backup_record_id)
+                .with_for_update()
+            )
+            if (
+                row is None
+                or backup_row is None
+                or self._read_payload(
+                    model_type=VeriReelProdBackupGateOperationRecord, payload=row.payload
+                )
+                != expected
+                or self._read_payload(model_type=BackupGateRecord, payload=backup_row.payload)
+                != expected_backup
+                or resumed.previous_attempt != expected
+                or resumed.previous_backup != expected_backup
+                or resumed.status != "pending"
+                or resumed.operation_id != expected.operation_id
+                or resumed.binding != expected.binding
+                or resumed.authorization != expected.authorization
+            ):
+                return False
+            self._sync_verireel_prod_backup_gate_operation_row(row, resumed)
+            session.commit()
+            return True
+
     def _sync_verireel_prod_backup_gate_operation_row(
         self,
         row: LaunchplaneVeriReelProdBackupGateOperationRow,
@@ -22774,41 +22819,6 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
             offset=offset,
         )
-
-    def close_every_code_work_request_for_pull_request_record(
-        self,
-        *,
-        request_id: str,
-        expected_lifecycle_id: str,
-        pr_url: str,
-        merged: bool,
-        closed_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        with self._session_factory() as session:
-            statement = (
-                select(LaunchplaneEveryCodeWorkRequestRow)
-                .where(LaunchplaneEveryCodeWorkRequestRow.request_id == request_id)
-                .limit(1)
-            )
-            if not self.database_url.startswith("sqlite"):
-                statement = statement.with_for_update()
-            row = session.scalar(statement)
-            if row is None:
-                raise FileNotFoundError(request_id)
-            record = self._read_payload(model_type=EveryCodeWorkRequestRecord, payload=row.payload)
-            if record.lifecycle_id != expected_lifecycle_id:
-                return None
-            closed_record = close_every_code_work_request_for_pull_request(
-                record,
-                pr_url=pr_url,
-                merged=merged,
-                closed_at=closed_at,
-            )
-            if closed_record is None:
-                return None
-            self._sync_every_code_work_request_row(row, closed_record)
-            session.commit()
-            return closed_record
 
     def claim_every_code_work_request_record(
         self,

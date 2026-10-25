@@ -467,8 +467,6 @@ remaining domain and storage removal is tracked in #2437.
 - Every Code local automation work-request routes (Every Code is retired; see
   `DIRECTION.md`. These routes and the Every Code sections below remain only
   until their readers move):
-  - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
-    human-session, and Every Code worker-token callers)
   - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
   - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
@@ -483,50 +481,6 @@ remaining domain and storage removal is tracked in #2437.
     bearer-token, human-session, and Every Code worker-token callers)
   - `GET /v1/previews/pr-feedback/notification-attempts` (native FastAPI for
     bearer-token and human-session callers)
-  - `POST /v1/every-code/notification-policies/apply` (native FastAPI for
-    bearer-token callers, DB-backed storage, `local_operator` reason enforcement,
-    and optional `Idempotency-Key` replay/conflict handling)
-  - `POST /v1/every-code/work-requests/create` (native FastAPI for
-    bearer-token callers, `every_code_work_request.write` authorization on
-    `launchplane`/`launchplane`, record-store write capability checks, and
-    optional `Idempotency-Key` replay/conflict handling)
-  - `POST /v1/every-code/work-requests/claim` (native FastAPI for Every Code
-    worker-token callers and bearer-token callers with
-    `every_code_work_request.claim`, record-store claim capability checks,
-    `404 not_found` for missing requests, `409 work_request_already_claimed`
-    for non-queued requests, and bearer or worker-token `Idempotency-Key`
-    replay/conflict handling; PostgreSQL commits the claim and completed replay
-    evidence atomically)
-  - `POST /v1/every-code/work-requests/heartbeat` (native FastAPI for Every Code
-    worker-token callers and authorized bearer callers, extending the lease only
-    when host and fencing token still match the active record)
-  - `POST /v1/every-code/work-requests/recover-stale` (native FastAPI for Every
-    Code worker-token callers and bearer-token callers with
-    `every_code_work_request.update`, using a locked stale-snapshot compare to
-    requeue bounded attempts or block for manual review)
-  - `POST /v1/every-code/work-requests/status` (native FastAPI for Every Code
-    worker-token callers and bearer-token callers with
-    `every_code_work_request.update`, replay-before-write idempotency handling,
-    record-store status capability checks, exact fencing-token enforcement for
-    leased requests, `404 not_found` for missing requests, and
-    blocked-notification delivery)
-  - `POST /v1/every-code/work-requests/rerun` (native FastAPI for Every Code
-    worker-token callers and bearer-token callers with
-    `every_code_work_request.rerun`, approved `every_code_rerun` write-intent
-    evidence, workflow replay-before-write idempotency handling, record-store
-    rerun capability checks, `404 not_found` for missing requests, terminal-only
-    compare-and-write requeue semantics, and atomic replay evidence for bearer
-    and worker-token callers)
-  - `POST /v1/every-code/pr-feedback` (native FastAPI for Every Code
-    worker-token callers, direct PR-feedback record writes, and DB-backed
-    storage capability enforcement without idempotency state)
-  - `POST /v1/every-code/pr-feedback/status` (native FastAPI for Every Code
-    worker-token callers, PR-feedback status transitions, `404 not_found` for
-    missing feedback, and `409 feedback_already_final` for already-final
-    feedback)
-  - `POST /v1/every-code/preview-gates` (native FastAPI for Every Code
-    worker-token callers, direct preview-gate record writes, and DB-backed
-    storage capability enforcement without idempotency state)
 - preview PR feedback notification policy route:
   - `POST /v1/previews/pr-feedback` (native FastAPI for bearer-token callers,
     `preview_pr_feedback.write` or matching lifecycle authorization,
@@ -697,8 +651,8 @@ replace an uncertain operation with a new key. The direct generic-web promotion
 binding always rewrites the generated request to `dry_run=true`; live promotion
 remains the separate product-owned workflow-dispatch path.
 
-The Engineering Ops browser routes consume the generated Every Code summary,
-merge-train policy-target, and controller-status read models directly.
+The Engineering Ops browser routes consume the generated merge-train
+policy-target and controller-status read models directly.
 Merge-train UI is status-only: target selection comes exclusively
 from `GET /v1/work-graph/merge-train/policy-targets`, while controller and
 legacy worker POST routes are never derived from data or invoked dynamically.
@@ -1107,10 +1061,11 @@ The `/v1/manager-preview-approval/github-webhook` URL and its
 for signed trusted-maintenance evidence. Manager approval itself is retired; the
 webhook records no approval and the manager reconcile route is deleted.
 
-The historical work-request reads and engineering-review routes retain the
+Historical work-request, shared preview-readiness and product-profile list
+reads, plus engineering-review routes, retain the
 existing `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` bearer identity. The retired local
-worker runner and session launch commands are removed; the credential name
-does not select an executable or grant new authority.
+worker cannot create or mutate Every Code requests through the service; the
+credential name does not select an executable or grant new authority.
 
 Engineering-review worker routes reuse that bearer secret but do not trust
 caller-supplied host or runtime strings. The service derives the worker identity
@@ -1159,16 +1114,6 @@ service has recorded a matching Director-agent dry-run for the same payload. The
 requests still use Launchplane records, redacted responses, runtime key-safety
 policy, and managed secret storage. Terminal-agent credentials remain read-only.
 
-`GET /v1/every-code/summary` returns a compact agent-safe projection of Every
-Code work requests. It requires `every_code_work_request.read` for
-product/context `launchplane` and supports `repository`, `issue_number`,
-`state`, `limit`, and `offset` query parameters. Summary entries include source
-links, state, summary status, claim metadata, timestamps, result PR URL, and
-safe rerun guidance. They intentionally omit raw webhook delivery ids, error
-messages, issue bodies, prompt text, local checkout paths, and local worker
-hostnames. Entries include compact agent-context provenance and evidence so
-callers can tell recorded request state apart from source-of-truth links.
-
 `GET /v1/previews/readiness` returns a compact agent-safe projection of Every
 Code preview gate records. It requires `every_code_preview_gate.read` for
 product/context `launchplane` and supports `repository`, `pr_number`, `status`,
@@ -1185,19 +1130,9 @@ reads use `every_code_work_request.read`; PR-feedback reads use
 `every_code_notification_attempt.read`; preview PR-feedback notification-attempt
 reads use `preview_pr_feedback_notification_attempt.read`. The dedicated Every
 Code worker token is accepted only for the worker-facing Every Code read routes,
-not for the preview PR-feedback notification-attempt route. Every Code
-work-request status is also a native FastAPI route for the dedicated Every Code
-worker token and workflows authorized for `every_code_work_request.update`. It
-checks idempotency replay before requiring status-write store capabilities,
-writes successful idempotency records, preserves missing-request `404 not_found`,
-and delivers configured blocked notifications when a request transitions to
-`blocked`. Every Code PR-feedback write, PR-feedback status, and preview-gate
-write routes are also native FastAPI routes for the dedicated Every Code worker
-token. They require only the matching PR-feedback or preview-gate record-store
-capabilities, preserve the direct worker signal payloads, and do not create
-idempotency records. PR-feedback status preserves
-the worker transition semantics: missing feedback returns `404 not_found`, and
-already applied or ignored feedback returns `409 feedback_already_final`.
+not for the preview PR-feedback notification-attempt route. Retired Every Code
+execution and notification-policy writes are removed; these read identities
+cannot start or resume that pipeline.
 
 `POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
 ordered-queue pass for a requested repository/base branch. It requires the
@@ -1414,7 +1349,7 @@ preview context; awareness entries do not imply Launchplane runtime ownership.
 `GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
 for public-safe skill preflight. It requires `product_environment.read` for
 product/context `launchplane`, accepts an optional `repository` filter, and
-composes the existing repo-product mapping, Every Code summary, preview
+composes the existing repo-product mapping, preview
 readiness, and optional exact tenant-admission projections under named sections.
 Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
 writes no
@@ -2164,19 +2099,9 @@ provider-safe external delivery links and bounded delivery state, but not
 destination ids, policy ids, raw outbox payloads, provider operation keys,
 provider ids, raw target URLs, secret references, or provider error text.
 
-Every Code notification policy writes use
-`POST /v1/every-code/notification-policies/apply`. The request carries
-`mode: "dry-run"` or `mode: "apply"` and a complete
-`EveryCodeNotificationPolicyRecord`. Apply requires
-`every_code_notification_policy.apply`, DB-backed Launchplane storage, and an
-idempotency key when a caller wants retry-safe service semantics. `local_operator`
-calls must include a non-empty reason. Policies store repository-scoped routing
-intent and managed secret record ids only; Discord webhook URLs and admin
-destination values must stay in managed secrets, not source or text-file
-defaults. When a worker status update transitions a work request to `blocked`,
-Launchplane persists the blocked request first, then attempts configured Every
-Code notifications and records delivered or failed attempts under
-`GET /v1/every-code/notification-attempts`.
+Every Code notification policies and attempts remain historical records. Their
+apply route and blocked-request delivery are removed; existing evidence stays
+readable through `GET /v1/every-code/notification-attempts`.
 
 Preview PR feedback notification policy writes use
 `POST /v1/previews/pr-feedback/notification-policies/apply`. The request
@@ -3142,8 +3067,6 @@ For reviewed reconciliation of provider-absent legacy preview history, see
   human-session callers)
 - `GET /v1/dokploy/inventory` (native FastAPI for bearer-token and
   human-session callers)
-- `GET /v1/every-code/summary` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
 - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
   human-session, and Every Code worker-token callers)
 - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
