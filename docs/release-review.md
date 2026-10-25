@@ -1224,8 +1224,8 @@ The planning writer can attach a `release` pointer to a structured wait with
 --evidence REVIEW`. The pointer binds the first wait and names the product's
 source commit; the published summary shows that binding.
 
-The release-completion worker resolves matching waits on the product repository's
-open issues only after a passed accepted forward release still matches production.
+The release-completion worker resolves matching waits on open issues in
+repositories covered by the product repository's existing planning authority only after a passed accepted forward release still matches production.
 It proves the required commit is the released commit or its ancestor, so a release
 already underway without the fix cannot clear the wait. It preserves other
 products, later source changes, human tests and other event waits. Rollbacks,
@@ -1234,5 +1234,10 @@ failed runs and incomplete ancestry/history reads preserve the wait.
 Resolution records the release decision and next agent action, then reuses planning
 status reconciliation. It does not close the issue or claim follow-up verification.
 A lost response retries from the current trusted wait; an already-closed release
-record still retries its unfinished wait resolution. Update the catalog readers
+record still retries its unfinished wait resolution. Settled records are checked
+again on the existing settled-decision cadence, so a late-recorded wait is picked
+up without a worker restart. One malformed issue cannot starve other issues;
+incomplete scopes stay retryable. Resolution uses the configured planning identity
+and the same trusted author policy as the other planning readers. Only issues updated since a successful scan are reread on later passes; the
+cutoff advances only after the whole scan succeeds. Update the catalog readers
 and deploy the matching planning-package pin before recording release pointers.

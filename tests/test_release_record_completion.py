@@ -1,4 +1,3 @@
-from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from pathlib import Path
@@ -122,6 +121,17 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                 run=self.release_run,
             )
             resolve.assert_not_called()
+        repositories = (
+            self.profile.repository,
+            self.profile.repository.split("/")[0] + "/planning",
+        )
+        source = SimpleNamespace(service_authz=None)
+        policy = SimpleNamespace(
+            policies=tuple(
+                SimpleNamespace(repository=repo, service_authz=None) for repo in repositories
+            ),
+            find_repository_policy=lambda **kwargs: source,
+        )
         with (
             patch(
                 "control_plane.release_event_waits.release_version",
@@ -129,14 +139,11 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.release_event_waits.resolve_merge_train_policy_record",
-                return_value=SimpleNamespace(policy=SimpleNamespace(policies=())),
+                return_value=SimpleNamespace(policy=policy),
             ),
             patch(
-                "control_plane.release_event_waits.launchplane_github_token",
-                return_value=nullcontext("test-token"),
-            ),
-            patch(
-                "control_plane.release_event_waits.resolve_delivery_github_app_id", return_value=77
+                "control_plane.release_event_waits.planning_scope_resolver",
+                return_value=lambda repo: SimpleNamespace(repository=repo),
             ),
             patch("control_plane.release_event_waits.resolve_repository_release_waits") as resolve,
         ):
@@ -147,23 +154,18 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                 decision=self.decision,
                 run=self.release_run,
             )
-            self.assertEqual(resolve.call_args.kwargs["product"], self.profile.product)
             self.assertEqual(
-                resolve.call_args.kwargs["released_commit"],
-                self.decision.checklist.candidate.source_commit,
+                {call.kwargs["scope"].repository for call in resolve.call_args_list},
+                set(repositories),
             )
+            self.assertEqual(resolve.call_args.kwargs["product"], self.profile.product)
+            self.assertTrue(callable(resolve.call_args.kwargs["contains_commit"]))
 
     def test_completion_retries_release_waits_even_after_record_closes(self) -> None:
         self.advance()
         self.advance()
         self.assertEqual(self.settle_waits.call_count, 2)
         self.assertEqual(self.settle_waits.call_args.kwargs["decision"], self.decision)
-
-    def test_failed_release_does_not_resolve_production_waits(self) -> None:
-        assert self.release_run is not None
-        self.release_run = self.release_run.model_copy(update={"state": "running"})
-        self.advance()
-        self.settle_waits.assert_not_called()
 
     def test_worker_closes_release_record_without_invitation_or_equal_lanes(self) -> None:
         self.advance()

@@ -57,6 +57,7 @@ class ReleaseInvitationBackoff:
     completions: dict[str, tuple[str, float]] = field(default_factory=dict)
     diagnostics: dict[str, tuple[type[Exception], float]] = field(default_factory=dict)
     release_records: dict[str, float] = field(default_factory=dict)
+    release_wait_scans: dict[str, str] = field(default_factory=dict)
 
 
 def advance_release_invitations(
@@ -545,6 +546,7 @@ def _settle_release_records(
                 control_plane_root=control_plane_root,
                 profile=profile,
                 decision=decision,
+                wait_scan_cutoffs=backoff.release_wait_scans if backoff is not None else None,
             )
         except Exception as error:
             _LOGGER.warning(
@@ -555,7 +557,9 @@ def _settle_release_records(
             )
             continue
         if settled and backoff is not None:
-            backoff.release_records[decision.record_id] = float("inf")
+            backoff.release_records[decision.record_id] = (
+                monotonic() + SETTLED_DECISION_RECHECK_SECONDS
+            )
 
 
 def _settle_release_record(
@@ -564,6 +568,7 @@ def _settle_release_record(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
+    wait_scan_cutoffs: dict[str, str] | None = None,
 ) -> bool:
     from control_plane.client_release import read_client_release_run
     from control_plane.release_review_record import release_decision_marker
@@ -625,6 +630,7 @@ def _settle_release_record(
                     profile=profile,
                     decision=decision,
                     run=run,
+                    scan_cutoffs=wait_scan_cutoffs,
                 )
                 return True
             if (
@@ -659,6 +665,7 @@ def _settle_release_record(
                 profile=profile,
                 decision=decision,
                 run=run,
+                scan_cutoffs=wait_scan_cutoffs,
             )
             return True
     return False
