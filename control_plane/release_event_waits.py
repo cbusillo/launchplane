@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from functools import partial
 import logging
@@ -31,16 +32,21 @@ def advance_product_release_waits(
     store: ReleaseReviewStore,
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
-    next_checks: dict[str, float] | None,
+    next_checks: dict[str, tuple[str, float]] | None,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> None:
     from control_plane.client_release import read_client_release_run
     from control_plane.release_invitation import SETTLED_DECISION_RECHECK_SECONDS
 
-    if next_checks is not None:
-        if monotonic() < next_checks.get(profile.product, 0):
-            return
-        next_checks[profile.product] = monotonic() + SETTLED_DECISION_RECHECK_SECONDS
+    if should_stop():
+        return
     production = release_version(store=store, profile=profile, instance="prod")
+    fingerprint = production.model_dump_json()
+    if next_checks is not None:
+        previous, next_read = next_checks.get(profile.product, ("", 0))
+        if previous == fingerprint and monotonic() < next_read:
+            return
+        next_checks[profile.product] = (fingerprint, monotonic() + SETTLED_DECISION_RECHECK_SECONDS)
     decisions = [
         decision
         for decision in store.list_release_review_decision_records(product=profile.product)
@@ -61,6 +67,7 @@ def advance_product_release_waits(
                 profile=profile,
                 decision=decision,
                 run=run,
+                should_stop=should_stop,
             )
             return
 
@@ -72,6 +79,7 @@ def settle_product_release_waits(
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
     run: ClientReleaseRunView,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> None:
     if (
         run.state != "passed"
@@ -143,6 +151,8 @@ def settle_product_release_waits(
     }
     failures = 0
     for repository in sorted(repositories):
+        if should_stop():
+            return
         try:
             scope = source_scope if repository == profile.repository else resolve_scope(repository)
             resolve_repository_release_waits(
@@ -151,6 +161,7 @@ def settle_product_release_waits(
                 evidence=f"Release reached production: {decision.release_issue_url} (decision {decision.record_id}).",
                 contains_commit=contains_commit,
                 release_still_current=release_still_current,
+                should_stop=should_stop,
                 ensure_posting_author=partial(
                     confirm_planning_poster, issued.get(repository), scope.trusted_author_ids
                 ),

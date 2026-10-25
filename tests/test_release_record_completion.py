@@ -187,6 +187,18 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                 self.advance(backoff)
             self.assertEqual(self.settle_waits.call_count, 2)
 
+    def test_wait_resolution_failure_does_not_skip_invitation_publication(self) -> None:
+        with (
+            patch(
+                "control_plane.release_event_waits.advance_product_release_waits",
+                side_effect=ValueError("Wait incomplete"),
+            ),
+            patch("control_plane.release_invitation.publish_release_invitation") as publish,
+        ):
+            self.advance()
+            publish.assert_called_once()
+            self.assertEqual(self.issue["state"], "closed")
+
     def test_worker_closes_release_record_without_invitation_or_equal_lanes(self) -> None:
         self.advance()
         self.assertEqual(self.issue["state"], "closed")

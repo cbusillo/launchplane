@@ -73,7 +73,8 @@ def release_wait_candidates(scope: PlanningRepositoryScope, product: str) -> lis
                 or type(item.get("number")) is not int
                 or item["number"] < 1
                 or not isinstance(item.get("repository"), dict)
-                or item["repository"].get("nameWithOwner") != scope.repository
+                or not isinstance(item["repository"].get("nameWithOwner"), str)
+                or item["repository"]["nameWithOwner"].casefold() != scope.repository.casefold()
             ):
                 raise PlanningCompletionReview("Release wait candidate identity is incomplete.")
             records[item["number"]] = item
@@ -102,10 +103,15 @@ def released_change_contains(
 ) -> bool:
     if required_commit == released_commit:
         return True
-    comparison = github_api_request(
-        path=f"/repos/{scope.repository}/compare/{required_commit}...{released_commit}",
-        token=scope.token,
-    )
+    try:
+        comparison = github_api_request(
+            path=f"/repos/{scope.repository}/compare/{required_commit}...{released_commit}",
+            token=scope.token,
+        )
+    except click.ClickException as error:
+        if provider_failure(error).status_code == 404:
+            return False
+        raise
     if not isinstance(comparison, dict) or comparison.get("status") not in {
         "ahead",
         "behind",
@@ -125,6 +131,7 @@ def _resolve_issue_wait(
     contains_commit: Callable[[str], bool],
     release_still_current: Callable[[], bool],
     ensure_posting_author: Callable[[], None],
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> None:
     def trusted(source: dict[str, Any]) -> bool:
         return wait_records.author_is_trusted(
@@ -133,7 +140,13 @@ def _resolve_issue_wait(
 
     path = f"/repos/{scope.repository}/issues/{number}"
     issue = github_api_request(path=path, token=scope.token)
-    if not isinstance(issue, dict) or issue.get("number") != number:
+    if (
+        not isinstance(issue, dict)
+        or issue.get("number") != number
+        or not isinstance(issue.get("repository_url"), str)
+        or issue["repository_url"].casefold()
+        != f"https://api.github.com/repos/{scope.repository}".casefold()
+    ):
         raise ValueError("Release wait issue identity is unavailable.")
     if issue.get("state") != "open" or "pull_request" in issue:
         return
@@ -161,6 +174,8 @@ def _resolve_issue_wait(
     )
     body = wait_records.marker(resolved) + "\n\n" + human.replace("@", "@\u200b")
     ensure_posting_author()
+    if should_stop():
+        return
     result = github_api_request(
         path=path + "/comments", token=scope.token, method="POST", body={"body": body}
     )
@@ -180,9 +195,14 @@ def resolve_repository_release_waits(
     contains_commit: Callable[[str], bool],
     release_still_current: Callable[[], bool],
     ensure_posting_author: Callable[[], None],
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> None:
     failures = 0
+    if should_stop():
+        return
     for issue in release_wait_candidates(scope, product):
+        if should_stop():
+            return
         if "pull_request" in issue:
             continue
         number = issue.get("number")
@@ -197,12 +217,13 @@ def resolve_repository_release_waits(
                 contains_commit=contains_commit,
                 release_still_current=release_still_current,
                 ensure_posting_author=ensure_posting_author,
+                should_stop=should_stop,
             )
         except (ValueError, click.ClickException) as error:
             if isinstance(error, click.ClickException) and not isinstance(
                 error, PlanningCompletionReview
             ):
-                if provider_failure(error).status_code != 404:
+                if provider_failure(error).status_code not in {404, 410}:
                     raise
             failures += 1
             _LOGGER.warning(

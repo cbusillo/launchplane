@@ -57,7 +57,7 @@ class ReleaseInvitationBackoff:
     completions: dict[str, tuple[str, float]] = field(default_factory=dict)
     diagnostics: dict[str, tuple[type[Exception], float]] = field(default_factory=dict)
     release_records: dict[str, float] = field(default_factory=dict)
-    release_waits: dict[str, float] = field(default_factory=dict)
+    release_waits: dict[str, tuple[str, float]] = field(default_factory=dict)
 
 
 def advance_release_invitations(
@@ -86,12 +86,20 @@ def advance_release_invitations(
             )
             from control_plane.release_event_waits import advance_product_release_waits
 
-            advance_product_release_waits(
-                store=store,
-                control_plane_root=control_plane_root,
-                profile=profile,
-                next_checks=backoff.release_waits if backoff is not None else None,
-            )
+            try:
+                advance_product_release_waits(
+                    store=store,
+                    control_plane_root=control_plane_root,
+                    profile=profile,
+                    next_checks=backoff.release_waits if backoff is not None else None,
+                    should_stop=stop_event.is_set if stop_event is not None else lambda: False,
+                )
+            except Exception as error:
+                _LOGGER.warning(
+                    "release waits unavailable product=%s error_type=%s",
+                    profile.product,
+                    type(error).__name__,
+                )
             publish_release_invitation(
                 store=store, control_plane_root=control_plane_root, profile=profile, backoff=backoff
             )
