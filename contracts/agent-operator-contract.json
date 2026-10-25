@@ -52,8 +52,7 @@
         ],
         "method": "POST",
         "modes": [
-          "request",
-          "adopt"
+          "request"
         ],
         "operation_id": "request_release_review",
         "path": "/v1/release-review/requests",
@@ -1165,8 +1164,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "190d2dabc4cc55a1c3584ee780a60057049a4e46"
+    "source_commit_sha": "cda994b2eb50783144fea0c7dbdff90f8e297a66"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "55b85d26a860b2f6a5737bc034dd888e09867c31f5be9af0f198b39035a678d8"
+  "semantic_digest_sha256": "9a15ae89f47fdbe35c3ab935a05e9aad9e8f381b6fe40c3d67fe110741cbfabb"
 }

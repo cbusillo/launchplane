@@ -363,6 +363,35 @@ class ProductOnboardingTests(unittest.TestCase):
             "public",
         )
 
+    def test_context_move_preserves_instance_monitoring_authority(self) -> None:
+        manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
+        existing = build_product_profile_record(
+            manifest=manifest, updated_at="2026-10-25T12:00:00Z"
+        )
+        lane = manifest.lanes[0]
+        moved = lane.model_copy(
+            update={
+                "context": lane.context + "-moved",
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"monitoring_intent": "prelaunch"}
+                ),
+            }
+        )
+        replacement = build_product_profile_record(
+            manifest=manifest.model_copy(
+                update={
+                    "lanes": (moved, *manifest.lanes[1:]),
+                    "historical_contexts": (lane.context,),
+                }
+            ),
+            updated_at="2026-10-25T12:01:00Z",
+            existing_profile=existing,
+        )
+        self.assertEqual(replacement.lanes[0].context, moved.context)
+        self.assertEqual(
+            replacement.lanes[0].health_monitoring, existing.lanes[0].health_monitoring
+        )
+
     def test_existing_onboarding_preserves_prelaunch_rebuild_authority(self) -> None:
         existing_manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
         existing_profile = build_product_profile_record(

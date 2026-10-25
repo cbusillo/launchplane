@@ -110,7 +110,7 @@ OPERATION_SPECS = (
         RELEASE_REQUEST_ROUTE,
         "Record a Director request or agreed finish-line release decision and deliver its Client invitation without accepting or deploying.",
         ("service_api", "browser"),
-        ("request", "adopt"),
+        ("request",),
         "body",
         ("checklist_digest", "decision_reference"),
     ),

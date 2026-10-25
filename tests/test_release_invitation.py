@@ -218,6 +218,32 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), before)
         self.assertEqual(self.posts, [])
 
+    def test_request_decision_requires_a_client_release_product_without_a_hotfix(self) -> None:
+        for update in (
+            {"production_use": "prelaunch"},
+            {"release_on_acceptance": "director_standing"},
+            {},
+        ):
+            with self.subTest(update=update):
+                profile = self.profile.model_copy(update=update)
+                self.store.write_product_profile_record(profile)
+                with patch(
+                    "control_plane.client_release.live_temporary_hotfix",
+                    return_value=object() if not update else None,
+                ):
+                    with self.assertRaises(ValueError):
+                        record_release_request(
+                            store=self.store,
+                            profile=profile,
+                            review=self.review,
+                            source="director_request",
+                            reason="Release the completed work.",
+                            decision_reference="",
+                            actor="director",
+                        )
+                self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
+        self.assertEqual(self.posts, [])
+
     def test_request_record_preserves_a_concurrent_product_edit(self) -> None:
         compare_and_write = self.store.compare_and_write_product_profile_record
         edited = self.profile.model_copy(update={"display_name": "Updated site name"})

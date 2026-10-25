@@ -388,8 +388,8 @@ in the open review is current. Lost post or replacement responses are recovered 
 cleanup is completed before delivery is cached. Missing timestamps or identities
 refuse publication. No manual live-thread cleanup is needed.
 
-A saved, still-current release request gets at most one reminder after three
-days. Its durable receipt prevents duplicate reminders after restarts or lost
+A saved, still-current release request gets at most one reminder per open review
+after three days. Its durable receipt prevents duplicate reminders after restarts or lost
 responses. A direct request retry confirms the existing invitation without
 sending a due reminder. This maintains the decided request; it never starts a
 new release request because time passed.

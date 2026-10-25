@@ -582,6 +582,7 @@ def register_release_review_routes(
         profile = profile_for_viewer(record_store, envelope.product, identity, trace_id)
         if not (
             director_agent_identity(identity)
+            and envelope.adopt_issue_number is None
             or isinstance(identity, GitHubHumanIdentity)
             and can_override(profile, identity)
         ):

@@ -157,8 +157,21 @@ def _onboarding_lane_profile(
     )
     payload = existing.model_dump(mode="python") if existing else {}
     manifest_values = lane.model_dump(mode="python")
+    monitoring_owner = (
+        next(
+            (
+                candidate
+                for candidate in existing_profile.lanes
+                if candidate.instance == lane.instance
+            ),
+            None,
+        )
+        if existing_profile
+        else None
+    )
+    if monitoring_owner is not None:
+        manifest_values["health_monitoring"] = monitoring_owner.health_monitoring
     if existing is not None:
-        manifest_values.pop("health_monitoring")
         manifest_values.pop("odoo_prelaunch_rebuild")
     payload.update(manifest_values)
     payload["health_url"] = _lane_health_url(manifest=manifest, lane=lane)

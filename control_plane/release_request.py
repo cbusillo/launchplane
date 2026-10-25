@@ -11,6 +11,7 @@ from control_plane.contracts.release_request import (
 from control_plane.contracts.release_review import ReleaseReviewStatus
 from control_plane.release_invitation import (
     _accepted_release_in_progress,
+    _client_release_requests_enabled,
     _last_client_decision,
     _ready,
     publish_release_invitation,
@@ -48,12 +49,18 @@ def record_release_request(
     decision_reference: str,
     actor: str,
 ) -> LaunchplaneProductProfileRecord:
+    from control_plane.client_release import live_temporary_hotfix
+
+    if not _client_release_requests_enabled(profile):
+        raise ValueError("This product does not request Client releases.")
     if not _ready(review, profile):
         raise ValueError("The release is not ready for a Client request.")
     assert review.checklist is not None
     with store.release_review_publication_lock(record_id=f"invitation:{profile.product}"):
         if store.read_product_profile_record(profile.product) != profile:
             raise ValueError("The product changed before the release request was recorded.")
+        if live_temporary_hotfix(store, profile) is not None:
+            raise ValueError("The temporary hotfix awaits the Client's review first.")
         client_decision = _last_client_decision(store, profile)
         if _accepted_release_in_progress(
             store, profile, client_decision, review.checklist.production, review.checklist.candidate

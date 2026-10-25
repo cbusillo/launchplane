@@ -658,6 +658,23 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                 adopt_comment_id=600,
             )
             self.assertEqual(stale.status_code, 409)
+            agent = await _asgi_request(
+                self.app,
+                "POST",
+                "/v1/release-review/requests",
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload={
+                    "product": "example-site",
+                    "checklist_digest": build_release_review(
+                        store=self.store, profile=profile(), read=github_read
+                    ).checklist_digest,
+                    "reason": "Adopt existing request.",
+                    "decision_reference": "https://git.example.test/agreements/7",
+                    "adopt_issue_number": 91,
+                    "adopt_comment_id": 600,
+                },
+            )
+            self.assertEqual(agent.status_code, 403, agent.text)
             adopt.assert_not_called()
             for dry_run in (True, False):
                 result = await self.request_release(
