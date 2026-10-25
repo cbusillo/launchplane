@@ -1647,6 +1647,22 @@ the original opening effect completed before its attempt record committed.
 Delivery attempts are the idempotency boundary for notifications, while incident
 records remain the source of truth for active public-ingress state.
 
+Discord pages only new critical incidents and material critical changes. Warnings
+and unchanged reminders use a plain-text, mention-free summary grouped by product,
+lane, check kind and failure code. A five-minute settling delay groups concurrent
+changes. Summaries reuse the notification outbox with aggregate type
+`public_ingress_discord_summary`; their identity binds the policy, destination and
+current incident occurrences and material fingerprints. Probe timestamps and
+reminder windows cannot create another copy of an unchanged summary.
+
+Before delivery, both paths re-read current state. Cleared incidents and obsolete
+material alerts are superseded. A changed summary queues its current replacement;
+an empty summary sends nothing. Summary receipts live in the outbox, independently
+of per-incident attempt records. An interrupted Discord summary retains its send
+marker and cannot replay an unknown provider effect; an explicit rate-limit
+refusal may retry. Notification routing never changes measured health, incident
+severity, acknowledgement, resolution or provider-operation fences.
+
 ## Every Code Feedback Resume Evidence
 
 Status: Every Code is retired in [DIRECTION.md](../DIRECTION.md). Historical

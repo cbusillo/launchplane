@@ -4,6 +4,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
+from control_plane.discord_incident_summary import SUMMARY_AGGREGATE_TYPE
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentRecord,
     PublicIngressNotificationPolicyRecord,
@@ -54,6 +55,8 @@ def _delivery_routing(
     if record.kind == "github_workflow_dispatch":
         routing["inputs"] = record.payload.get("inputs", {})
     if record.kind == "public_ingress_notification":
+        if record.aggregate_type == SUMMARY_AGGREGATE_TYPE:
+            return {**routing, "summary_digest": record.payload.get("summary_digest", "")}
         attempt = record.payload.get("attempt")
         if isinstance(attempt, dict):
             routing.update(

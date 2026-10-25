@@ -126,9 +126,16 @@ from control_plane.runtime_dependency_health import derive_runtime_dependencies
 from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.lane_runtime_verification import lane_expected_runtime_identity
 from control_plane.notifications import (
+    DiscordNotificationError,
     post_discord_webhook,
     public_discord_url_error,
     public_url_error,
+)
+from control_plane.discord_incident_summary import (
+    SUMMARY_AGGREGATE_TYPE,
+    build_discord_incident_summary_delivery,
+    deliver_discord_incident_summary,
+    discord_incident_needs_summary,
 )
 from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsProbeResult
@@ -327,6 +334,7 @@ class PublicIngressNotificationDelivery:
     external_url: str = ""
     external_id: str = ""
     error_message: str = ""
+    outcome_unknown: bool = False
 
 
 class PublicIngressNotificationDrivers(Protocol):
@@ -1246,10 +1254,7 @@ def _store_monitor_observation(
             direct_destination_kinds: (
                 tuple[PublicIngressNotificationDestinationKind, ...] | None
             ) = None
-            if callable(transition_writer) and any(
-                _outbox_incident_event_id(delivery) == incident_event.event_id
-                for delivery in outbox_deliveries
-            ):
+            if callable(transition_writer):
                 direct_destination_kinds = ()
             delivery_attempts.extend(
                 deliver_public_ingress_incident_notifications(
@@ -1492,6 +1497,19 @@ def _public_ingress_notification_outbox_deliveries(
             for destination in policy.destinations:
                 if destination.status != "enabled":
                     continue
+                if destination.kind == "discord" and discord_incident_needs_summary(
+                    incident, event
+                ):
+                    summary = build_discord_incident_summary_delivery(
+                        record_store=record_store,
+                        policy=policy,
+                        destination=destination,
+                        incidents=incident_records,
+                        created_at=incident_event.occurred_at,
+                    )
+                    if summary is not None:
+                        deliveries.append(summary)
+                    continue
                 attempt_id = build_public_ingress_notification_attempt_id(
                     incident_id=incident.incident_id,
                     event=event,
@@ -1565,14 +1583,6 @@ def _public_ingress_notification_outbox_deliveries(
                     )
                 )
     return tuple(deliveries)
-
-
-def _outbox_incident_event_id(delivery: OutboxDeliveryRecord) -> str:
-    attempt = delivery.payload.get("attempt")
-    if not isinstance(attempt, dict):
-        return ""
-    value = attempt.get("incident_event_id")
-    return value.strip() if isinstance(value, str) else ""
 
 
 def _plan_public_ingress_incident_transition(
@@ -3573,6 +3583,10 @@ class PublicIngressNotificationDriverSet:
                 delivery_status="failed",
                 action="provider_error",
                 error_message=str(error) or error.__class__.__name__,
+                outcome_unknown=destination.kind == "discord"
+                and not (
+                    isinstance(error, DiscordNotificationError) and 400 <= error.status_code < 500
+                ),
             )
         return PublicIngressNotificationDelivery(
             delivery_status="failed",
@@ -3652,6 +3666,15 @@ def deliver_public_ingress_notification_outbox_delivery(
 ) -> OutboxDeliveryRecord:
     delivery_record = record
     try:
+        if record.aggregate_type == SUMMARY_AGGREGATE_TYPE:
+            if record_store is None:
+                raise ValueError("Discord incident summary requires a record store")
+            return deliver_discord_incident_summary(
+                record=record,
+                record_store=record_store,
+                drivers=drivers,
+                mark_provider_started=mark_provider_started,
+            )
         payload = record.payload
         attempt_payload = _dict_payload(payload.get("attempt"))
         destination_payload = _dict_payload(payload.get("destination"))
@@ -3675,6 +3698,58 @@ def deliver_public_ingress_notification_outbox_delivery(
                     record=record,
                     reason=reason,
                 )
+            if destination_payload.get("kind") == "discord":
+                event = _public_ingress_event_value(attempt_payload.get("event"))
+                if discord_incident_needs_summary(incident, event):
+                    policy = next(
+                        (
+                            value
+                            for value in _matching_notification_policies(
+                                record_store=record_store, incident=incident
+                            )
+                            if value.policy_id == attempt_payload.get("policy_id")
+                        ),
+                        None,
+                    )
+                    destination = (
+                        next(
+                            (
+                                value
+                                for value in policy.destinations
+                                if value.destination_id == destination_payload.get("destination_id")
+                                and value.kind == "discord"
+                                and value.status == "enabled"
+                            ),
+                            None,
+                        )
+                        if policy
+                        else None
+                    )
+                    if policy is not None and destination is not None:
+                        from control_plane.storage.postgres import OutboxWithIdempotencyRequest
+
+                        summary = build_discord_incident_summary_delivery(
+                            record_store=record_store,
+                            policy=policy,
+                            destination=destination,
+                            incidents=(),
+                            created_at=record.updated_at,
+                        )
+                        if summary is not None:
+                            record_store.enqueue_outbox_delivery_with_idempotency(
+                                OutboxWithIdempotencyRequest(delivery=summary)
+                            )
+                    return _superseded_incident_outbox_delivery(
+                        record=record, reason="discord_summary"
+                    )
+                if (
+                    incident.latest_material_event_id
+                    and attempt_payload.get("incident_event_id")
+                    and incident.latest_material_event_id != attempt_payload["incident_event_id"]
+                ):
+                    return _superseded_incident_outbox_delivery(
+                        record=record, reason="material_state_changed"
+                    )
         summary_delivery_id = payload.get(PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY)
         if summary_delivery_id and summary_delivery_id != record.delivery_id:
             return _superseded_incident_outbox_delivery(
@@ -3837,6 +3912,8 @@ def _superseded_incident_outbox_delivery(
 
 
 class PublicIngressNotificationOutboxStore(PublicIngressMonitorStore, Protocol):
+    def enqueue_outbox_delivery_with_idempotency(self, request: Any) -> OutboxDeliveryRecord: ...
+
     def read_public_ingress_incident_record(
         self, incident_id: str
     ) -> PublicIngressIncidentRecord: ...
@@ -3926,12 +4003,15 @@ def _deliver_direct_notification_outbox(
     )
     return record.model_copy(
         update={
-            "state": "pending" if delivery.delivery_status == "failed" else "delivered",
+            "state": "failed"
+            if delivery.outcome_unknown
+            else ("pending" if delivery.delivery_status == "failed" else "delivered"),
             "provider_id": destination.kind,
-            # A returned failure is retryable; a process interruption retains the durable marker.
-            "provider_operation_key": "",
+            "provider_operation_key": operation_key if delivery.outcome_unknown else "",
             "action": delivery.action,
-            "error_code": "provider_error" if delivery.delivery_status == "failed" else "",
+            "error_code": "delivery_outcome_unknown"
+            if delivery.outcome_unknown
+            else ("provider_error" if delivery.delivery_status == "failed" else ""),
             "lease_owner": "",
             "lease_expires_at": "",
             "payload": {**payload, "attempt_result": attempt.model_dump(mode="json")},
@@ -4196,7 +4276,13 @@ def _deliver_discord_notification(
             action="invalid_discord_webhook",
             error_message=f"Discord webhook URL is not public: {public_url_error}",
         )
-    color = 0x2E7D32 if event == "resolved" else 0xC62828
+    color = (
+        0x2E7D32
+        if event == "resolved"
+        else 0xED9B20
+        if discord_incident_needs_summary(incident, event)
+        else 0xC62828
+    )
     title = (
         "Testing delivery"
         if incident.check_name.startswith("testing-delivery-")
