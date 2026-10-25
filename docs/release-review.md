@@ -248,8 +248,12 @@ invitation. The existing invitation is marked released without another mention,
 with the saved acceptance linked and the original text and delivery receipts
 retained in a collapsed history section. Historical mentions are neutralized.
 Completed or replaced comments and their preserved receipts are excluded from
-later open request, replacement and reminder scans, including renewed requests bound to
-the same saved decision; a later review gets its own reminder.
+later open request and replacement scans, including renewed requests bound to
+the same saved decision.
+The latest open request also settles when the Client accepted a newer testing
+version in that same review and that accepted version reached production.
+The saved acceptance, rather than the original request marker, identifies what
+released. Earlier rejected requests remain history.
 The marked issue closes only when testing matches production and there is no
 other outstanding invitation. Older decided invitations remain history;
 newer requests remain pending until the Client decides. A newer testing
@@ -273,9 +277,8 @@ for a newer candidate. Deliberate urgent openings skip historical settlement;
 the routine worker reconciles it separately.
 
 Each request includes `release_invitation_marker(product, candidate)`, derived
-from the candidate's artifact, commit and shared-input identity. The worker
-serializes publication across replicas using the existing release-publication
-lock and checks for that receipt before posting. A retry after a lost response
+from the candidate's artifact, commit and shared-input identity. The publisher serializes deliberate requests across replicas using the existing
+release-publication lock and checks for that receipt before posting. A retry after a lost response
 adopts the existing comment; edits to checklist notes do not notify again.
 Receipt-only adoption is the migration prerequisite for the receipt-trust
 hardening tracked in #3085. The ordinary publisher still accepts its existing
@@ -296,8 +299,7 @@ mention, original edit or new invitation is created. Retries discover the same
 adoption marker; the ordinary publisher can then update its own receipt silently.
 An App attestation on a manual destination supplies trust without trusting its
 human author or borrowing another App's credential. Adoption refuses when another
-App-attested destination already exists. The adoption receipt begins a new
-three-day reminder clock; it does not send a reminder on adoption. The original
+App-attested destination already exists. The original
 manual comment is retained unchanged, including after release completion.
 The invitation greets the Client, shows the Client test notes for changes they
 reviewed or were asked to review on preview, and asks them to open the release
@@ -321,11 +323,6 @@ The Client sees the real test steps and the source change, without the engineeri
 directive. Those steps alone never open an automatic request or send a new ping;
 preview-review evidence classifies additions within a deliberate publication.
 Neither kind of change starts publication from the worker.
-An addition note still names only the Client-facing additions; the next silent
-update restores the full testing list, including the release-test steps.
-Existing requests refresh missing or corrected release-test steps silently before
-their receipt is reused or a reminder is sent. Adoption receipts record only the
-changes with preview-review evidence, so a later material addition can still notify.
 For a batch landing, the stored landing plan binds the batch PR and merge commit
 to its constituent PRs; each constituent uses its own review evidence and its
 section of the batch's Client test notes.
@@ -351,10 +348,7 @@ train membership and current source notes on every read, so correcting the notes
 clears it across worker restarts without a second failure record. It changes no
 checklist digest, completeness, acceptance or release gate. An inconsistent
 batch provenance record still refuses invitation publication without making the
-release checklist unavailable through this diagnostic read. The worker logs the
-same bounded reason at its existing five-minute retry cadence for unchanged
-profile/lane versions; it never logs the PR body or arbitrary exception text.
-Missing lane versions use the same per-product, exception-type diagnostic bound.
+release checklist unavailable through this diagnostic read. Missing lane versions use the same per-product, exception-type diagnostic bound.
 Version reads continue every pass, and a successful pass clears the diagnostic
 backoff so a new failure is visible.
 
@@ -365,19 +359,13 @@ lookup blocked while the next release pass runs within the configured worker
 cadence. Shutdown joins both threads; this is scheduling isolation, not a
 provider latency guarantee. All existing checklist, candidate and release gates
 still apply.
-Durable `release-client-change` receipts record which PRs have been announced in
-this open review. Engineering-only candidates update an already open invitation
-silently, with no new comment or mention. Notes edits and already-announced changes
-do not notify again. The `release-request` marker binds the open review to the
-product, repository, Client identity and latest Client decision. A new candidate
-with a Client-facing change after acceptance or a request for changes opens a new
-review and mentions the Client.
-The worker adopts the newest legacy candidate-marked request created after that
-decision (or the newest one if there has been no decision). Legacy PR links,
-including batch links bound to their constituents, seed the announcement history.
-An adopted manual receipt for the exact current candidate covers its included
-changes even without individual PR links. Bound request evidence compares
-repository names without case sensitivity, as GitHub does.
+The `release-request` marker binds an open review to its product, repository,
+Client identity and latest Client decision. Durable `release-client-change`
+receipts retain which PRs were announced in that review. Legacy PR links,
+including batch links bound to their constituents, seed announcement history on
+a deliberate publication. An adopted receipt for the exact current candidate
+covers its included changes even without individual PR links. Repository names
+compare without case sensitivity, as GitHub does.
 The publisher updates the wording and marks older invitations in the same open
 review replaced once, collapsing the earlier wording and neutralizing its
 mentions while retaining delivery receipts and historical text. Release decision

@@ -59,6 +59,15 @@ class ReleaseInvitationBackoff:
     release_records: dict[str, float] = field(default_factory=dict)
 
 
+def _client_release_requests_enabled(profile: LaunchplaneProductProfileRecord) -> bool:
+    return (
+        profile.is_active
+        and profile.production_use != "prelaunch"
+        and profile.release_on_acceptance != "director_standing"
+        and profile.owner.is_set
+    )
+
+
 def advance_release_invitations(
     *,
     store: object,
@@ -68,7 +77,6 @@ def advance_release_invitations(
 ) -> None:
     """Cold notification reads never occupy the accepted-release worker."""
     from control_plane.storage.postgres import PostgresRecordStore
-    from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
 
     if not isinstance(store, PostgresRecordStore):
         return
@@ -83,12 +91,7 @@ def advance_release_invitations(
                 backoff=backoff,
                 stop_event=stop_event,
             )
-            if (
-                profile.is_active
-                and profile.production_use != "prelaunch"
-                and profile.release_on_acceptance != "director_standing"
-                and profile.owner.is_set
-            ):
+            if _client_release_requests_enabled(profile):
                 _settle_completed_invitation(
                     store=store,
                     control_plane_root=control_plane_root,
@@ -108,19 +111,11 @@ def advance_release_invitations(
                 continue
             if backoff is not None:
                 backoff.diagnostics[profile.product] = (type(error), now + 300)
-            if isinstance(error, ReleaseInvitationNotesUnavailable):
-                _LOGGER.warning(
-                    "release invitation unavailable product=%s error_type=%s reason=%s",
-                    profile.product,
-                    type(error).__name__,
-                    error,
-                )
-            else:
-                _LOGGER.warning(
-                    "release invitation unavailable product=%s error_type=%s",
-                    profile.product,
-                    type(error).__name__,
-                )
+            _LOGGER.warning(
+                "release invitation unavailable product=%s error_type=%s",
+                profile.product,
+                type(error).__name__,
+            )
         else:
             if backoff is not None:
                 backoff.diagnostics.pop(profile.product, None)
@@ -783,7 +778,11 @@ def _settle_completed_invitation(
                 ):
                     continue
                 created_at = _timestamp(comment.get("created_at"))
-                if not candidate_markers.intersection(lines) or (
+                reviewed_request = (
+                    _request_marker(profile, previous_decision) in lines
+                    and created_at <= _timestamp(decision.decided_at)
+                )
+                if not (candidate_markers.intersection(lines) or reviewed_request) or (
                     previous_decision is not None
                     and created_at <= _timestamp(previous_decision.decided_at)
                     and comment is not continued_request
@@ -838,13 +837,7 @@ def publish_release_invitation(
     urgent_checklist_digest: str = "",
 ) -> bool:
     origin = launchplane_public_origin_from_env()
-    if (
-        not origin
-        or not profile.is_active
-        or profile.production_use == "prelaunch"
-        or profile.release_on_acceptance == "director_standing"
-        or not profile.owner.is_set
-    ):
+    if not origin or not _client_release_requests_enabled(profile):
         return False
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")

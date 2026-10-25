@@ -98,10 +98,28 @@ class ReleaseInvitationTests(unittest.TestCase):
                 self.review = original
                 if change != "client_accepted":
                     self.make_engineering_only()
+                    if change == "docs":
+                        assert self.review.checklist is not None
+                        self.review = self.review.model_copy(
+                            update={
+                                "checklist": self.review.checklist.model_copy(
+                                    update={"items": (), "additional_changes": ()}
+                                )
+                            }
+                        )
                 advance_release_invitations(store=self.store, control_plane_root=self.root)
                 self.assertEqual(self.posts, [])
                 self.assertEqual(self.comments, [])
                 self.assertEqual(self.issues, [])
+
+    def test_worker_settles_request_when_client_releases_a_newer_testing_version(self) -> None:
+        self.publish(urgent_reason="Release the completed work.")
+        self.change_candidate(source_commit="e" * 40)
+        accepted, _ = self.complete_release()
+        advance_release_invitations(store=self.store, control_plane_root=self.root)
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertIn(accepted.release_issue_url, self.comments[0]["body"])
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
 
     def test_manual_request_adoption_is_receipt_only_and_preserves_original(self) -> None:
         self.prepare_settings()
