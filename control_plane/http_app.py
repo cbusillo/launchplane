@@ -29873,6 +29873,7 @@ def create_launchplane_fastapi_app(
             common=read_route_dependencies,
             read_mutation_identity=read_operator_mutation_identity,
             cancel_pending_operation=cancel_pending_durable_operation,
+            control_plane_root=resolved_control_plane_root,
         ),
     )
     register_odoo_prod_release_operation_routes(

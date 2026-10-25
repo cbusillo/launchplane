@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 import os
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -41,9 +42,67 @@ from tests.test_http_app_production_backup_authority import (
     _JOB_WORKFLOW_REF,
 )
 from tests.test_postgres_integration import _store_for_fresh_head_database
+from tests import test_generic_web_client_release as release_fixtures
 
 
 class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
+    @scoped_agent_test
+    async def test_continuation_requires_existing_scope_and_preserves_original_release(
+        self,
+    ) -> None:
+        fixture = release_fixtures.GenericWebClientReleaseTests("runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        accepted, operation_id = fixture.stopped_precapture_backup()
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=("local-owner-agent",),
+                    token_labels=("local-owner-read",),
+                    products=(fixture.profile.product,),
+                    contexts=(fixture.context,),
+                    instances=("prod",),
+                    actions=("product_environment.read", "production_backup_gate.execute"),
+                ),
+            ),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            bearer_identity_config=_local_operator_bearer_config(),
+            authz_policy=policy,
+            record_store_factory=lambda: fixture.store,
+            control_plane_root_path=fixture.root,
+        )
+        path = f"/v1/products/{fixture.profile.product}/releases/{accepted.record_id}/backup-continuation"
+        body: dict[str, object] = {"reason": "Capture enrollment is qualified"}
+        with patch(
+            "control_plane.client_release_backup_continuation.resolve_guest_capture_values",
+            return_value={},
+        ):
+            denied = await request(app, "POST", path, payload=body)
+            self.assertIn(denied.status_code, (401, 403))
+            headers = {"Authorization": "Bearer local-operator-token"}
+            planned = await request(app, "POST", path, headers=headers, payload=body)
+            self.assertEqual(planned.status_code, 200, planned.text)
+            self.assertEqual(
+                fixture.store.read_verireel_prod_backup_gate_operation_record(operation_id).status,
+                "fail",
+            )
+            body.update(apply=True, expected_digest=planned.json()["review_digest"])
+            applied = await request(app, "POST", path, headers=headers, payload=body)
+            self.assertEqual(applied.status_code, 200, applied.text)
+            self.assertEqual(applied.json()["status"], "queued")
+            replay = await request(app, "POST", path, headers=headers, payload=body)
+            self.assertEqual(replay.status_code, 200, replay.text)
+            self.assertEqual(replay.json()["status"], "replayed")
+        self.assertEqual(
+            fixture.store.read_release_review_decision_record(
+                product=fixture.profile.product, record_id=accepted.record_id
+            ),
+            accepted,
+        )
+
     async def test_legacy_capture_route_cannot_enqueue_an_operation(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
