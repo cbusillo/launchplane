@@ -59,6 +59,8 @@ def snapshot_storage_budget(
     lane = next(
         item for item in profile.lanes if (item.context, item.instance) == (context, "testing")
     )
+    if lane.odoo_testing_drill_storage is None:
+        raise ValueError("Clean snapshots require reviewed testing storage headroom.")
     return lane.odoo_testing_drill_storage
 
 
@@ -71,6 +73,7 @@ def preview_snapshot(
         or profile.preview.template_instance != "testing"
     ):
         raise ValueError("Preview requires an opted-in clean snapshot source.")
+    snapshot_storage_budget(profile, profile.preview.context)
     snapshot = store.read_clean_testing_snapshot(profile.product, profile.preview.context)
     if snapshot is None:
         raise ValueError("No completed clean snapshot is available for this product.")

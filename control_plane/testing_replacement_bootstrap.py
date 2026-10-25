@@ -200,6 +200,9 @@ def bootstrap_copy_prerequisites(
     generation: FreshOdooTestingGeneration | None,
     source_mode: Literal["ssh", "container-export"],
 ) -> tuple[tuple[str, ...], str]:
+    from control_plane.clean_testing_snapshot import snapshot_storage_budget
+
+    snapshot_storage_budget(profile, context)
     require_testing_restore_policy(profile, context)
     omitted = testing_credential_omissions(store, context, generation)
     require_testing_credential_safety(store, context, omitted)

@@ -298,6 +298,17 @@ class CandidateApplicationTests(unittest.TestCase):
             self.inputs(allocation, "upstream")
         self.fixture.assert_serving_unchanged()
 
+    def test_snapshot_hold_without_budget_refuses_before_source_probe(self) -> None:
+        self.profile.preview.clean_testing_snapshot = True
+        self.store.write_product_profile_record(self.profile)
+        self.fixture.before = self.fixture.authority()
+        allocation = self.allocate("production")
+        with patch.object(compiler, "resolve_native_testing_source") as probe:
+            with self.assertRaises(compiler.CandidateRuntimeInputsChanged):
+                self.inputs(allocation, "production")
+        probe.assert_not_called()
+        self.fixture.assert_serving_unchanged()
+
     def execution(self, source: CandidateSource = "empty") -> None:
         self.allocation = self.allocate(source)
         self.compiled = self.inputs(self.allocation, source)
