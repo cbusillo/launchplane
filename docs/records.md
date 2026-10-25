@@ -2286,7 +2286,7 @@ backfill or authorization change.
   and published, and the active policy still names the caller as administrator;
   otherwise the operation fails with the same code. See
   [Temporary hotfix](release-review.md#temporary-hotfix).
-- A product profile's optional `release_request` holds its pending Director or
+- A product profile's optional `release_request` holds its latest Director or
   finish-line request decision. It binds the reviewed checklist and lane versions,
   repository, Client and preceding Client decision. Same-request retries preserve
   its actor, reason, agreement reference and timestamp. The existing profile

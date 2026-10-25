@@ -207,7 +207,7 @@ for this bounded request record, with its required decision reference; other age
 This operation records a request for review, never Client acceptance or permission
 to promote.
 
-The pending decision is stored in the product record's optional `release_request`
+The decision is stored in the product record's optional `release_request`
 field, with its actor, reason, source, reference, time, reviewed lane versions,
 checklist digest and preceding Client decision. Compare-and-write preserves
 concurrent profile edits. The general profile upsert preserves an omitted

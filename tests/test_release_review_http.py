@@ -144,7 +144,14 @@ class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
                     headers={"Cookie": self.sessions.session_cookie_header(session)},
                 )
                 self.assertEqual(read.status_code, 200, read.text)
-                self.assertEqual("release_request" in read.json(), visible)
+                self.assertEqual(read.json().get("release_request") is not None, visible)
+        agent_read = await _asgi_get(
+            self.app,
+            "/v1/release-review?product=example-site",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+        self.assertEqual(agent_read.status_code, 200, agent_read.text)
+        self.assertIsNotNone(agent_read.json().get("release_request"))
 
     async def test_agent_requests_require_a_recorded_decision_and_preserve_it_on_delivery_failure(
         self,

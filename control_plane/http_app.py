@@ -13872,7 +13872,10 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="release_request_bounded_apply_required",
-                message=f"Record release requests through POST {RELEASE_REQUEST_ROUTE}.",
+                message=(
+                    "Release request data is managed separately. Refresh the profile before saving settings; "
+                    f"use POST {RELEASE_REQUEST_ROUTE} to request a release."
+                ),
             )
         if profile.odoo_business_hours != (
             existing_profile.odoo_business_hours if existing_profile else None

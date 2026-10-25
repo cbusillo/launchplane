@@ -875,10 +875,13 @@ def publish_release_invitation(
     ):
         return False
     request_marker = _request_marker(profile, last_decision)
+    decision_marker = f"<!-- launchplane:release-request-decision:{request_decision.record_id} -->"
     receipt = (
         profile.product,
         profile.repository,
-        request_marker + release_invitation_marker(profile.product, candidate),
+        request_marker
+        + request_decision.record_id
+        + release_invitation_marker(profile.product, candidate),
     )
     receipt_due = False
     if backoff is not None:
@@ -1055,6 +1058,7 @@ def publish_release_invitation(
             if (
                 request
                 and marker in _comment_lines(request)
+                and decision_marker in _comment_lines(request)
                 and formatted
                 and not added
                 and not release_steps_changed
@@ -1139,7 +1143,7 @@ def publish_release_invitation(
                     + ", then press **Accept** or **Request changes**."
                 )
             body = (
-                f"{request_marker}\n{marker}\n{receipts}\n\n"
+                f"{request_marker}\n{decision_marker}\n{marker}\n{receipts}\n\n"
                 "**Release review** — is the site working with these changes, so they can go live?\n\n"
                 f"Hi {client},\n\n"
                 + (f"{why_now}\n\n" if why_now else "")

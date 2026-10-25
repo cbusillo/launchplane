@@ -75,7 +75,12 @@ from control_plane.release_invitation import (
     _last_client_decision,
     ADOPTED_ORIGINAL_PREFIX,
 )
-from control_plane.release_review import ReleaseReviewStore, build_release_review, release_version
+from control_plane.release_review import (
+    ReleaseReviewStore,
+    build_release_review,
+    release_version,
+    checklist_digest,
+)
 from control_plane.release_request import record_release_request, release_request_id
 from control_plane.release_invitation_changes import (
     ReleaseInvitationNotesUnavailable,
@@ -158,6 +163,39 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.store.create_release_review_decision_record_if_absent(decision(self.store))
         advance_release_invitations(store=self.store, control_plane_root=self.root)
         self.assertEqual(self.posts, posts)
+
+    def test_worker_continues_a_new_decision_before_an_older_receipt_is_due(self) -> None:
+        def decide(reason: str) -> None:
+            self.profile = record_release_request(
+                store=self.store,
+                profile=self.profile,
+                review=self.review,
+                source="director_request",
+                reason=reason,
+                decision_reference="",
+                actor="director",
+            )
+
+        decide("Release the first reviewed work.")
+        backoff = ReleaseInvitationBackoff()
+        advance_release_invitations(store=self.store, control_plane_root=self.root, backoff=backoff)
+        assert self.review.checklist is not None
+        changed = self.review.checklist.model_copy(
+            update={
+                "items": tuple(
+                    item.model_copy(update={"owner_test_notes": "Check the updated repair prices."})
+                    for item in self.review.checklist.items
+                )
+            }
+        )
+        self.review = self.review.model_copy(
+            update={"checklist": changed, "checklist_digest": checklist_digest(changed)}
+        )
+        reason = "Release the newly reviewed work."
+        decide(reason)
+        advance_release_invitations(store=self.store, control_plane_root=self.root, backoff=backoff)
+        self.assertEqual(len(self.comments), 1)
+        self.assertIn(reason, self.comments[0]["body"])
 
     def test_request_decision_cannot_change_a_profile_during_an_accepted_run(self) -> None:
         accepted = decision(self.store).model_copy(update={"release_start": "promote"})
