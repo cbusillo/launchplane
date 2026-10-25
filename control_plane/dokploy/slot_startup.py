@@ -227,10 +227,7 @@ class DokploySlotStartup:
                 raise ValueError(
                     "recreated writer inventory is not unique; guarded recover required"
                 )
-            target = replace(writer, container=containers[0])
-            if self.writers.active_jobs(target) != 0:
-                raise ValueError("recreated writer has active database jobs")
-            replacements[service] = target.container
+            replacements[service] = containers[0]
         services = {writer.writer: service for writer, service in project.services}
         refreshed = tuple(
             replace(target, container=replacements[services[target.writer]])
@@ -239,6 +236,9 @@ class DokploySlotStartup:
             for target in self.writers.targets
         )
         physical_writer_targets(self.writers.plan, refreshed)
+        self.writers.require_drained(
+            tuple(target for target in refreshed if target.slot_id == project.slot.slot_id)
+        )
         self.writers.targets = refreshed
 
     def _projects(self, plan: OdooCutoverPlan, *, fenced: bool) -> tuple[_Project, ...]:

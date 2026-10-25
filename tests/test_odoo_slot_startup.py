@@ -266,6 +266,16 @@ class SlotStartupTests(unittest.TestCase):
         inspected = [call.args[0][-1] for call in execute.call_args_list]
         self.assertCountEqual(inspected, {target.container for target in readback.containers})
 
+    def test_refresh_refuses_active_jobs_from_a_shared_nonrepresentative_writer(self) -> None:
+        hidden = next(target for target in self.writers.targets if target.writer.kind != "web")
+        self.writers.active_jobs = lambda target: int(
+            target.writer == hidden.writer and target.slot_id == hidden.slot_id
+        )
+        assert self.plan.website_settings is not None
+        with self.assertRaises(ValueError):
+            self.startup(self.plan, self.plan.new, self.plan.website_settings)
+        self.assertFalse(self.effects)
+
     def test_running_writers_and_wrong_recreated_image_cannot_return_success(self) -> None:
         assert self.plan.website_settings is not None
         first = self.writers.targets[0]

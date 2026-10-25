@@ -985,6 +985,9 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             run_planned_slot_maintenance(
                 fake, runner_container=self.new_runner, execute=self.execute
             )
+        self.assertFalse(
+            (self.data / ".launchplane-cutovers" / payload_digest(payload) / "web-ready").exists()
+        )
         self.assertEqual(
             self.sql("SELECT count(*) FROM cutover_hook_events", database="postgres"), events
         )

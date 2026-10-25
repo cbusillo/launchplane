@@ -289,3 +289,18 @@ class WebsiteProviderAdapterTests(unittest.TestCase):
                 {container for container, active in running.items() if active},
                 {target.container for target in targets if target.slot_id == slot.slot_id},
             )
+        aliases = [
+            target
+            for target in targets
+            if target.slot_id == self.plan.old.slot_id and target.writer.kind != "web"
+        ]
+        hidden = aliases[-1]
+        writers.active_jobs = lambda target: int(target == hidden)
+        for operation in (
+            lambda: writers.fence(self.site, "held"),
+            lambda: writers.handoff(self.plan.new),
+        ):
+            effects.clear()
+            with self.assertRaises(ValueError):
+                operation()
+            self.assertFalse(any(action == "start" for action, _ in effects))

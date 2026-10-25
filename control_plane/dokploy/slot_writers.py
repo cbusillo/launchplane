@@ -76,8 +76,12 @@ class ContainerSlotWriters:
     def _stop(self, target: SlotWriterContainer) -> None:
         if self._running(target):
             self.execute(("docker", "stop", target.container), None)
-        if self._running(target) or self.active_jobs(target) != 0:
+        if self._running(target):
             raise ValueError("writer has not drained after fencing")
+
+    def require_drained(self, targets: tuple[SlotWriterContainer, ...]) -> None:
+        if any(self.active_jobs(target) != 0 for target in targets):
+            raise ValueError("logical writer database jobs are not drained")
 
     def fence(self, site: PreparedPublicSite, pause_id: str) -> tuple[WriterObservation, ...]:
         if site.plan.binding != self.plan.old.binding or site.plan.writers != self.plan.writers:
@@ -85,6 +89,7 @@ class ContainerSlotWriters:
         # The privately prepared candidate must also be unable to schedule work.
         for target in physical_writer_targets(self.plan, self.targets):
             self._stop(target)
+        self.require_drained(self.targets)
         return tuple(
             WriterObservation(
                 binding=site.plan.binding,
@@ -104,6 +109,9 @@ class ContainerSlotWriters:
         for target in physical:
             if target.slot_id != slot.slot_id:
                 self._stop(target)
+        self.require_drained(
+            tuple(target for target in self.targets if target.slot_id != slot.slot_id)
+        )
         for target in physical:
             if target.slot_id == slot.slot_id and not self._running(target):
                 self.execute(("docker", "start", target.container), None)
