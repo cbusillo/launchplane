@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding, SecretVersion
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.production_backup_credentials import BACKUP_CREDENTIAL_KEYS
+from control_plane.guest_capture_credentials import CAPTURE_KEYS as BACKUP_CREDENTIAL_KEYS
 from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
 from control_plane.contracts.privileged_operation import PrivilegedOperationLocalOperatorActor
 from control_plane.privileged_operation_service import create_typed_privileged_operation_plan
