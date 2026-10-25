@@ -80,7 +80,6 @@ from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationRequest,
     plan_runner_lane_registration,
 )
-from control_plane.every_code_github_webhook import handle_every_code_github_webhook_request
 from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanRequest,
     generic_web_preview_rules,
@@ -122,6 +121,7 @@ from tests.support.auth import (
     _StubVerifier,
     _identity,
 )
+from tests.http_app_test_support import _seed_every_code_claim_request
 from tests.support.profiles import (
     _product_profile_payload,
     _odoo_preview_profile_payload,
@@ -744,91 +744,6 @@ def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
     )
 
 
-def _github_webhook_body_signature(body_bytes: bytes, secret: str) -> str:
-    signature = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
-    return f"sha256={signature}"
-
-
-def _github_webhook_signature(payload: Mapping[str, object], secret: str) -> str:
-    body_bytes = json.dumps(payload).encode("utf-8")
-    return _github_webhook_body_signature(body_bytes, secret)
-
-
-def _every_code_github_issue_labeled_payload(
-    *,
-    label: str = "every-code",
-    action: str = "labeled",
-    repository: str = "cbusillo/code",
-    issue_number: int = 123,
-    issue_url: str = "",
-    closed_at: str = "",
-    state_reason: str = "",
-) -> dict[str, object]:
-    resolved_issue_url = (
-        issue_url.strip() or f"https://github.com/{repository}/issues/{issue_number}"
-    )
-    issue_payload = {
-        "number": issue_number,
-        "html_url": resolved_issue_url,
-        "title": "Wire local automation",
-    }
-    if closed_at.strip():
-        issue_payload["closed_at"] = closed_at
-    if state_reason.strip():
-        issue_payload["state_reason"] = state_reason
-    return {
-        "action": action,
-        "label": {"name": label},
-        "repository": {"full_name": repository},
-        "issue": issue_payload,
-        "sender": {"login": "cbusillo"},
-    }
-
-
-def _every_code_github_pull_request_closed_payload(
-    *,
-    repository: str = "cbusillo/code",
-    pr_number: int = 26,
-    merged: bool = True,
-    closed_at: str = "2026-05-06T16:20:00Z",
-    body: str = "",
-) -> dict[str, object]:
-    return {
-        "action": "closed",
-        "repository": {"full_name": repository},
-        "pull_request": {
-            "number": pr_number,
-            "html_url": f"https://github.com/{repository}/pull/{pr_number}",
-            "merged": merged,
-            "closed_at": closed_at,
-            "body": body,
-        },
-        "sender": {"login": "cbusillo"},
-    }
-
-
-def _seed_every_code_work_request_record(
-    state_dir: Path,
-    *,
-    request_id: str = "every-code-cbusillo-code-123-test",
-) -> EveryCodeWorkRequestRecord:
-    record = EveryCodeWorkRequestRecord(
-        request_id=request_id,
-        source="manual",
-        state="queued",
-        repository="cbusillo/code",
-        issue_number=123,
-        issue_url="https://github.com/cbusillo/code/issues/123",
-        issue_title="Wire local automation",
-        trigger_label="every-code",
-        trigger_actor="cbusillo",
-        queued_at="2026-05-05T22:00:00Z",
-        updated_at="2026-05-05T22:00:00Z",
-    )
-    FilesystemRecordStore(state_dir).write_every_code_work_request_record(record)
-    return record
-
-
 def _claim_every_code_work_request_record(
     record_store: Any,
     request_id: str,
@@ -975,67 +890,6 @@ def _update_every_code_work_request_status_in_postgres(
     finally:
         store.close()
     return _every_code_status_fixture_response(record)
-
-
-def _every_code_github_pr_comment_payload(
-    *,
-    repository: str = "cbusillo/code",
-    pr_number: int = 26,
-    body: str = "Please tighten this wording before merge.",
-    comment_id: int = 1001,
-    issue_body: str = "",
-    sender: str = "cbusillo",
-    sender_type: str = "User",
-) -> dict[str, object]:
-    return {
-        "action": "created",
-        "repository": {"full_name": repository},
-        "issue": {
-            "number": pr_number,
-            "html_url": f"https://github.com/{repository}/pull/{pr_number}",
-            "body": issue_body,
-            "pull_request": {"url": f"https://api.github.com/repos/{repository}/pulls/{pr_number}"},
-        },
-        "comment": {
-            "id": comment_id,
-            "node_id": f"IC_kwDO_test_{comment_id}",
-            "html_url": f"https://github.com/{repository}/pull/{pr_number}#issuecomment-{comment_id}",
-            "body": body,
-            "author_association": "OWNER",
-            "user": {"login": sender, "type": sender_type},
-        },
-        "sender": {"login": sender, "type": sender_type},
-    }
-
-
-def _every_code_github_issue_comment_payload(
-    *,
-    repository: str = "cbusillo/code",
-    issue_number: int = 123,
-    issue_author: str = "Mbanks89",
-    sender: str = "Mbanks89",
-    body: str = "/preview ok",
-    comment_id: int = 2001,
-) -> dict[str, object]:
-    return {
-        "action": "created",
-        "repository": {"full_name": repository},
-        "issue": {
-            "number": issue_number,
-            "html_url": f"https://github.com/{repository}/issues/{issue_number}",
-            "title": "Wire local automation",
-            "user": {"login": issue_author},
-        },
-        "comment": {
-            "id": comment_id,
-            "node_id": f"IC_kwDO_issue_{comment_id}",
-            "html_url": f"https://github.com/{repository}/issues/{issue_number}#issuecomment-{comment_id}",
-            "body": body,
-            "author_association": "CONTRIBUTOR",
-            "user": {"login": sender, "type": "User"},
-        },
-        "sender": {"login": sender, "type": "User"},
-    }
 
 
 def _invoke_app(
@@ -1445,7 +1299,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     self.assertEqual(status, 404)
 
     def test_every_code_blocked_status_posts_discord_notification(self) -> None:
-        secret = "launchplane-every-code-webhook-secret"
         sent_payloads: list[tuple[str, dict[str, object]]] = []
 
         def send_discord(webhook_url: str, payload: dict[str, object]) -> None:
@@ -1456,7 +1309,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
             patch.dict(
                 os.environ,
                 {
-                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
                     control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
                         "test-master-key"
                     ),
@@ -1501,21 +1353,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             finally:
                 store.close()
 
-            webhook_payload = _every_code_github_issue_labeled_payload()
             store = PostgresRecordStore(database_url=database_url)
             try:
-                create_status, create_payload = handle_every_code_github_webhook_request(
-                    json.dumps(webhook_payload).encode("utf-8"),
-                    "issues",
-                    "delivery-blocked-notify",
-                    _github_webhook_signature(webhook_payload, secret),
-                    store,
-                    root,
-                    "notification-test",
-                )
+                request_id = _seed_every_code_claim_request(store).request_id
             finally:
                 store.close()
-            request_id = str(cast(dict[str, object], create_payload["records"])["request_id"])
             claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
                 database_url,
                 request_id,
@@ -1541,7 +1383,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(create_status, 202)
         self.assertEqual(claim_status, 202)
         self.assertEqual(blocked_record.state, "blocked")
         self.assertEqual(len(sent_payloads), 1)
@@ -1552,8 +1393,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(attempts[0].delivery_status, "delivered")
 
     def test_every_code_blocked_status_records_discord_failure(self) -> None:
-        secret = "launchplane-every-code-webhook-secret"
-
         def send_discord(_webhook_url: str, _payload: dict[str, object]) -> None:
             raise RuntimeError("discord unavailable")
 
@@ -1562,7 +1401,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
             patch.dict(
                 os.environ,
                 {
-                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
                     control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: (
                         "test-master-key"
                     ),
@@ -1607,21 +1445,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             finally:
                 store.close()
 
-            webhook_payload = _every_code_github_issue_labeled_payload(issue_number=124)
             store = PostgresRecordStore(database_url=database_url)
             try:
-                create_status, create_payload = handle_every_code_github_webhook_request(
-                    json.dumps(webhook_payload).encode("utf-8"),
-                    "issues",
-                    "delivery-blocked-notify-failed",
-                    _github_webhook_signature(webhook_payload, secret),
-                    store,
-                    root,
-                    "notification-test",
-                )
+                request_id = _seed_every_code_claim_request(store).request_id
             finally:
                 store.close()
-            request_id = str(cast(dict[str, object], create_payload["records"])["request_id"])
             claim_status, _claim_payload = _claim_every_code_work_request_in_postgres(
                 database_url,
                 request_id,
@@ -1647,7 +1475,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
             finally:
                 store.close()
 
-        self.assertEqual(create_status, 202)
         self.assertEqual(claim_status, 202)
         self.assertEqual(blocked_record.state, "blocked")
         self.assertEqual(notification_attempts[0].delivery_status, "failed")

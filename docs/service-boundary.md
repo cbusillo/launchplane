@@ -84,8 +84,6 @@ Service implementation ownership is split by runtime responsibility:
   configuration, policy and provider composition, OAuth/session wiring,
   FastAPI application construction, startup validation, Uvicorn execution, and
   store cleanup.
-- `control_plane/every_code_github_webhook.py` is retired domain code awaiting
-  deletion under #1313; it is not registered as HTTP ingress.
 - `control_plane/http_app.py` owns FastAPI composition, dependency injection,
   remaining core and mutation route registration, and the independent signed
   GitHub App and trusted-maintenance receiver callables. Domain modules under

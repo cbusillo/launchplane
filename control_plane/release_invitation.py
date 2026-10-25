@@ -455,7 +455,7 @@ def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord
         and checklist.repository == profile.repository
         and checklist.owner_github_id == profile.owner.github_id
         and checklist.production != checklist.candidate
-        and not checklist_blockers(checklist)
+        and not checklist_blockers(checklist, profile=profile)
         and review.blockers == (CLIENT_APPROVAL_REQUIRED,)
     )
 

@@ -229,7 +229,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   // The Director keeps the current testing checklist so a further hotfix can
   // bind it; other viewers review the already-live fix's saved checklist.
   const reviewingHotfix = activeHotfix && !response?.can_start_temporary_hotfix;
-  const incomplete = !checklist || !(reviewingHotfix || testingUrl) || response?.review.checklist_complete !== true;
+  const incomplete = !checklist || response?.review.checklist_complete !== true;
   const hasChanges = !!checklist && (
     checklist.production.artifact_id !== checklist.candidate.artifact_id
     || checklist.production.source_commit !== checklist.candidate.source_commit

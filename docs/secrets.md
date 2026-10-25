@@ -722,7 +722,6 @@ decryption key state denies the reveal or resolution.
     `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST`; request bodies cannot
     override them
   - route-specific webhook ingress secrets such as
-    `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` and
     `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
 - Treat these as DB-backed Launchplane-owned data instead of live service-host
   env once the shared store is available:

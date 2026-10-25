@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import cast
@@ -8,8 +7,6 @@ from typing import cast
 import click
 
 from control_plane import every_code_reconciliation as control_plane_every_code_reconciliation
-from control_plane import every_code_webhooks as control_plane_every_code_webhooks
-from control_plane.child_process_errors import normalize_child_process_failure
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
 from control_plane.every_code_reconciliation import (
     EveryCodeReconciliationStore,
@@ -40,7 +37,6 @@ from control_plane.engineering_review_worker import (
 
 
 _EVERY_CODE_WORKER_TOKEN_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN"
-_EVERY_CODE_WEBHOOK_URL_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_WEBHOOK_URL"
 
 StoreFactory = Callable[..., object]
 
@@ -142,27 +138,6 @@ def engineering_review_run_once(
             sort_keys=True,
         )
     )
-
-
-def _gh_current_user_login() -> str:
-    try:
-        result = subprocess.run(
-            ("gh", "api", "user", "--jq", ".login"),
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as error:
-        failure = normalize_child_process_failure(
-            operation="Determine current GitHub user",
-            tool="github_cli",
-            exception=error,
-        )
-        raise click.ClickException(failure.operator_message()) from error
-    login = result.stdout.strip()
-    if not login:
-        raise click.ClickException("Could not determine GitHub user login from gh.")
-    return login
 
 
 @every_code.command("run-once")
@@ -826,64 +801,3 @@ def every_code_reconcile_issue(
     finally:
         _close_store(record_store)
     click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
-
-
-@every_code.command("sync-webhooks")
-@click.option("--owner", default="", help="GitHub owner to scan; defaults to gh api user.")
-@click.option("--topic", default="every-code", show_default=True)
-@click.option(
-    "--webhook-url",
-    envvar=_EVERY_CODE_WEBHOOK_URL_ENV_KEY,
-    default="",
-    help=(
-        "Every Code GitHub webhook URL. Can also be supplied via "
-        f"{_EVERY_CODE_WEBHOOK_URL_ENV_KEY}."
-    ),
-)
-@click.option(
-    "--webhook-secret-env",
-    default="LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET",
-    show_default=True,
-)
-def every_code_sync_webhooks(
-    owner: str,
-    topic: str,
-    webhook_url: str,
-    webhook_secret_env: str,
-) -> None:
-    resolved_owner = owner.strip() or _gh_current_user_login()
-    secret_env_key = webhook_secret_env.strip()
-    webhook_secret = os.environ.get(secret_env_key, "").strip()
-    if not webhook_secret:
-        raise click.ClickException(f"{secret_env_key} is required.")
-    resolved_webhook_url = webhook_url.strip()
-    if not resolved_webhook_url:
-        raise click.ClickException(
-            f"--webhook-url or {_EVERY_CODE_WEBHOOK_URL_ENV_KEY} is required."
-        )
-    try:
-        results = control_plane_every_code_webhooks.sync_every_code_webhooks(
-            owner=resolved_owner,
-            webhook_secret=webhook_secret,
-            webhook_url=resolved_webhook_url,
-            topic=topic,
-        )
-    except (ValueError, control_plane_every_code_webhooks.EveryCodeWebhookSyncError) as error:
-        raise click.ClickException(str(error)) from error
-    failed = [result for result in results if result.status == "error"]
-    click.echo(
-        json.dumps(
-            {
-                "status": "error" if failed else "ok",
-                "owner": resolved_owner,
-                "topic": topic,
-                "webhook_url": resolved_webhook_url,
-                "events": list(control_plane_every_code_webhooks.EVERY_CODE_WEBHOOK_EVENTS),
-                "repositories": [result.as_payload() for result in results],
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-    if failed:
-        raise click.ClickException(f"Failed to sync {len(failed)} Every Code webhook(s).")
