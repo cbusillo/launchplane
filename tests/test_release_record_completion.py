@@ -51,7 +51,6 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                 "control_plane.release_invitation.resolve_launchplane_github_token",
                 lambda **kwargs: "test-token",
             ),
-            ("control_plane.release_invitation.publish_release_invitation", lambda **kwargs: False),
             (
                 "control_plane.release_invitation.resolve_delivery_github_app_id",
                 lambda **kwargs: 77,
@@ -244,10 +243,13 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                     update={"decision_record_id": kwargs["decision"].record_id}
                 ),
             ),
-            patch("control_plane.release_invitation.publish_release_invitation") as publish,
+            patch("control_plane.release_invitation._settle_completed_invitation") as settle,
         ):
+            self.store.write_product_profile_record(
+                self.profile.model_copy(update={"release_on_acceptance": "promote"})
+            )
             self.advance()
-            publish.assert_called_once()
+            settle.assert_called_once()
         self.assertEqual(self.issue["state"], "closed")
 
     def test_temporary_hotfix_keeps_its_pending_client_review_open(self) -> None:
