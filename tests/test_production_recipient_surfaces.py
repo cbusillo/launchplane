@@ -200,6 +200,45 @@ class HttpBoundaryTests(unittest.TestCase):
         )
         self.app = app
 
+    def read_consumers(self, query: str = "") -> Any:
+        from tests.support.http import request
+
+        return asyncio.run(
+            request(
+                self.app,
+                "GET",
+                f"/v1/products/{self.fixture.product}/production-recipient/consumer-reads?context={self.fixture.context}{query}",
+            )
+        )
+
+    def test_consumer_read_requires_source_authority_and_rejects_overrides(self) -> None:
+        with patch(
+            "control_plane.http_routes.production_recipient.qualify_consumer_reads"
+        ) as qualify:
+            self.allowed = False
+            self.assertEqual(self.read_consumers().status_code, 403)
+            self.allowed = True
+            for query in ("&sql=SELECT+1", "&password=sentinel", "&context=other"):
+                self.assertEqual(self.read_consumers(query).status_code, 400)
+        qualify.assert_not_called()
+        self.mutate.assert_not_called()
+
+    def test_consumer_read_is_uncached_value_free_and_has_no_mutation_dispatch(self) -> None:
+        from control_plane.contracts.production_consumer_reads import ProductionConsumerReadResult
+
+        result = ProductionConsumerReadResult(
+            observed_at="service-start", completed_at="service-end"
+        )
+        with patch(
+            "control_plane.http_routes.production_recipient.qualify_consumer_reads",
+            return_value=result,
+        ):
+            response = self.read_consumers()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(response.json()["result"], result.model_dump(mode="json"))
+        self.mutate.assert_not_called()
+
     def post(self, body: dict[str, Any], route: str = ROUTE) -> Any:
         async def send() -> Any:
             async with AsyncClient(

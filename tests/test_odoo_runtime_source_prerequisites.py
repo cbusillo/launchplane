@@ -46,7 +46,7 @@ from tests.test_odoo_import_diagnostics import DiagnosticFixture, PRIVATE
 from tests.test_release_compatibility import artifact
 
 
-class PrerequisiteTests(unittest.TestCase):
+class PrerequisiteFixture(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = DiagnosticFixture()
         self.temp = TemporaryDirectory()
@@ -393,6 +393,8 @@ class PrerequisiteTests(unittest.TestCase):
                 database_url=None,
             )
 
+
+class PrerequisiteTests(PrerequisiteFixture):
     def test_installed_defaults_resolve_without_authority_credentials_or_exports(self) -> None:
         result = self.read()
         self.assertEqual(result.runtime, "verified")
