@@ -203,7 +203,7 @@ def render_odoo_raw_compose_file(
     testing_networks = "  default:\n    internal: true\n" if isolated_testing else ""
     web_extra_hosts = (
         ""
-        if isolated_testing
+        if isolated_testing or not publish_host_ports
         else '    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
     )
     cron_threads = '"0"' if isolated_testing else "${ODOO_MAX_CRON_THREADS:-2}"
