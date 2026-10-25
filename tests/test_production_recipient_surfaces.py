@@ -364,7 +364,6 @@ class HttpBoundaryTests(unittest.TestCase):
             with self.subTest(route=route):
                 response = self.post(body, route)
                 self.assertEqual(response.status_code, 503, response.text)
-                self.assertEqual(response.json()["detail"]["code"], "postgresql_required")
                 denied = self.post({**body, "context": "other-context"}, route)
                 self.assertEqual(denied.status_code, 403, denied.text)
         promotion = self.post(

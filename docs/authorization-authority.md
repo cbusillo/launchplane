@@ -16,11 +16,12 @@ do not authorize that request. Instance rules still require explicit selectors.
 Registering a new driver route must not retroactively change existing actions
 into exclusively instance-scoped actions.
 
-`generic_web_rollback.execute` is instance-scoped for both the production
-recipient inverse and rollback release recovery. Schema-v2/v3 policy rules
-require explicit instance selectors; product, context and caller selectors
-still apply. This action grants no production promotion or driver rollback
-action. Accepted-release rollback grants retain their existing production scope.
+`generic_web_rollback.execute` supports instance selectors for both the production
+recipient inverse and rollback release recovery. Historical context-only rules
+remain loadable but cannot authorize these instance-target requests under
+schema v2/v3. Product, context and caller selectors still apply. This action
+grants no production promotion or driver rollback action. Accepted-release
+rollback grants retain their existing production scope.
 
 If an active stored policy fails model or digest validation at startup, the
 service keeps an empty authorization runtime and logs a bounded validation

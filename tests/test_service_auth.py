@@ -1383,13 +1383,13 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
                 for changes in refused:
                     with self.subTest(changes=changes):
                         self.assertFalse(restored.allows(**{**request, **changes}))
-                with self.assertRaises(ValidationError):
-                    LaunchplaneAuthzPolicy(
-                        schema_version=version,
-                        local_operators=(
-                            policy.local_operators[0].model_copy(update={"instances": ()}),
-                        ),
-                    )
+                historical = LaunchplaneAuthzPolicy(
+                    schema_version=version,
+                    local_operators=(
+                        policy.local_operators[0].model_copy(update={"instances": ()}),
+                    ),
+                )
+                self.assertFalse(historical.allows(**request))
 
     def test_policy_schema_rejects_ambiguous_instance_rule_shapes(self) -> None:
         with self.assertRaisesRegex(
