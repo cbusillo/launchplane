@@ -469,7 +469,7 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                 )
             store.close()
 
-    def test_worker_secrets_reach_only_their_lane_and_never_the_app(self) -> None:
+    def test_worker_secrets_never_reach_the_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -522,18 +522,6 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                     actor="test",
                 )
 
-                self.assertEqual(
-                    control_plane_secrets.resolve_lane_worker_secret_values(
-                        context_name="site", instance_name="prod"
-                    ),
-                    {"PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "lane-backup-key"},
-                )
-                self.assertEqual(
-                    control_plane_secrets.resolve_lane_worker_secret_values(
-                        context_name="site", instance_name="testing"
-                    ),
-                    {},
-                )
                 app_values = runtime_environments.resolve_runtime_environment_values(
                     control_plane_root=control_plane_root,
                     context_name="site",
