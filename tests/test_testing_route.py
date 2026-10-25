@@ -13,6 +13,7 @@ from control_plane.dokploy.testing_route import (
     observe_testing_route,
     route_document,
     select_testing_route_raw,
+    testing_route_rule,
 )
 
 
@@ -68,6 +69,56 @@ class RoutingRuleTests(unittest.TestCase):
 
 
 class TestingRouteTests(unittest.TestCase):
+    def test_recorded_alias_survives_rebuild_and_keeps_foreign_router_checks(self) -> None:
+        original = self.plan()
+        alias = "retained-testing.example.invalid"
+        payload = original.model_dump()
+        payload["aliases"] = (alias,)
+        for router in payload["template"]["http"]["routers"].values():
+            router["rule"] = testing_route_rule(self.host, (alias,))
+            if "tls" in router:
+                router["tls"]["domains"] = [{"main": self.host}, {"main": alias}]
+        retained = TestingLaneRoute.model_validate(payload)
+        raw = self.apply(retained, self.old)
+        rebuilt = compile_testing_route(
+            product=retained.product,
+            context=retained.context,
+            host=retained.host,
+            aliases=retained.aliases,
+            old_backend=self.old,
+            old_backend_addresses=(self.old_address,),
+            new_backend=self.new,
+            raw=raw,
+            public_entrypoints=retained.public_entrypoints,
+            owned_document=route_document(retained, self.old),
+            recorded_template=retained.template,
+        )
+        self.assertEqual(rebuilt.aliases, retained.aliases)
+        self.assertEqual(
+            observe_testing_route(
+                rebuilt, self.apply(rebuilt, self.new), route_document(rebuilt, self.new)
+            ),
+            self.new,
+        )
+        raw["routers"]["foreign@file"] = {
+            "rule": f"Host(`{alias}`)",
+            "entryPoints": ["websecure"],
+            "service": "foreign@file",
+            "status": "enabled",
+            "priority": 1000000,
+        }
+        with self.assertRaises(ValueError):
+            observe_testing_route(rebuilt, raw, route_document(rebuilt, self.old))
+
+    def test_single_host_receipts_keep_their_historical_serialization(self) -> None:
+        plan = self.plan()
+        self.assertNotIn("aliases", plan.model_dump(mode="json"))
+        historical = plan.model_dump(mode="json")
+        self.assertEqual(TestingLaneRoute.model_validate(historical).digest, plan.digest)
+        for alias in (self.host.upper(), "unsafe`hostname", ""):
+            with self.subTest(alias=alias), self.assertRaises(ValueError):
+                TestingLaneRoute.model_validate({**historical, "aliases": (alias,)})
+
     def test_scoped_observation_ignores_unreferenced_redirects(self) -> None:
         before = select_testing_route_raw(self.raw, self.host, ("web", "websecure"))
         self.raw["middlewares"]["another-lane@file"] = {

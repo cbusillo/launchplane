@@ -1295,6 +1295,83 @@ Legacy managed and external bindings keep their existing paths and bounded failu
 reporting. Manual/browser single-binding reconcile identifies the native controller
 as the supported renewal path rather than returning a provider-domain error.
 
+### Changing a native testing canonical address
+
+`POST /v1/products/{product}/testing-address` amends the current published Odoo
+testing lane without replacing its copy. The Director agent supplies `context`,
+`retirement_operation_id`, `reservation_operation_id`, `hostname`, and `reason`.
+`instance` is always `testing`. The retirement ID identifies the original
+retirement inspection; the reservation ID identifies the separate retained
+allocation or generation that actually reserves the requested hostname. These
+may be different operations. Production is outside this operation.
+
+Use `mode: dry-run` first. The service saves an immutable private plan and returns
+its `plan_sha256`, current target ID, new canonical hostname and retained original
+hostname. Review that result, then send the same request with `mode: apply`,
+`reviewed_plan_sha256`, and one stable `Idempotency-Key`. `mode: readback` uses the
+same reviewed hash. The installed Launchplane service helper's transport supplies
+the existing credential; no provider credential, caller-supplied topology or new
+grant is an input. Generated agent/OpenAPI contracts describe this service API.
+The reviewed reason is retained in the immutable plan and applied receipt.
+
+The plan requires exact retained hostname custody in the same product/context,
+a superseded original recipient operation, complete credential-visible provider
+domain membership, and stopped recipients on the existing testing server. The
+old recipients must have automatic deploys and schedules disabled. Their dormant
+router labels must remain strictly below the existing lane-owned priority, with
+known listeners. Foreign domains, matching foreign routers, automatic restart
+policies and incomplete observations refuse qualification. The original executor
+locks and all retained custody hashes are rechecked; no old fence is released.
+The retained recipient facts form the comparison digest. Unrelated provider
+membership is not part of that digest. A full census runs immediately before
+each actual route dispatch, including retries of an unsent or busy writer.
+A continuing original that only observes its recorded writer needs no new census.
+The bounded census runs in the worker; dispatch rechecks its lease and physical
+fence afterward. Matching
+applied or dormant TCP routers also refuse qualification because
+[TCP routing precedes HTTP routing](https://doc.traefik.io/traefik/reference/routing-configuration/tcp/routing/router/).
+
+The existing physical route fence writes one owned document with a rule for the
+new hostname and the original hostname. Backend, TLS resolver/options, middleware
+and listeners stay the same. Each hostname gets a separate `tls.domains` main
+entry so its certificate order and renewal remain independent; see
+[Traefik ACME domain definition](https://doc.traefik.io/traefik/reference/install-configuration/tls/certificate-resolvers/acme/#domain-definition).
+Original-attempt receipts settle an uncertain writer before another
+dispatch. Both HTTPS origins must return the current testing runtime identity
+before one transaction updates the lane base URL, binding provenance and canonical
+Odoo override intent. The original publication, candidate, restore generation,
+retirement and resources remain unchanged. A lost metadata reply resolves from
+the committed address receipt. Preserve the original request and key on any
+unknown outcome; do not clear old operation fences or edit publication history.
+The metadata transaction checks the original lease again immediately before commit.
+
+If the unpublished amendment cannot finish, send `mode: apply` with
+`operation: cancel`, the original reviewed hash, reason and `Idempotency-Key`.
+Cancellation settles and excludes the original forward writer before restoring
+the recorded owned-file preimage through the same fenced mechanism. Its own
+uncertain inverse must settle before cancellation can complete. Once an inverse
+exists, forward amendment and its readback refuse until cancellation finishes;
+the original operation cannot change direction while a late inverse may run.
+It can preserve
+later inventory, runtime and unrelated profile edits while restoring the route;
+it never overwrites a different copy or binding. `mode: readback` with
+`operation: cancel` and the same key verifies the restored preimage. Completed
+cancellation permits a fresh plan and key; it does not certify public health.
+An already committed canonical publication cannot be cancelled by this path;
+retrieve its original amend result instead. Database uncertainty retains the
+original fence until the publication transaction can be observed conclusively.
+After a matching canonical commit, readback checks the same current copy and its
+fresh runtime identity without depending on retained containers remaining present.
+Original retained operation and custody records must still match.
+
+Native refresh and later rebuild admission resolve this additive address receipt.
+A later rebuild keeps the original hostname as an alias. Ordinary deploy and
+release checks continue to validate the original copy custody, and completed
+restore rendering uses the amended canonical address without rewriting its
+generation witness. After amendment readback, reapply the testing canonical Odoo
+settings through the existing supported service operation. The address amendment
+does not itself deploy, restore, start or delete an application.
+
 ## Native testing worker integration
 
 The existing durable target-replacement action accepts testing-only

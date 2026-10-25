@@ -13,6 +13,7 @@ from control_plane.odoo_testing_restore import generation_snapshot_matches
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import candidate_resources
 from control_plane.testing_candidate_runtime import candidate_runtime_fences
+from control_plane.testing_address_storage import effective_testing_route, read_testing_address
 from control_plane.testing_publication_storage import (
     read_publication,
     read_snapshot,
@@ -53,6 +54,9 @@ def published_testing_copy(
     if record is None or record.state != "applied":
         raise ValueError("Serving testing copy publication is unavailable.")
     plan = record.plan
+    route = effective_testing_route(store, record)
+    address_key = binding.source.source_versions.get("testing_address", "") if binding else ""
+    address = read_testing_address(store, address_key) if address_key else None
     candidate = plan.candidate
     if recovery_operation_id and recovery_operation_id != candidate.operation_id:
         raise ValueError("Published-copy recovery belongs to another original operation.")
@@ -80,7 +84,8 @@ def published_testing_copy(
         # Ordinary maintenance still requires the current profile to agree.
         or not (recovery_operation_id or for_rebuild_admission)
         and profile.runtime_port != plan.profile.runtime_port
-        or lane.base_url.rstrip("/") != app.plan.base_url
+        or lane.base_url.rstrip("/")
+        != ("https://" + route.host if address is not None else app.plan.base_url)
         or snapshot.target_id.target_id != candidate.compose_id
         or snapshot.provider.target_id != candidate.compose_id
         or snapshot.target.target_name != candidate.namespace
@@ -89,9 +94,10 @@ def published_testing_copy(
         or snapshot.target.public_hosts
         or snapshot.target.pending_public_host_effects
         or binding is None
-        or binding.source.source_versions.get("testing_route") != plan.route.digest
+        or binding.source.source_versions.get("testing_route") != route.digest
         or candidate_custody != candidate
-        or testing_binding_authority(binding) != testing_binding_authority(plan.after.binding)
+        or testing_binding_authority(binding)
+        != testing_binding_authority(address.plan.binding_after if address else plan.after.binding)
         or snapshot.runtime is None
     ):
         raise ValueError("Serving testing copy no longer matches its publication custody.")

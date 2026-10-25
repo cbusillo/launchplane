@@ -56,6 +56,7 @@ def testing_binding_authority(
         binding.source.source_label,
         binding.source.source_versions.get("testing_publication"),
         binding.source.source_versions.get("testing_route"),
+        binding.source.source_versions.get("testing_address"),
     )
 
 

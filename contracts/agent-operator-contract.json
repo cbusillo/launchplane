@@ -506,6 +506,36 @@
         "modes": [
           "dry-run",
           "apply",
+          "readback"
+        ],
+        "operation_id": "amend_native_testing_address",
+        "path": "/v1/products/{product}/testing-address",
+        "purpose": "Amend the current native Odoo testing lane's canonical hostname from exact retained custody, preserving its copy, original hostname and operation fences; verify both public runtime identities before publishing canonical metadata. Cancel an unpublished amendment under its original request and key to restore the route preimage.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "535f901764568d1524de5200f4dcde9accda388481881f327afdeca509186a71",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
           "readback",
           "inspect"
         ],
@@ -1105,8 +1135,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "bdc4a1071f447e2501dcb32633ef1447a016ba08"
+    "source_commit_sha": "708189ce7a9f01711ab0be1a64120289c00406c8"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "9c115c988f15d8667da33aca574b136fc9724de7074dced918097a06f84c327f"
+  "semantic_digest_sha256": "63d8d747dec65840edc2a192f41fc7d73ff4b2e8bcc2a5da679f24dd3e61bd52"
 }
