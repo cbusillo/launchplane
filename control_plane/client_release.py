@@ -1078,7 +1078,7 @@ def _record_standing_acceptance(
     if (
         checklist is None
         or checklist.production == checklist.candidate
-        or checklist_blockers(checklist)
+        or checklist_blockers(checklist, profile=profile)
     ):
         return
     existing = review.latest_decision

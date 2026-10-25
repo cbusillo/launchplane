@@ -114,6 +114,12 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+A product recorded with `public_website: none` needs no testing website URL.
+Its qualified testing deployment and runtime evidence still gate the candidate;
+test notes, recorded acceptance, verified backup and rollback remain required.
+The checklist, decision, invitation and standing-release controller all use the
+current product profile for this website requirement.
+
 For generic-web testing lanes, candidate construction reads the inventory's
 referenced deployment record as well as the inventory. That record must pass
 deployment, post-deploy and destination-health qualification and match the
