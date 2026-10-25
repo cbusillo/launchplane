@@ -90,7 +90,9 @@ The copy receives no source SSH mount or upstream connection. Private-port
 preview renders also omit the host-gateway alias; runtime inspection rejects
 host aliases before copying. Its schedule
 uses the immutable image bound to the preview request, without requiring
-a separate image setting in the runtime environment. Its filestore
+a separate image setting in the runtime environment. Snapshot schedules use
+the existing restore execution budget, independently of the shorter deployment
+wait. An explicit schedule execution timeout still takes precedence. Its filestore
 is cloned or copied into exclusively owned storage with the preview writer
 stopped and runner paused. It restores the frozen dump into a missing
 database, then uses the existing credential, sanitizer, module-update and

@@ -812,7 +812,7 @@ def run_compose_post_deploy_update(
     )
     resolved_schedule_execution_timeout_seconds = resolve_data_workflow_execution_timeout_seconds(
         deploy_timeout_seconds=schedule_timeout_seconds,
-        run_destructive_restore=run_destructive_restore,
+        run_destructive_restore=run_destructive_restore or clean_preview_snapshot is not None,
         requested_timeout_seconds=schedule_execution_timeout_seconds,
     )
     if fresh_testing_generation is not None:
