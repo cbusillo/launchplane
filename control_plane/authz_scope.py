@@ -75,6 +75,7 @@ _DUAL_SCOPE_AUTHZ_ACTIONS = frozenset(
     {
         AGENT_READ_ROLE_ACTION,
         "generic_web_prod_promotion.dry_run",
+        "generic_web_rollback.execute",
         "driver.read",
         "ingress_route.apply",
         "ingress_route.plan",

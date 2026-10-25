@@ -28,7 +28,13 @@ from control_plane.http_routes.production_recipient import register_production_r
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.production_recipient import ROUTE, plan
 from control_plane.production_recipient_resources import RESOURCE_PROGRAM, resource_spec
-from control_plane.service_auth import LocalAdminIdentity, TerminalAgentIdentity
+from control_plane.service_auth import (
+    LaunchplaneAuthzPolicy,
+    LocalAdminIdentity,
+    LocalOperatorIdentity,
+    LocalOperatorPolicyRule,
+    TerminalAgentIdentity,
+)
 from tests import test_odoo_testing_resources as resources_support
 from tests import test_production_recipient as recipient_support
 
@@ -161,6 +167,7 @@ class HttpBoundaryTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.identity: Any = LocalAdminIdentity("admin", "fixture")
         self.allowed = True
+        self.policy: LaunchplaneAuthzPolicy | None = None
         self.allowed_effects = {"read", "plan", "write"}
         self.requested: list[dict[str, Any]] = []
         self.mutate = AsyncMock()
@@ -168,6 +175,8 @@ class HttpBoundaryTests(unittest.TestCase):
 
         def authorize(**kwargs: Any) -> bool:
             self.requested.append(kwargs)
+            if self.policy is not None:
+                return self.policy.allows(**kwargs)
             return self.allowed and action_effect(kwargs["action"]) in self.allowed_effects
 
         dependencies = ReadRouteDependencies(
@@ -316,6 +325,51 @@ class HttpBoundaryTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 403, response.text)
         self.mutate.assert_not_awaited()
         self.assertEqual(self.post(self.fixture.body.model_dump(mode="json")).status_code, 403)
+        self.mutate.assert_not_awaited()
+        self.assertEqual(self.fixture.effects, [])
+
+    def test_scoped_rollback_rule_admits_inverse_and_rollback_recovery_only(self) -> None:
+        from control_plane.production_recipient_inverse import INVERSE_ROUTE
+        from control_plane.production_recipient_release_recovery import RELEASE_RECOVERY_ROUTE
+
+        self.identity = LocalOperatorIdentity("operator", "rollback-token")
+        self.policy = LaunchplaneAuthzPolicy(
+            schema_version=3,
+            local_operators=(
+                LocalOperatorPolicyRule(
+                    subjects=(self.identity.subject,),
+                    token_labels=(self.identity.token_label,),
+                    products=(self.fixture.product,),
+                    contexts=(self.fixture.context,),
+                    instances=("prod",),
+                    actions=("generic_web_rollback.execute",),
+                ),
+            ),
+        )
+        common = {
+            "context": self.fixture.context,
+            "preparation_plan_sha256": "a" * 64,
+            "reason": "review",
+            "mode": "apply",
+            "reviewed_plan_sha256": "b" * 64,
+        }
+        requests = (
+            (INVERSE_ROUTE, {**common, "publication_sha256": "c" * 64}),
+            (
+                RELEASE_RECOVERY_ROUTE,
+                {**common, "decision_record_id": "accepted", "kind": "rollback"},
+            ),
+        )
+        for route, body in requests:
+            with self.subTest(route=route):
+                response = self.post(body, route)
+                self.assertEqual(response.status_code, 503, response.text)
+                denied = self.post({**body, "context": "other-context"}, route)
+                self.assertEqual(denied.status_code, 403, denied.text)
+        promotion = self.post(
+            {**common, "decision_record_id": "accepted", "kind": "promote"}, RELEASE_RECOVERY_ROUTE
+        )
+        self.assertEqual(promotion.status_code, 403, promotion.text)
         self.mutate.assert_not_awaited()
         self.assertEqual(self.fixture.effects, [])
 
