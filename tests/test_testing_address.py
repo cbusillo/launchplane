@@ -295,6 +295,7 @@ class TestingAddressTests(unittest.TestCase):
         from control_plane.http_app import create_launchplane_fastapi_app
         from control_plane.service_auth import LaunchplaneAuthzPolicy
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+        from control_plane.testing_address_qualification import TestingAddressRecipientUnverified
         from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
         from tests.support.http import request
         from control_plane.testing_address import ROUTE
@@ -309,6 +310,7 @@ class TestingAddressTests(unittest.TestCase):
         private = "private-provider-error-sentinel"
         failures = (
             (ValueError(private), 409),
+            (TestingAddressRecipientUnverified(True, 1), 409),
             (
                 NativeSourceAuthorizationDenied(private),
                 403,
@@ -340,6 +342,12 @@ class TestingAddressTests(unittest.TestCase):
                     )
                 )
             self.assertEqual(response.status_code, status, response.text)
+            if isinstance(failure, TestingAddressRecipientUnverified):
+                self.assertEqual(
+                    response.json()["error"]["code"], "testing_address_recipient_unverified"
+                )
+                self.assertIn(failure.auto_deploy, response.json()["error"]["message"])
+                self.assertIn(str(failure.schedule_count), response.json()["error"]["message"])
             evidence = next(
                 item
                 for item in (json.loads(record.getMessage()) for record in captured.records)
@@ -835,7 +843,7 @@ class TestingAddressRecipientTests(unittest.TestCase):
                 "fetch_dokploy_target_payload",
                 side_effect=lambda **kwargs: payloads[kwargs["target_id"]],
             ),
-            patch.object(api, "list_dokploy_schedules", return_value=()),
+            patch.object(api, "list_dokploy_schedules", return_value=()) as schedules,
         ):
             digest, projects = qualification.qualify_address_domains(**arguments)
             self.assertTrue(digest)
@@ -843,6 +851,27 @@ class TestingAddressRecipientTests(unittest.TestCase):
             page.inventory_digest = "unrelated-preview-membership"
             page.projects[0].name = "Renamed unrelated project metadata"
             self.assertEqual(qualification.qualify_address_domains(**arguments), (digest, projects))
+            for flag, rows in (
+                (True, ()),
+                (None, ({"scheduleId": "job"},)),
+                (False, ({"scheduleId": "job"},)),
+            ):
+                with self.subTest(flag=flag, rows=rows):
+                    payloads["retained"]["autoDeploy"] = flag
+                    schedules.return_value = rows
+                    schedules.reset_mock()
+                    with self.assertRaises(
+                        qualification.TestingAddressRecipientUnverified
+                    ) as caught:
+                        qualification.qualify_address_domains(**arguments)
+                    schedules.assert_called_once()
+                    self.assertEqual(
+                        caught.exception.auto_deploy,
+                        "enabled" if flag is True else "disabled" if flag is False else "unknown",
+                    )
+                    self.assertEqual(caught.exception.schedule_count, len(rows))
+            payloads["retained"]["autoDeploy"] = False
+            schedules.return_value = ()
             payloads["foreign"]["domains"] = [{"domainId": "foreign-domain", "host": hostname}]
             with self.assertRaises(ValueError):
                 qualification.qualify_address_domains(**arguments)

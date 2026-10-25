@@ -1038,7 +1038,6 @@ def register_dokploy_target_inspect_read_routes(
         service: Annotated[str, Query()] = "",
         event: Annotated[str, Query()] = "",
         expected_image: Annotated[str, Query()] = "",
-        include_automation: Annotated[bool, Query()] = False,
     ) -> DokployTargetInspectResponse:
         trace_id = common.next_trace_id()
         inspect_allowed = False
@@ -1092,7 +1091,6 @@ def register_dokploy_target_inspect_read_routes(
                     "service": service,
                     "event": event,
                     "expected_image": expected_image,
-                    "include_automation": include_automation,
                 }
             )
             try:

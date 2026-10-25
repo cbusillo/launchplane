@@ -46,9 +46,6 @@ type DokployEvidenceProviderOperation = Literal[
     "container-identity",
     "image-identity",
     "runtime-log-read",
-    "automation-target-identity",
-    "automation-read-budget",
-    "automation-provider-read",
 ]
 
 

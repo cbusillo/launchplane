@@ -24,7 +24,6 @@ from control_plane.dokploy.application_runtime import (
     fetch_application_runtime,
 )
 from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
-from control_plane.dokploy_automation_inspect import inspect_dokploy_automation
 
 DokployTargetType = Literal["application", "compose"]
 _RUNTIME_EVIDENCE_LOG_LINE_COUNT = dokploy_api.MAX_DOKPLOY_LOG_LINE_COUNT
@@ -81,7 +80,6 @@ class DokployTargetInspectRequest(BaseModel):
     service: str = ""
     event: str = ""
     expected_image: str = ""
-    include_automation: bool = False
 
     @model_validator(mode="after")
     def _validate_request(self) -> "DokployTargetInspectRequest":
@@ -292,14 +290,6 @@ def inspect_dokploy_target(
         "provider_payload_redacted": True,
         "provider": provider_summary,
     }
-    if request.include_automation:
-        result["automation"] = inspect_dokploy_automation(
-            host=host,
-            token=token,
-            target_type=target_type,
-            target_id=target_id,
-            payload=provider_payload,
-        )
     if request.expected_image and target_type == "application":
         observed = (fetch_application or fetch_application_runtime)(
             host=host, token=token, application_id=target_id

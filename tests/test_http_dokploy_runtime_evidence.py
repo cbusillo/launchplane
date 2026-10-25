@@ -20,46 +20,6 @@ from tests.support.stores import sqlite_database_url
 
 
 class FastApiDokployRuntimeEvidenceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_target_automation_is_an_opt_in_read_through_existing_authority(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            root = Path(temporary_directory_name)
-            database_url = sqlite_database_url(root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            self.addCleanup(store.close)
-            with (
-                patch(
-                    "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
-                    return_value=("https://provider.example.invalid", "token"),
-                ),
-                patch(
-                    "control_plane.dokploy_target_inspect.dokploy_api.fetch_dokploy_target_payload",
-                    return_value={"composeId": "retained-target", "autoDeploy": True},
-                ),
-                patch(
-                    "control_plane.dokploy.api.dokploy_request", return_value=[]
-                ) as provider_read,
-            ):
-                app = create_launchplane_fastapi_app(
-                    verifier=StubVerifier(identity()),
-                    authz_policy=_record_read_policy(
-                        action="dokploy_target.inspect", context="launchplane"
-                    ),
-                    database_url=database_url,
-                    record_store_factory=lambda: store,
-                    control_plane_root_path=root,
-                )
-                path = "/v1/dokploy-targets/inspect?target_type=compose&target_id=retained-target"
-                headers = {"Authorization": "Bearer valid-token"}
-                ordinary = await _asgi_get(app, path, headers=headers)
-                self.assertEqual(ordinary.status_code, 200)
-                self.assertNotIn("automation", ordinary.json()["inspect"])
-                provider_read.assert_not_called()
-                observed = await _asgi_get(app, path + "&include_automation=true", headers=headers)
-        self.assertEqual(observed.status_code, 200)
-        self.assertEqual(observed.json()["inspect"]["automation"]["auto_deploy"], "enabled")
-        provider_read.assert_called_once()
-
     async def test_dokploy_target_inspect_returns_runtime_proof(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

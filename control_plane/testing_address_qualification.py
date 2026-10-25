@@ -27,6 +27,19 @@ from control_plane.testing_publication_storage import read_snapshot
 from control_plane.testing_serving_copy import published_testing_copy
 
 
+class TestingAddressRecipientUnverified(ValueError):
+    def __init__(self, auto_deploy: object, schedule_count: int) -> None:
+        self.auto_deploy = (
+            "enabled" if auto_deploy is True else "disabled" if auto_deploy is False else "unknown"
+        )
+        self.schedule_count = schedule_count
+        super().__init__(
+            f"Retained hostname recipient automatic deployment is {self.auto_deploy}; "
+            f"{schedule_count} target schedules observed. "
+            "Preserve the original request, resources and operation fences."
+        )
+
+
 def qualify_address_domains(
     *, host: str, token: str, hostname: str, retained_ids: frozenset[str], server_id: str
 ) -> tuple[str, tuple[str, ...]]:
@@ -116,14 +129,15 @@ def _qualify_address_domains(
                             or not actual.get("appName")
                         ):
                             raise ValueError("The original retained hostname recipient changed.")
-                        if actual.get("autoDeploy") is not False or api.list_dokploy_schedules(
+                        schedules = api.list_dokploy_schedules(
                             host=host,
                             token=token,
                             target_id=target.target_id,
                             schedule_type="compose",
-                        ):
-                            raise ValueError(
-                                "The original retained recipient can still deploy automatically."
+                        )
+                        if actual.get("autoDeploy") is not False or schedules:
+                            raise TestingAddressRecipientUnverified(
+                                actual.get("autoDeploy"), len(schedules)
                             )
                         seen.add(target.target_id)
                         projects.add(str(actual["appName"]))

@@ -148,6 +148,46 @@ class _FakeDokployTargetStore:
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_schedule_inventory_requires_an_explicit_whole_object_array(self) -> None:
+        malformed: tuple[JsonValue, ...] = (
+            None,
+            {},
+            {"raw": "synthetic-private-value"},
+            {"data": None},
+            {"items": [], "total": 40},
+            {"data": []},
+            [None],
+            [{}, None],
+        )
+        for payload in malformed:
+            with (
+                self.subTest(payload=payload),
+                patch.object(dokploy_api, "dokploy_request", return_value=payload),
+            ):
+                with self.assertRaises(click.ClickException) as caught:
+                    dokploy_api.list_dokploy_schedules(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        target_id="retained",
+                        schedule_type="compose",
+                    )
+                self.assertNotIn("synthetic-private-value", str(caught.exception))
+        valid_inventories: tuple[list[JsonValue], ...] = ([], [{"scheduleId": "retained-job"}])
+        for rows in valid_inventories:
+            with (
+                self.subTest(rows=rows),
+                patch.object(dokploy_api, "dokploy_request", return_value=rows),
+            ):
+                self.assertEqual(
+                    dokploy_api.list_dokploy_schedules(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        target_id="retained",
+                        schedule_type="compose",
+                    ),
+                    tuple(rows),
+                )
+
     def test_dokploy_request_redacts_http_error_body(self) -> None:
         error = HTTPError(
             url="https://dokploy.example/api/schedule.runManually",
