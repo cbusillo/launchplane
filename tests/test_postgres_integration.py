@@ -4,7 +4,7 @@ import atexit
 import asyncio
 import base64
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -6047,7 +6047,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             csrf = managers[0].csrf_token(original)
             now += timedelta(seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS)
             provider = Mock(spec=GitHubOAuthClient)
-            observations: list[Any] = []
+            observations: list[tuple[Future[Any], bool]] = []
             consumption: list[Future[Any]] = []
 
             def exchange(*args: object, **kwargs: object) -> GitHubOAuthLogin:
@@ -6057,10 +6057,8 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     client=provider,
                     authz_policy=_policy(),
                 )
-                other = second.result(timeout=60)
-                assert other is not None
-                self.assertEqual(other.claims_verified_at, original.claims_verified_at)
-                observations.append(other)
+                completed, _ = wait((second,), timeout=60)
+                observations.append((second, bool(completed)))
                 consumption.append(workers.submit(managers[2].consume_csrf_token, original, csrf))
                 return GitHubOAuthLogin(_identity(), GitHubOAuthCredential("rotated-access"))
 
@@ -6071,7 +6069,12 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     client=provider,
                     authz_policy=_policy(),
                 )
-                other = observations[0]
+                self.assertEqual(len(observations), 1)
+                second, completed_before_provider_returned = observations[0]
+                self.assertTrue(completed_before_provider_returned)
+                other = second.result(timeout=5)
+                assert other is not None
+                self.assertEqual(other.claims_verified_at, original.claims_verified_at)
                 consumed = consumption[0].result(timeout=5)
             self.assertIsNotNone(refreshed)
             self.assertIsNotNone(other)
