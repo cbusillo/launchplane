@@ -357,67 +357,6 @@ class EveryCodeFeedbackLaunchBinding(_StrictFrozenModel):
         return self
 
 
-class EveryCodeFeedbackProcessBindingRecord(_StrictFrozenModel):
-    binding: EveryCodeFeedbackLaunchBinding
-    session_name: str
-    process_id: StrictInt = Field(gt=0)
-    process_group_id: StrictInt = Field(gt=0)
-    process_start_marker: str
-    registered_at: str
-    process_binding_sha256: str = ""
-
-    @model_validator(mode="after")
-    def validate_process_binding(self) -> EveryCodeFeedbackProcessBindingRecord:
-        for name in ("session_name", "process_start_marker"):
-            _token(getattr(self, name), name)
-        _timestamp(self.registered_at, "registered_at")
-        expected = _canonical_digest(
-            self.model_dump(mode="json", exclude={"process_binding_sha256"})
-        )
-        if self.process_binding_sha256 and self.process_binding_sha256 != expected:
-            raise ValueError("process_binding_sha256 does not match the exact process binding")
-        object.__setattr__(self, "process_binding_sha256", expected)
-        return self
-
-
-class EveryCodeFeedbackLaunchObservationRecord(_StrictFrozenModel):
-    binding: EveryCodeFeedbackLaunchBinding
-    evidence_status: Literal["exact_match", "proven_absent", "mismatch", "unavailable"]
-    observed_process_binding: EveryCodeFeedbackProcessBindingRecord | None = None
-    inspected_at: str
-    evidence_sha256: str
-
-    @model_validator(mode="after")
-    def validate_observation(self) -> EveryCodeFeedbackLaunchObservationRecord:
-        _timestamp(self.inspected_at, "inspected_at")
-        _digest(self.evidence_sha256, "evidence_sha256")
-        if self.evidence_status == "exact_match":
-            if self.observed_process_binding is None:
-                raise ValueError("exact-match observation requires a process binding")
-            if self.observed_process_binding.binding != self.binding:
-                raise ValueError("observed process binding does not match launch binding")
-        elif self.observed_process_binding is not None:
-            raise ValueError("non-matching observations cannot claim an exact process binding")
-        return self
-
-
-class EveryCodeFeedbackCancellationInstructionRecord(_StrictFrozenModel):
-    operation_id: str
-    process_binding: EveryCodeFeedbackProcessBindingRecord
-    requested_at: str
-    instruction_sha256: str = ""
-
-    @model_validator(mode="after")
-    def validate_instruction(self) -> EveryCodeFeedbackCancellationInstructionRecord:
-        _token(self.operation_id, "operation_id")
-        _timestamp(self.requested_at, "requested_at")
-        expected = _canonical_digest(self.model_dump(mode="json", exclude={"instruction_sha256"}))
-        if self.instruction_sha256 and self.instruction_sha256 != expected:
-            raise ValueError("instruction_sha256 does not match cancellation instruction")
-        object.__setattr__(self, "instruction_sha256", expected)
-        return self
-
-
 class EveryCodeFeedbackResumeOperationRecord(_StrictFrozenModel):
     schema_version: Literal[1] = 1
     operation_id: str

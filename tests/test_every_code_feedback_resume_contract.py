@@ -10,8 +10,6 @@ from control_plane.contracts.every_code_feedback_resume import (
     EveryCodeFeedbackHandoffReceiptRecord,
     EveryCodeFeedbackLaunchBinding,
     EveryCodeFeedbackPolicyDecisionProvenance,
-    EveryCodeFeedbackProcessBindingRecord,
-    EveryCodeFeedbackLaunchObservationRecord,
     EveryCodeFeedbackRecoveryDispositionRecord,
     EveryCodeFeedbackResumeIntentRecord,
     EveryCodeFeedbackStartupReceiptRecord,
@@ -219,28 +217,6 @@ class EveryCodeFeedbackResumeContractTests(unittest.TestCase):
                     "evidence_status": "unavailable",
                     "operator_subject": "operator-1",
                 }
-            )
-
-    def test_process_identity_needs_start_marker_and_observation_is_exact(self) -> None:
-        process = EveryCodeFeedbackProcessBindingRecord(
-            binding=binding(),
-            session_name="session-1",
-            process_id=123,
-            process_group_id=122,
-            process_start_marker="start-456",
-            registered_at=T0,
-        )
-        self.assertTrue(process.process_binding_sha256)
-        with self.assertRaises(ValidationError):
-            EveryCodeFeedbackProcessBindingRecord.model_validate(
-                {**process.model_dump(), "process_id": True, "process_binding_sha256": ""}
-            )
-        with self.assertRaisesRegex(ValidationError, "requires a process binding"):
-            EveryCodeFeedbackLaunchObservationRecord(
-                binding=binding(),
-                evidence_status="exact_match",
-                inspected_at=T0,
-                evidence_sha256=SHA,
             )
 
     def test_new_launch_lifecycle_requires_canonical_uuid4(self) -> None:

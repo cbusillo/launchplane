@@ -89,12 +89,6 @@ tests establish workspace retention only. Issue
 service-backed implementation, was closed on 2026-09-23 when `DIRECTION.md` was
 adopted; no open issue continues it.
 
-The [feedback continuation foundation](every-code-feedback-resume.md) adds strict
-contracts, isolated SQL evidence and inert launch protocol tests. It does not
-wire the deployed worker or prove positive service-backed restart. A distinct
-exact session handoff receipt and supported admin recovery remain mandatory
-before production enablement.
-
 The current Codex Lab session client maps this provenance into the Discord Blue
 [remote agent session contract](https://github.com/cbusillo/discord-blue/blob/main/docs/agent-session-protocol.md).
 It connects to `/agent-session/connect`; Launchplane does not implement the
