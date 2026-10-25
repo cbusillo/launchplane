@@ -185,6 +185,10 @@ def capture_clean_snapshot(spec, containers, clone):
     budget = spec['generation'].get('drill_storage_budget')
     if budget is None:
         raise RuntimeError('Clean snapshot capture requires reviewed storage headroom')
+    space = os.statvfs(destination.parent)
+    required = budget['database_bytes'] + budget['filestore_bytes'] + budget['reserve_bytes']
+    if space.f_bavail * space.f_frsize < required:
+        raise RuntimeError('Clean snapshot capture lacks reviewed storage headroom')
     web = json.loads(docker('inspect', containers['web'][0]))[0]
     if (web.get('State') or {}).get('Running') is not False:
         raise RuntimeError('Clean snapshot capture requires a stopped testing writer')

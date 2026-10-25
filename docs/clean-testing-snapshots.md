@@ -61,6 +61,7 @@ dump. Snapshot and preview filestores retain their full capacity budget even
 when a real `cp --reflink=always` probe proves block sharing. Cloning saves
 physical pool space, but dataset quotas can still charge each reference;
 the available filesystem bytes must cover the whole admitted budget and reserve.
+Each new capture rechecks its destination capacity, including when a restore resumes.
 A proved clone runs `cp --reflink=always` and fails rather than silently
 switching to a full copy. Database restores are also charged in full. Demands on
 datasets sharing a ZFS pool are summed, using the smallest available-space reading in that pool;
