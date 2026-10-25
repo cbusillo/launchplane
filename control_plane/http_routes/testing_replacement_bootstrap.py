@@ -94,6 +94,8 @@ def register_testing_replacement_bootstrap_routes(
                     in_progress_message="Fresh testing bootstrap is running under its original key.",
                     reconcile_message="Bootstrap has an unknown outcome; inspect the retained generation with its original key.",
                 )
+        except NativeTestingRebuildRequired as error:
+            refuse(409, error.code, str(error))
         except DurableOperationAuthorizationDeniedError:
             refuse(
                 403,

@@ -199,6 +199,8 @@ def register_testing_replacement_resource_routes(
             adapter = TestingReplacementResourceAdapter(root, record_store, product, body, trace)
             try:
                 result = await run_in_worker_thread(adapter.readback)
+            except NativeTestingRebuildRequired as error:
+                refuse(409, error.code, str(error))
             except DurableOperationAuthorizationDeniedError:
                 refuse(
                     403,
