@@ -63,23 +63,9 @@ original GitHub webhook through GitHub's delivery interface. Launchplane still
 validates the signed event and its request/PR match. Do not replace missing
 closure evidence with a local record edit or manual deletion.
 
-Workspace retention alone does not enable production feedback relaunch. The
-current service status API rejects terminal-to-running transitions, while the
-rerun API requires approved write-intent evidence. The local direct-store
-feedback path does not prove that service-backed transition or a fresh fence.
-A supported feedback-resume lifecycle must preserve those authorization and
-fencing requirements; do not work around them with a local record write.
-
-`tests/test_http_app_every_code_restart_boundary.py` exercises the real
-FastAPI routes with lifespan handling and the SQL record store on SQLite.
-It checks terminal restart rejection for both worker-token and update-scoped
-callers, the separation of rerun authority from approved intent, and rejection
-of old-fence or wrong-host callbacks after an authorized rerun and fresh claim.
-Rejected writes must preserve the complete stored request. This is service
-contract evidence, not PostgreSQL concurrency or positive feedback-resume
-acceptance. The existing PostgreSQL integration gate separately covers claims,
-heartbeats, stale recovery, status fencing, and completion racing linked-PR
-closure.
+The retired service mutation routes no longer start or resume Every Code work.
+Historical records and saved workspaces remain preserved; missing execution
+or closure evidence does not authorize a record edit or workspace deletion.
 
 The worker test module's `_EveryCodeApiHandler` is a transport fixture with
 direct record writes; its successful reruns and feedback sessions do not prove

@@ -28,6 +28,7 @@ from control_plane.http_app import (
 from control_plane.product_config_http import ProductConfigApplyResponse
 from control_plane.service_auth import (
     BearerIdentityConfig,
+    action_safety,
     LaunchplaneAuthzPolicy,
     LocalOperatorIdentity,
 )
@@ -1330,10 +1331,9 @@ class FastApiRuntimeKeySafetyPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
-    async def test_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            state_dir = Path(temporary_directory_name) / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
+    async def test_retired_intent_cannot_authorize_execution(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_agent_write_intent_policy(
@@ -1343,11 +1343,41 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 record_store_factory=lambda: store,
             )
+            for mode in ("dry_run", "apply"):
+                with self.subTest(mode=mode):
+                    response = await _post_agent_write_intent_evaluate(
+                        app,
+                        _agent_write_intent_payload(
+                            intent="every_code_rerun",
+                            mode=mode,
+                            product="launchplane",
+                            context="launchplane",
+                        ),
+                    )
+                    self.assertEqual(response.status_code, 202)
+                    intent = response.json()["result"]["intent"]
+                    self.assertEqual(intent["status"], "denied")
+                    self.assertFalse(intent["safe_to_execute"])
+                    self.assertEqual(intent["audit"]["decision"], "denied")
+
+    async def test_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_agent_write_intent_policy(
+                    actions=("preview_refresh.execute",),
+                    product="launchplane",
+                    context="launchplane",
+                ),
+                record_store_factory=lambda: store,
+            )
 
             response = await _post_agent_write_intent_evaluate(
                 app,
                 _agent_write_intent_payload(
-                    intent="every_code_rerun",
+                    intent="preview_refresh",
                     mode="dry_run",
                     product="launchplane",
                     context="launchplane",
@@ -1363,13 +1393,15 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["records"], {})
         intent = payload["result"]["intent"]
         self.assertEqual(intent["status"], "allowed")
-        self.assertEqual(intent["authz_action"], "every_code_work_request.rerun")
+        self.assertEqual(intent["authz_action"], "preview_refresh.execute")
         self.assertFalse(intent["safe_to_execute"])
         self.assertEqual(intent["reason_code"], "authorized")
         self.assertEqual(intent["audit"]["decision"], "allowed")
-        self.assertEqual(intent["audit"]["subject"]["action_safety"], "safe_write")
+        self.assertEqual(
+            intent["audit"]["subject"]["action_safety"], action_safety("preview_refresh.execute")
+        )
         self.assertEqual(record.evaluation.status, "allowed")
-        self.assertEqual(record.evaluation.intent, "every_code_rerun")
+        self.assertEqual(record.evaluation.intent, "preview_refresh")
         self.assertEqual(record.idempotency_key, "agent-write-intent-rerun")
         self.assertEqual(record.request.source_url, _AGENT_WRITE_INTENT_SOURCE_URL)
         self.assertEqual(record.trace_id, payload["trace_id"])
@@ -1380,14 +1412,14 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_agent_write_intent_policy(
-                    actions=("every_code_work_request.rerun",),
+                    actions=("preview_refresh.execute",),
                     product="launchplane",
                     context="launchplane",
                 ),
                 record_store_factory=lambda: store,
             )
             payload = _agent_write_intent_payload(
-                intent="every_code_rerun",
+                intent="preview_refresh",
                 mode="dry_run",
                 product="launchplane",
                 context="launchplane",
@@ -1417,7 +1449,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_evaluate_replays_before_write_store_check(self) -> None:
         payload = _agent_write_intent_payload(
-            intent="every_code_rerun",
+            intent="preview_refresh",
             mode="dry_run",
             product="launchplane",
             context="launchplane",
@@ -1429,7 +1461,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_agent_write_intent_policy(
-                actions=("every_code_work_request.rerun",),
+                actions=("preview_refresh.execute",),
                 product="launchplane",
                 context="launchplane",
             ),
@@ -1453,7 +1485,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_agent_write_intent_policy(
-                    actions=("every_code_work_request.rerun",),
+                    actions=("preview_refresh.execute",),
                     product="launchplane",
                     context="launchplane",
                 ),
@@ -1463,7 +1495,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             first_response = await _post_agent_write_intent_evaluate(
                 app,
                 _agent_write_intent_payload(
-                    intent="every_code_rerun",
+                    intent="preview_refresh",
                     mode="dry_run",
                     product="launchplane",
                     context="launchplane",
@@ -1473,7 +1505,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             conflict_response = await _post_agent_write_intent_evaluate(
                 app,
                 _agent_write_intent_payload(
-                    intent="every_code_rerun",
+                    intent="preview_refresh",
                     mode="dry_run",
                     product="launchplane",
                     context="launchplane",
@@ -1492,7 +1524,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_agent_write_intent_policy(
-                    actions=("every_code_work_request.rerun",),
+                    actions=("preview_refresh.execute",),
                     product="launchplane",
                     context="launchplane",
                 ),
@@ -1570,7 +1602,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
             response = await _post_agent_write_intent_evaluate(
                 app,
                 _agent_write_intent_payload(
-                    intent="every_code_rerun",
+                    intent="preview_refresh",
                     mode="dry_run",
                     product="launchplane",
                     context="launchplane",
@@ -1720,7 +1752,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_agent_write_intent_policy(
-                actions=("every_code_work_request.rerun",),
+                actions=("preview_refresh.execute",),
                 product="launchplane",
                 context="launchplane",
             ),
@@ -1730,7 +1762,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         response = await _post_agent_write_intent_evaluate(
             app,
             _agent_write_intent_payload(
-                intent="every_code_rerun",
+                intent="preview_refresh",
                 mode="dry_run",
                 product="launchplane",
                 context="launchplane",
@@ -1744,7 +1776,7 @@ class FastApiAgentWriteIntentEvaluateTests(unittest.IsolatedAsyncioTestCase):
         app = create_launchplane_fastapi_app(
             verifier=_StubVerifier(_identity()),
             authz_policy=_agent_write_intent_policy(
-                actions=("every_code_work_request.rerun",),
+                actions=("preview_refresh.execute",),
                 product="launchplane",
                 context="launchplane",
             ),

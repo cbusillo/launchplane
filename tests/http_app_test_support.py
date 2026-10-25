@@ -4558,7 +4558,7 @@ class _AgentWriteIntentEvaluateReplayOnlyStore:
                 "result": {
                     "intent": {
                         "status": "allowed",
-                        "intent": "every_code_rerun",
+                        "intent": "preview_refresh",
                     },
                     "record": {
                         "record_id": "agent-write-intent-original",

@@ -1392,7 +1392,6 @@ def _lane_setup_context_owner(*, record_store: object, context: str) -> str:
 
 
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
-_AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 _DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
 
 
@@ -2974,20 +2973,6 @@ class PublicIngressMonitorRunOnceRequest(BaseModel):
             raise ValueError("public ingress monitor run requires product 'launchplane'")
         self.product = "launchplane"
         return self
-
-
-class _AgentWriteIntentRecordReadStore(Protocol):
-    def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord: ...
-
-    def list_agent_write_intent_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        status: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[AgentWriteIntentRecord, ...]: ...
 
 
 class _AgentWriteIntentRecordWriteStore(Protocol):
@@ -5945,19 +5930,6 @@ def create_launchplane_fastapi_app(
             missing_summary = ", ".join(missing_methods)
             raise TypeError(f"record store does not support {capability}: {missing_summary}")
 
-    def require_agent_write_intent_read_store(
-        record_store: object,
-    ) -> _AgentWriteIntentRecordReadStore:
-        require_agent_write_intent_methods(
-            record_store,
-            required_methods=(
-                "read_agent_write_intent_record",
-                "list_agent_write_intent_records",
-            ),
-            capability="agent write-intent evidence reads",
-        )
-        return cast(_AgentWriteIntentRecordReadStore, record_store)
-
     def require_agent_write_intent_write_store(
         record_store: object,
     ) -> _AgentWriteIntentRecordWriteStore:
@@ -6000,17 +5972,6 @@ def create_launchplane_fastapi_app(
             evaluation=evaluation,
             policy_record_id=policy_record.record_id,
             policy_sha256=policy_record.policy_sha256,
-        )
-
-    def reject_agent_write_intent(
-        *, trace_id: str, code: str, message: str, record_id: str = ""
-    ) -> HTTPException:
-        detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
-        if record_id:
-            detail["records"] = {"agent_write_intent_record_id": record_id}
-        return LaunchplaneHTTPException(
-            status_code=404 if code == "agent_write_intent_not_found" else 409,
-            detail=detail,
         )
 
     def merge_train_policy_not_configured_error(

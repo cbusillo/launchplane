@@ -1063,7 +1063,8 @@ The `/v1/manager-preview-approval/github-webhook` URL and its
 for signed trusted-maintenance evidence. Manager approval itself is retired; the
 webhook records no approval and the manager reconcile route is deleted.
 
-The historical work-request reads and engineering-review routes retain the
+Historical work-request, shared preview-readiness and product-profile list
+reads, plus engineering-review routes, retain the
 existing `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` bearer identity. The retired local
 worker cannot create or mutate Every Code requests through the service; the
 credential name does not select an executable or grant new authority.

@@ -202,6 +202,21 @@ def evaluate_agent_write_intent(
 ) -> AgentWriteIntentEvaluation:
     authz_action = authz_action_for_agent_write_intent(request.intent)
     resolved_secret_evidence = secret_evidence or AgentWriteIntentSecretEvidence()
+    if request.intent == "every_code_rerun":
+        return AgentWriteIntentEvaluation(
+            intent=request.intent,
+            mode=request.mode,
+            status="denied",
+            authz_action=authz_action,
+            product=request.product,
+            context=request.context,
+            source_url=request.source_url,
+            safe_to_execute=False,
+            next_action="Continue the issue through the repository workflow; Every Code execution is retired.",
+            reason_code="intent_retired",
+            audit=audit.model_copy(update={"decision": "denied", "reason_code": "intent_retired"}),
+            secret_evidence=resolved_secret_evidence,
+        )
     if request.secret_bindings and resolved_secret_evidence.status != "pass":
         return AgentWriteIntentEvaluation(
             intent=request.intent,
