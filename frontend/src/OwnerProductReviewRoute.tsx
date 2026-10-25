@@ -334,7 +334,7 @@ function ProductReviewNotes({ review }: { review: ProductReviewResponse }) {
   return (
     <section aria-label="What to check">
       <h4>What to check</h4>
-      {needsNothingFromClient(review.client_test_notes) ? (
+      {needsNothingFromClient(review.client_test_notes) && !review.client_test_notes_error ? (
         <p>{reason ? `Nothing for you to test: ${reason}` : "Nothing for you to test."}</p>
       ) : (
         <ClientTestNotes notes={review.client_test_notes} />
@@ -511,7 +511,7 @@ function ProductReviewDecisionForm({
         <button
           className="button button-primary"
           type="button"
-          disabled={busy || stale}
+          disabled={busy || stale || Boolean(review.client_test_notes_error)}
           onClick={() => void record("accepted")}
         >
           Accept
@@ -525,6 +525,7 @@ function ProductReviewDecisionForm({
           Request changes
         </button>
       </div>
+      {review.client_test_notes_error ? <p className="owner-review-alert" role="alert">{review.client_test_notes_error}</p> : null}
       {busy ? <p className="owner-review-state" role="status">Recording…</p> : null}
       {failure ? <p className="owner-review-alert" role="alert">{failure}</p> : null}
       {stale ? <button className="button" type="button" disabled={busy} onClick={async () => {

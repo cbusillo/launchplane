@@ -173,3 +173,20 @@ for (const [scenario, message] of [
     await expect(page.locator(".owner-review-card")).toContainText(message);
   });
 }
+
+for (const scenario of ["missing-notes", "notes-unavailable", "open-questions", "answered-questions"]) {
+  test(`Accept follows the notes gate: ${scenario}`, { tag: "@responsive" }, async ({ page }) => {
+    await page.goto(`/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=${scenario}`);
+    const accept = page.getByRole("button", { name: "Accept", exact: true });
+    if (scenario === "answered-questions") {
+      await expect(accept).toBeEnabled();
+    } else {
+      await expect(accept).toBeDisabled();
+    }
+    if (scenario === "open-questions") {
+      await expect(page.locator(".release-review-notes")).toContainText("What is the public business address?");
+    }
+    await page.getByRole("textbox").fill("Please supply the missing facts.");
+    await expect(page.getByRole("button", { name: "Request changes", exact: true })).toBeEnabled();
+  });
+}

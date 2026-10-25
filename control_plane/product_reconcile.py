@@ -48,7 +48,12 @@ from control_plane.testing_restore_prerequisite import (
     incomplete_testing_restore,
 )
 
-from control_plane.client_test_notes import ClientTestNotes, change_client_review
+from control_plane.client_test_notes import (
+    ClientTestNotes,
+    change_client_review,
+    open_client_questions,
+    owner_test_notes,
+)
 from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_reconcile_read import preview_refresh_failure
@@ -2176,7 +2181,11 @@ def _plan_preview_target(
         or profile.owner.review_label.strip().casefold()
         in {label.casefold() for label in _labels(pull_request)}
     )
-    if profile.owner.is_set and intent.error:
+    if (
+        profile.owner.is_set
+        and intent.error
+        and not open_client_questions(owner_test_notes(str(pull_request.get("body") or "")))
+    ):
         plan.update(
             action="wait", reason="client_test_notes_required", detail=intent.error, held=False
         )

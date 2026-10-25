@@ -1,6 +1,9 @@
 """Explicit engineering notes and real test instructions drive Client review."""
 
 import unittest
+from contextlib import nullcontext
+from pathlib import Path
+from unittest.mock import patch
 
 from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
 
@@ -8,6 +11,50 @@ from control_plane.client_test_notes import change_client_review, client_test_no
 
 
 class ClientTestNotesTests(unittest.TestCase):
+    def test_questions_keep_the_review_notification_without_permitting_acceptance(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from control_plane.client_test_notes import ClientTestNotesRequired
+        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
+
+        payload = {
+            "body": f"## Client test notes\nCheck the page.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?",
+            "labels": [],
+        }
+        with (
+            patch(
+                "control_plane.workflows.preview_pr_feedback.launchplane_github_token",
+                return_value=nullcontext("fixture"),
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                return_value=payload,
+            ),
+        ):
+            self.assertTrue(
+                pull_request_client_review(
+                    control_plane_root=Path("unused"),
+                    context="testing",
+                    anchor_pr_url="https://github.com/example/site/pull/42",
+                    label="owner-review",
+                )
+            )
+            self.assertTrue(
+                change_client_review(
+                    body=str(payload["body"]),
+                    labels=(),
+                    review_label="owner-review",
+                    pure_dependency_update=True,
+                ).error
+            )
+            payload["body"] = "## Client test notes\n"
+            with self.assertRaises(ClientTestNotesRequired):
+                pull_request_client_review(
+                    control_plane_root=Path("unused"),
+                    context="testing",
+                    anchor_pr_url="https://github.com/example/site/pull/42",
+                    label="owner-review",
+                )
+
     def test_release_testing_engineering_marker_keeps_each_sections_review_intent(self) -> None:
         notes = f"{ENGINEERING_RELEASE_TESTS}\nCheck the imported parts at release."
         body = "## Client test notes\n" + notes

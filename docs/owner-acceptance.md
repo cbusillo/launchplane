@@ -67,6 +67,13 @@ Client's acceptance.
 
 Editing the PR body re-plans its preview and review intent without needing a
 push or label change.
+The [shared ready-handoff notes contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#ready-handoffs)
+also defines the unanswered-questions subsection and shipping placeholder marker.
+Its validation extends the existing missing-notes gate: preview and release
+Accept stay disabled while questions remain. Preview acceptance rereads and
+validates the notes on the server before saving a decision. Request changes
+remains available. Clearing the questions restores normal notes validation;
+Client repositories also check their committed shipping content in ordinary CI.
 The preview reconciler refreshes the Client-review check independently of
 preview planning and delivery, including a deferred operation, an unknown
 provider outcome, or a failure to recover the original preview proof. The

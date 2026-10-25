@@ -280,8 +280,8 @@ wheels = [
 [[package]]
 name = "codex-skills-plan-status"
 version = "0.1.0"
-source = { url = "https://github.com/cbusillo/codex-skills/archive/91acb9ea69a401980e2917e0d91705634aec2ff9.tar.gz", subdirectory = "skills/github/scripts" }
-sdist = { hash = "sha256:d719174be6ad1ebf085ace99bed094e57e3d5f3f876ab4d8b79eb075e9e3b689" }
+source = { url = "https://github.com/cbusillo/codex-skills/archive/887efb4d10f621ff07ba659d7a58c6fdbbf9c42c.tar.gz", subdirectory = "skills/github/scripts" }
+sdist = { hash = "sha256:f36d028def917ca9250247207d14d590e28944a2d968e13c0dddfa9179b206a4" }
 
 [[package]]
 name = "cryptography"
@@ -532,7 +532,7 @@ requires-dist = [
     { name = "asgi-lifespan", marker = "extra == 'dev'", specifier = ">=2.1.0" },
     { name = "authlib", specifier = ">=1.7.2" },
     { name = "click", specifier = ">=8.4.2" },
-    { name = "codex-skills-plan-status", url = "https://github.com/cbusillo/codex-skills/archive/91acb9ea69a401980e2917e0d91705634aec2ff9.tar.gz", subdirectory = "skills/github/scripts" },
+    { name = "codex-skills-plan-status", url = "https://github.com/cbusillo/codex-skills/archive/887efb4d10f621ff07ba659d7a58c6fdbbf9c42c.tar.gz", subdirectory = "skills/github/scripts" },
     { name = "cryptography", specifier = ">=50.0.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.10.0" },

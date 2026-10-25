@@ -7881,6 +7881,8 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertIn("An admin needs to set one", self.comment_body())
 
     def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         self.store.write_product_profile_record(
@@ -7891,6 +7893,12 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["action"], "apply")
+        self.assertIn("@site-owner", self.comment_body())
+        self.github.pull_request["body"] = str(self.github.pull_request["body"]) + (
+            f"\n### {OPEN_CLIENT_QUESTIONS}\n- What is the business address?"
+        )
+        self.request("preview", 5)
+        self.assertNotEqual(self.reconcile()["reason"], "client_test_notes_required")
         self.assertIn("@site-owner", self.comment_body())
         calls_before_refusal = tuple(self.owner_review_status_calls)
         self.github.pull_request["body"] = "## Client test notes\n<!-- fill me in -->"
