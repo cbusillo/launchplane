@@ -778,10 +778,9 @@ def _settle_completed_invitation(
                 ):
                     continue
                 created_at = _timestamp(comment.get("created_at"))
-                reviewed_request = (
-                    _request_marker(profile, previous_decision) in lines
-                    and created_at <= _timestamp(decision.decided_at)
-                )
+                reviewed_request = _request_marker(
+                    profile, previous_decision
+                ) in lines and created_at <= _timestamp(decision.decided_at)
                 if not (candidate_markers.intersection(lines) or reviewed_request) or (
                     previous_decision is not None
                     and created_at <= _timestamp(previous_decision.decided_at)
@@ -1092,8 +1091,6 @@ def publish_release_invitation(
                     last_decision=last_decision,
                     control_plane_root=control_plane_root,
                 )
-                # An explicit urgent-open retry only confirms the existing request;
-                # routine workers retain the scheduled reminder behavior.
                 if reminded or _now() < due or urgent_reason:
                     _remember_delivery(backoff, receipt, due, reminded)
                     return True

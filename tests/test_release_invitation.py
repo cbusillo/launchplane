@@ -119,7 +119,7 @@ class ReleaseInvitationTests(unittest.TestCase):
         advance_release_invitations(store=self.store, control_plane_root=self.root)
         self.assertEqual(self.issues[0]["state"], "closed")
         self.assertIn(accepted.release_issue_url, self.comments[0]["body"])
-        self.assertNotIn("@site-owner", self.comments[0]["body"])
+        self.assertNotIn(f"@{self.profile.owner.github_login}", self.comments[0]["body"])
 
     def test_manual_request_adoption_is_receipt_only_and_preserves_original(self) -> None:
         self.prepare_settings()

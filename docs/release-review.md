@@ -272,10 +272,6 @@ while a newer review waits; a restart recovers
 the durable completion receipts. They do not compile a new checklist for a
 release already completed. No acceptance or release record is
 changed by invitation reconciliation.
-An unavailable historical completion is logged and cannot block publication
-for a newer candidate. Deliberate urgent openings skip historical settlement;
-the routine worker reconciles it separately.
-
 Each request includes `release_invitation_marker(product, candidate)`, derived
 from the candidate's artifact, commit and shared-input identity. The publisher serializes deliberate requests across replicas using the existing
 release-publication lock and checks for that receipt before posting. A retry after a lost response
@@ -375,16 +371,8 @@ in the open review is current. Lost post or replacement responses are recovered 
 cleanup is completed before delivery is cached. Missing timestamps or identities
 refuse publication. No manual live-thread cleanup is needed.
 
-An undecided request gets at most one reminder, no sooner than three days after
-the current invitation's creation. Silent candidate updates do not reset that
-clock or send a reminder during the update. A fresh Client-facing addition resets
-the reminder deadline; the open review still gets at most one reminder. A reminder
-also replaces the older invitation. A separate `release-reminder` marker binds the
-reminder to the open request, so retries and worker restarts cannot send it twice,
-even when another candidate arrives. A decided or incomplete review gets no
-reminder. Markers are delivery
-receipts only and never supply release acceptance. Preserve them during edits;
-deleting a receipt permits another notification.
+No background reminders are sent until the record-driven request slice on
+#4898 lands. Existing reminder receipts remain preserved.
 
 Legacy marker-only requests need the receipt-only admin adoption above before
 App-only discovery is enabled. The following read-only command can identify the
