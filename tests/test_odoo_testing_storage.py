@@ -512,6 +512,14 @@ class TestingStorageTests(TestingDrillScenario):
 
 
 class HostCapacityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        real_read = Path.read_text
+
+        def read(path: Path, *args: Any, **kwargs: Any) -> str:
+            return "" if path == Path("/proc/self/mountinfo") else real_read(path, *args, **kwargs)
+
+        self.enterContext(patch.object(Path, "read_text", read))
+
     def test_shared_backing_demands_are_summed_and_unknown_overlay_is_refused(self) -> None:
         namespace: dict[str, Any] = {"Path": Path, "os": os, "json": json}
         tree = ast.parse(STORAGE_MAINTENANCE_LIBRARY)
@@ -559,6 +567,86 @@ class HostCapacityTests(unittest.TestCase):
                 containers["script-runner"][1]["GraphDriver"] = {}
                 with self.assertRaises(RuntimeError):
                     namespace["storage_capacity"](spec, containers, budget)
+
+    def test_datasets_share_capacity_only_within_the_same_zfs_pool(self) -> None:
+        namespace: dict[str, Any] = {"json": json}
+        exec(STORAGE_MAINTENANCE_LIBRARY, namespace)
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for name in ("data", "db", "overlay", "snapshot"):
+                (root / name).mkdir()
+            namespace["docker"] = lambda *arguments: json.dumps(
+                [{"Mountpoint": str(root / arguments[-1])}]
+            ).encode()
+            namespace["clean_snapshot_root"] = lambda *_args, **_kwargs: root / "snapshot" / "copy"
+            namespace["filestore_clone_proved"] = lambda *_args: False
+            spec: dict[str, Any] = {
+                "generation": {"namespace": "fixture", "clean_snapshot_enabled": True},
+                "preview_volumes": {"data": "data", "database": "db"},
+                "copy_binding_sha256": "a" * 64,
+                "staging_directory": str(root / "snapshot"),
+            }
+            containers = {
+                "script-runner": (
+                    "runner",
+                    {"GraphDriver": {"Data": {"UpperDir": str(root / "overlay")}}},
+                )
+            }
+            budget = {
+                "database_bytes": 10,
+                "filestore_bytes": 40,
+                "staging_bytes": 50,
+                "reserve_bytes": 5,
+            }
+            real_stat = Path.stat
+            real_read = Path.read_text
+
+            def device(path: Path, **kwargs: Any) -> Any:
+                metadata = real_stat(path, **kwargs)
+                number = 2 if path.is_relative_to(root / "snapshot") else 1
+                return SimpleNamespace(st_dev=os.makedev(0, number), st_mode=metadata.st_mode)
+
+            for filesystem, source, capture, free_bytes, admitted in (
+                ("zfs", "tank/home", True, 100, False),
+                ("zfs", "tank/home", True, 106, True),
+                ("zfs", "other/home", True, 100, True),
+                ("ext4", "/dev/fixture", True, 100, True),
+                ("zfs", "tank/home", False, 1, True),
+            ):
+                spec["generation"]["clean_snapshot_enabled"] = capture
+                mounts = (
+                    f"1 0 0:1 / / rw shared:1 - {filesystem} tank/docker rw\n"
+                    f"2 1 0:2 / /home rw - {filesystem} {source} rw\n"
+                )
+
+                def read(path: Path, *args: Any, **kwargs: Any) -> str:
+                    if path == Path("/proc/self/mountinfo"):
+                        return mounts
+                    return real_read(path, *args, **kwargs)
+
+                with (
+                    self.subTest(
+                        filesystem=filesystem, source=source, capture=capture, free=free_bytes
+                    ),
+                    patch("pathlib.Path.stat", autospec=True, side_effect=device),
+                    patch.object(Path, "read_text", read),
+                    patch.object(
+                        os,
+                        "statvfs",
+                        side_effect=lambda path: SimpleNamespace(
+                            f_bavail=free_bytes
+                            if capture or Path(path).is_relative_to(root / "snapshot")
+                            else 100,
+                            f_frsize=1,
+                        ),
+                    ),
+                ):
+                    self.assertEqual(
+                        namespace["storage_capacity"](
+                            spec, containers, budget, runner_staging_bytes=1, host_staging_bytes=0
+                        ),
+                        admitted,
+                    )
 
     def test_staged_filestore_is_charged_once_and_proven_clones_as_free(self) -> None:
         import shutil

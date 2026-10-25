@@ -57,7 +57,10 @@ preview are charged zero only when a real `cp --reflink=always` probe between
 the same two filesystems succeeds; otherwise they are charged in full and
 refused when they do not fit. A copy admitted as a clone runs
 `cp --reflink=always` and fails rather than falling back to a full copy the
-check did not charge. Database restores are always charged in full.
+check did not charge. Database restores are always charged in full. Demands on
+datasets sharing a ZFS pool are summed, using the smallest available-space reading in that pool;
+other filesystems remain grouped by device. Dataset quotas can therefore make
+the shared-pool check more conservative.
 
 The newest qualified immutable database-backed capture is the preview source,
 separate from the current testing generation. Worker completion records it
