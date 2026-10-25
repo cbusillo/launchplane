@@ -14,6 +14,17 @@ from control_plane.docker_errors import docker_daemon_authorization_denied
 
 BRIDGE_NETWORK_CAPACITY_MARGIN = 2
 
+# https://github.com/moby/moby/blob/master/daemon/libnetwork/ipamutils/utils.go
+DOCKER_LOCAL_DEFAULT_POOLS = (
+    ("172.17.0.0/16", 16),
+    ("172.18.0.0/16", 16),
+    ("172.19.0.0/16", 16),
+    ("172.20.0.0/14", 16),
+    ("172.24.0.0/14", 16),
+    ("172.28.0.0/14", 16),
+    ("192.168.0.0/16", 20),
+)
+
 
 def compose_bridge_network_requirement(document: Mapping[str, object]) -> int:
     """Reserve the default bridge and declared private bridges in a known Compose.
@@ -88,7 +99,8 @@ def calculate_capacity(
 
 # Only fixed metadata reads. No schedules, containers, networks or files are created.
 BRIDGE_CAPACITY_PROGRAM = (
-    "from collections.abc import Mapping, Sequence\n"
+    f"DOCKER_LOCAL_DEFAULT_POOLS = {DOCKER_LOCAL_DEFAULT_POOLS!r}\n"
+    + "from collections.abc import Mapping, Sequence\n"
     + inspect.getsource(docker_daemon_authorization_denied)
     + "\n"
     + inspect.getsource(calculate_capacity)
@@ -124,7 +136,20 @@ def identifiers():
     return sorted(values)
 
 def capacity():
-    pools = json.loads(checked(['docker', 'info', '--format', '{{json .DefaultAddressPools}}']))
+    info = json.loads(checked(['docker', 'info', '--format', '{"id":{{json .ID}},"pools":{{json .DefaultAddressPools}},"errors":{{json .ServerErrors}}}']))
+    if not isinstance(info, dict) or 'pools' not in info or 'errors' not in info:
+        raise ValueError('Daemon pool evidence is unavailable')
+    errors = info['errors']
+    if errors not in (None, []):
+        if isinstance(errors, list) and all(isinstance(error, str) for error in errors):
+            if docker_daemon_authorization_denied('\n'.join(errors).encode()):
+                raise DaemonReadDenied('Existing provider reader refused the read')
+        raise ValueError('Daemon reported a server error')
+    if not isinstance(info.get('id'), str) or not info['id'].strip():
+        raise ValueError('Daemon did not supply its identity')
+    pools = info['pools']
+    if pools is None or pools == []:
+        pools = [{'Base': base, 'Size': size} for base, size in DOCKER_LOCAL_DEFAULT_POOLS]
     if not isinstance(pools, list) or not all(isinstance(pool, dict) for pool in pools):
         raise ValueError('Daemon pools are unavailable')
     ids = identifiers()

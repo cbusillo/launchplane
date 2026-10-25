@@ -3039,7 +3039,8 @@ volumes, credentials, database names, cron and connections are isolated.
 Before a rehearsal prepare creates credentials or dispatches its first provider
 create, Launchplane reads the selected server's IPv4 bridge-network headroom
 over Dokploy's existing registered-server terminal transport. The fixed reader
-uses the daemon's effective `DefaultAddressPools`, complete network IPAM and
+uses the daemon's configured `DefaultAddressPools`, or Docker's built-in local
+pools when the custom-pool list is null or empty, complete network IPAM and
 all IPv4 route tables. Each overlapping allocation or non-default route consumes
 the pool slots it intersects; duplicate overlaps count once. The rehearsal needs
 one private bridge plus two spare slots. Exactly that headroom passes.
@@ -3048,7 +3049,7 @@ that pool unavailable to admission even if Docker would otherwise allocate it.
 
 HTTP 409 `host_bridge_network_capacity_short` means the measured free capacity
 is below that requirement. `host_bridge_network_capacity_unavailable` means
-capacity is unproved, including absent daemon pool evidence, malformed or
+capacity is unproved, including failed daemon reads, malformed or
 incomplete reads, or network inventory changing during the read. Neither
 refusal creates credentials or provider placement, and a fresh pre-effect
 operation reservation is released. Provider authorization denials retain their
