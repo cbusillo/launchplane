@@ -1,5 +1,6 @@
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
+import base64
 import hashlib
 import fcntl
 import io
@@ -16,6 +17,8 @@ from unittest.mock import Mock, patch
 import yaml
 
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
+from control_plane._odoo_copy_runtime_guard import VOLUME_BACKING_INSPECTION_LIBRARY
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
@@ -27,6 +30,8 @@ from control_plane.dokploy.source import (
 )
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY, render_odoo_raw_compose_file
 from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
+from control_plane.preview_filestore import PREPARE_PREVIEW_FILESTORE_PROGRAM
+from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 
 
 class PreviewCleanSnapshotTests(unittest.TestCase):
@@ -34,7 +39,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         temporary = self.enterContext(TemporaryDirectory())
         self.root = Path(temporary).resolve()
         self.snapshot_id = "a" * 64
-        library: dict[str, Any] = {}
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
         exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
         with patch("pathlib.Path.home", return_value=self.root):
             self.source = library["clean_snapshot_root"](self.snapshot_id)
@@ -63,15 +68,16 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.project = "example-pr-23"
         self.database = "example_pr_23_db"
         self.image = "registry.invalid/odoo@sha256:" + "b" * 64
-        self.data = self.root / "preview-data"
-        self.data.mkdir()
+        self.data = self.root / "volumes/preview-data/_data"
+        self.data.mkdir(parents=True)
         self.volumes = {
             "preview-data": self.data,
             "preview-db": self.root / "preview-db",
             "preview-logs": self.root / "preview-logs",
+            "preview-data-filestore": self.root / "volumes/preview-data-filestore/_data",
         }
         for path in self.volumes.values():
-            path.mkdir(exist_ok=True)
+            path.mkdir(parents=True, exist_ok=True)
         self.calls: list[list[str]] = []
         self.present = False
         self.sanitized = True
@@ -82,8 +88,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.ready_before_web = False
         self.witness_probe_failure = False
         self.paused = False
-        self.clones = False
-        self.clone_copies_fail = False
         self.overlay = self.root / "runner-overlay"
         self.overlay.mkdir()
         self.volume_created_at = datetime.now(timezone.utc).isoformat()
@@ -123,6 +127,38 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         }
         self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.overlay)}}
         self.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
+        self.private = self.data.parent / "launchplane-preview-filestore"
+        for directory in (self.private / "upper", self.private / "work"):
+            directory.mkdir(parents=True)
+        self.overlay_options = {
+            "type": "overlay",
+            "device": "overlay",
+            "o": f"lowerdir={self.source}/filestore,upperdir={self.private}/upper,workdir={self.private}/work,userxattr",
+        }
+        self.remount_filestore()
+        self.volume_options = {"preview-data-filestore": self.overlay_options}
+        self.volume_labels = {
+            name: {"com.docker.compose.project": self.project} for name in self.volumes
+        }
+        self.volume_labels["preview-data-filestore"]["io.launchplane.preview-snapshot"] = (
+            self.snapshot_id
+        )
+        self.container_inspection_error = b""
+        for role in ("web", "script-runner"):
+            self.containers[role]["Mounts"].append(
+                {
+                    "Type": "volume",
+                    "Name": "preview-data-filestore",
+                    "Source": str(self.volumes["preview-data-filestore"]),
+                    "Destination": "/volumes/data/filestore/" + self.database,
+                }
+            )
+
+    def remount_filestore(self) -> None:
+        destination = self.data / "filestore" / self.database
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(self.source / "filestore", destination)
 
     def run_script(self, **updates: Any) -> str:
         arguments = {
@@ -146,6 +182,38 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         validate_dokploy_schedule_script({"script": script, "appName": self.project})
         return self.execute_script(script)
 
+    def prepare_filestore(
+        self,
+        *,
+        snapshot: CleanTestingSnapshot | None,
+        apply: bool = True,
+        require_existing: bool = False,
+    ) -> dict[str, Any]:
+        payload = {
+            "project": self.project,
+            "data_volume": "preview-data",
+            "volumes": {"data": "preview-data", "database": "preview-db", "logs": "preview-logs"},
+            "database_name": self.database,
+            "snapshot": snapshot.model_dump(mode="json") if snapshot else None,
+            "copy_witness_parameter": TESTING_COPY_COMPLETION_PARAMETER,
+            "apply": apply,
+            "require_existing": require_existing,
+        }
+        output = io.StringIO()
+        with (
+            patch("pathlib.Path.home", return_value=self.root),
+            patch("subprocess.run", side_effect=self.command),
+            patch(
+                "sys.argv",
+                ["proof", base64.b64encode(json.dumps(payload).encode()).decode(), "frame:"],
+            ),
+            redirect_stdout(output),
+        ):
+            exec(PREPARE_PREVIEW_FILESTORE_PROGRAM, {})
+        result = json.loads(output.getvalue().removeprefix("frame:"))
+        assert isinstance(result, dict)
+        return result
+
     def execute_script(self, script: str) -> str:
         program = script.partition("<<'LP_PREVIEW_SNAPSHOT'\n")[2].rsplit(
             "\nLP_PREVIEW_SNAPSHOT", 1
@@ -165,16 +233,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         output = b""
         if arguments[0] in {"ssh", "rsync"}:
             self.fail("A preview must not read an upstream source")
-        if arguments[:2] == ["cp", "--reflink=always"]:
-            if not self.clones:
-                return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"")
-            shutil.copyfile(arguments[-2], arguments[-1])
-        elif arguments[0] == "cp":
-            self.assertTrue(self.paused)
-            self.assertEqual(Path(arguments[-2]), self.source / "filestore")
-            if self.clone_copies_fail and arguments[2] == "--reflink=always":
-                return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"")
-            shutil.copytree(arguments[-2], arguments[-1], dirs_exist_ok=True)
+        if arguments[0] == "cp":
+            self.fail("A preview must not copy its filestore")
         elif arguments[:2] == ["docker", "cp"]:
             self.assertEqual(Path(arguments[2]), self.source / "database.dump")
         elif arguments[:2] == ["docker", "ps"]:
@@ -183,6 +243,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 if any(value.startswith("volume=") for value in arguments)
                 else "\n".join(self.containers).encode()
             )
+            if self.container_inspection_error:
+                output += b"\nretired-preview"
         elif arguments[:2] == ["docker", "inspect"]:
             output = json.dumps(
                 [
@@ -194,18 +256,54 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     if arguments[-1] == "fixture-data"
                     else self.containers[arguments[-1]]
                 ]
+                if len(arguments) == 3
+                else [
+                    self.containers[identifier]
+                    for identifier in arguments[2:]
+                    if identifier in self.containers
+                ]
             ).encode()
+            if self.container_inspection_error:
+                result = subprocess.CompletedProcess(
+                    arguments, 1, stdout=output, stderr=self.container_inspection_error
+                )
+                if kwargs.get("check"):
+                    result.check_returncode()
+                return result
+        elif arguments[:3] == ["docker", "volume", "create"]:
+            self.volume_options[arguments[-1]] = dict(
+                arguments[index + 1].split("=", 1)
+                for index, value in enumerate(arguments[:-1])
+                if value == "--opt"
+            )
+            self.volume_labels[arguments[-1]] = dict(
+                arguments[index + 1].split("=", 1)
+                for index, value in enumerate(arguments[:-1])
+                if value == "--label"
+            )
+            self.volumes[arguments[-1]] = self.root / "volumes" / arguments[-1] / "_data"
+            self.volumes[arguments[-1]].mkdir(parents=True, exist_ok=True)
         elif arguments[:3] == ["docker", "volume", "ls"]:
-            output = "\n".join(self.volumes).encode()
+            names = (
+                [
+                    name
+                    for name in self.volumes
+                    if "io.launchplane.preview-snapshot" in self.volume_labels.get(name, {})
+                ]
+                if "label=io.launchplane.preview-snapshot" in arguments
+                else list(self.volumes)
+            )
+            output = "\n".join(names).encode()
         elif arguments[:3] == ["docker", "volume", "inspect"]:
             output = json.dumps(
                 [
                     {
+                        "Name": arguments[-1],
                         "Driver": "local",
-                        "Options": {},
+                        "Options": self.volume_options.get(arguments[-1], {}),
                         "Mountpoint": str(self.volumes[arguments[-1]]),
                         "CreatedAt": self.volume_created_at,
-                        "Labels": {"com.docker.compose.project": self.project},
+                        "Labels": self.volume_labels.get(arguments[-1], {}),
                     }
                 ]
             ).encode()
@@ -213,6 +311,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             self.paused = True
         elif arguments[:2] == ["docker", "unpause"]:
             self.paused = False
+        elif arguments == ["docker", "start", "script-runner"]:
+            self.remount_filestore()
         elif arguments[:2] == ["docker", "start"]:
             self.ready_before_web = any(
                 json.loads(path.read_text()).get("completed")
@@ -235,7 +335,11 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 else:
                     self.fail("Unexpected preview SQL probe")
             elif arguments[-2:] in (["id", "-u"], ["id", "-g"]):
-                output = b"1000"
+                output = str(
+                    self.source.stat().st_uid
+                    if arguments[-1] == "-u"
+                    else self.source.stat().st_gid
+                ).encode()
             elif kwargs.get("input") in (
                 b"fixture-readback",
                 INTEGRATION_READBACK_PROGRAM.encode(),
@@ -284,7 +388,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         )
         self.assertIn(["docker", "start", "web"], self.calls)
 
-    def test_preview_clones_only_frozen_bytes_and_sanitizes_before_web(self) -> None:
+    def test_preview_uses_shared_frozen_bytes_and_sanitizes_before_web(self) -> None:
         output = self.run_script()
         self.assertIn("clean_preview_snapshot_restored=true", output.splitlines())
         self.assertEqual(
@@ -292,6 +396,310 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             (self.source / "filestore/attachment").read_bytes(),
         )
         self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_preparation_allocates_overlay_and_retains_its_original_source(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        created = self.prepare_filestore(snapshot=self.snapshot)
+        self.assertEqual(created["type"], "complete")
+        options = dict(
+            field.split("=", 1)
+            for field in created["declaration"]["driver_opts"]["o"].split(",")
+            if "=" in field
+        )
+        self.assertEqual(Path(options["lowerdir"]), self.source / "filestore")
+        self.assertEqual(Path(options["upperdir"]), self.private / "upper")
+        self.calls.clear()
+        newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
+        reused = self.prepare_filestore(snapshot=newer)
+        self.assertEqual(reused, created)
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+        self.volumes.pop("preview-data-filestore")
+        reconstructed = self.prepare_filestore(snapshot=newer, require_existing=True)
+        self.assertEqual(reconstructed, created)
+        self.assertEqual(
+            self.volume_labels["preview-data-filestore"]["io.launchplane.preview-snapshot"],
+            self.snapshot.snapshot_id,
+        )
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
+        exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+        attempts = self.source.parent / "preview-attempts"
+        for attempt in attempts.glob("*.json"):
+            payload = json.loads(attempt.read_text())
+            payload["completed"] = True
+            attempt.write_text(json.dumps(payload))
+        with patch("pathlib.Path.home", return_value=self.root):
+            library["retire_clean_snapshots"](
+                {
+                    "copy_binding_sha256": "c" * 64,
+                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+                }
+            )
+            self.assertTrue(self.source.is_dir())
+            self.volumes.pop("preview-data-filestore")
+            library["retire_clean_snapshots"](
+                {
+                    "copy_binding_sha256": "c" * 64,
+                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+                }
+            )
+            self.assertTrue(self.source.is_dir())
+            for path in self.volumes.values():
+                shutil.rmtree(path)
+            self.volumes.clear()
+            library["retire_clean_snapshots"](
+                {
+                    "copy_binding_sha256": "c" * 64,
+                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+                }
+            )
+        self.assertFalse(self.source.exists())
+
+    def test_preparation_uses_docker_full_container_identities(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        command = self.command
+        identities = {role: hashlib.sha256(role.encode()).hexdigest() for role in self.containers}
+
+        def realistic_ids(
+            arguments: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            if arguments[:2] == ["docker", "ps"]:
+                width = 64 if "--no-trunc" in arguments else 12
+                return subprocess.CompletedProcess(
+                    arguments,
+                    0,
+                    stdout="\n".join(value[:width] for value in identities.values()).encode(),
+                    stderr=b"",
+                )
+            if arguments[:2] == ["docker", "inspect"]:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    0,
+                    stdout=json.dumps(
+                        [
+                            {**container, "Id": identities[role]}
+                            for role, container in self.containers.items()
+                            if any(
+                                identities[role].startswith(identifier)
+                                for identifier in arguments[2:]
+                            )
+                        ]
+                    ).encode(),
+                    stderr=b"",
+                )
+            if arguments[:2] == ["docker", "exec"]:
+                arguments = list(arguments)
+                arguments[3] = next(
+                    role for role, identity in identities.items() if identity == arguments[3]
+                )
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=realistic_ids):
+            self.assertEqual(
+                self.prepare_filestore(snapshot=self.snapshot, apply=False)["type"], "complete"
+            )
+
+    def test_declared_overlay_before_first_allocation_can_resume(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        result = self.prepare_filestore(snapshot=self.snapshot, require_existing=True)
+        self.assertEqual(result["type"], "complete")
+        self.assertIsNotNone(result["declaration"])
+
+    def test_fresh_generation_preserves_surviving_upper_before_any_data_changes(self) -> None:
+        attachment = self.private / "upper" / "staff-attachment"
+        attachment.write_bytes(b"staff writes")
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        self.calls.clear()
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"], "failed"
+        )
+        self.assertFalse(
+            (self.source.parent / "preview-attempts").exists()
+            and list((self.source.parent / "preview-attempts").glob("*.json"))
+        )
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+        self.assertEqual(attachment.read_bytes(), b"staff writes")
+
+    def test_preparation_preserves_legacy_database_and_filestore(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        self.present = True
+        result = self.prepare_filestore(snapshot=self.snapshot)
+        self.assertEqual(result, {"type": "complete", "declaration": None})
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
+            "failed",
+        )
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+        self.present = False
+        result = self.prepare_filestore(snapshot=self.snapshot)
+        self.assertEqual(result["type"], "failed")
+        self.assertTrue((self.data / "filestore" / self.database / "attachment").is_file())
+
+    def test_refused_preparation_never_allocates_or_pins_storage(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        for refusal in ("disk", "receipt"):
+            with self.subTest(refusal=refusal):
+                snapshot = (
+                    self.snapshot
+                    if refusal == "disk"
+                    else self.snapshot.model_copy(update={"database_sha256": "b" * 64})
+                )
+                with patch(
+                    "os.statvfs",
+                    return_value=SimpleNamespace(
+                        f_bavail=0 if refusal == "disk" else 2**40, f_frsize=1
+                    ),
+                ):
+                    self.assertEqual(self.prepare_filestore(snapshot=snapshot)["type"], "failed")
+                self.assertFalse(
+                    any(call[:3] == ["docker", "volume", "create"] for call in self.calls)
+                )
+                self.assertFalse((self.source.parent / "preview-attempts").exists())
+
+    def test_missing_retained_overlay_refuses_instead_of_hiding_attachments(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        for snapshot in (None, self.snapshot):
+            with self.subTest(snapshot=snapshot):
+                self.assertEqual(
+                    self.prepare_filestore(snapshot=snapshot, require_existing=True)["type"],
+                    "failed",
+                )
+
+    def test_completed_host_restore_cannot_reconstruct_a_missing_declared_overlay(self) -> None:
+        self.run_script()
+        self.volumes.pop("preview-data-filestore")
+        self.calls.clear()
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
+            "failed",
+        )
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+
+    def test_preparation_tolerates_only_missing_container_inventory_errors(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        for error in (b"Error: No such container: retired-preview\n", b"daemon unavailable\n"):
+            with self.subTest(error=error):
+                self.container_inspection_error = error
+                result = self.prepare_filestore(snapshot=self.snapshot, apply=False)
+                self.assertEqual(result["type"], "complete" if b"No such" in error else "failed")
+
+    def test_owned_legacy_resume_preserves_attempt_writes_without_an_overlay(self) -> None:
+        self.sanitized = False
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.sanitized = True
+        self.volumes.pop("preview-data-filestore")
+        for role in ("web", "script-runner"):
+            self.containers[role]["Mounts"].pop()
+        attachment = self.data / "filestore" / self.database / "attempt-attachment"
+        attachment.write_bytes(b"attachment created during module update")
+        self.calls.clear()
+        result = self.prepare_filestore(snapshot=self.snapshot)
+        self.assertEqual(result, {"type": "complete", "declaration": None})
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
+            "failed",
+        )
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+        self.run_script()
+        self.assertEqual(attachment.read_bytes(), b"attachment created during module update")
+        self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
+        self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_overlay_plan_has_no_application_storage_effects(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        plan = self.prepare_filestore(snapshot=self.snapshot, apply=False)
+        self.assertEqual(plan["type"], "complete")
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+        self.assertFalse((self.source.parent / "preview-attempts").exists())
+
+    def test_owned_legacy_attempts_transition_without_another_filestore_copy(self) -> None:
+        self.killed_during_restore = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.killed_during_restore = False
+        self.volumes.pop("preview-data-filestore")
+        mounts = {}
+        for role in ("web", "script-runner"):
+            mounts[role] = self.containers[role]["Mounts"].pop()
+        result = self.prepare_filestore(snapshot=self.snapshot)
+        self.assertEqual(result["type"], "complete")
+        for role, mount in mounts.items():
+            self.containers[role]["Mounts"].append(mount)
+        self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
+        self.assertFalse(any(call[0] == "cp" for call in self.calls))
+
+    def test_foreign_overlay_or_aliased_upper_refuses_before_data_changes(self) -> None:
+        self.overlay_options["o"] += ",upperdir=/another-preview"
+        self.assertEqual(self.prepare_filestore(snapshot=None)["type"], "failed")
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
+    def test_foreign_volume_readback_batches_and_preserves_consumer_checks(self) -> None:
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
+        exec(VOLUME_BACKING_INSPECTION_LIBRARY, library)
+        foreign = {
+            "Id": "foreign",
+            "Mounts": [
+                {"Type": "volume", "Name": name, "Source": str(self.root / name)}
+                for name in ("foreign-a", "foreign-b")
+            ],
+        }
+        cases: tuple[tuple[list[dict[str, Any]], bytes, ReadbackPredicate | None], ...] = (
+            (
+                [],
+                b"Error response from daemon: volume foreign-a not found\nError response from daemon: volume foreign-b not found\n",
+                None,
+            ),
+            ([], b"daemon unavailable\n", ReadbackPredicate.BACKING_STORAGE),
+            (
+                [
+                    {"Name": "foreign-a", "Mountpoint": "", "Options": {}},
+                    {"Name": "foreign-b", "Mountpoint": str(self.root), "Options": {}},
+                ],
+                b"",
+                ReadbackPredicate.BACKING_STORAGE,
+            ),
+            (
+                [
+                    {
+                        "Name": "foreign-a",
+                        "Mountpoint": str(self.root / "alias"),
+                        "Options": {"device": str(self.data)},
+                    },
+                    {"Name": "foreign-b", "Mountpoint": str(self.root), "Options": {}},
+                ],
+                b"",
+                ReadbackPredicate.STORAGE_CONSUMERS,
+            ),
+        )
+        for rows, stderr, predicate in cases:
+            with self.subTest(predicate=predicate):
+                result = subprocess.CompletedProcess(
+                    [], int(bool(stderr)), stdout=json.dumps(rows).encode(), stderr=stderr
+                )
+                with patch("subprocess.run", return_value=result) as batch:
+                    if predicate is None:
+                        self.assertIn(
+                            "preview-data",
+                            library["inspect_volume_backings"]({"preview-data"}, [foreign], set()),
+                        )
+                    else:
+                        with self.assertRaises(library["CopyReadbackRefused"]) as refused:
+                            library["inspect_volume_backings"]({"preview-data"}, [foreign], set())
+                        self.assertEqual(refused.exception.predicate, predicate)
+                batch.assert_called_once()
 
     def test_private_preview_render_passes_snapshot_runtime_inspection(self) -> None:
         rendered = yaml.safe_load(
@@ -306,9 +714,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             self.containers[role]["HostConfig"] = {
                 "ExtraHosts": rendered["services"][role].get("extra_hosts", [])
             }
-        self.clones = True
         self.run_script()
-        self.assertTrue(any(call[:3] == ["cp", "-a", "--reflink=always"] for call in self.calls))
+        self.assertFalse(any(call[0] == "cp" for call in self.calls))
         self.assertTrue(self.ready_before_web)
 
     def service_schedule(
@@ -421,7 +828,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
 
     def test_malformed_committed_attempt_defers_all_retirement(self) -> None:
-        library: dict[str, Any] = {}
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
         exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
         attempts = self.source.parent / "preview-attempts"
         attempts.mkdir()
@@ -440,7 +847,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertTrue(self.ready_before_web)
 
     def test_interrupted_obsolete_retirement_is_resumable_and_nonfatal(self) -> None:
-        library: dict[str, Any] = {}
+        self.volumes.pop("preview-data-filestore")
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
         exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
         spec = {
             "copy_binding_sha256": "b" * 64,
@@ -458,7 +866,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(self.source.exists())
 
     def test_atomic_writer_temporary_file_does_not_block_snapshot_retirement(self) -> None:
-        library: dict[str, Any] = {}
+        self.volumes.pop("preview-data-filestore")
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
         exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
         attempts = self.source.parent / "preview-attempts"
         attempts.mkdir()
@@ -626,37 +1035,20 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(self.source.exists())
         self.assertFalse(list((self.source.parent / "preview-attempts").iterdir()))
 
-    def test_overlay_dump_demand_shares_the_real_filesystem_budget(self) -> None:
-        budget = self.snapshot.storage_budget
-        available = budget.database_bytes + budget.filestore_bytes + budget.reserve_bytes
-        with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)):
-            with self.assertRaises(RuntimeError):
-                self.run_script()
-        self.assertNotIn(["docker", "stop", "web"], self.calls)
-
-    def test_proven_clone_requires_full_guest_capacity_before_copying(self) -> None:
+    def test_overlay_charges_database_dump_and_reserve_without_another_filestore(self) -> None:
         budget = self.snapshot.storage_budget
         dump = (self.source / "database.dump").stat().st_size
-        required = budget.database_bytes + budget.filestore_bytes + dump + budget.reserve_bytes
-        self.clones = True
+        required = budget.database_bytes + dump + budget.reserve_bytes
         with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=required - 1, f_frsize=1)):
             with self.assertRaises(RuntimeError):
                 self.run_script()
         self.assertNotIn(["docker", "stop", "web"], self.calls)
         self.calls.clear()
         with patch("os.statvfs", return_value=SimpleNamespace(f_bavail=required, f_frsize=1)):
-            output = self.run_script()
-        self.assertIn("clean_preview_snapshot_restored=true", output.splitlines())
-        self.assertTrue(any(call[:3] == ["cp", "-a", "--reflink=always"] for call in self.calls))
-
-    def test_admitted_clone_fails_closed_instead_of_copying_in_full(self) -> None:
-        self.clones = True
-        self.clone_copies_fail = True
-        with self.assertRaises(RuntimeError):
             self.run_script()
-        copies = [call[:3] for call in self.calls if call[:2] == ["cp", "-a"]]
-        self.assertEqual(copies, [["cp", "-a", "--reflink=always"]] * 2)
-        self.assertNotIn(["docker", "start", "web"], self.calls)
+        self.assertIn(["docker", "start", "web"], self.calls)
+        self.assertFalse(any(call[0] == "cp" for call in self.calls))
+        self.assertFalse(any("-R" in call for call in self.calls if "chown" in call))
 
     def test_existing_preview_data_and_staff_edits_are_never_overwritten(self) -> None:
         self.present = True
@@ -687,7 +1079,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_destroyed_preview_can_start_again_on_new_storage(self) -> None:
         self.run_script()
-        shutil.rmtree(self.data / "filestore")
+        self.remount_filestore()
         self.present = False
         self.volume_created_at = datetime.now(timezone.utc).isoformat()
         self.calls.clear()
@@ -704,6 +1096,37 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.run_script()
         self.assertFalse(extra.exists())
         self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_owned_cleanup_failure_restarts_runner_and_keeps_web_held(self) -> None:
+        self.runner_failure = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        attachment = self.private / "upper" / "attempt-attachment"
+        attachment.write_bytes(b"preserve failed cleanup")
+        self.calls.clear()
+        remove = shutil.rmtree
+
+        def fail_upper_reset(path: Path, *args: Any, **kwargs: Any) -> None:
+            if path == self.private / "upper":
+                raise PermissionError("fixture cleanup failure")
+            remove(path, *args, **kwargs)
+
+        with patch.object(shutil, "rmtree", side_effect=fail_upper_reset):
+            with self.assertRaises(PermissionError):
+                self.run_script()
+        self.assertIn(["docker", "start", "script-runner"], self.calls)
+        self.assertLess(
+            self.calls.index(["docker", "stop", "script-runner"]),
+            self.calls.index(["docker", "start", "script-runner"]),
+        )
+        self.assertIn(["docker", "stop", "web"], self.calls)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+        self.assertFalse(self.present)
+        self.assertFalse(any(call[:2] == ["docker", "cp"] for call in self.calls))
+        self.assertEqual(attachment.read_bytes(), b"preserve failed cleanup")
+        self.assertEqual(
+            (self.source / "filestore/attachment").read_bytes(), b"clean snapshot attachment"
+        )
 
     def test_qualified_copy_preserves_edits_after_api_completion_failure(self) -> None:
         self.run_script()
@@ -760,6 +1183,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.runner_failure = True
         with self.assertRaises(RuntimeError):
             self.run_script()
+        self.volumes.pop("preview-data-filestore")
         library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
         exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
         attempts = self.source.parent / "preview-attempts"
@@ -773,7 +1197,30 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             library["retire_clean_snapshots"](spec)
             self.assertTrue(self.source.is_dir())
             payload["completed"] = True
+            payload.pop("overlay_filestore", None)
             attempt.write_text(json.dumps(payload))
+            library["retire_clean_snapshots"](spec)
+        self.assertFalse(self.source.exists())
+
+    def test_completed_overlay_pins_source_even_after_its_data_backing_is_removed(self) -> None:
+        self.run_script()
+        self.volumes.pop("preview-data")
+        shutil.rmtree(self.data.parent)
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
+        exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+        spec = {
+            "copy_binding_sha256": "b" * 64,
+            "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+        }
+        with patch("pathlib.Path.home", return_value=self.root):
+            library["retire_clean_snapshots"](spec)
+            self.assertTrue(self.source.exists())
+            self.volumes.pop("preview-data-filestore")
+            library["retire_clean_snapshots"](spec)
+            self.assertTrue(self.source.exists())
+            for path in self.volumes.values():
+                shutil.rmtree(path)
+            self.volumes.clear()
             library["retire_clean_snapshots"](spec)
         self.assertFalse(self.source.exists())
 

@@ -1768,6 +1768,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
         )
         self._assert_refresh_readback_allowances((), snapshot=snapshot)
+        self._assert_refresh_readback_allowances((), snapshot=snapshot, fail_preparation=True)
 
     def _assert_refresh_readback_allowances(
         self,
@@ -1777,6 +1778,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         source_environment: dict[str, str] | None = None,
         restore_upstream: bool = False,
         snapshot: CleanTestingSnapshot | None = None,
+        fail_preparation: bool = False,
     ) -> str:
         manifest = artifact_manifest_v2(odoo_install_modules=("cm_website",))
         dry_run = build_odoo_preview_dokploy_dry_run(
@@ -1790,6 +1792,26 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         dry_run.clean_snapshot = snapshot
         requests: list[dict[str, object]] = []
+
+        def filestore_preparation(**kwargs: Any) -> dict[str, object] | None:
+            if snapshot is None:
+                return None
+            if kwargs["apply"]:
+                self.assertTrue(sync_source.called)
+                self.assertTrue(update_env.called)
+                kwargs["dispatch_guard"](lambda: None)
+                if fail_preparation:
+                    raise click.ClickException("Interrupted overlay allocation")
+            return {
+                "name": _environment_values()["ODOO_DATA_VOLUME"] + "-filestore",
+                "driver": "local",
+                "driver_opts": {
+                    "type": "overlay",
+                    "device": "overlay",
+                    "o": "lowerdir=/snapshot,upperdir=/upper,workdir=/work,userxattr",
+                },
+                "labels": {"io.launchplane.preview-snapshot": snapshot.snapshot_id},
+            }
 
         def _fake_dokploy_request(**kwargs: object) -> object:
             requests.append(dict(kwargs))
@@ -1820,12 +1842,18 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                         "composeId": "compose-cm-pr-45",
                         "environmentId": "env-cm-preview",
                         "serverId": "server-nonprod",
+                        "appName": dry_run.compose_name,
                         "env": f"{PREVIEW_FISHBOWL_SOURCE_ENV_KEY}={previous_source}"
                         if previous_source
                         else "",
                     },
                 ),
             ) as fetch_target_payload,
+            patch(
+                "control_plane.preview_filestore.prepare_preview_filestore",
+                side_effect=filestore_preparation,
+            ) as prepare_filestore,
+            patch("control_plane.workflows.odoo_preview_runtime._delete_compose") as delete_compose,
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
             ) as sync_source,
@@ -1879,7 +1907,16 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ),
             )
 
+        if fail_preparation:
+            self.assertEqual(result.status, "fail")
+            delete_compose.assert_not_called()
+            trigger_deployment.assert_not_called()
+            module_update.assert_not_called()
+            return ""
         self.assertEqual(result.status, "pass")
+        if snapshot is not None:
+            self.assertEqual(prepare_filestore.call_args.kwargs["snapshot"], snapshot)
+            self.assertEqual(prepare_filestore.call_args.kwargs["project"], dry_run.compose_name)
         self.assertEqual(
             result.module_install_update_evidence.get("upstream_restore_requested"),
             str(restore_upstream).lower(),
@@ -2539,9 +2576,19 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 provider_operation_title="Launchplane operation deploy",
                 provider_effect_phase="deploy_trigger",
             )
+            prepared = observe_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                context_name="cm-preview",
+                request=request,
+                database_url=None,
+                provider_operation_title="Launchplane operation deploy",
+                provider_effect_phase="preview_filestore_prepare",
+            )
 
         self.assertEqual(observation.outcome, "unknown")
         self.assertFalse(observation.retry_safe)
+        self.assertTrue(prepared.retry_safe)
+        self.assertEqual(prepared.outcome, "absent")
 
     def test_apply_create_blocks_missing_template_compose_id_before_provider_fetch(
         self,
