@@ -26,6 +26,7 @@ def inspect_resources(
     record: ProductionRecipientRecord,
     *,
     prepare: bool,
+    materialize: bool = False,
     checkpoint: Callable[[str], None],
 ) -> None:
     host, token = source.read_dokploy_config(control_plane_root=root)
@@ -41,8 +42,13 @@ def inspect_resources(
         compose_name=record.namespace,
         target_payload=payload,
     )
-    spec = resource_spec(record)
-    encoded = base64.b64encode(json.dumps({**spec, "prepare": prepare}).encode()).decode()
+    template = json.loads(record.compose_source)
+    for volume in template["volumes"].values():
+        volume["external"] = True
+    spec = {**resource_spec(record), "compose_source": json.dumps(template)}
+    encoded = base64.b64encode(
+        json.dumps({**spec, "prepare": prepare, "materialize": materialize}).encode()
+    ).decode()
     evidence = post_deploy.run_manual_data_schedule(
         host=host,
         token=token,
@@ -80,8 +86,36 @@ def inspect_resources(
 
 
 RESOURCE_LIBRARY = r"""
-import base64, hashlib, json, re, socket, subprocess, sys
+import base64, hashlib, json, os, re, socket, subprocess, sys, tempfile
 from pathlib import Path
+
+COMPOSE_ROOT = Path("/etc/dokploy/compose")
+
+def qualify_source(spec):
+    directory = COMPOSE_ROOT / spec["project"] / "code"
+    for parent in (COMPOSE_ROOT, directory.parent, directory):
+        if parent.is_symlink() or any(path.is_symlink() for path in parent.parents):
+            raise ValueError("invalid source path")
+        if spec["materialize"] and parent != COMPOSE_ROOT:
+            parent.mkdir(exist_ok=True, mode=0o700)
+        if not parent.is_dir():
+            raise ValueError("missing source directory")
+    path = directory / "docker-compose.yml"
+    if path.is_symlink():
+        raise ValueError("invalid source file")
+    if not path.exists() and spec["materialize"]:
+        with tempfile.NamedTemporaryFile(mode="w", dir=directory, prefix=".lp-source-") as output:
+            output.write(spec["compose_source"])
+            output.flush()
+            os.fsync(output.fileno())
+            os.link(output.name, path, follow_symlinks=False)
+        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    if not path.is_file() or path.read_bytes() != spec["compose_source"].encode("utf-8"):
+        raise ValueError("recipient source differs")
 
 def docker(*args):
     result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=60)
@@ -175,7 +209,9 @@ def main():
     finally:
         for listener in sockets:
             listener.close()
-    binding = {key:value for key,value in spec.items() if key != "prepare"}
+    if "compose_source" in spec:
+        qualify_source(spec)
+    binding = {key:value for key,value in spec.items() if key not in {"prepare", "materialize"}}
     print("production_recipient_resources_sha256=" + hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
     print("production_recipient_resources_ok=true")
     return paths
