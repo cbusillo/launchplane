@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 
-from typing import Literal
+from typing import Any, Literal
 
 import click
 import yaml
@@ -28,6 +28,32 @@ DOKPLOY_COMPOSE_METADATA_LABELS = frozenset(
         "dokploy.service",
     }
 )
+
+
+def discard_unused_dokploy_network(actual: dict[str, Any], *, expected: dict[str, Any]) -> None:
+    networks = actual.get("networks")
+    expected_networks = expected.get("networks", {})
+    services = actual.get("services")
+    if (
+        not isinstance(networks, dict)
+        or not isinstance(expected_networks, dict)
+        or "dokploy-network" in expected_networks
+        or not isinstance(network := networks.get("dokploy-network"), dict)
+        or set(network) != {"external"}
+        or network["external"] is not True
+        or not isinstance(services, dict)
+        or not services
+        or any(
+            not isinstance(service, dict)
+            or not isinstance(service.get("networks", []), (list, dict))
+            or "dokploy-network" in service.get("networks", [])
+            for service in services.values()
+        )
+    ):
+        return
+    networks.pop("dokploy-network")
+    if not networks and "networks" not in expected:
+        actual.pop("networks")
 
 
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
