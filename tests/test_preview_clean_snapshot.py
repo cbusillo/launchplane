@@ -135,6 +135,13 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         }
         self.remount_filestore()
         self.volume_options = {"preview-data-filestore": self.overlay_options}
+        self.volume_labels = {
+            name: {"com.docker.compose.project": self.project} for name in self.volumes
+        }
+        self.volume_labels["preview-data-filestore"]["io.launchplane.preview-snapshot"] = (
+            self.snapshot_id
+        )
+        self.container_inspection_error = b""
         for role in ("web", "script-runner"):
             self.containers[role]["Mounts"].append(
                 {
@@ -234,6 +241,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 if any(value.startswith("volume=") for value in arguments)
                 else "\n".join(self.containers).encode()
             )
+            if self.container_inspection_error:
+                output += b"\nretired-preview"
         elif arguments[:2] == ["docker", "inspect"]:
             output = json.dumps(
                 [
@@ -246,19 +255,39 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                     else self.containers[arguments[-1]]
                 ]
                 if len(arguments) == 3
-                else [self.containers[identifier] for identifier in arguments[2:]]
+                else [
+                    self.containers[identifier]
+                    for identifier in arguments[2:]
+                    if identifier in self.containers
+                ]
             ).encode()
+            if self.container_inspection_error:
+                result = subprocess.CompletedProcess(
+                    arguments, 1, stdout=output, stderr=self.container_inspection_error
+                )
+                if kwargs.get("check"):
+                    result.check_returncode()
+                return result
         elif arguments[:3] == ["docker", "volume", "create"]:
             self.volume_options[arguments[-1]] = dict(
                 arguments[index + 1].split("=", 1)
                 for index, value in enumerate(arguments[:-1])
                 if value == "--opt"
             )
+            self.volume_labels[arguments[-1]] = dict(
+                arguments[index + 1].split("=", 1)
+                for index, value in enumerate(arguments[:-1])
+                if value == "--label"
+            )
             self.volumes[arguments[-1]] = self.root / "volumes" / arguments[-1] / "_data"
             self.volumes[arguments[-1]].mkdir(parents=True, exist_ok=True)
         elif arguments[:3] == ["docker", "volume", "ls"]:
             names = (
-                [name for name in self.volumes if name.endswith("-filestore")]
+                [
+                    name
+                    for name in self.volumes
+                    if "io.launchplane.preview-snapshot" in self.volume_labels.get(name, {})
+                ]
                 if "label=io.launchplane.preview-snapshot" in arguments
                 else list(self.volumes)
             )
@@ -272,10 +301,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                         "Options": self.volume_options.get(arguments[-1], {}),
                         "Mountpoint": str(self.volumes[arguments[-1]]),
                         "CreatedAt": self.volume_created_at,
-                        "Labels": {
-                            "com.docker.compose.project": self.project,
-                            "io.launchplane.preview-snapshot": self.snapshot_id,
-                        },
+                        "Labels": self.volume_labels.get(arguments[-1], {}),
                     }
                 ]
             ).encode()
@@ -387,14 +413,45 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(reused, created)
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
         self.volumes.pop("preview-data-filestore")
-        reconstructed = self.prepare_filestore(snapshot=newer)
+        reconstructed = self.prepare_filestore(snapshot=newer, require_existing=True)
         self.assertEqual(reconstructed, created)
+        self.assertEqual(
+            self.volume_labels["preview-data-filestore"]["io.launchplane.preview-snapshot"],
+            self.snapshot.snapshot_id,
+        )
+        library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
+        exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+        attempts = self.source.parent / "preview-attempts"
+        for attempt in attempts.glob("*.json"):
+            payload = json.loads(attempt.read_text())
+            payload["completed"] = True
+            attempt.write_text(json.dumps(payload))
+        with patch("pathlib.Path.home", return_value=self.root):
+            library["retire_clean_snapshots"](
+                {
+                    "copy_binding_sha256": "c" * 64,
+                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+                }
+            )
+            self.assertTrue(self.source.is_dir())
+            self.volumes.pop("preview-data-filestore")
+            library["retire_clean_snapshots"](
+                {
+                    "copy_binding_sha256": "c" * 64,
+                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
+                }
+            )
+        self.assertFalse(self.source.exists())
 
     def test_preparation_preserves_legacy_database_and_filestore(self) -> None:
         self.volumes.pop("preview-data-filestore")
         self.present = True
         result = self.prepare_filestore(snapshot=self.snapshot)
         self.assertEqual(result, {"type": "complete", "declaration": None})
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
+            "failed",
+        )
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
         self.present = False
         result = self.prepare_filestore(snapshot=self.snapshot)
@@ -425,9 +482,54 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_missing_retained_overlay_refuses_instead_of_hiding_attachments(self) -> None:
         self.volumes.pop("preview-data-filestore")
+        for snapshot in (None, self.snapshot):
+            with self.subTest(snapshot=snapshot):
+                self.assertEqual(
+                    self.prepare_filestore(snapshot=snapshot, require_existing=True)["type"],
+                    "failed",
+                )
+
+    def test_completed_host_restore_cannot_reconstruct_a_missing_declared_overlay(self) -> None:
+        self.run_script()
+        self.volumes.pop("preview-data-filestore")
+        self.calls.clear()
         self.assertEqual(
-            self.prepare_filestore(snapshot=None, require_existing=True)["type"], "failed"
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
+            "failed",
         )
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+
+    def test_preparation_tolerates_only_missing_container_inventory_errors(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        for error in (b"Error: No such container: retired-preview\n", b"daemon unavailable\n"):
+            with self.subTest(error=error):
+                self.container_inspection_error = error
+                result = self.prepare_filestore(snapshot=self.snapshot, apply=False)
+                self.assertEqual(result["type"], "complete" if b"No such" in error else "failed")
+
+    def test_owned_legacy_resume_preserves_attempt_writes_without_an_overlay(self) -> None:
+        self.sanitized = False
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.sanitized = True
+        self.volumes.pop("preview-data-filestore")
+        for role in ("web", "script-runner"):
+            self.containers[role]["Mounts"].pop()
+        attachment = self.data / "filestore" / self.database / "attempt-attachment"
+        attachment.write_bytes(b"attachment created during module update")
+        self.calls.clear()
+        result = self.prepare_filestore(snapshot=self.snapshot)
+        self.assertEqual(result, {"type": "complete", "declaration": None})
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
+            "failed",
+        )
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+        self.run_script()
+        self.assertEqual(attachment.read_bytes(), b"attachment created during module update")
+        self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
+        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_overlay_plan_has_no_application_storage_effects(self) -> None:
         self.volumes.pop("preview-data-filestore")

@@ -23,6 +23,13 @@ def preview_docker_text(*arguments):
     return output.decode() if isinstance(output, bytes) else output
 
 
+def missing_container_error(stderr):
+    message = stderr.decode() if isinstance(stderr, bytes) else stderr
+    return bool(message.strip()) and all(
+        re.search(r'No such (?:container|object):', line, re.IGNORECASE)
+        for line in message.splitlines() if line.strip())
+
+
 def preview_filestore_layout(data_name, project, snapshot_id, *, allow_missing=False):
     if not re.fullmatch(r'[a-f0-9]{64}', snapshot_id):
         raise RuntimeError('Preview filestore snapshot identity is invalid')
@@ -246,13 +253,24 @@ def prepare_locked(spec, root):
             volume, _, _, _ = inspect_preview_filestore(data_name, project)
             return {'name': name, 'driver': 'local', 'driver_opts': volume['Options'],
                 'labels': {'io.launchplane.preview-snapshot': volume['Labels']['io.launchplane.preview-snapshot']}}
-        if spec.get('require_existing') and spec.get('snapshot') is None:
-            raise RuntimeError('Retained preview overlay is missing')
         previous = read_prepared_attempt(spec, root, names)
         owned = previous is not None and previous.get('completed') is False
+        if spec.get('require_existing') and not owned:
+            raise RuntimeError('Retained preview overlay is missing')
         snapshot = previous['snapshot'] if owned else spec['snapshot']
         identifiers = preview_docker_text('ps', '-aq').splitlines()
-        containers = json.loads(docker('inspect', *identifiers)) if identifiers else []
+        containers = []
+        if identifiers:
+            result = subprocess.run(['docker', 'inspect', *identifiers], capture_output=True,
+                check=False, timeout=30, pass_fds=inherited_lock_descriptors)
+            if result.returncode and not missing_container_error(result.stderr):
+                raise RuntimeError('Preview container inspection is unavailable')
+            containers = json.loads(result.stdout)
+            found = [item.get('Id') for item in containers if isinstance(item, dict)]
+            if (len(found) != len(containers) or len(set(found)) != len(found)
+                or not set(found).issubset(identifiers)
+                or not result.returncode and set(found) != set(identifiers)):
+                raise RuntimeError('Preview container inventory is incomplete')
         for container in containers:
             labels = container.get('Config', {}).get('Labels') or {}
             if any(mount.get('Name') in spec['volumes'].values() for mount in container.get('Mounts', [])) and labels.get('com.docker.compose.project') != project:
@@ -274,6 +292,10 @@ def prepare_locked(spec, root):
                     b"SELECT value FROM ir_config_parameter WHERE key=:'marker';\n") if table == 't' else ''
                 if witness not in {'', snapshot['snapshot_id'], previous['restore_witness']}:
                     raise RuntimeError('Preserve a foreign preview database witness')
+                if witness == previous['restore_witness']:
+                    if spec.get('require_existing'):
+                        raise RuntimeError('Retained preview overlay is missing')
+                    return None
             elif present != '0':
                 raise RuntimeError('Preview database custody is unavailable')
         data, lower, private, options = preview_filestore_layout(data_name, project, snapshot['snapshot_id'], allow_missing=True)

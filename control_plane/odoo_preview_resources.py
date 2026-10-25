@@ -316,7 +316,7 @@ def container_inventory():
     if not identifiers:
         return []
     result = subprocess.run(["docker", "inspect", "--format", CONTAINER_FORMAT, *identifiers], check=False, capture_output=True, text=True, timeout=15)
-    if result.returncode and (not result.stderr.strip() or any(not re.search(r"No such (?:container|object):", line, re.IGNORECASE) for line in result.stderr.splitlines() if line.strip())):
+    if result.returncode and not missing_container_error(result.stderr):
         raise RuntimeError("Container inspection unavailable")
     rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
     found = [item.get("Id") for item in rows if isinstance(item, dict)]

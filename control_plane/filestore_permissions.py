@@ -1,5 +1,6 @@
 import inspect
 from pathlib import Path
+import shlex
 import subprocess
 
 
@@ -24,5 +25,14 @@ def normalize_filestore_permissions(
 FILESTORE_PERMISSION_PROGRAM = (
     "from pathlib import Path\nimport subprocess,sys\n"
     + inspect.getsource(normalize_filestore_permissions)
-    + "\nnormalize_filestore_permissions(Path(sys.argv[1]), sys.argv[2])\n"
+    + "\nnormalize_filestore_permissions(Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]))\n"
 )
+
+
+def filestore_permission_shell(mountinfo: Path = Path("/proc/self/mountinfo")) -> str:
+    command = shlex.join(["python3", "-I", "-c", FILESTORE_PERMISSION_PROGRAM])
+    command += ' "$filestore_database_path" "$target_owner" ' + shlex.quote(str(mountinfo))
+    return command.replace("'", "'\"'\"'")
+
+
+FILESTORE_PERMISSION_SHELL = filestore_permission_shell()

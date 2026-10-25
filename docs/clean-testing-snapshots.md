@@ -99,9 +99,13 @@ data volume's `_data`, outside application mounts. Docker mounts the overlay at
 the preview database's filestore directory in both application containers.
 The volume uses `userxattr`; there is no full-copy fallback. Preparation preserves
 populated databases and filestores unless the existing exact-volume receipt and
-SQL witness prove an owned attempt that never opened to a user. Those incomplete
-legacy full copies can transition to an overlay without copying the filestore
-again. Later deploys retain an existing
+SQL witness prove an owned attempt that never opened to a user. An incomplete
+legacy attempt whose database holds its exact restore witness resumes on its
+existing filestore, preserving attachments written during that attempt. Other
+owned incomplete legacy attempts can restart with an overlay without copying
+the filestore again. A declared overlay that is missing refuses deployment;
+only an exact incomplete allocation receipt permits reconstructing it before
+the database has its completed restore witness. Later deploys retain an existing
 overlay and its original source, even when the newest snapshot changes.
 
 Admission charges the database, dump staging and existing reserve against real
@@ -194,8 +198,9 @@ proved gone or replaced. Unknown hard-crash partial directories remain in
 custody; they are never swept by filename.
 Unknown reader evidence preserves copies. Reviewed headroom is checked before
 testing stops; insufficient capacity keeps the previous source usable.
-PostgreSQL restore headroom, and filestore headroom unless a clone is proved,
-are also required for a new preview. Neither cleanup path removes testing originals, backups or unknown files.
+New overlay previews require database and dump-staging headroom plus the
+reviewed reserve. Snapshot capture retains its separate filestore headroom
+gate. Neither cleanup path removes testing originals, backups or unknown files.
 
 Obsolete snapshot retirement commits an atomic tombstone rename before deleting
 bytes, so an interrupted delete can finish on the next pass. Cleanup errors and
