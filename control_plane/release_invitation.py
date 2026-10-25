@@ -39,9 +39,6 @@ from control_plane.workflows.launchplane import (
 )
 
 
-# How often a worker confirms that a decision on unchanged lane versions still covers
-# the current checklist. Changed test notes can invalidate it without a new candidate.
-SETTLED_DECISION_RECHECK_SECONDS = 1800
 WEBSITE_SETTINGS_REVIEW_NOTE = (
     "- Website settings: review the prepared search indexing, analytics and cookie "
     "consent settings on the release page. They apply only after you accept."
@@ -53,7 +50,6 @@ _LOGGER = logging.getLogger(__name__)
 class ReleaseInvitationBackoff:
     next_reads: dict[str, tuple[str, float]] = field(default_factory=dict)
     delivered: dict[tuple[str, str], tuple[str, float]] = field(default_factory=dict)
-    settled: dict[str, tuple[str, float]] = field(default_factory=dict)
     completions: dict[str, tuple[str, float]] = field(default_factory=dict)
     diagnostics: dict[str, tuple[type[Exception], float]] = field(default_factory=dict)
     release_records: dict[str, float] = field(default_factory=dict)
@@ -92,14 +88,22 @@ def advance_release_invitations(
                 stop_event=stop_event,
             )
             if _client_release_requests_enabled(profile):
-                _settle_completed_invitation(
-                    store=store,
-                    control_plane_root=control_plane_root,
-                    profile=profile,
-                    production=release_version(store=store, profile=profile, instance="prod"),
-                    candidate=release_version(store=store, profile=profile, instance="testing"),
-                    backoff=backoff,
-                )
+                if profile.release_request is not None:
+                    publish_release_invitation(
+                        store=store,
+                        control_plane_root=control_plane_root,
+                        profile=profile,
+                        backoff=backoff,
+                    )
+                else:
+                    _settle_completed_invitation(
+                        store=store,
+                        control_plane_root=control_plane_root,
+                        profile=profile,
+                        production=release_version(store=store, profile=profile, instance="prod"),
+                        candidate=release_version(store=store, profile=profile, instance="testing"),
+                        backoff=backoff,
+                    )
         except Exception as error:
             now = monotonic()
             previous, next_log = (
@@ -217,9 +221,6 @@ def _announced_changes(
 REPLACED_MARKER = "<!-- launchplane:release-invitation-replaced -->"
 COMPLETED_PREFIX = "<!-- launchplane:release-invitation-completed:"
 WHY_NOW = "**Why now:** "
-ENGINEERING_WHY_NOW = (
-    WHY_NOW + "Engineering updates are ready for production and need your release acceptance."
-)
 ADOPTED_ORIGINAL_PREFIX = "<!-- launchplane:release-adopted-original:"
 
 
@@ -832,15 +833,14 @@ def publish_release_invitation(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     backoff: ReleaseInvitationBackoff | None = None,
-    urgent_reason: str = "",
-    urgent_checklist_digest: str = "",
+    send_reminder: bool = True,
 ) -> bool:
     origin = launchplane_public_origin_from_env()
     if not origin or not _client_release_requests_enabled(profile):
         return False
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
-    if not urgent_reason:
+    if send_reminder:
         try:
             _settle_completed_invitation(
                 store=store,
@@ -860,9 +860,20 @@ def publish_release_invitation(
                 profile.product,
                 type(error).__name__,
             )
-    if production == candidate:
+    request_decision = profile.release_request
+    if request_decision is None or production == candidate:
         return False
     last_decision = _last_client_decision(store, profile)
+    if (
+        request_decision.product != profile.product
+        or request_decision.repository != profile.repository
+        or request_decision.owner_github_id != profile.owner.github_id
+        or request_decision.production != production
+        or request_decision.candidate != candidate
+        or request_decision.client_decision_record_id
+        != (last_decision.record_id if last_decision else "")
+    ):
+        return False
     request_marker = _request_marker(profile, last_decision)
     receipt = (
         profile.product,
@@ -895,40 +906,6 @@ def publish_release_invitation(
         backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
     if _accepted_release_in_progress(store, profile, last_decision, production, candidate):
         return False
-    # A person already decided about these versions. The decision still settles the
-    # review only while it covers the current checklist; edited test notes change the
-    # checklist without a new candidate, and the Client then needs a fresh request.
-    settled = next(
-        (
-            decision
-            for decision in store.list_release_review_decision_records(
-                product=profile.product, limit=1
-            )
-            if decision.checklist.production == production
-            and decision.checklist.candidate == candidate
-            and decision.checklist.repository == profile.repository
-            and decision.checklist.owner_github_id == profile.owner.github_id
-        ),
-        None,
-    )
-    if settled is not None:
-        if backoff is not None:
-            checked, next_check = backoff.settled.get(profile.product, ("", 0))
-            if checked == settled.record_id and monotonic() < next_check:
-                return False
-        current_review = current_release_review(
-            control_plane_root=control_plane_root, record_store=store, profile=profile
-        )
-        if current_review.unavailable_reason is not None or current_review.checklist_digest in (
-            "",
-            settled.checklist_digest,
-        ):
-            if backoff is not None:
-                backoff.settled[profile.product] = (
-                    settled.record_id,
-                    monotonic() + SETTLED_DECISION_RECHECK_SECONDS,
-                )
-            return False
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}", profile.owner.github_login):
         raise ValueError("Release invitation requires a GitHub login.")
     # Product-wide serialization also prevents competing candidates creating
@@ -943,7 +920,7 @@ def publish_release_invitation(
         if not _ready(review, profile):
             return False
         # The admin's reason applies only to the checklist they reviewed.
-        if urgent_reason and review.checklist_digest != urgent_checklist_digest:
+        if review.checklist_digest != request_decision.checklist_digest:
             return False
         assert review.checklist is not None
         client_changes = client_invitation_changes(store, profile, review.checklist)
@@ -1091,7 +1068,7 @@ def publish_release_invitation(
                     last_decision=last_decision,
                     control_plane_root=control_plane_root,
                 )
-                if reminded or _now() < due or urgent_reason:
+                if reminded or _now() < due or not send_reminder:
                     _remember_delivery(backoff, receipt, due, reminded)
                     return True
                 # One durable reminder per open request. A lost response is
@@ -1148,17 +1125,7 @@ def publish_release_invitation(
                         )
                     )
                 )
-            # The admin's reason for opening early stays on the request through
-            # later silent updates; neutralize mentions in it like Client notes.
-            why_now = (
-                next((line for line in _comment_lines(request) if line.startswith(WHY_NOW)), "")
-                if request
-                else ""
-            )
-            if not request and urgent_reason:
-                why_now = WHY_NOW + " ".join(urgent_reason.split()).replace("@", "@\u200b")
-            elif not why_now or why_now == ENGINEERING_WHY_NOW:
-                why_now = "" if notification_links else ENGINEERING_WHY_NOW
+            why_now = WHY_NOW + " ".join(request_decision.reason.split()).replace("@", "@\u200b")
             display_time = _display_time()
             action = (
                 "check the changes on the testing site, then press **Accept** or **Request changes**."

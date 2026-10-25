@@ -395,7 +395,8 @@ from control_plane.release_review import (
     read_pull_request_notes,
 )
 from control_plane.release_review_record import publish_release_decision
-from control_plane.release_invitation import publish_release_invitation, adopt_release_invitation
+from control_plane.release_invitation import adopt_release_invitation
+from control_plane.release_request import request_release_review
 from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
 from control_plane.github_app_webhook import GITHUB_APP_WEBHOOK_ROUTE
 from control_plane.provider_operations import (
@@ -5346,6 +5347,20 @@ def create_launchplane_fastapi_app(
                 cookie=cookie,
                 allow_owner=True,
             )
+        )
+
+    def read_release_request_mutation_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        return resolve_browser_mutation_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+            allow_owner=True,
         )
 
     def require_github_human_identity(identity: LaunchplaneIdentity) -> GitHubHumanIdentity:
@@ -29730,6 +29745,7 @@ def create_launchplane_fastapi_app(
             read_github_human_browser_mutation_identity=(
                 read_owner_review_browser_mutation_identity
             ),
+            read_request_mutation_identity=read_release_request_mutation_identity,
             current_review=lambda store, profile, trace_id: current_release_review(
                 control_plane_root=resolved_control_plane_root,
                 record_store=store,
@@ -29743,12 +29759,17 @@ def create_launchplane_fastapi_app(
                 profile=profile,
                 decision=decision,
             ),
-            open_urgent_review=lambda store, profile, reason, digest: publish_release_invitation(
-                store=store,
-                control_plane_root=resolved_control_plane_root,
-                profile=profile,
-                urgent_reason=reason,
-                urgent_checklist_digest=digest,
+            request_release_review=lambda store, profile, review, source, reason, reference, actor: (
+                request_release_review(
+                    store=store,
+                    control_plane_root=resolved_control_plane_root,
+                    profile=profile,
+                    review=review,
+                    source=source,
+                    reason=reason,
+                    decision_reference=reference,
+                    actor=actor,
+                )
             ),
             adopt_invitation=lambda store, profile, digest, issue, comment, dry_run, reason: (
                 adopt_release_invitation(

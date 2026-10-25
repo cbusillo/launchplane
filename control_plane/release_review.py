@@ -69,6 +69,13 @@ class ReleaseReviewStore(GenericWebSourceQualificationStore, Protocol):
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
+    def compare_and_write_product_profile_record(
+        self,
+        *,
+        expected_record: LaunchplaneProductProfileRecord,
+        replacement_record: LaunchplaneProductProfileRecord,
+    ) -> object: ...
+
     def read_release_tuple_record(
         self, *, context_name: str, channel_name: str
     ) -> ReleaseTupleRecord: ...

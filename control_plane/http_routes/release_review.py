@@ -38,6 +38,11 @@ from control_plane.contracts.release_review import (
     ReleaseReviewStatus,
     ReleaseStart,
 )
+from control_plane.contracts.release_request import (
+    RELEASE_REQUEST_ROUTE,
+    ReleaseRequestDecisionRecord,
+    ReleaseRequestSource,
+)
 from control_plane.durable_operation_authorization import read_active_authz_policy_record
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.product_review import viewer_is_product_owner
@@ -46,7 +51,12 @@ from control_plane.release_review import (
     ReleaseReviewStore,
     checklist_blockers,
 )
-from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    GitHubHumanIdentity,
+    LaunchplaneIdentity,
+    director_agent_identity,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.odoo_business_hours import BusinessHoursWindow
 from control_plane.odoo_business_hours import read_business_hours_window
@@ -56,15 +66,22 @@ from control_plane.odoo_business_hours import read_business_hours_window
 class ReleaseReviewRouteDependencies:
     common: ReadRouteDependencies
     read_github_human_browser_mutation_identity: Callable[..., GitHubHumanIdentity]
+    read_request_mutation_identity: Callable[..., LaunchplaneIdentity]
     current_review: Callable[[object, LaunchplaneProductProfileRecord, str], ReleaseReviewStatus]
     publish_decision: Callable[
         [ReleaseReviewStore, LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord], str
     ]
-    # Opens the Client's release request for an engineering-only release, with
-    # the admin's reason for the reviewed checklist digest; returns whether a
-    # request is open afterwards.
-    open_urgent_review: Callable[
-        [ReleaseReviewStore, LaunchplaneProductProfileRecord, str, str], bool
+    request_release_review: Callable[
+        [
+            ReleaseReviewStore,
+            LaunchplaneProductProfileRecord,
+            ReleaseReviewStatus,
+            ReleaseRequestSource,
+            str,
+            str,
+            str,
+        ],
+        bool,
     ]
     control_plane_root: Path | None = None
     adopt_invitation: (
@@ -85,6 +102,11 @@ class ReleaseReviewResponse(BaseModel):
     viewer_is_owner: bool
     can_override: bool
     review: ReleaseReviewStatus
+    release_request: ReleaseRequestDecisionRecord | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     # Whether accepting starts the release, the site it goes live on, and what the
     # newest accepted release has done so far.
     release_on_acceptance: ReleaseOnAcceptance = "held"
@@ -124,23 +146,26 @@ class ReleaseReviewDecisionEnvelope(BaseModel):
         return self
 
 
-class UrgentReleaseReviewEnvelope(BaseModel):
-    """An admin's request to ask the Client about an engineering-only release now."""
-
+class ReleaseRequestEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     product: str = Field(min_length=1, max_length=256)
     checklist_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     reason: str = Field(min_length=1, max_length=1000)
+    source: ReleaseRequestSource = "director_request"
+    decision_reference: str = Field(default="", max_length=2000)
     adopt_issue_number: int | None = Field(default=None, ge=1)
     adopt_comment_id: int | None = Field(default=None, ge=1)
     dry_run: bool = False
 
     @model_validator(mode="after")
-    def validate_reason(self) -> "UrgentReleaseReviewEnvelope":
+    def validate_reason(self) -> "ReleaseRequestEnvelope":
         self.reason = self.reason.strip()
         if not self.reason:
-            raise ValueError("Opening an urgent release review requires a reason.")
+            raise ValueError("Requesting a release review requires a reason.")
+        self.decision_reference = self.decision_reference.strip()
+        if self.source == "finish_line" and not self.decision_reference:
+            raise ValueError("A finish-line request requires its recorded agreement.")
         if (self.adopt_issue_number is None) != (self.adopt_comment_id is None):
             raise ValueError("Receipt adoption requires both the issue and original comment.")
         if self.dry_run and self.adopt_issue_number is None:
@@ -306,6 +331,7 @@ def register_release_review_routes(
             viewer_is_owner=viewer_is_owner,
             can_override=can_override(profile, identity),
             review=review,
+            release_request=profile.release_request,
             release_on_acceptance=release_start_for_acceptance(store=store, profile=profile)
             or "held",
             live_site_url=prod_lane.base_url if prod_lane is not None else "",
@@ -541,22 +567,32 @@ def register_release_review_routes(
             }
         )
 
-    def open_urgent_release_review(
-        envelope: UrgentReleaseReviewEnvelope,
+    def request_release_review(
+        envelope: ReleaseRequestEnvelope,
         identity: Annotated[
-            GitHubHumanIdentity, Depends(dependencies.read_github_human_browser_mutation_identity)
+            LaunchplaneIdentity, Depends(dependencies.read_request_mutation_identity)
         ],
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> ReleaseReviewResponse:
-        """Ask the Client now; their acceptance is still what starts the release."""
         trace_id = common.next_trace_id()
         profile = profile_for_viewer(record_store, envelope.product, identity, trace_id)
-        if not can_override(profile, identity):
+        if not (
+            director_agent_identity(identity)
+            or isinstance(identity, GitHubHumanIdentity)
+            and can_override(profile, identity)
+        ):
             raise common.http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="release_review_open_denied",
-                message="Only an admin can open an urgent release review.",
+                message="Only an admin or Director agent can request a release review.",
+            )
+        if director_agent_identity(identity) and not envelope.decision_reference:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="release_request_reference_required",
+                message="An agent must cite the Director request or agreed finish line.",
             )
         current = response(record_store, profile, identity, trace_id)
         if current.review.checklist_digest != envelope.checklist_digest:
@@ -582,11 +618,16 @@ def register_release_review_routes(
                 and dependencies.adopt_invitation is not None
                 else False
                 if envelope.adopt_issue_number is not None
-                else dependencies.open_urgent_review(
+                else dependencies.request_release_review(
                     cast(ReleaseReviewStore, record_store),
                     profile,
+                    current.review,
+                    envelope.source,
                     envelope.reason,
-                    envelope.checklist_digest,
+                    envelope.decision_reference,
+                    f"github:{identity.github_id}"
+                    if isinstance(identity, GitHubHumanIdentity)
+                    else str(getattr(identity, "subject", "")),
                 )
             )
         except (FileNotFoundError, StopIteration, ValueError, click.ClickException):
@@ -598,7 +639,13 @@ def register_release_review_routes(
                 code="release_review_not_opened",
                 message="The release review could not be confirmed. Reload before trying again; a request may already be open. The release must be complete, undecided and waiting only for the Client.",
             )
-        return current
+        return current.model_copy(
+            update={
+                "release_request": cast(ReleaseReviewStore, record_store)
+                .read_product_profile_record(profile.product)
+                .release_request
+            }
+        )
 
     for path, endpoint, method, operation in (
         ("/v1/release-review", read_release_review, "GET", "read_release_review"),
@@ -609,10 +656,10 @@ def register_release_review_routes(
             "write_release_review_decision",
         ),
         (
-            "/v1/release-review/urgent-openings",
-            open_urgent_release_review,
+            RELEASE_REQUEST_ROUTE,
+            request_release_review,
             "POST",
-            "open_urgent_release_review",
+            "request_release_review",
         ),
     ):
         app.add_api_route(

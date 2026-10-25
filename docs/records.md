@@ -2286,6 +2286,13 @@ backfill or authorization change.
   and published, and the active policy still names the caller as administrator;
   otherwise the operation fails with the same code. See
   [Temporary hotfix](release-review.md#temporary-hotfix).
+- A product profile's optional `release_request` holds its pending Director or
+  finish-line request decision. It binds the reviewed checklist and lane versions,
+  repository, Client and preceding Client decision. Same-request retries preserve
+  its actor, reason, agreement reference and timestamp. The existing profile
+  compare-and-write path saves it before invitation delivery. This request is
+  separate from Client acceptance and grants no promotion authority. See
+  [Release review](release-review.md).
 - A release decision's `release_start` (`promote`,
   `promote_with_rollback_drill`, or `rollback`, omitted when empty) records whether
   the decision starts the release, or rolls back a rejected temporary hotfix. It is fixed when the decision is recorded. A

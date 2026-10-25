@@ -253,7 +253,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/owner-secret-inputs/submit": "submit_owner_secret_input",
     "/v1/local-consumer-deliveries": "deliver_testing_local_consumer",
     "/v1/release-review/decisions": "write_release_review_decision",
-    "/v1/release-review/urgent-openings": "open_urgent_release_review",
+    "/v1/release-review/requests": "request_release_review",
     "/v1/production-backup-gates": "enqueue_production_backup_gate",
     "/v1/odoo-prod-promotions": "enqueue_odoo_prod_promotion",
     SERVICE_RESTART_ROUTE: "restart_lane_service",

@@ -46,6 +46,36 @@
     },
     "operations": [
       {
+        "idempotency": "body",
+        "identity_dependencies": [
+          "read_release_request_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "request",
+          "adopt"
+        ],
+        "operation_id": "request_release_review",
+        "path": "/v1/release-review/requests",
+        "purpose": "Record a Director request or agreed finish-line release decision and deliver its Client invitation without accepting or deploying.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "checklist_digest",
+          "decision_reference"
+        ],
+        "schema_fingerprint_sha256": "f115692c3fb674b18f91ad11f6babe3fa8592a1a8e8fe4e50015fd769dd22382",
+        "supported_surfaces": [
+          "service_api",
+          "browser"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_identity"
@@ -1135,8 +1165,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "708189ce7a9f01711ab0be1a64120289c00406c8"
+    "source_commit_sha": "190d2dabc4cc55a1c3584ee780a60057049a4e46"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "63d8d747dec65840edc2a192f41fc7d73ff4b2e8bcc2a5da679f24dd3e61bd52"
+  "semantic_digest_sha256": "55b85d26a860b2f6a5737bc034dd888e09867c31f5be9af0f198b39035a678d8"
 }
