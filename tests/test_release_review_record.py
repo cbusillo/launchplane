@@ -30,6 +30,8 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 store = (PostgresRecordStore(database_url=sys.argv[1]) if sys.argv[1]
          else FilesystemRecordStore(Path(sys.argv[2])))
+print("ready", flush=True)
+sys.stdin.readline()
 with store.release_review_publication_lock(record_id="interrupted-publication"):
     print("locked", flush=True)
     sys.stdin.read()
@@ -47,6 +49,12 @@ with store.release_review_publication_lock(record_id="interrupted-publication"):
         )
         try:
             assert process.stdout is not None
+            assert process.stdin is not None
+            readable, _, _ = select.select([process.stdout], [], [], 60)
+            if not readable or process.stdout.readline().strip() != "ready":
+                raise AssertionError("Worker did not finish release publication setup")
+            process.stdin.write("acquire\n")
+            process.stdin.flush()
             readable, _, _ = select.select([process.stdout], [], [], 10)
             if not readable or process.stdout.readline().strip() != "locked":
                 raise AssertionError("Worker could not acquire release publication lock")

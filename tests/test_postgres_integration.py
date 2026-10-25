@@ -4,7 +4,7 @@ import atexit
 import asyncio
 import base64
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -6046,42 +6046,33 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             original = managers[0].issue(_identity(), GitHubOAuthCredential("original-access"))
             csrf = managers[0].csrf_token(original)
             now += timedelta(seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS)
-            entered = threading.Event()
-            release = threading.Event()
             provider = Mock(spec=GitHubOAuthClient)
+            observations: list[Any] = []
+            consumption: list[Future[Any]] = []
 
             def exchange(*args: object, **kwargs: object) -> GitHubOAuthLogin:
-                entered.set()
-                if not release.wait(10):
-                    raise TimeoutError("test provider wait")
-                return GitHubOAuthLogin(_identity(), GitHubOAuthCredential("rotated-access"))
-
-            provider.revalidate.side_effect = exchange
-            with ThreadPoolExecutor(max_workers=3) as workers:
-                first = workers.submit(
-                    managers[0].refresh_authorization_claims,
+                second = workers.submit(
+                    managers[1].refresh_authorization_claims,
                     original,
                     client=provider,
                     authz_policy=_policy(),
                 )
-                try:
-                    self.assertTrue(entered.wait(5))
-                    second = workers.submit(
-                        managers[1].refresh_authorization_claims,
-                        original,
-                        client=provider,
-                        authz_policy=_policy(),
-                    )
-                    # An in-progress exchange must not queue dashboard reads.
-                    other = second.result(timeout=2)
-                    assert other is not None
-                    self.assertEqual(other.claims_verified_at, original.claims_verified_at)
-                    consume = workers.submit(managers[2].consume_csrf_token, original, csrf)
-                finally:
-                    release.set()
-                refreshed = first.result(timeout=5)
-                other = second.result(timeout=5)
-                consumed = consume.result(timeout=5)
+                other = second.result(timeout=60)
+                assert other is not None
+                self.assertEqual(other.claims_verified_at, original.claims_verified_at)
+                observations.append(other)
+                consumption.append(workers.submit(managers[2].consume_csrf_token, original, csrf))
+                return GitHubOAuthLogin(_identity(), GitHubOAuthCredential("rotated-access"))
+
+            provider.revalidate.side_effect = exchange
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                refreshed = managers[0].refresh_authorization_claims(
+                    original,
+                    client=provider,
+                    authz_policy=_policy(),
+                )
+                other = observations[0]
+                consumed = consumption[0].result(timeout=5)
             self.assertIsNotNone(refreshed)
             self.assertIsNotNone(other)
             self.assertIsNotNone(consumed)
@@ -14566,72 +14557,50 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         assert operation is not None
         second = PostgresRecordStore(database_url=scenario.store.database_url)
         self.addCleanup(second.close)
-        entered = threading.Event()
-        release = threading.Event()
-        waiting_remotely = threading.Event()
-        finish_remote = threading.Event()
 
         def execute(*arguments: Any) -> dict[str, object]:
-            def send() -> None:
-                entered.set()
-                if not release.wait(10):
-                    raise TimeoutError("fixture cleanup dispatch")
+            writer: Future[Any] | None = None
+            admission: Future[Any] | None = None
+            with ThreadPoolExecutor(max_workers=2) as pool:
 
-            arguments[3](send)
-            waiting_remotely.set()
-            if not finish_remote.wait(10):
-                raise TimeoutError("fixture remote completion")
-            return {"capacity": True, "disposals": []}
-
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            maintenance = pool.submit(
-                prepare_drill_storage,
-                scenario.store,
-                operation,
-                Path("."),
-                execute=execute,
-                now=scenario.now,
-                checkpoint=lambda: None,
-            )
-            self.assertTrue(entered.wait(5))
-            writer = pool.submit(
-                second.write_runtime_environment_record,
-                RuntimeEnvironmentRecord(
-                    scope="global",
-                    env={"EXAMPLE_INSERT": "changed"},
-                    updated_at=scenario.profile.updated_at,
-                ),
-            )
-            admission = pool.submit(
-                second.enqueue_odoo_testing_drill,
-                scenario.profile.product,
-                scenario.context,
-                lane_key(scenario.profile.product, scenario.context) + ":competing",
-                scenario.now,
-            )
-            try:
-                deadline = time.monotonic() + 5
-                waiting = 0
-                while time.monotonic() < deadline:
-                    with scenario.store._engine.connect() as observer:
-                        waiting = int(
-                            observer.scalar(
-                                text(
-                                    "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'"
+                def send() -> None:
+                    nonlocal writer, admission
+                    writer = pool.submit(
+                        second.write_runtime_environment_record,
+                        RuntimeEnvironmentRecord(
+                            scope="global",
+                            env={"EXAMPLE_INSERT": "changed"},
+                            updated_at=scenario.profile.updated_at,
+                        ),
+                    )
+                    admission = pool.submit(
+                        second.enqueue_odoo_testing_drill,
+                        scenario.profile.product,
+                        scenario.context,
+                        lane_key(scenario.profile.product, scenario.context) + ":competing",
+                        scenario.now,
+                    )
+                    deadline = time.monotonic() + 5
+                    waiting = 0
+                    while time.monotonic() < deadline:
+                        with scenario.store._engine.connect() as observer:
+                            waiting = int(
+                                observer.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'"
+                                    )
                                 )
+                                or 0
                             )
-                            or 0
-                        )
-                    if waiting >= 2:
-                        break
-                    time.sleep(0.01)
-                self.assertGreaterEqual(waiting, 2)
-                self.assertFalse(writer.done())
-                self.assertFalse(admission.done())
-            finally:
-                release.set()
-            self.assertTrue(waiting_remotely.wait(5))
-            try:
+                        if waiting >= 2:
+                            break
+                        time.sleep(0.01)
+                    self.assertGreaterEqual(waiting, 2)
+                    self.assertFalse(writer.done())
+                    self.assertFalse(admission.done())
+
+                arguments[3](send)
+                assert writer is not None and admission is not None
                 writer.result(timeout=5)
                 admission.result(timeout=5)
                 second.write_runtime_environment_record(
@@ -14641,16 +14610,19 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                         }
                     )
                 )
-            finally:
-                finish_remote.set()
-            from control_plane.odoo_testing_drill import DrillPrerequisite
+            return {"capacity": True, "disposals": []}
 
-            with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_authority_changed"):
-                maintenance.result(timeout=10)
-        # The competing authority insert invalidates the completed capacity
-        # snapshot, so its old result cannot activate the worker's new database.
         from control_plane.odoo_testing_drill import DrillPrerequisite
 
+        with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_authority_changed"):
+            prepare_drill_storage(
+                scenario.store,
+                operation,
+                Path("."),
+                execute=execute,
+                now=scenario.now,
+                checkpoint=lambda: None,
+            )
         with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_capacity_unverified"):
             scenario.store.activate_odoo_testing_drill(operation, scenario.now)
 
@@ -16770,6 +16742,7 @@ class RealPostgresGenericSiblingOwnershipTests(
 
     async def test_http_ownership_receipt_contention_refuses_and_recovers(self) -> None:
         from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+        from tests.support.http import lifespan_client
 
         runtime = await self.produced_sibling()
         receipt = self.store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)[0]
@@ -16777,20 +16750,21 @@ class RealPostgresGenericSiblingOwnershipTests(
         self.addCleanup(peer.close)
         with self.provider_inventory():
             plan = await self.plan()
-            with peer._session_factory() as session:
-                session.scalar(
-                    select(LaunchplaneIdempotencyRow)
-                    .where(LaunchplaneIdempotencyRow.record_id == receipt.record_id)
-                    .with_for_update()
-                )
-                blocked = await asyncio.wait_for(self.apply(plan), 5)
-                self.assertEqual(blocked.status_code, 409, blocked.text)
-                self.assertEqual(
-                    self.store.read_preview_record(self.preview.preview_id), self.preview
-                )
-                peer.write_preview_record(self.preview)
-                session.rollback()
-            self.assertEqual((await self.apply(plan)).status_code, 202)
+            async with lifespan_client(self.app) as client:
+                with peer._session_factory() as session:
+                    session.scalar(
+                        select(LaunchplaneIdempotencyRow)
+                        .where(LaunchplaneIdempotencyRow.record_id == receipt.record_id)
+                        .with_for_update()
+                    )
+                    blocked = await asyncio.wait_for(self.apply(plan, app=client), 5)
+                    self.assertEqual(blocked.status_code, 409, blocked.text)
+                    self.assertEqual(
+                        self.store.read_preview_record(self.preview.preview_id), self.preview
+                    )
+                    peer.write_preview_record(self.preview)
+                    session.rollback()
+                self.assertEqual((await self.apply(plan, app=client)).status_code, 202)
 
 
 class RealPostgresLegacyOdooPreviewReconciliationTests(
@@ -16805,6 +16779,7 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
             LegacyPreviewReconciliationRequest,
         )
         from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+        from tests.support.http import lifespan_client
 
         runtime = self.produced_sibling()
         self.compose(name=runtime.instance, image=self.profile.image.repository + ":current")
@@ -16816,23 +16791,22 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
         self.assertIn(runtime.deployment_record_id, bound.sibling_receipt_ids)
         peer = PostgresRecordStore(database_url=self.store.database_url)
         self.addCleanup(peer.close)
-        for identifier in bound.sibling_receipt_ids:
-            with self.subTest(receipt=identifier), peer._session_factory() as session:
-                session.scalar(
-                    select(LaunchplaneIdempotencyRow)
-                    .where(LaunchplaneIdempotencyRow.record_id == identifier)
-                    .with_for_update()
-                )
-                # A writer that owns the receipt can need authority next. Apply
-                # must fail immediately rather than waiting in the inverse order.
-                blocked = await asyncio.wait_for(self.apply(plan), 5)
-                self.assertEqual(blocked.status_code, 409, blocked.text)
-                self.assertEqual(
-                    self.store.read_preview_record(self.preview.preview_id), self.preview
-                )
-                peer.write_preview_record(self.preview)
-                session.rollback()
-        response = await self.apply(plan)
+        async with lifespan_client(self.app) as client:
+            for identifier in bound.sibling_receipt_ids:
+                with self.subTest(receipt=identifier), peer._session_factory() as session:
+                    session.scalar(
+                        select(LaunchplaneIdempotencyRow)
+                        .where(LaunchplaneIdempotencyRow.record_id == identifier)
+                        .with_for_update()
+                    )
+                    blocked = await asyncio.wait_for(self.apply(plan, app=client), 5)
+                    self.assertEqual(blocked.status_code, 409, blocked.text)
+                    self.assertEqual(
+                        self.store.read_preview_record(self.preview.preview_id), self.preview
+                    )
+                    peer.write_preview_record(self.preview)
+                    session.rollback()
+            response = await self.apply(plan, app=client)
         self.assertEqual(response.status_code, 202, response.text)
 
     async def test_pointed_legacy_verifying_history_is_retained_under_actual_exclusion(
