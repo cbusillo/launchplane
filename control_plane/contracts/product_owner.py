@@ -45,12 +45,6 @@ ProductOwnerPreviewIsolationClass = Literal[
 PRODUCT_OWNER_POLICY_FINGERPRINT_VERSION = 1
 PRODUCT_OWNER_ROUTINE_REVIEW_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 PRODUCT_OWNER_ELEVATED_REVIEW_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
-PRODUCT_OWNER_PREVIEW_ISOLATION_STRENGTH: dict[str, int] = {
-    "unknown": 0,
-    "cloned_product_data": 1,
-    "synthetic_seeded": 2,
-    "no_product_data": 3,
-}
 
 _ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 
@@ -283,11 +277,6 @@ class ProductOwnerReviewAgePolicy(BaseModel):
             raise ValueError("elevated_max_age_seconds cannot exceed routine_max_age_seconds")
         return self
 
-    def max_age_seconds(self, change_class: ProductOwnerReviewChangeClass) -> int:
-        if change_class == "routine":
-            return self.routine_max_age_seconds
-        return self.elevated_max_age_seconds
-
 
 class ProductOwnerSelfReviewPolicy(BaseModel):
     """Self-review denial policy for one product Owner scope.
@@ -322,9 +311,6 @@ class ProductOwnerSelfReviewPolicy(BaseModel):
             )
         return self
 
-    def allows(self, change_class: ProductOwnerReviewChangeClass) -> bool:
-        return self.routine_exception_enabled and change_class == "routine"
-
 
 class ProductOwnerPreviewTrustPolicy(BaseModel):
     """Minimum provable preview isolation for admissible Owner review evidence."""
@@ -343,13 +329,6 @@ class ProductOwnerPreviewTrustPolicy(BaseModel):
                 "preview trust policy minimum_isolation_class must name a provable class"
             )
         return self
-
-    def satisfied_by(self, isolation_class: ProductOwnerPreviewIsolationClass) -> bool:
-        if isolation_class == "not_applicable":
-            return True
-        required = PRODUCT_OWNER_PREVIEW_ISOLATION_STRENGTH[self.minimum_isolation_class]
-        observed = PRODUCT_OWNER_PREVIEW_ISOLATION_STRENGTH.get(isolation_class, 0)
-        return observed >= required
 
 
 class ProductOwnerPolicyRecord(BaseModel):
@@ -744,46 +723,6 @@ def _validate_or_assign_digest(*, current: str, computed: str, field_name: str, 
     if normalized != computed:
         raise ValueError(f"{label} digest does not match payload")
     return normalized
-
-
-def product_owner_scoped_policy_fingerprint(
-    *,
-    dimension: Literal[
-        "owner_membership",
-        "self_review",
-        "review_age",
-        "requirement",
-        "preview_trust",
-    ],
-    context: ProductOwnerActionContext,
-    record_id: str,
-    revision: int,
-    payload: object,
-) -> str:
-    """Return one explicitly versioned, product/action-scoped policy fingerprint.
-
-    Every fingerprint binds the exact evaluated product, system, repository,
-    environment, and action alongside the source record identity and revision, so
-    an unrelated product or action can never share a fingerprint.
-    """
-    if revision < 1:
-        raise ValueError("product Owner policy fingerprint requires a positive revision")
-    return _canonical_sha256(
-        {
-            "fingerprint_version": PRODUCT_OWNER_POLICY_FINGERPRINT_VERSION,
-            "dimension": dimension,
-            "scope": {
-                "product": required_token(context.product, "product"),
-                "system": required_token(context.system, "system"),
-                "repository_id": normalize_decimal_id(context.repository_id, "repository_id"),
-                "environment": required_token(context.environment, "environment"),
-                "action": required_token(context.action, "action"),
-            },
-            "record_id": required_token(record_id, "record_id"),
-            "revision": revision,
-            "payload": payload,
-        }
-    )
 
 
 class ProductOwnerPolicyConflictError(ValueError):
