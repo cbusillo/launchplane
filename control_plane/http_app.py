@@ -206,6 +206,9 @@ from control_plane.authz_rule_retirement import (
 from control_plane.http_routes.runtime_setting_removal import (
     register_runtime_setting_removal_routes,
 )
+from control_plane.http_routes.service_runtime_settings import (
+    register_service_runtime_settings_routes,
+)
 from control_plane.authz_retirement_evidence import build_retirement_evidence
 from control_plane.contracts.authz_retirement_evidence import (
     AuthzRetirementEvidenceRequest,
@@ -31278,6 +31281,11 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,
+    )
+    register_service_runtime_settings_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_operator_mutation_identity,
     )
     register_product_display_name_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity

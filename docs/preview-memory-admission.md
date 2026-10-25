@@ -9,7 +9,7 @@ The DB-backed runtime-environment record with `scope=context` and
 `LAUNCHPLANE_PREVIEW_HOST_MEMORY_FLOORS` to a JSON object mapping provider server
 IDs to positive integer byte floors, for example
 `{"synthetic-execution-host":5368709120}`. Configure real server IDs and values
-through the existing service runtime-environment settings surface. No process
+through [service settings](service-runtime-settings.md). No process
 environment, checked-in host list, or numeric default supplies this policy.
 An absent key or an empty object selects no protected hosts; deploying this
 source alone does not activate a floor. Unreadable records or malformed policy

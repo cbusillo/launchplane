@@ -137,6 +137,22 @@ def read_host_memory_headroom(*, host: str, token: str, server_id: str) -> int:
     )
 
 
+def parse_preview_memory_floors(raw: object) -> dict[str, int]:
+    if not isinstance(raw, str):
+        raise ValueError("Invalid memory floors.")
+    floors = json.loads(raw)
+    if not isinstance(floors, dict) or any(
+        not isinstance(key, str)
+        or not key.strip()
+        or key != key.strip()
+        or type(value) is not int
+        or value <= 0
+        for key, value in floors.items()
+    ):
+        raise ValueError("Invalid memory floors.")
+    return floors
+
+
 def require_preview_host_memory_capacity(
     *,
     host: str,
@@ -164,19 +180,9 @@ def require_preview_host_memory_capacity(
         ]
         if len(selected) > 1:
             raise ValueError("Service memory policy is ambiguous.")
-        raw = selected[0].env.get(PREVIEW_MEMORY_FLOORS_SETTING, "{}") if selected else "{}"
-        if not isinstance(raw, str):
-            raise ValueError("Invalid memory floors.")
-        floors = json.loads(raw)
-        if not isinstance(floors, dict) or any(
-            not isinstance(key, str)
-            or not key.strip()
-            or key != key.strip()
-            or type(value) is not int
-            or value <= 0
-            for key, value in floors.items()
-        ):
-            raise ValueError("Invalid memory floors.")
+        floors = parse_preview_memory_floors(
+            selected[0].env.get(PREVIEW_MEMORY_FLOORS_SETTING, "{}") if selected else "{}"
+        )
     except (ValueError, click.ClickException, OSError, SQLAlchemyError):
         raise PreviewMemoryCapacityRefused(
             "Preview start refused: service-record memory policy is unavailable or invalid."
