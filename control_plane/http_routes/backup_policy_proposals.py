@@ -4,7 +4,10 @@ from typing import Annotated, Literal
 from fastapi import Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from control_plane.backup_policy_proposals import decide_backup_policy
+from control_plane.backup_policy_proposals import (
+    BackupPolicyDecisionAuthorizationError,
+    decide_backup_policy,
+)
 from control_plane.contracts.backup_policy_proposal import BackupPolicyHumanEvidence
 from control_plane.contracts.privileged_operation import (
     PrivilegedOperationRecord,
@@ -173,12 +176,12 @@ def register_backup_policy_proposal_routes(
                 code="backup_proposal_missing",
                 message="Backup proposal was not found.",
             ) from error
-        except PermissionError as error:
+        except BackupPolicyDecisionAuthorizationError as error:
             raise dependencies.http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Current immutable human authority is required to approve backup proposals.",
+                message="Current immutable human authority is required to decide backup proposals.",
             ) from error
         except (TypeError, LookupError) as error:
             raise dependencies.http_error(

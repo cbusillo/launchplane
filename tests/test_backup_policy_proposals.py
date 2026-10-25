@@ -207,6 +207,29 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()["error"]["code"], "authorization_denied")
         self.assertEqual(self.store.list_production_backup_policy_records(), ())
 
+    async def test_unsupported_administrator_policy_refuses_before_recording_approval(self) -> None:
+        from unittest.mock import patch
+
+        operation_id = await self.propose()
+        legacy_rule = self.administrator_rule()
+        legacy_rule.pop("managed_set_id")
+        legacy_rule.pop("managed_rule_id")
+        legacy = _policy_record(
+            LaunchplaneAuthzPolicy.model_validate(
+                {"schema_version": 1, "github_humans": [legacy_rule]}
+            )
+        )
+        self.assertTrue(legacy.policy.names_administrator(_github_human_identity()))
+        with patch(
+            "control_plane.backup_policy_proposals.read_active_authz_policy_record",
+            return_value=legacy,
+        ):
+            response = await self.decide(operation_id)
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(
+            self.store.read_privileged_operation_record(operation_id).status, "planned"
+        )
+
     async def test_inert_durable_redacted_then_single_human_click_executes(self) -> None:
         operation_id = await self.propose()
         self.assertEqual(self.store.list_production_backup_policy_records(), ())
