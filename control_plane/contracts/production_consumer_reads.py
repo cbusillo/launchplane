@@ -53,5 +53,6 @@ class ProductionConsumerReadResult(BaseModel):
     publication_sha256: str = ""
     source_observation_reference: str = ""
     consumers: tuple[ConsumerReadEvidence, ...] = Field(default=(), max_length=16)
+    busy: bool = Field(default=False, exclude_if=lambda value: not value)
     values_redacted: Literal[True] = True
     applied: Literal[False] = False

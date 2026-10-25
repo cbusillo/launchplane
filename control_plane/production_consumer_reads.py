@@ -1,7 +1,9 @@
+import hashlib
 import hmac
 import json
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -88,8 +90,27 @@ def current_source(
     review = ProductionConsumerReview.model_validate(
         record.activation["request"]["consumer_review"]
     )
+    profile = store.read_product_profile_record(product)
+    lanes = [lane for lane in profile.lanes if lane.context == context and lane.instance == "prod"]
+    checks = [
+        check
+        for lane in lanes
+        for check in lane.health_monitoring.checks
+        if check.enabled
+        and check.kind == "private_http"
+        and check.require_runtime_identity
+        and check.private_endpoint_key
+        in {row["endpoint_key"] for row in current["health_endpoints"]}
+    ]
+    if len(checks) != 1:
+        raise ValueError("One current published identity-bearing source check is required.")
     rows = store.list_public_ingress_observation_records(
-        product=product, context_name=context, instance_name="prod", limit=1
+        product=product,
+        context_name=context,
+        instance_name="prod",
+        check_name=checks[0].name,
+        check_kind="private_http",
+        limit=1,
     )
     if len(rows) != 1:
         raise ValueError("Current source-cycle evidence is required.")
@@ -159,7 +180,7 @@ def current_source(
             {
                 "record": record.model_dump(mode="json"),
                 "authority": current,
-                "observation": observation.model_dump(mode="json"),
+                "cycle": cycle.model_dump(mode="json"),
             }
         ),
         record.publication["published_sha256"],
@@ -302,14 +323,21 @@ def read_consumer(
     root: Path,
     member: ReviewedOdooConsumer,
     source_state: PublishedConsumerSource,
+    selection: reads.OdooRuntimeSelection,
 ) -> ConsumerReadEvidence:
-    selection = select_consumer(store, member)
     connection = reads.connect_runtime(
         store=store, selection=selection, control_plane_root=root, database_url=store.database_url
     )
     desired, snapshot = consumer_authority(store, root, selection)
     files = consumer_files(store, connection)
     nonce = uuid.uuid4().hex
+    desired = {
+        "desired_payload": desired["desired_payload"],
+        "desired_env_sha256": {
+            key: hmac.new(bytes.fromhex(nonce), value.encode(), hashlib.sha256).hexdigest()
+            for key, value in desired["desired_env"].items()
+        },
+    }
     frames: list[dict[str, object]] = []
     destination = False
 
@@ -343,7 +371,10 @@ def read_consumer(
             "container": connection.evidence.container_id,
             "identity": selection.identity.model_dump(mode="json"),
             "files": files,
-            "addons": {name: value[0] for name, value in SOURCE_ADDONS.items()},
+            "addons": {
+                **{name: value[0] for name, value in SOURCE_ADDONS.items()},
+                "tls": "external_ids",
+            },
             "prefixes": {"repairshopr": "repairshopr.sync_db"},
             "option_fields": ("port", "use_ssl", "ssl_verify", "batch_size"),
             "payload_addon": PAYLOAD_ADDON,
@@ -395,9 +426,9 @@ def read_consumer(
     )
     status = (
         "verified"
-        if evidence.query == "verified" and destination
+        if evidence.query == "verified" and evidence.populated == "verified" and destination
         else "failed"
-        if evidence.query == "failed"
+        if evidence.query == "failed" or evidence.populated == "failed"
         else "unsupported"
         if evidence.query == "unsupported"
         else "unknown"
@@ -415,30 +446,34 @@ def qualify_consumer_reads(
 ) -> ProductionConsumerReadResult:
     started = utc_now_timestamp()
     result = ProductionConsumerReadResult(observed_at=started, completed_at=started)
-    if not _READ_SLOTS.acquire(blocking=False):
-        return result
     members: list[ConsumerReadEvidence] = []
+    acquired = False
     try:
         review = reviewed_consumers(store, product, context)
         members = [ConsumerReadEvidence(consumer=member) for member in review.consumers]
+        result = result.model_copy(update={"consumers": tuple(members)})
+        acquired = _READ_SLOTS.acquire(blocking=False)
+        if not acquired:
+            return result.model_copy(update={"busy": True, "completed_at": utc_now_timestamp()})
         current = current_source(store, root, product, context)
         if current.review != review:
             raise ValueError("Reviewed consumer authority changed.")
-        observed_members = []
-        for member in current.review.consumers:
-            evidence = ConsumerReadEvidence(consumer=member)
+
+        def observe(member: ReviewedOdooConsumer) -> ConsumerReadEvidence:
             try:
                 selection = select_consumer(store, member)
                 if can_read(
                     member.product, selection.identity.context, selection.identity.instance
                 ):
-                    evidence = read_consumer(store, root, member, current)
+                    return read_consumer(store, root, member, current, selection)
             except NativeSourceAuthorizationDenied:
                 raise
             except Exception:
-                evidence = ConsumerReadEvidence(consumer=member)
-            observed_members.append(evidence)
-        members = observed_members
+                return ConsumerReadEvidence(consumer=member)
+            return ConsumerReadEvidence(consumer=member)
+
+        with ThreadPoolExecutor(max_workers=len(review.consumers)) as executor:
+            members = list(executor.map(observe, review.consumers))
         after = current_source(store, root, product, context)
         if after.snapshot != current.snapshot:
             members = [ConsumerReadEvidence(consumer=item.consumer) for item in members]
@@ -450,7 +485,7 @@ def qualify_consumer_reads(
             observed_at=started,
             completed_at=utc_now_timestamp(),
             publication_sha256=current.publication,
-            source_observation_reference=current.observation,
+            source_observation_reference=after.observation,
             consumers=tuple(members),
         )
     except NativeSourceAuthorizationDenied:
@@ -465,4 +500,5 @@ def qualify_consumer_reads(
             }
         )
     finally:
-        _READ_SLOTS.release()
+        if acquired:
+            _READ_SLOTS.release()

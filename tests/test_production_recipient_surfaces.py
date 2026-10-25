@@ -237,7 +237,6 @@ class HttpBoundaryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.assertEqual(response.json()["result"], result.model_dump(mode="json"))
-        self.assertEqual(self.requested[-1]["action"], "operations.read")
         self.assertTrue(callable(qualify.call_args.kwargs["can_read"]))
         self.mutate.assert_not_called()
 

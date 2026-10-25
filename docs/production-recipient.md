@@ -530,17 +530,21 @@ endpoint, account, password or runtime override. Deleted, inaccessible,
 unsupported or changed members remain unknown. The uncached, value-free result
 includes service start/end times, publication and source observation references,
 and one closed result per reviewed consumer. It grants no retirement permission;
-a replayed response cannot substitute for a fresh read.
+a replayed response cannot substitute for a fresh read. Consumers run concurrently
+within the fixed membership bound, so adding members does not serialize their
+30-second witnesses. Capacity contention returns `busy: true` and retains every
+reviewed member as unknown.
 
 The reader verifies the installed artifact, importer/settings/payload and TLS
 source. It uses the installed pure settings resolver and connection method
 without loading Odoo or running an importer. Current managed password/version
 and desired, delivered and applied settings are compared privately. Only the
-selected source's managed inputs reach the consumer. The existing account must
+selected source's keyed expected-value digests reach the consumer, never the
+service's managed plaintext password. The existing account must
 have read-only grants. A read-only transaction checks the selected database and
 queries one constant from every required product-owned table with `LIMIT 1`.
-Query capability and populated data have separate results; empty tables do not
-certify populated data.
+Query capability and populated data have separate results. Overall verification
+requires both plus a corroborated destination; empty tables cannot qualify.
 
 A fresh nonce stays on that same connection in a bounded SELECT while the
 service checks the published recipient's MariaDB process list through the
@@ -554,8 +558,10 @@ credentials, grants and driver messages never reach the response.
 
 Qualification also requires a fresh service health observation of the exact
 published runtime and a successful incremental cycle started after publication.
-Source authority, observation, runtime, artifact and consumer applied settings
-are rechecked around I/O. Drift invalidates evidence. This proves neither
+Source authority, the selected identity-bearing private check, runtime, artifact,
+cycle and consumer applied settings are rechecked around I/O. A new monitor row
+for the same qualifying cycle does not invalidate the proof; changed authority
+or cycle does. This proves neither
 universal invoice history nor unique-ID/parent reconciliation, accepted bootstrap,
 post-cutover elapsed time, recovery eligibility or exclusive old-resource custody.
 Those remain the retirement and source-data validation gates' responsibilities.

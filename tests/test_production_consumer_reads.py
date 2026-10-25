@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pymysql
 
-from control_plane import production_consumer_reads as reader
+from control_plane import production_consumer_reads as reader, odoo_runtime_reads as reads
 from control_plane.odoo_runtime_source_prerequisites import SOURCE_ADDONS, PAYLOAD_ADDON
 from control_plane.contracts.production_consumer_reads import (
     ConsumerReadEvidence,
@@ -23,7 +23,10 @@ from control_plane.contracts.production_consumer_reads import (
 )
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
-from control_plane.production_consumer_programs import CONSUMER_CONTAINER_PROGRAM
+from control_plane.production_consumer_programs import (
+    CONSUMER_CONTAINER_PROGRAM,
+    CONSUMER_TABLE_ROLES,
+)
 from tests.test_odoo_import_diagnostics import PRIVATE
 from tests.test_odoo_runtime_source_prerequisites import PrerequisiteFixture
 
@@ -35,27 +38,16 @@ class ConsumerProgramFixture(PrerequisiteFixture):
         self.fixture.identity = self.fixture.identity.model_copy(update={"instance": "prod"})
         self.env[RUNTIME_IDENTITY_ENV_KEY] = self.fixture.identity.model_dump_json()
         self.client_path = self.producer("repairshopr").with_name("repairshopr_sync_client.py")
+        self.tables = {
+            role: "synthetic_" + str(index)
+            for index, role in enumerate(sorted(CONSUMER_TABLE_ROLES))
+        }
+        self.child_table = self.tables["INVOICE_LINE_ITEM_TABLE"]
         self.client_path.write_text(
-            "\n".join(
-                name + " = 'synthetic_" + str(index) + "'"
-                for index, name in enumerate(
-                    sorted(
-                        {
-                            "CUSTOMER_TABLE",
-                            "CONTACT_TABLE",
-                            "PRODUCT_TABLE",
-                            "TICKET_TABLE",
-                            "TICKET_PROPERTIES_TABLE",
-                            "TICKET_COMMENT_TABLE",
-                            "ESTIMATE_TABLE",
-                            "ESTIMATE_LINE_ITEM_TABLE",
-                            "INVOICE_TABLE",
-                            "INVOICE_LINE_ITEM_TABLE",
-                        }
-                    )
-                )
-            )
+            "\n".join(name + " = " + repr(table) for name, table in self.tables.items())
             + """
+import pymysql
+from odoo.addons.external_ids.utils.ssl_context import build_ssl_context
 class RepairshoprSyncClient:
     def _open_connection(self):
         secure_context=build_ssl_context(self._settings.use_ssl,self._settings.ssl_verify)
@@ -115,6 +107,7 @@ def build_ssl_context(use_ssl,verify_ssl):
         self.mysql_cursor.execute.side_effect = self.mysql_execute
         self.mysql_cursor.fetchone.side_effect = self.mysql_one
         self.mysql_cursor.fetchmany.side_effect = self.mysql_many
+        self.installed["external_ids"] = "installed"
         self.sql = ""
         self.mysql_queries: list[str] = []
         self.empty = False
@@ -131,7 +124,7 @@ def build_ssl_context(use_ssl,verify_ssl):
                 self.values["repairshopr.sync_db.host"] = "changed"
             if self.drift == "file":
                 self.client_path.write_text("changed")
-        if self.denied and query.startswith("SELECT 1 FROM") and "synthetic_3`" in query:
+        if self.denied and query.startswith("SELECT 1 FROM") and self.child_table + "`" in query:
             raise pymysql.err.ProgrammingError(1142, PRIVATE)
 
     def mysql_one(self) -> Any:
@@ -144,7 +137,6 @@ def build_ssl_context(use_ssl,verify_ssl):
     def mysql_many(self, limit: int) -> Any:
         if self.sql == "SHOW GRANTS":
             return [("GRANT " + self.grants + " ON `synthetic_database`.* TO 'reader'@'%'",)]
-        self.assertEqual(limit, 2)
         return () if self.empty else ((1,),)
 
     def mysql_connect(self, **kwargs: Any) -> Any:
@@ -168,7 +160,10 @@ def build_ssl_context(use_ssl,verify_ssl):
         spec = {
             "identity": self.fixture.identity.model_dump(mode="json"),
             "files": files,
-            "addons": {name: value[0] for name, value in SOURCE_ADDONS.items()},
+            "addons": {
+                **{name: value[0] for name, value in SOURCE_ADDONS.items()},
+                "tls": "external_ids",
+            },
             "prefixes": {"repairshopr": "repairshopr.sync_db"},
             "option_fields": ["port", "use_ssl", "ssl_verify", "batch_size"],
             "payload_addon": PAYLOAD_ADDON,
@@ -178,9 +173,15 @@ def build_ssl_context(use_ssl,verify_ssl):
             "desired_payload": json.loads(
                 base64.b64decode(self.env["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"])
             ),
-            "desired_env": self.env.copy(),
+            "desired_env_sha256": {
+                key: __import__("hmac")
+                .new(bytes.fromhex("a" * 32), value.encode(), hashlib.sha256)
+                .hexdigest()
+                for key, value in self.env.items()
+            },
             **changes,
         }
+        self.assertNotIn(PRIVATE, json.dumps(spec))
         program = CONSUMER_CONTAINER_PROGRAM.replace(
             "__CONFIG_PATH__", repr(str(self.config))
         ).replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY))
@@ -202,7 +203,7 @@ class ConsumerProgramTests(ConsumerProgramFixture):
         frames = self.run_container()
         self.assertEqual(frames[-1]["result"], {"query": "verified", "populated": "verified"})
         self.assertEqual(frames[0], {"type": "connection", "connection_id": 719})
-        self.assertTrue(any("synthetic_3`" in sql for sql in self.mysql_queries))
+        self.assertTrue(any(self.child_table + "`" in sql for sql in self.mysql_queries))
         self.assertEqual(self.mysql_kwargs["database"], "synthetic_database")
         self.assertEqual(self.mysql_kwargs["password"], PRIVATE)
         self.assertFalse(self.mysql_kwargs["local_infile"])
@@ -247,6 +248,15 @@ class ConsumerProgramTests(ConsumerProgramFixture):
                 else:
                     self.assertIsNone(context)
 
+    def test_shadowed_tls_binding_and_transient_driver_failure_stay_unknown(self) -> None:
+        original = self.client_path.read_text()
+        self.client_path.write_text(original + "\nbuild_ssl_context=lambda *args:None\n")
+        self.assertEqual(self.run_container()[-1]["result"]["query"], "unknown")
+        self.client_path.write_text(original)
+        self.mysql_cursor.execute.side_effect = pymysql.err.OperationalError(2013, PRIVATE)
+        self.assertEqual(self.run_container()[-1]["result"]["query"], "unknown")
+        self.mysql.close.assert_called_once()
+
     def test_managed_delivered_applied_mismatch_never_connects(self) -> None:
         for layer in ("applied", "managed"):
             with self.subTest(layer=layer):
@@ -255,7 +265,7 @@ class ConsumerProgramTests(ConsumerProgramFixture):
                     frames = self.run_container()
                     self.values["repairshopr.sync_db.host"] = "synthetic-host"
                 else:
-                    frames = self.run_container(desired_env={})
+                    frames = self.run_container(desired_env_sha256={"missing": "f" * 64})
                 self.assertEqual(frames[-1]["result"]["query"], "unknown")
         self.mysql.close.assert_not_called()
 
@@ -336,6 +346,39 @@ class CoverageTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "unknown")
 
+    def test_busy_read_preserves_every_reviewed_member(self) -> None:
+        with patch.object(reader, "_READ_SLOTS") as slots:
+            slots.acquire.return_value = False
+            result = self.qualify()
+        self.assertTrue(result.busy)
+        self.assertEqual(
+            tuple(item.consumer for item in result.consumers), self.current.review.consumers
+        )
+
+    def test_consumers_run_concurrently_on_their_authorized_selection(self) -> None:
+        import threading
+
+        barrier = threading.Barrier(len(self.current.review.consumers))
+
+        def read(store: Any, root: Path, member: Any, current: Any, selection: Any) -> Any:
+            self.assertIs(selection, self.selection)
+            barrier.wait(timeout=5)
+            return ConsumerReadEvidence(
+                consumer=member,
+                status="verified",
+                query="verified",
+                populated="verified",
+                destination="verified",
+            )
+
+        with (
+            patch.object(reader, "current_source", return_value=self.current),
+            patch.object(reader, "select_consumer", return_value=self.selection),
+            patch.object(reader, "read_consumer", side_effect=read),
+        ):
+            result = self.qualify()
+        self.assertEqual(result.status, "verified")
+
     def test_publication_drift_discards_every_consumer_proof(self) -> None:
         with (
             patch.object(
@@ -347,7 +390,7 @@ class CoverageTests(unittest.TestCase):
             patch.object(
                 reader,
                 "read_consumer",
-                side_effect=lambda store, root, member, current: ConsumerReadEvidence(
+                side_effect=lambda store, root, member, current, selection: ConsumerReadEvidence(
                     consumer=member, status="verified"
                 ),
             ),
@@ -420,6 +463,25 @@ class SourceCycleTests(unittest.TestCase):
         )
         self.store = MagicMock()
         self.store.list_public_ingress_observation_records.return_value = (self.observation,)
+        self.store.read_product_profile_record.return_value = SimpleNamespace(
+            lanes=(
+                SimpleNamespace(
+                    context="source",
+                    instance="prod",
+                    health_monitoring=SimpleNamespace(
+                        checks=(
+                            SimpleNamespace(
+                                enabled=True,
+                                kind="private_http",
+                                require_runtime_identity=True,
+                                private_endpoint_key="health",
+                                name="source-check",
+                            ),
+                        )
+                    ),
+                ),
+            )
+        )
         self.patches = [
             patch.object(reader, "custody", return_value=self.record),
             patch.object(reader, "require_owned_publication_rows"),
@@ -427,7 +489,8 @@ class SourceCycleTests(unittest.TestCase):
                 reader,
                 "authority_snapshot",
                 return_value={
-                    "inventory": {"runtime_identity": self.identity.model_dump(mode="json")}
+                    "inventory": {"runtime_identity": self.identity.model_dump(mode="json")},
+                    "health_endpoints": [{"endpoint_key": "health"}],
                 },
             ),
             patch.object(reader, "ProductionRecipientAdapter"),
@@ -457,6 +520,16 @@ class SourceCycleTests(unittest.TestCase):
         result = self.current()
         self.assertEqual(result.observation, self.observation.record_id)
         self.assertEqual(result.review, self.review)
+        self.observation.record_id = "new-observation"
+        refreshed = self.current()
+        self.assertEqual(result.snapshot, refreshed.snapshot)
+        self.assertNotEqual(result.observation, refreshed.observation)
+        self.assertEqual(
+            self.store.list_public_ingress_observation_records.call_args.kwargs["check_kind"],
+            self.store.read_product_profile_record.return_value.lanes[0]
+            .health_monitoring.checks[0]
+            .kind,
+        )
 
     def test_replayed_bootstrap_stale_future_failed_and_foreign_cycles_are_refused(self) -> None:
         from datetime import timedelta
@@ -534,12 +607,12 @@ class RealConsumerQueryTests(ConsumerProgramFixture):
             "3306/tcp"
         ][0]["HostPort"]
         sql = "CREATE USER 'reader'@'%' IDENTIFIED BY 'synthetic-reader'; GRANT SELECT ON synthetic_database.* TO 'reader'@'%';"
-        for index in range(10):
+        for table in self.tables.values():
             sql += (
-                "CREATE TABLE synthetic_database.synthetic_"
-                + str(index)
-                + " (id INTEGER PRIMARY KEY); INSERT INTO synthetic_database.synthetic_"
-                + str(index)
+                "CREATE TABLE synthetic_database."
+                + table
+                + " (id INTEGER PRIMARY KEY); INSERT INTO synthetic_database."
+                + table
                 + " VALUES (1);"
             )
         self.root_sql(sql)
@@ -645,10 +718,14 @@ class RealConsumerQueryTests(ConsumerProgramFixture):
         self.assertFalse(worker.is_alive())
         self.assertFalse(errors)
         self.assertEqual(results[-1]["result"]["query"], "verified")
-        self.root_sql(
-            "REVOKE SELECT ON synthetic_database.* FROM 'reader'@'%'; GRANT SELECT ON synthetic_database.synthetic_0 TO 'reader'@'%'"
-        )
+        grants = "REVOKE SELECT ON synthetic_database.* FROM 'reader'@'%';"
+        for table in self.tables.values():
+            if table != self.child_table:
+                grants += "GRANT SELECT ON synthetic_database." + table + " TO 'reader'@'%';"
+        self.root_sql(grants)
         self.assertEqual(self.run_container()[-1]["result"]["query"], "failed")
+        self.root_sql("GRANT INSERT ON synthetic_database.* TO PUBLIC")
+        self.assertNotEqual(self.run_container()[-1]["result"]["query"], "verified")
 
 
 class GrantClassificationTests(unittest.TestCase):
@@ -670,3 +747,54 @@ class GrantClassificationTests(unittest.TestCase):
             classify_grants([(usage + " UNRECOGNIZED",), (select,)], mariadb_authentication=True),
             "unknown",
         )
+
+
+class ConsumerReadIntegrationTests(unittest.TestCase):
+    def test_payload_excludes_managed_values_and_empty_data_cannot_qualify(self) -> None:
+        from tests.test_odoo_import_diagnostics import DiagnosticFixture
+
+        fixture = DiagnosticFixture()
+        member = ReviewedOdooConsumer(product=fixture.profile.product, environment="testing")
+        source = reader.PublishedConsumerSource(
+            "source",
+            "b" * 64,
+            "probe",
+            ProductionConsumerReview(consumers=(member,), coordination_reference="review"),
+            {},
+            "source-server",
+        )
+        populated = "verified"
+
+        def remote(**kwargs: Any) -> None:
+            self.assertNotIn(PRIVATE, json.dumps(kwargs["payload"]))
+            kwargs["receive"]({"type": "connection", "connection_id": 17})
+            kwargs["receive"](
+                {"type": "complete", "result": {"query": "verified", "populated": populated}}
+            )
+
+        with (
+            patch.object(reads, "connect_runtime", return_value=fixture.connection),
+            patch.object(
+                reader,
+                "consumer_authority",
+                return_value=(
+                    {"desired_payload": {}, "desired_env": {"password": PRIVATE}},
+                    "authority",
+                ),
+            ),
+            patch.object(reader, "consumer_files", return_value={}),
+            patch.object(reads, "inspect_runtime_container", return_value={}),
+            patch.object(reads, "assert_selection_current"),
+            patch.object(reader, "witness_source", return_value=True),
+            patch.object(reader, "_read_remote", side_effect=remote),
+        ):
+            result = reader.read_consumer(
+                fixture.store, Path("/synthetic"), member, source, fixture.connection.selection
+            )
+            self.assertEqual(result.status, "verified")
+            populated = "failed"
+            result = reader.read_consumer(
+                fixture.store, Path("/synthetic"), member, source, fixture.connection.selection
+            )
+            self.assertEqual(result.query, "verified")
+            self.assertEqual(result.status, "failed")

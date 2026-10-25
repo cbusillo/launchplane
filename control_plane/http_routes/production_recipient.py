@@ -7,7 +7,7 @@ from typing import Annotated
 import click
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
-from fastapi import Depends, Header, Path as PathParameter, Request, Response
+from fastapi import Depends, Header, Path as PathParameter, Query, Request, Response
 from pydantic import BaseModel
 from control_plane.contracts.production_consumer_reads import ProductionConsumerReadResult
 from control_plane.production_consumer_reads import qualify_consumer_reads
@@ -59,8 +59,10 @@ def register_production_recipient_routes(
     run_provider_mutation: Callable[..., Awaitable[AcceptedEvidenceResponse]],
 ) -> None:
     async def consumer_reads(
-        product: str,
-        context: str,
+        product: Annotated[
+            str, PathParameter(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
+        ],
+        context: Annotated[str, Query(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")],
         request: Request,
         response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],

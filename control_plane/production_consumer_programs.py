@@ -4,17 +4,41 @@ from control_plane import odoo_source_probe
 from control_plane.odoo_source_prerequisite_programs import CONTAINER_LIBRARY, HOST_LIBRARY
 from control_plane.production_recipient_published_host import PUBLISHED_SOURCE_LIBRARY
 
-GRANT_LIBRARY = inspect.getsource(odoo_source_probe).split("def probe(", 1)[0]
+CONSUMER_TABLE_ROLES = frozenset(
+    {
+        "CUSTOMER_TABLE",
+        "CONTACT_TABLE",
+        "PRODUCT_TABLE",
+        "TICKET_TABLE",
+        "TICKET_PROPERTIES_TABLE",
+        "TICKET_COMMENT_TABLE",
+        "ESTIMATE_TABLE",
+        "ESTIMATE_LINE_ITEM_TABLE",
+        "INVOICE_TABLE",
+        "INVOICE_LINE_ITEM_TABLE",
+    }
+)
+
+GRANT_LIBRARY = (
+    "import re, pymysql\nGrantStatus=str\n_READ_PRIVILEGES="
+    + repr(odoo_source_probe._READ_PRIVILEGES)
+    + "\n_GRANT=re.compile("
+    + repr(odoo_source_probe._GRANT.pattern)
+    + ")\n"
+    + inspect.getsource(odoo_source_probe.classify_grants)
+)
 
 CONSUMER_CONTAINER_PROGRAM = (
     CONTAINER_LIBRARY
     + GRANT_LIBRARY
+    + "\nTABLE_ROLES="
+    + repr(CONSUMER_TABLE_ROLES)
+    + "\n"
     + r"""
 import ast, copy
 output=sys.stdout
 
-TABLE_ROLES={'CUSTOMER_TABLE','CONTACT_TABLE','PRODUCT_TABLE','TICKET_TABLE','TICKET_PROPERTIES_TABLE',
-             'TICKET_COMMENT_TABLE','ESTIMATE_TABLE','ESTIMATE_LINE_ITEM_TABLE','INVOICE_TABLE','INVOICE_LINE_ITEM_TABLE'}
+
 
 def verified_connection_code(roots):
     addon=spec['addons']['repairshopr']
@@ -24,6 +48,22 @@ def verified_connection_code(roots):
     if hashlib.sha256(raw).hexdigest()!=spec['files']['repairshopr'][str(path)]:
         raise ValueError()
     tree=ast.parse(raw)
+    bindings=[]
+    for node in tree.body:
+        if isinstance(node,ast.Import) and len(node.names)==1 and node.names[0].name=='pymysql' and node.names[0].asname is None:
+            bindings.append('pymysql')
+            continue
+        if (isinstance(node,ast.ImportFrom) and node.module=='odoo.addons.external_ids.utils.ssl_context'
+            and node.level==0 and len(node.names)==1 and node.names[0].name=='build_ssl_context' and node.names[0].asname is None):
+            bindings.append('build_ssl_context')
+            continue
+        if any((isinstance(item,ast.Name) and isinstance(item.ctx,ast.Store) and item.id in {'pymysql','build_ssl_context'})
+               or (isinstance(item,(ast.FunctionDef,ast.ClassDef)) and item.name in {'pymysql','build_ssl_context'})
+               or isinstance(item,(ast.Import,ast.ImportFrom)) and any((alias.asname or alias.name.split('.')[0]) in {'pymysql','build_ssl_context'} for alias in item.names)
+               for item in ast.walk(node)):
+            raise ValueError()
+    if sorted(bindings)!=['build_ssl_context','pymysql']:
+        raise ValueError()
     tables={}
     for node in tree.body:
         if isinstance(node,ast.Assign) and len(node.targets)==1 and isinstance(node.targets[0],ast.Name):
@@ -85,7 +125,9 @@ def query_consumer(settings,open_connection,tables):
             if cursor.fetchone()!=(0,spec['nonce']):
                 raise ValueError()
             return {'query':'verified','populated':'verified' if populated else 'failed'}
-    except pymysql.MySQLError:
+    except pymysql.MySQLError as error:
+        if not error.args or error.args[0] not in {1044,1045,1049,1142,1143,1146}:
+            return {'query':'unknown','populated':'unknown'}
         return {'query':'failed','populated':'unknown'}
     finally:
         try:
@@ -107,10 +149,14 @@ def run_consumer():
     producer=load_payload_producer(payload_raw)
     payload=producer.decode_payload(os.environ.get(producer.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,''))
     before,installed=parameters(list(module.PARAMETER_KEYS),options)
-    if not installed.get(spec['addons']['repairshopr']) or not installed.get(spec['payload_addon']):
+    if not installed.get(spec['addons']['repairshopr']) or not installed.get(spec['payload_addon']) or not installed.get('external_ids'):
         return {'query':'unsupported','populated':'unknown'}
     delivered=producer.resolve_config_parameters(payload,os.environ,keys=module.PARAMETER_KEYS)
-    desired=producer.resolve_config_parameters(spec['desired_payload'],spec['desired_env'],keys=module.PARAMETER_KEYS)
+    for key,digest in spec['desired_env_sha256'].items():
+        actual=os.environ.get(key)
+        if not isinstance(actual,str) or not hmac.compare_digest(hmac.new(bytes.fromhex(spec['nonce']),actual.encode(),hashlib.sha256).hexdigest(),digest):
+            raise ValueError()
+    desired=producer.resolve_config_parameters(spec['desired_payload'],os.environ,keys=module.PARAMETER_KEYS)
     applied=module.resolve_connection_settings(before)
     if applied!=module.resolve_connection_settings(delivered) or applied!=module.resolve_connection_settings(desired):
         return {'query':'unknown','populated':'unknown'}
@@ -194,7 +240,7 @@ print(prefix+json.dumps({'type':'complete','result':result}),flush=True)
 
 SOURCE_WITNESS_PROGRAM = (
     r"""
-import base64,hashlib,json,re,subprocess,sys,time
+import base64,hashlib,json,re,signal,subprocess,sys,time
 from pathlib import Path
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
@@ -210,6 +256,10 @@ def digest_json(value):
 """
     + PUBLISHED_SOURCE_LIBRARY
     + r"""
+def deadline(_signal,_frame):
+    raise TimeoutError()
+signal.signal(signal.SIGALRM,deadline)
+signal.alarm(25)
 result={'verified':False}
 try:
     identifier=spec['connection_id']
@@ -232,6 +282,8 @@ try:
     result={'verified':matched and before==after}
 except BaseException:
     pass
+finally:
+    signal.alarm(0)
 print(prefix+json.dumps({'type':'complete','result':result}),flush=True)
 """
 )
