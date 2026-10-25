@@ -15,6 +15,7 @@ from control_plane.contracts.deploy_reference import (
     canonical_docker_image_repository as _repository,
 )
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.child_process_errors import redact_untrusted_text
 from control_plane.dokploy import api
 from control_plane.dokploy.runtime_evidence import (
     DokployEvidenceProviderError,
@@ -50,6 +51,7 @@ _DEPLOYMENT_PREFIX = "LAUNCHPLANE_DEPLOYMENT_RECORD_ID="
 _ENVIRONMENT_KEY = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$")
 MAX_APPLICATION_DIAGNOSTIC_ITEMS = 100
 MAX_APPLICATION_ENVIRONMENT_KEYS = 256
+MAX_APPLICATION_TASK_DETAIL_LENGTH = 1000
 
 
 @dataclass(frozen=True)
@@ -108,6 +110,38 @@ class ApplicationTaskObservation:
     task_id: str = ""
     desired_state: str = ""
     container_id_present: bool | None = None
+    error: str | None = None
+    message: str | None = None
+    status_timestamp: str | None = None
+    exit_code: int | None = None
+
+
+def _task_detail(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if re.search(r"(?i)\b(?:proxy-)?authorization\s*[:=]", value):
+        return "[redacted]"
+    return redact_untrusted_text(
+        api.redact_dokploy_log_line(value),
+        fallback="",
+        maximum_length=MAX_APPLICATION_TASK_DETAIL_LENGTH,
+    )
+
+
+def _task_timestamp(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 100:
+        return None
+    try:
+        parse_launchplane_mutation_timestamp(value, field_name="status_timestamp")
+    except ValueError:
+        return None
+    return value
+
+
+def _task_exit_code(status: dict[str, object]) -> int | None:
+    captured = status.get("ContainerStatus")
+    value = captured.get("ExitCode") if isinstance(captured, dict) else None
+    return value if type(value) is int else None
 
 
 @dataclass(frozen=True)
@@ -444,6 +478,10 @@ def _fetch_application_runtime(
                     task_id,
                     desired,
                     container_id_present=_task_container_id_present(status),
+                    error=_task_detail(status.get("Err")),
+                    message=_task_detail(status.get("Message")),
+                    status_timestamp=_task_timestamp(status.get("Timestamp")),
+                    exit_code=_task_exit_code(status),
                 )
             )
             if state != "running":

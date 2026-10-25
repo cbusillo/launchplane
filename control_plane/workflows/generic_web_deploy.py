@@ -1244,6 +1244,8 @@ def _execute_generic_web_deploy_unserialized(
                     provider_failure_observed = failed.outcome == "present" and not (
                         generic_web_provider_deployment_succeeded(failed.deployment_status)
                     )
+                    if provider_failure_observed:
+                        provider_deployment_observation = failed
         if (
             execution_recorder is not None
             and runtime_deadline is not None
@@ -1311,6 +1313,15 @@ def _execute_generic_web_deploy_unserialized(
                 status="fail",
                 detail=str(exc),
                 evidence=post_deploy_update.evidence,
+            )
+        if provider_failure_observed and provider_deployment_observation is not None:
+            post_deploy_update = post_deploy_update.model_copy(
+                update={
+                    "evidence": {
+                        **provider_deployment_observation.runtime_failure_evidence,
+                        **post_deploy_update.evidence,
+                    }
+                }
             )
         runtime_identity = (
             _build_runtime_identity(

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import hashlib
+import json
 from pathlib import Path
 import re
 from time import monotonic, sleep
@@ -59,6 +60,7 @@ from control_plane.dokploy.application_runtime import (
     application_service_image_matches,
     fetch_application_runtime,
 )
+from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
 
 
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverPlan
@@ -369,6 +371,19 @@ class GenericWebProviderDeploymentObservation(BaseModel):
     started_at: str = ""
     finished_at: str = ""
     error_message: str = ""
+    runtime_failure_evidence: dict[str, str] = Field(default_factory=dict, exclude=True)
+
+    def with_application_failure(
+        self, runtime: ApplicationRuntimeObservation, expected_image: str
+    ) -> GenericWebProviderDeploymentObservation:
+        evidence = summarize_application_runtime(
+            runtime, expected_image=expected_image, observed_at=datetime.now(UTC)
+        )
+        return self.model_copy(
+            update={
+                "runtime_failure_evidence": {"application_runtime_failure": json.dumps(evidence)}
+            }
+        )
 
     @model_validator(mode="after")
     def _validate_terminal_evidence(self) -> "GenericWebProviderDeploymentObservation":
@@ -713,7 +728,9 @@ def qualify_testing_application_observation(
             if observation.deployment_status in {"error", "failed"} and runtime.rollout_settled:
                 # A pull/login failure can end before any service update. This
                 # proves a failed, currently settled effect, never its absence.
-                return GenericWebProviderDeploymentFailed(observation).observation
+                return GenericWebProviderDeploymentFailed(
+                    observation
+                ).observation.with_application_failure(runtime, target.ship_request.artifact_id)
             if application_runtime_matches(
                 runtime,
                 artifact_reference=target.ship_request.artifact_id,
@@ -753,7 +770,7 @@ def qualify_testing_application_observation(
                                 f"provider job status={observation.deployment_status}."
                             ),
                         }
-                    )
+                    ).with_application_failure(runtime, target.ship_request.artifact_id)
         except (ValueError, RuntimeError, click.ClickException):
             runtime = None
         remaining = deadline - monotonic() if deadline is not None else 0
@@ -781,7 +798,7 @@ def qualify_testing_application_observation(
                             f"deployment deadline; provider job status={observation.deployment_status}."
                         ),
                     }
-                )
+                ).with_application_failure(runtime, target.ship_request.artifact_id)
             return GenericWebProviderDeploymentObservation(outcome="unknown")
         sleep(min(1.0, remaining))
 
