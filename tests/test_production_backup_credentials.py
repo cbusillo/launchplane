@@ -10,6 +10,10 @@ from unittest.mock import patch
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding, SecretVersion
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.guest_capture_credentials import CAPTURE_KEYS as BACKUP_CREDENTIAL_KEYS
+from control_plane.guest_capture_credentials import (
+    capture_boundary,
+    validate_guest_capture_enrollment,
+)
 from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
 from control_plane.contracts.privileged_operation import PrivilegedOperationLocalOperatorActor
 from control_plane.privileged_operation_service import create_typed_privileged_operation_plan
@@ -556,6 +560,147 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.store.guest_capture_secret_ids(),
             frozenset(record.secret_id for record in self.originals),
+        )
+
+    def revise_capture_endpoint(self, host: str, username: str = "capture") -> None:
+        for current in self.store.list_production_backup_target_records(status="active"):
+            if current.target_id not in _policy().target_ids:
+                continue
+            payload = current.model_dump(mode="json")
+            payload.update(
+                record_id="",
+                target_digest="",
+                target_revision=current.target_revision + 1,
+                supersedes_record_id=current.record_id,
+            )
+            payload["destination"].update(host=host, username=username)
+            self.store.write_production_backup_target_record(type(current).model_validate(payload))
+
+    def add_original_endpoint_consumer(self) -> Any:
+        source_payload = _source_target().model_dump(mode="json")
+        source_payload.update(target_id="historical-source", record_id="", target_digest="")
+        source = type(_source_target()).model_validate(source_payload)
+        destination_payload = _destination_target().model_dump(mode="json")
+        destination_payload.update(target_id="historical-storage", record_id="", target_digest="")
+        destination = type(_destination_target()).model_validate(destination_payload)
+        self.store.write_production_backup_target_record(source)
+        self.store.write_production_backup_target_record(destination)
+        payload = _policy().model_dump(mode="json")
+        payload.update(
+            product="other", context="other", record_id="", policy_id="", policy_digest=""
+        )
+        payload["fast_snapshot"]["source_target_id"] = source.target_id
+        payload["independent_backup"].update(
+            source_target_id=source.target_id, destination_target_id=destination.target_id
+        )
+        policy = type(_policy()).model_validate(payload)
+        self.store.write_production_backup_policy_record(policy)
+        return policy
+
+    async def test_reviewed_endpoint_transition_reuses_the_pair_without_changing_secret_data(
+        self,
+    ) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "original-pin")).status_code, 202)
+        old_boundary = capture_boundary(_policy(), _source_target(), _destination_target())
+        old_pin = self.store.read_guest_capture_binding(old_boundary)
+        assert old_pin is not None
+        records = self.store.list_secret_records()
+        versions = tuple(
+            self.store.list_secret_versions(secret_id=record.secret_id) for record in records
+        )
+        self.revise_capture_endpoint("new-endpoint.invalid")
+        with patch.object(
+            self.store, "read_secret_version", side_effect=AssertionError("No key reads")
+        ):
+            self.store.seed_guest_capture_bindings()
+            state = self.store.guest_capture_enrollment_state("example-product", "prod")
+            body = await self.reviewed()
+            result = await self.post(body, "endpoint-transition")
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertEqual(self.store.read_guest_capture_binding(old_boundary), old_pin)
+        pin = self.store.read_guest_capture_binding(
+            old_boundary.model_copy(update={"host": "new-endpoint.invalid", "username": "capture"})
+        )
+        assert pin is not None
+        self.assertEqual(
+            pin.model_dump(exclude={"boundary"}), old_pin.model_dump(exclude={"boundary"})
+        )
+        self.assertFalse(state["consumers"])
+        self.assertEqual(self.store.list_secret_records(), records)
+        self.assertEqual(
+            tuple(
+                self.store.list_secret_versions(secret_id=record.secret_id) for record in records
+            ),
+            versions,
+        )
+        host = BackupHost()
+        with (
+            patch("control_plane.secrets._decrypt_secret_value", return_value="fixture"),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            ),
+        ):
+            response = await _asgi_request(
+                self.app,
+                "GET",
+                "/v1/production-backup-authority/preflight?product=example-product&context=example-product&instance=prod&promotion_action="
+                + _policy().promotion_action,
+                headers={"Cookie": self.sessions.session_cookie_header(self.session)},
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["result"]["status"], "pass")
+        self.assertFalse(response.json()["result"]["capture_started"])
+        for change in (
+            {"guest_id": "999"},
+            {"storage_id": "other"},
+            {"snapshot_prefix": "other"},
+        ):
+            candidate = old_pin.model_copy(
+                update={"boundary": old_boundary.model_copy(update=change)}
+            )
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                validate_guest_capture_enrollment(candidate, state)
+
+    async def test_all_historical_endpoint_consumers_block_the_next_transition(self) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "original-pin")).status_code, 202)
+        self.revise_capture_endpoint("second.invalid")
+        self.assertEqual((await self.post(await self.reviewed(), "second-pin")).status_code, 202)
+        consumer = self.add_original_endpoint_consumer()
+        self.revise_capture_endpoint("third.invalid")
+        denied = await self.post({"bindings": self.selection, "reason": "Third endpoint"})
+        self.assertEqual(denied.status_code, 409, denied.text)
+        payload = consumer.model_dump(mode="json")
+        payload.update(
+            record_id="",
+            policy_digest="",
+            policy_revision=consumer.policy_revision + 1,
+            supersedes_record_id=consumer.record_id,
+            status="retired",
+        )
+        self.store.write_production_backup_policy_record(type(consumer).model_validate(payload))
+        self.assertEqual((await self.post(await self.reviewed(), "third-pin")).status_code, 202)
+
+    async def test_consumer_appearing_before_commit_refuses_endpoint_enrollment(self) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "original-pin")).status_code, 202)
+        self.revise_capture_endpoint("new-endpoint.invalid")
+        body = await self.reviewed()
+        commit = self.store.compare_and_rebind_worker_credentials
+
+        def racing_commit(**kwargs: Any) -> Any:
+            self.add_original_endpoint_consumer()
+            return commit(**kwargs)
+
+        with patch.object(self.store, "compare_and_rebind_worker_credentials", racing_commit):
+            denied = await self.post(body, "raced-endpoint")
+        self.assertEqual(denied.status_code, 409, denied.text)
+        old_boundary = capture_boundary(_policy(), _source_target(), _destination_target())
+        self.assertIsNone(
+            self.store.read_guest_capture_binding(
+                old_boundary.model_copy(
+                    update={"host": "new-endpoint.invalid", "username": "capture"}
+                )
+            )
         )
 
     async def test_failed_pin_rolls_back_rebinding_and_its_receipt(self) -> None:

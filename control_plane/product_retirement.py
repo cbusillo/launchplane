@@ -1587,9 +1587,9 @@ def redacted_product_retirement_response(record: ProductRetirementRecord) -> dic
                                 if not reference.startswith(_RETAINED_GUEST_CAPTURE_PREFIX)
                             ),
                         ],
-                        "ownership": f"Exclusive context {record.context}; all three tracked target records agree. Provider target has no other product or lane owner. "
+                        "ownership": f"Exclusive context {record.context}; all three tracked target records agree. Provider target has no other product or lane owner."
                         + (
-                            "Guest capture credentials stay enabled because they belong to the guest."
+                            " Guest capture credentials stay enabled because they belong to the guest."
                             if any(
                                 reference.startswith(_RETAINED_GUEST_CAPTURE_PREFIX)
                                 for reference in record.authority_snapshot.secret_record_refs

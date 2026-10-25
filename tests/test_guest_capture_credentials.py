@@ -111,18 +111,19 @@ class GuestCaptureCredentialTests(unittest.TestCase):
     def test_different_guest_storage_or_prefix_refuses_before_decrypt(self) -> None:
         for component, change in (
             ("source_target", {"guest_id": "999"}),
-            ("source_target", {"host": "other.invalid"}),
+            ("endpoint", {"host": "other.invalid"}),
             ("source_target", {"guest_kind": "qemu"}),
             ("destination_target", {"storage_id": "other"}),
         ):
-            target = getattr(self.binding, component)
-            changed = self.binding.model_copy(
-                update={
-                    component: target.model_copy(
-                        update={"destination": target.destination.model_copy(update=change)}
-                    )
-                }
-            )
+            changes = {}
+            for target_name in (
+                ("source_target", "destination_target") if component == "endpoint" else (component,)
+            ):
+                target = getattr(self.binding, target_name)
+                changes[target_name] = target.model_copy(
+                    update={"destination": target.destination.model_copy(update=change)}
+                )
+            changed = self.binding.model_copy(update=changes)
             with (
                 self.subTest(change=change),
                 patch(

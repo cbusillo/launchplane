@@ -17,7 +17,11 @@ from control_plane.contracts.production_backup_authority import (
     ProductionBackupTargetRecord,
 )
 from control_plane.contracts.secret_record import SecretAuditEvent, SecretRecord, SecretBinding
-from control_plane.guest_capture_credentials import capture_boundary, plan_guest_capture_credential
+from control_plane.guest_capture_credentials import (
+    capture_boundary,
+    plan_guest_capture_credential,
+    validate_guest_capture_enrollment,
+)
 from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -50,6 +54,79 @@ def guest_capture_bindings(session: Session) -> tuple[GuestCaptureCredential, ..
         guest_capture_credential_from_event(SecretAuditEvent.model_validate(row.payload))
         for row in rows
     )
+
+
+def _consumer_state(
+    session: Session, pins: tuple[GuestCaptureCredential, ...]
+) -> list[dict[str, Any]]:
+    from control_plane.storage.postgres import (
+        LaunchplaneProductionBackupPolicyRow,
+        LaunchplaneProductionBackupTargetRow,
+    )
+
+    if not pins:
+        return []
+    boundaries = {pin.boundary.event_id for pin in pins}
+    prefixes = {pin.boundary.snapshot_prefix for pin in pins}
+    targets = {
+        row.target_id: row
+        for row in session.scalars(
+            select(LaunchplaneProductionBackupTargetRow).where(
+                LaunchplaneProductionBackupTargetRow.status == "active"
+            )
+        )
+    }
+    consumers: list[dict[str, Any]] = []
+    for row in session.scalars(
+        select(LaunchplaneProductionBackupPolicyRow)
+        .where(LaunchplaneProductionBackupPolicyRow.status == "active")
+        .order_by(LaunchplaneProductionBackupPolicyRow.record_id)
+    ):
+        snapshot = row.payload.get("fast_snapshot")
+        if (
+            isinstance(snapshot, dict)
+            and isinstance(snapshot.get("snapshot_prefix"), str)
+            and snapshot["snapshot_prefix"] not in prefixes
+        ):
+            continue
+        try:
+            policy = ProductionBackupPolicyRecord.model_validate(row.payload)
+            if policy.fast_snapshot.snapshot_prefix not in prefixes:
+                continue
+            source = ProductionBackupTargetRecord.model_validate(
+                targets[policy.fast_snapshot.source_target_id].payload
+            )
+            destination = ProductionBackupTargetRecord.model_validate(
+                targets[policy.independent_backup.destination_target_id].payload
+            )
+            boundary = capture_boundary(policy, source, destination)
+        except (ValueError, KeyError):
+            consumers.append({"policy_record_id": row.record_id, "boundary_id": ""})
+            continue
+        if boundary.event_id in boundaries:
+            consumers.append(
+                {
+                    "policy_record_id": row.record_id,
+                    "source_record_id": source.record_id,
+                    "destination_record_id": destination.record_id,
+                    "boundary_id": boundary.event_id,
+                }
+            )
+    return consumers
+
+
+def enroll_guest_capture_binding_in_session(
+    store: PostgresRecordStore,
+    session: Session,
+    credential: GuestCaptureCredential,
+    state: dict[str, list[dict[str, Any]]],
+) -> None:
+    validate_guest_capture_enrollment(credential, state)
+    if read_guest_capture_binding(session, credential.boundary) is not None:
+        return
+    session.add(store._secret_audit_event_row(credential.audit_event(utc_now_timestamp())))
+    session.flush()
+    store._after_product_authority_bundle_step(GUEST_CAPTURE_BINDING_WRITE_STEP)
 
 
 def enrollment_state(
@@ -130,16 +207,19 @@ def enrollment_state(
         "policies": [policy_row.payload for policy_row in policies],
         "targets": [target_row.payload for target_row in targets],
         "pins": relevant,
+        "consumers": _consumer_state(
+            session,
+            tuple(
+                guest_capture_credential_from_event(SecretAuditEvent.model_validate(payload))
+                for payload in relevant
+            ),
+        ),
     }
 
 
 def seed_guest_capture_bindings_in_session(
     store: PostgresRecordStore,
     session: Session,
-    *,
-    context: str = "",
-    instance: str = "",
-    promotion_action: str = "",
 ) -> int:
     from control_plane.storage.postgres import (
         LaunchplaneProductionBackupPolicyRow,
@@ -206,8 +286,6 @@ def seed_guest_capture_bindings_in_session(
     ):
         try:
             policy = ProductionBackupPolicyRecord.model_validate(policy_row.payload)
-            if promotion_action and policy.promotion_action != promotion_action:
-                continue
             source, destination = (
                 targets.get(policy.fast_snapshot.source_target_id),
                 targets.get(policy.independent_backup.destination_target_id),
@@ -220,7 +298,7 @@ def seed_guest_capture_bindings_in_session(
         lanes.setdefault((policy.context, policy.instance), set()).add(boundary)
     candidates: dict[GuestCaptureBoundary, dict[frozenset[str], GuestCaptureCredential]] = {}
     for (lane_context, lane_instance), boundaries in lanes.items():
-        if len(boundaries) != 1 or context and (lane_context, lane_instance) != (context, instance):
+        if len(boundaries) != 1:
             continue
         boundary = next(iter(boundaries))
         if boundary.event_id in existing:

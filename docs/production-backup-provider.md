@@ -108,6 +108,16 @@ policy/target revisions and relevant guest bindings; its optional
 `promotion_action` selects an action when a lane has several capture boundaries.
 A canonical pair still needs review/apply when the guest binding is missing.
 
+The same control supports an endpoint-only transition after approved targets
+change host or SSH username. It adds a successor binding to the same ordered
+pair and custody only when guest kind, ID, storage and prefix stay identical,
+the destination has no different pair, and no active policy on any lane/action
+still consumes any prior endpoint binding. Potentially relevant unresolved
+consumer authority refuses the transition. Its digest and commit recheck those
+consumers under the metadata lock. Startup and policy application never move an
+already-bound pair automatically. Historical endpoint bindings remain aliases
+of the same guest credential; no secret is copied or widened.
+
 All products with an approved policy for the same complete boundary resolve the
 one pinned pair. A product's old key remains on its old guest after its policy
 moves; it cannot become a second candidate on the destination guest. A second

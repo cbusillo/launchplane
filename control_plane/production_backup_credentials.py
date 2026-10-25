@@ -11,7 +11,11 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.guest_capture_credentials import CAPTURE_KEYS as BACKUP_CREDENTIAL_KEYS
-from control_plane.guest_capture_credentials import capture_boundary, plan_guest_capture_credential
+from control_plane.guest_capture_credentials import (
+    capture_boundary,
+    plan_guest_capture_credential,
+    validate_guest_capture_enrollment,
+)
 from control_plane.contracts.guest_capture_credential import (
     guest_capture_credential_from_event,
     GuestCaptureCredential,
@@ -88,7 +92,7 @@ def plan_credential_bindings(
     bindings: tuple[SecretBinding, ...],
     request: BackupCredentialBindingRequest,
     capture_state: dict[str, list[dict[str, Any]]],
-) -> tuple[dict[str, object], tuple[SecretBinding, ...]]:
+) -> tuple[dict[str, object], tuple[SecretBinding, ...], GuestCaptureCredential | None]:
     policies = [
         ProductionBackupPolicyRecord.model_validate(value) for value in capture_state["policies"]
     ]
@@ -192,14 +196,14 @@ def plan_credential_bindings(
             selected_records[0].context,
             selected_records[0].instance,
         )
-        if any(pin.secret_ids & enrollment.secret_ids and pin.boundary != boundary for pin in pins):
-            raise ValueError("These credentials already belong to another guest boundary.")
-        existing = next((pin for pin in pins if pin.boundary == boundary), None)
-        if existing is not None and existing != enrollment:
-            raise ValueError("This guest already has credentials; reuse its existing pair.")
+        validate_guest_capture_enrollment(enrollment, capture_state)
     needs_pin = enrollment is not None and not any(pin == enrollment for pin in pins)
-    return {
-        "plan_sha256": digest,
-        "changes": changes,
-        "changed": bool(replacements) or needs_pin,
-    }, replacements
+    return (
+        {
+            "plan_sha256": digest,
+            "changes": changes,
+            "changed": bool(replacements) or needs_pin,
+        },
+        replacements,
+        enrollment,
+    )

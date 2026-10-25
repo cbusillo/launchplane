@@ -48,13 +48,14 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.guest_capture_credentials import (
     guest_capture_metadata,
     resolve_guest_capture_values,
+    SSH_PRIVATE_KEY,
+    SSH_KNOWN_HOSTS,
+    capture_boundary,
 )
 from control_plane.workflows.production_backup_gate import (
     resolve_production_backup_binding,
 )
 from control_plane.workflows.production_backup_provider import execute_production_backup_provider
-from control_plane.guest_capture_credentials import SSH_PRIVATE_KEY, SSH_KNOWN_HOSTS
-from control_plane.guest_capture_credentials import capture_boundary
 
 CREDENTIAL_ROUTE = "/v1/products/{product}/environments/prod/backup-worker-bindings"
 CREDENTIAL_APPLY_ROUTE = CREDENTIAL_ROUTE + "/apply"
@@ -243,7 +244,7 @@ def register_production_backup_credential_routes(
         records, bindings = credential_metadata(store, context=context, instance=instance)
         try:
             capture_state = store.guest_capture_enrollment_state(context, instance)
-            plan, replacements = plan_credential_bindings(
+            plan, replacements, enrollment = plan_credential_bindings(
                 profile, records, bindings, body, capture_state
             )
         except ValueError as error:
@@ -299,7 +300,7 @@ def register_production_backup_credential_routes(
                 expected_records=records,
                 expected_bindings=bindings,
                 expected_capture_state=capture_state,
-                capture_promotion_action=body.promotion_action,
+                guest_capture_credential=enrollment,
                 replacements=replacements,
                 reason=body.reason,
                 mutation=DbOnlyMutationRequest(

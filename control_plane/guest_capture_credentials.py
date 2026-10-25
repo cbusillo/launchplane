@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from control_plane import secrets
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupPolicyRecord,
@@ -8,11 +10,12 @@ from control_plane.contracts.production_backup_authority import (
     ProxmoxStorageBackupDestinationReference,
 )
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerRequest
-from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding, SecretRecord
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.guest_capture_credential import (
     GuestCaptureBoundary,
     GuestCaptureCredential,
+    guest_capture_credential_from_event,
 )
 
 
@@ -87,6 +90,52 @@ def plan_guest_capture_credential(
         custody_context=context,
         custody_instance=instance,
     )
+
+
+def validate_guest_capture_enrollment(
+    candidate: GuestCaptureCredential, state: dict[str, list[dict[str, Any]]]
+) -> None:
+    targets = {
+        target.target_id: target
+        for target in (
+            ProductionBackupTargetRecord.model_validate(payload) for payload in state["targets"]
+        )
+    }
+    boundaries = {
+        capture_boundary(
+            policy,
+            targets[policy.fast_snapshot.source_target_id],
+            targets[policy.independent_backup.destination_target_id],
+        )
+        for policy in (
+            ProductionBackupPolicyRecord.model_validate(payload) for payload in state["policies"]
+        )
+    }
+    if candidate.boundary not in boundaries:
+        raise ValueError("Guest enrollment requires the lane's current capture authority.")
+    pins = tuple(
+        guest_capture_credential_from_event(SecretAuditEvent.model_validate(value))
+        for value in state["pins"]
+    )
+    destination = next((pin for pin in pins if pin.boundary == candidate.boundary), None)
+    if destination is not None:
+        if destination != candidate:
+            raise ValueError("This guest already has credentials; reuse its existing pair.")
+        return
+    prior = tuple(pin for pin in pins if pin.secret_ids & candidate.secret_ids)
+    for pin in prior:
+        if pin.model_dump(exclude={"boundary"}) != candidate.model_dump(
+            exclude={"boundary"}
+        ) or pin.boundary.model_dump(exclude={"host", "username"}) != candidate.boundary.model_dump(
+            exclude={"host", "username"}
+        ):
+            raise ValueError("These credentials already belong to another guest boundary.")
+    if prior and any(
+        not consumer.get("boundary_id")
+        or consumer["boundary_id"] in {pin.boundary.event_id for pin in prior}
+        for consumer in state["consumers"]
+    ):
+        raise ValueError("The prior capture endpoint still has active or unresolved consumers.")
 
 
 def guest_capture_metadata(

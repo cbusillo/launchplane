@@ -7777,8 +7777,6 @@ class PostgresRecordStore(HumanSessionStore):
                 session.flush()
             session.add(self._production_backup_policy_row(envelope.policy))
         session.flush()
-
-        session.flush()
         from control_plane.storage.guest_capture_bindings import (
             seed_guest_capture_bindings_in_session,
         )
@@ -32971,7 +32969,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected_records: tuple[SecretRecord, ...],
         expected_bindings: tuple[SecretBinding, ...],
         expected_capture_state: dict[str, list[dict[str, Any]]],
-        capture_promotion_action: str,
+        guest_capture_credential: GuestCaptureCredential | None,
         replacements: tuple[SecretBinding, ...],
         mutation: DbOnlyMutationRequest,
         reason: str,
@@ -33076,17 +33074,30 @@ class PostgresRecordStore(HumanSessionStore):
                 self._write_secret_audit_event_in_session(session, event)
                 self._after_product_authority_bundle_step("rebind_worker_credential")
             session.flush()
-            from control_plane.storage.guest_capture_bindings import (
-                seed_guest_capture_bindings_in_session,
-            )
+            if guest_capture_credential is not None:
+                from control_plane.guest_capture_credentials import plan_guest_capture_credential
+                from control_plane.storage.guest_capture_bindings import (
+                    enroll_guest_capture_binding_in_session,
+                )
 
-            seed_guest_capture_bindings_in_session(
-                self,
-                session,
-                context=context,
-                instance=instance,
-                promotion_action=capture_promotion_action,
-            )
+                future = {binding.binding_id: binding for binding in bindings}
+                future.update({binding.binding_id: binding for binding in replacements})
+                candidate = plan_guest_capture_credential(
+                    guest_capture_credential.boundary,
+                    tuple(
+                        record
+                        for record in records
+                        if record.secret_id in guest_capture_credential.secret_ids
+                    ),
+                    tuple(future.values()),
+                    context,
+                    instance,
+                )
+                if candidate != guest_capture_credential:
+                    raise ValueError("Reviewed capture credential changed.")
+                enroll_guest_capture_binding_in_session(
+                    self, session, candidate, expected_capture_state
+                )
             completion = complete_launchplane_mutation_reservation(
                 reservation,
                 response_status_code=mutation.response_status_code,
