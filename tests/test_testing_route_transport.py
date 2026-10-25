@@ -23,6 +23,7 @@ from control_plane import http_error_evidence
 from control_plane.dokploy import testing_route_transport as transport, compose
 from control_plane.dokploy import testing_route as routing
 from control_plane.dokploy import native_copy_stream
+from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.native_copy_stream import (
     NativeSourceAuthorizationDenied,
     NativeSourceUnavailable,
@@ -47,6 +48,72 @@ from tests.test_odoo_testing_native_source import Connection
 
 class TestingRouteTransportTests(unittest.TestCase):
     program_filename = "<testing-route-host>"
+    plan: TestingLaneRoute
+    client: transport.DokployTestingRouteTransport
+    route_file: Path
+    raw: dict[str, Any]
+    new_identity: RuntimeIdentity
+
+    def test_address_amendment_uses_fenced_writer_without_changing_runtime(self) -> None:
+        before = self.plan
+        self.raw = self.fixture.apply(before, before.new_backend)
+        self.route_file.write_text(json.dumps(route_document(before, before.new_backend)))
+        self.plan = routing.amend_testing_route_address(before, "canonical.invalid")
+        self.client.payload.update(
+            host=self.plan.host, aliases=self.plan.aliases, old_project=self.candidate_project
+        )
+        self.client.public_aliases = self.plan.aliases
+        self.client.old_runtime_identity = self.new_identity
+        self.identity = self.new_identity
+        self.containers["retired"] = {
+            "Id": "retired",
+            "Name": "/retired-web",
+            "State": {"Status": "exited"},
+            "Mounts": [],
+            "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}},
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": "retired",
+                    "com.docker.compose.service": "web",
+                    "traefik.http.routers.retired.rule": f"Host(`{self.plan.host}`)",
+                    "traefik.http.routers.retired.entrypoints": "websecure",
+                }
+            },
+        }
+        self.client.payload["address_recipients"] = {
+            "hostname": self.plan.host,
+            "projects": ["retired"],
+            "entrypoints": self.plan.public_entrypoints,
+            "priority": min(
+                item["priority"] for item in self.plan.template["http"]["routers"].values()
+            ),
+        }
+        self.publish(self.plan.new_backend, self.plan.old_backend, address_preimage=before)
+        self.assertEqual(
+            observe_testing_route(self.plan, self.raw, json.loads(self.route_file.read_text())),
+            before.new_backend,
+        )
+        self.assertEqual(self.containers["retired"]["State"]["Status"], "exited")
+
+    def test_fenced_writer_preserves_only_the_recorded_public_alias(self) -> None:
+        alias = "retained-testing.example.invalid"
+        payload = self.plan.model_dump()
+        payload["aliases"] = (alias,)
+        for router in payload["template"]["http"]["routers"].values():
+            router["rule"] = routing.testing_route_rule(self.plan.host, (alias,))
+        self.plan = TestingLaneRoute.model_validate(payload)
+        self.client.public_aliases = (alias,)
+        self.client.payload["aliases"] = (alias,)
+        self.publish(self.plan.new_backend, self.plan.old_backend)
+        document = json.loads(self.route_file.read_text())
+        self.assertEqual(
+            observe_testing_route(self.plan, self.raw, document), self.plan.new_backend
+        )
+        for router in document["http"]["routers"].values():
+            self.assertTrue(host_rule_may_match(router["rule"], alias))
+        self.client.payload["aliases"] = ("different.example.invalid",)
+        with self.assertRaises((ValueError, native_copy_stream.NativeSourceUnavailable)):
+            self.publish(self.plan.old_backend, self.plan.new_backend)
 
     def setUp(self, *, initialize_fence: bool = True) -> None:
         self.temporary = TemporaryDirectory()
@@ -440,7 +507,13 @@ class TestingRouteTransportTests(unittest.TestCase):
             observed.append(native["lines"])
         self.assertNotEqual(*observed)
 
-    def publish(self, backend: str | None, expected: str | None) -> None:
+    def publish(
+        self,
+        backend: str | None,
+        expected: str | None,
+        *,
+        address_preimage: TestingLaneRoute | None = None,
+    ) -> None:
         execution = self.client.execution_intent(
             self.plan, backend, operation_id="fixture:" + str(expected)
         )
@@ -466,6 +539,7 @@ class TestingRouteTransportTests(unittest.TestCase):
             execution_key=execution.key(attempt=1),
             writer_attempt=writer,
             desired_compose_project=self.candidate_project,
+            address_preimage=address_preimage,
         )
         frame = self.client.read()
         observe_testing_route(

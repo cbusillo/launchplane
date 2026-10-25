@@ -104,6 +104,7 @@ from control_plane.testing_route_effects import (
     TestingRouteFenceController,
     ROUTE_PREPARING,
 )
+from control_plane.testing_address_storage import effective_testing_route
 from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.odoo_testing_usage import read_odoo_testing_usage
 from control_plane.provider_operations import (
@@ -188,6 +189,7 @@ class NativeTestingRebuildIntent(FrozenRecord):
     public_entrypoints: tuple[str, ...]
     old_auto_deploy: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     recorded_template: dict[str, Any] | None = None
+    route_aliases: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     unavailable_route: TestingLaneRoute | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -211,6 +213,7 @@ class NativeTestingRebuildIntent(FrozenRecord):
                 or route.context != self.before.target.context
                 or route.product != self.profile.product
                 or route.public_entrypoints != self.public_entrypoints
+                or route.aliases != self.route_aliases
                 or not self.provider_inventory_binding
             ):
                 raise ValueError(
@@ -368,6 +371,12 @@ def capture_rebuild_intent(
     )
     unavailable = retained.get("availability") in {"stopped", "absent"}
     identity = None if unavailable else RuntimeIdentity.model_validate(retained["identity"])
+    previous = published_testing_copy(
+        store, product=operation.product, context=operation.context, for_rebuild_admission=True
+    )
+    previous_route = effective_testing_route(store, previous) if previous else None
+    template = previous_route.template if previous_route else None
+    aliases = previous_route.aliases if previous_route else ()
     transport = DokployTestingRouteTransport(
         host=host,
         token=token,
@@ -376,6 +385,7 @@ def capture_rebuild_intent(
         product=operation.product,
         context=operation.context,
         public_host=str(urlsplit(lane.base_url).hostname),
+        public_aliases=aliases,
         entrypoints=(),
         old_runtime_identity=identity,
         unavailable_predecessor=(
@@ -398,10 +408,6 @@ def capture_rebuild_intent(
         raise TestingRebuildRefused(
             "testing_route_read_unavailable", "The applied testing ingress could not be read."
         ) from error
-    previous = published_testing_copy(
-        store, product=operation.product, context=operation.context, for_rebuild_admission=True
-    )
-    template = previous.plan.route.template if previous else None
     endpoints = frame["old_endpoints"]
     namespace = testing_candidate_namespace(
         operation.product, operation.context, operation.operation_id
@@ -437,7 +443,8 @@ def capture_rebuild_intent(
                 static_configuration=frame["static_configuration"],
                 configured_compose=configured,
                 recorded_template=template,
-                recorded_backend=previous.plan.route.new_backend if previous else None,
+                aliases=aliases,
+                recorded_backend=previous_route.new_backend if previous_route else None,
             )
             transport.payload["entrypoints"] = route.public_entrypoints
             transport.payload["external_middlewares"] = testing_route_external_middlewares(
@@ -482,6 +489,7 @@ def capture_rebuild_intent(
             public_entrypoints=route.public_entrypoints,
             old_auto_deploy=old_auto_deploy,
             recorded_template=template,
+            route_aliases=aliases,
             unavailable_route=route,
             provider_inventory_binding=placement,
         )
@@ -520,6 +528,7 @@ def capture_rebuild_intent(
                 public_entrypoints=points,
                 owned_document=owned,
                 recorded_template=template,
+                aliases=aliases,
             )
         except ValueError:
             continue
@@ -550,6 +559,7 @@ def capture_rebuild_intent(
         public_entrypoints=points,
         old_auto_deploy=old_auto_deploy,
         recorded_template=template,
+        route_aliases=aliases,
     )
 
 
@@ -852,6 +862,7 @@ class NativeTestingRebuildExecution:
             if frame["owned_file"] is not None
             else None,
             recorded_template=self.intent.recorded_template,
+            aliases=self.intent.route_aliases,
         )
         if self.route.unavailable_preimage is not None:
             if frame["owned_file"] != self.route.unavailable_preimage.file_content:
@@ -1384,6 +1395,7 @@ class NativeTestingRebuildExecution:
             product=self.operation.product,
             context=self.operation.context,
             public_host=str(urlsplit(self.base_url).hostname),
+            public_aliases=self.intent.route_aliases,
             entrypoints=self.intent.public_entrypoints,
             old_runtime_identity=self.intent.old.runtime_identity,
             unavailable_predecessor=(
@@ -1532,6 +1544,7 @@ class NativeTestingRebuildExecution:
                 if frame["owned_file"] is not None
                 else None,
                 recorded_template=self.intent.recorded_template,
+                aliases=self.intent.route_aliases,
             )
         return execute_testing_rebuild(self.plan, self.adapter.checkpoints, self)
 

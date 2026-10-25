@@ -16,6 +16,7 @@ from control_plane.contracts.disposable_lane import (
 )
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 from control_plane.testing_generation_retirement import ROUTE as TESTING_GENERATION_RETIREMENT_ROUTE
+from control_plane.testing_address import ROUTE as TESTING_ADDRESS_ROUTE
 from control_plane.generic_web_deploy_recovery_http import (
     GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
     GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
@@ -244,6 +245,15 @@ OPERATION_SPECS = (
         "Provision or revoke a testing-only Odoo task account, or run its browser inside Launchplane; return only redacted receipts and masked screenshots.",
         ("service_api",),
         ("dry-run", "apply"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
+        "POST",
+        TESTING_ADDRESS_ROUTE,
+        "Amend the current native Odoo testing lane's canonical hostname from exact retained custody, preserving its copy, original hostname and operation fences; verify both public runtime identities before publishing canonical metadata.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
         "apply",
         ("reviewed_plan_sha256",),
     ),

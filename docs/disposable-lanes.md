@@ -1295,6 +1295,51 @@ Legacy managed and external bindings keep their existing paths and bounded failu
 reporting. Manual/browser single-binding reconcile identifies the native controller
 as the supported renewal path rather than returning a provider-domain error.
 
+### Changing a native testing canonical address
+
+`POST /v1/products/{product}/testing-address` amends the current published Odoo
+testing lane without replacing its copy. The Director agent supplies `context`,
+`retirement_operation_id`, `reservation_operation_id`, `hostname`, and `reason`.
+`instance` is always `testing`. The retirement ID identifies the original
+retirement inspection; the reservation ID identifies the separate retained
+allocation or generation that actually reserves the requested hostname. These
+may be different operations. Production is outside this operation.
+
+Use `mode: dry-run` first. The service saves an immutable private plan and returns
+its `plan_sha256`, current target ID, new canonical hostname and retained original
+hostname. Review that result, then send the same request with `mode: apply`,
+`reviewed_plan_sha256`, and one stable `Idempotency-Key`. `mode: readback` uses the
+same reviewed hash. The installed operator helper's service transport supplies
+the existing credential; no provider credential, caller-supplied topology or new
+grant is an input. Generated agent/OpenAPI contracts describe this service API.
+
+The plan requires exact retained hostname custody in the same product/context,
+a superseded original recipient operation, complete credential-visible provider
+domain membership, and stopped recipients on the existing testing server. The
+old recipients must have automatic deploys and schedules disabled. Their dormant
+router labels must remain strictly below the existing lane-owned priority, with
+known listeners. Foreign domains, matching foreign routers, automatic restart
+policies and incomplete observations refuse qualification. The original executor
+locks and all retained custody hashes are rechecked; no old fence is released.
+
+The existing physical route fence writes one owned document with a rule for the
+new hostname and the original hostname. Backend, TLS, middleware and listeners
+stay the same. Original-attempt receipts settle an uncertain writer before another
+dispatch. Both HTTPS origins must return the current testing runtime identity
+before one transaction updates the lane base URL, binding provenance and canonical
+Odoo override intent. The original publication, candidate, restore generation,
+retirement and resources remain unchanged. A lost metadata reply resolves from
+the committed address receipt. Preserve the original request and key on any
+unknown outcome; do not clear old operation fences or edit publication history.
+
+Native refresh and later rebuild admission resolve this additive address receipt.
+A later rebuild keeps the original hostname as an alias. Ordinary deploy and
+release checks continue to validate the original copy custody, and completed
+restore rendering uses the amended canonical address without rewriting its
+generation witness. After amendment readback, reapply the testing canonical Odoo
+settings through the existing supported service operation. The address amendment
+does not itself deploy, restore, start or delete an application.
+
 ## Native testing worker integration
 
 The existing durable target-replacement action accepts testing-only
