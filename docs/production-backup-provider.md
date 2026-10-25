@@ -89,32 +89,29 @@ the lock does not resolve different IP/name aliases into physical identity.
 ## Host and credential prerequisites
 
 A capture credential belongs to its exact host, SSH user, guest kind and ID,
-PBS storage and snapshot prefix. Its `PRODUCTION_BACKUP_SSH_PRIVATE_KEY` and
-`PRODUCTION_BACKUP_SSH_KNOWN_HOSTS` records live in the
-`production_backup_capture` integration. Every active policy for that boundary
-uses the same records. The original lane remains their custody and rotation
-scope; it does not select which product may request a capture. App runtime
-secret resolution never reads this integration.
+PBS storage and snapshot prefix. The stored pair stays in its original lane's
+`launchplane_worker` integration, with `context_instance` scope and the keys
+`PRODUCTION_BACKUP_SSH_PRIVATE_KEY` and `PRODUCTION_BACKUP_SSH_KNOWN_HOSTS`.
+Active backup policies and their current targets associate that pair with its
+guest. A requesting product reuses the single configured pair from a lane whose
+policy has the same complete boundary. No migration, copy or second secret
+version is created; earlier service versions retain their existing lookup.
 
-Under the deployment migration lock, startup adopts an unambiguous configured
-pair from `launchplane_worker` using active policy and target metadata. Adoption
-changes only record and binding metadata. IDs, names, encrypted versions and
-original custody stay intact, and audit events retain the source lane.
-It never reads or copies encrypted versions. Ambiguous pairs, shared secret
-consumers and a source lane naming multiple boundaries are left unadopted and
-capture refuses until the ambiguity is resolved. The existing reviewed
-production worker-binding setup control also adopts a newly configured pair
-atomically with its receipt. Its review digest includes capture authority and
-credential metadata, so a concurrent policy or credential change needs a new
-review.
+Missing or incomplete pairs, multiple configured pairs for one boundary, shared
+secret consumers and a credential lane naming multiple boundaries refuse before
+decryption. Invalid unrelated policies are excluded from credential selection.
+The host boundary probe remains the final check that the selected key reaches
+only the policy's guest, storage and prefix, with restore disabled. A policy
+change cannot make the key reach a different guest: that probe still refuses.
+Use one canonical endpoint for a physical guest.
 
-Rotate the existing pair through product-config dry-run/apply in its original
-custody lane, with integration `production_backup_capture` and its existing name
-and binding key. Rotation preserves the guest boundary and binding identity;
-this path cannot create a guest credential or change its reach. Initial setup
-still stores a lane worker pair and uses the reviewed binding control to adopt
-it. Do not enter a second key for another product on the same boundary.
-The worker ignores workstation keys and ambient SSH configuration. The Linux worker keeps key material in anonymous memory-backed
+The original lane keeps custody and its existing managed-secret rotation path.
+Product retirement preserves capture credentials, since retiring a product does
+not retire the guest's backup authority. Initial credential setup still uses the
+reviewed worker-binding control, before or after policy activation; a capture
+requires both configured credentials and active matching authority. Do not store
+a second pair for another product on the same boundary. The worker ignores
+workstation keys and ambient SSH configuration. The Linux worker keeps key material in anonymous memory-backed
 files with mode 0600, exposes them to SSH through its own procfs descriptors, and
 closes them on completion. It never writes the material to disk. A runtime
 without Linux memfd support fails closed. Strict host-key checking stays enabled.
@@ -161,8 +158,10 @@ and recovery exercises remain separate evidence.
 
 Snapshot pruning runs only after both captures pass. For a shared guest and
 prefix, it retains the highest count among all active policies, including a
-policy awaiting review renewal. Each deletion holds the authority read guard
-while recomputing that floor, so policy changes cannot race a prune.
+policy awaiting review renewal. Each deletion holds a backup-authority read guard while recomputing that floor,
+so policy changes cannot race a prune. Backup-policy writers take their matching
+lock before the general product-authority lock; a slow delete does not hold that
+general lock. Operation progress and lease checks run before the retention guard.
  It removes only names
 matching this provider's configured prefix and timestamp/hash format, preserves
 the just-created snapshot, and retains at least one snapshot even when retention
@@ -372,6 +371,8 @@ field from their public projection.
 `proposal_id` for a saved pending backup-policy proposal. It verifies that the
 proposal belongs to the requested production lane, remains current, and has
 unchanged planning evidence, then resolves its proposed guest credentials.
+Only the Director’s authenticated agents and admins can qualify pending
+proposals; other callers retain qualification of their active policies.
 It executes only the boundary read and exact PBS storage-status check. It
 neither captures nor approves nor applies the policy. Its response reports the
 proposed policy revision and `capture_started: false`; mismatched or stale

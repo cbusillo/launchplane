@@ -1333,9 +1333,6 @@ def _plan_product_config_secret_write(
         )
     )
     created_at = existing_record.created_at if existing_record is not None else now
-    capture_binding = control_plane_secrets.require_capture_rotation_binding(
-        record_store, integration, existing_record, binding_key
-    )
     existing_generated_binding = (
         _existing_generated_binding(
             record_store,
@@ -1347,7 +1344,6 @@ def _plan_product_config_secret_write(
         if value_source == "generated"
         else None
     )
-    existing_generated_binding = capture_binding or existing_generated_binding
     binding = SecretBinding(
         binding_id=existing_generated_binding.binding_id
         if existing_generated_binding
@@ -1397,7 +1393,6 @@ def _plan_product_config_secret_write(
         updated_at=now,
         updated_by=actor,
         last_validated_at=existing_record.last_validated_at if existing_record is not None else "",
-        capture_boundary=existing_record.capture_boundary if existing_record is not None else None,
     )
     event = SecretAuditEvent(
         event_id=control_plane_secrets._audit_event_id(

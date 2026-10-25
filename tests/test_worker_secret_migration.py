@@ -127,8 +127,12 @@ class WorkerSecretMigrationTests(unittest.TestCase):
         )
 
     def worker_values(self) -> dict[str, str]:
-        return control_plane_secrets.resolve_lane_worker_secret_values(
-            context_name="site", instance_name="prod"
+        return control_plane_secrets.resolve_secret_values_for_integration_from_store(
+            record_store=self.store,
+            integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+            context_name="site",
+            instance_name="prod",
+            scopes=frozenset({"context_instance"}),
         )
 
     def test_lane_backup_keys_leave_the_app_environment_for_the_worker_store(self) -> None:

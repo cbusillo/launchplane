@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerResult
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_routes.production_backup_gate import _response
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import (
@@ -452,12 +453,22 @@ class ProductionBackupGatePostgresTests(unittest.TestCase):
                 started.set()
                 store.write_production_backup_policy_record(revised)
 
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 with store.production_backup_retention_guard():
                     future = executor.submit(revise)
                     self.assertTrue(started.wait(5))
                     with self.assertRaises(FutureTimeoutError):
                         future.result(timeout=0.1)
+                    unrelated = executor.submit(
+                        store.write_runtime_environment_record,
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context="unrelated",
+                            env={"PORT": 3000},
+                            updated_at=binding.policy.effective_at,
+                        ),
+                    )
+                    unrelated.result(timeout=5)
                     self.assertEqual(
                         store.list_production_backup_policy_records(status="active"),
                         (binding.policy,),

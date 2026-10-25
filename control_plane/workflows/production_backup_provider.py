@@ -256,9 +256,9 @@ def execute_production_backup_provider(
                 remaining = len(snapshots)
                 for name in [name for name in snapshots if name != snapshot]:
                     save_progress()
+                    if checkpoint is not None:
+                        checkpoint(stage)
                     with retention_guard() if retention_guard else nullcontext():
-                        if checkpoint is not None:
-                            checkpoint(stage)
                         keep = (
                             retention_count()
                             if retention_count

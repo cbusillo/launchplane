@@ -7442,6 +7442,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> Literal["written", "replayed"]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_production_backup_retention_write(session)
             self._lock_product_authority_bundle_write(session)
             rows = session.scalars(
                 select(LaunchplaneProductionBackupTargetRow)
@@ -7523,6 +7524,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> Literal["written", "replayed"]:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_production_backup_retention_write(session)
             self._lock_product_authority_bundle_write(session)
             policy_rows = session.scalars(
                 select(LaunchplaneProductionBackupPolicyRow)
@@ -7611,6 +7613,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> ProductionBackupAuthorityWriteResult:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_production_backup_retention_write(session)
             self._lock_product_authority_bundle_write(session)
             plan = self._plan_production_backup_authority_in_session(
                 session=session,
@@ -7651,6 +7654,7 @@ class PostgresRecordStore(HumanSessionStore):
                     idempotency_record=reservation,
                 )
             assert reservation_row is not None
+            self._lock_production_backup_retention_write(session)
             self._lock_product_authority_bundle_write(session)
             try:
                 plan = self._plan_production_backup_authority_in_session(
@@ -7876,6 +7880,35 @@ class PostgresRecordStore(HumanSessionStore):
         if for_update and not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
         return statement
+
+    def _lock_production_backup_retention_write(self, session: Any) -> None:
+        if self.database_dialect_name == "postgresql":
+            session.execute(
+                text("select pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
+                {"lock_name": "launchplane:production-backup-retention"},
+            )
+
+    @contextmanager
+    def production_backup_retention_guard(self) -> Iterator[None]:
+        previous = getattr(self._disposable_authority_context, "observation_read_session", None)
+        with self._session_factory() as session:
+            if self.database_dialect_name == "postgresql":
+                acquired = session.scalar(
+                    text(
+                        "select pg_try_advisory_xact_lock_shared(hashtextextended(:lock_name, 0))"
+                    ),
+                    {"lock_name": "launchplane:production-backup-retention"},
+                )
+                if not acquired:
+                    raise ValueError("Backup authority is changing; skip pruning.")
+            else:
+                session.execute(text("BEGIN"))
+            self._disposable_authority_context.observation_read_session = session
+            try:
+                yield
+            finally:
+                self._disposable_authority_context.observation_read_session = previous
+                session.rollback()
 
     def _begin_serialized_write(self, session: Any) -> None:
         if self.database_url.startswith("sqlite"):
@@ -32905,7 +32938,6 @@ class PostgresRecordStore(HumanSessionStore):
         instance: str,
         expected_records: tuple[SecretRecord, ...],
         expected_bindings: tuple[SecretBinding, ...],
-        expected_capture_state: dict[str, list[dict[str, Any]]],
         replacements: tuple[SecretBinding, ...],
         mutation: DbOnlyMutationRequest,
         reason: str,
@@ -32923,10 +32955,6 @@ class PostgresRecordStore(HumanSessionStore):
                 return status, reservation
             assert reservation_row is not None
             self._lock_product_authority_bundle_write(session)
-            if self._guest_capture_adoption_state(session) != expected_capture_state:
-                raise SecretCopySourceConflictError(
-                    "Guest capture authority changed before commit."
-                )
             profile_row = session.scalar(
                 select(LaunchplaneProductProfileRow)
                 .where(
@@ -32939,9 +32967,7 @@ class PostgresRecordStore(HumanSessionStore):
                 for row in session.scalars(
                     select(LaunchplaneSecretRow)
                     .where(
-                        LaunchplaneSecretRow.integration.in_(
-                            (LAUNCHPLANE_WORKER_SECRET_INTEGRATION, "production_backup_capture")
-                        ),
+                        LaunchplaneSecretRow.integration == LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
                         LaunchplaneSecretRow.context == context,
                         LaunchplaneSecretRow.instance == instance,
                         LaunchplaneSecretRow.scope == "context_instance",
@@ -32954,9 +32980,8 @@ class PostgresRecordStore(HumanSessionStore):
                 for row in session.scalars(
                     select(LaunchplaneSecretBindingRow)
                     .where(
-                        LaunchplaneSecretBindingRow.integration.in_(
-                            (LAUNCHPLANE_WORKER_SECRET_INTEGRATION, "production_backup_capture")
-                        ),
+                        LaunchplaneSecretBindingRow.integration
+                        == LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
                         LaunchplaneSecretBindingRow.context == context,
                         LaunchplaneSecretBindingRow.instance == instance,
                     )
@@ -33010,10 +33035,6 @@ class PostgresRecordStore(HumanSessionStore):
                 )
                 session.merge(self._secret_audit_event_row(event))
                 self._after_product_authority_bundle_step("rebind_worker_credential")
-            session.flush()
-            self._adopt_guest_capture_credentials_in_session(
-                session, context=context, instance=instance
-            )
             completion = complete_launchplane_mutation_reservation(
                 reservation,
                 response_status_code=mutation.response_status_code,
@@ -33024,101 +33045,6 @@ class PostgresRecordStore(HumanSessionStore):
             self._sync_idempotency_row(reservation_row, completion)
             session.commit()
             return "written", completion
-
-    def _guest_capture_adoption_state(self, session: Any) -> dict[str, list[dict[str, Any]]]:
-        return {
-            key: [row.payload for row in session.scalars(select(model).order_by(identifier)).all()]
-            for key, model, identifier in (
-                ("records", LaunchplaneSecretRow, LaunchplaneSecretRow.secret_id),
-                ("bindings", LaunchplaneSecretBindingRow, LaunchplaneSecretBindingRow.binding_id),
-                (
-                    "policies",
-                    LaunchplaneProductionBackupPolicyRow,
-                    LaunchplaneProductionBackupPolicyRow.record_id,
-                ),
-                (
-                    "targets",
-                    LaunchplaneProductionBackupTargetRow,
-                    LaunchplaneProductionBackupTargetRow.record_id,
-                ),
-            )
-        }
-
-    def guest_capture_adoption_state(self) -> dict[str, list[dict[str, Any]]]:
-        with self._session_factory() as session:
-            return self._guest_capture_adoption_state(session)
-
-    def _adopt_guest_capture_credentials_in_session(
-        self,
-        session: Any,
-        *,
-        context: str = "",
-        instance: str = "",
-    ) -> int:
-        from control_plane.guest_capture_credentials import plan_guest_credential_adoptions
-
-        records = tuple(
-            SecretRecord.model_validate(row.payload)
-            for row in session.scalars(select(LaunchplaneSecretRow)).all()
-        )
-        bindings = tuple(
-            SecretBinding.model_validate(row.payload)
-            for row in session.scalars(select(LaunchplaneSecretBindingRow)).all()
-        )
-        policies = tuple(
-            ProductionBackupPolicyRecord.model_validate(row.payload)
-            for row in session.scalars(select(LaunchplaneProductionBackupPolicyRow)).all()
-        )
-        targets = tuple(
-            ProductionBackupTargetRecord.model_validate(row.payload)
-            for row in session.scalars(select(LaunchplaneProductionBackupTargetRow)).all()
-        )
-        adopted_records, adopted_bindings = plan_guest_credential_adoptions(
-            records=records,
-            bindings=bindings,
-            policies=policies,
-            targets=targets,
-            context=context,
-            instance=instance,
-        )
-        originals = {r.secret_id: r for r in records}
-        for record in adopted_records:
-            session.merge(self._secret_row(record))
-            original = originals[record.secret_id]
-            session.merge(
-                self._secret_audit_event_row(
-                    SecretAuditEvent(
-                        event_id=f"{record.secret_id}-guest-capture-adoption-{uuid4().hex}",
-                        secret_id=record.secret_id,
-                        event_type="relabelled",
-                        recorded_at=_utc_now_timestamp(),
-                        actor="launchplane:guest-capture-adoption",
-                        metadata={
-                            "source_context": original.context,
-                            "source_instance": original.instance,
-                            "source_name": original.name,
-                            "source_integration": original.integration,
-                        },
-                    )
-                )
-            )
-            self._after_product_authority_bundle_step("adopt_guest_capture_record")
-        for binding in adopted_bindings:
-            session.merge(self._secret_binding_row(binding))
-        return len(adopted_records)
-
-    def adopt_guest_capture_credentials(self) -> int:
-        with self._session_factory() as session:
-            self._begin_serialized_write(session)
-            self._lock_product_authority_bundle_write(session)
-            changed = self._adopt_guest_capture_credentials_in_session(session)
-            session.commit()
-            return changed
-
-    @contextmanager
-    def production_backup_retention_guard(self) -> Iterator[None]:
-        with self._product_authority_bundle_read_guard(bind_observation_session=True):
-            yield
 
     def write_secret_version(self, version: SecretVersion) -> None:
         self._write_row(self._secret_version_row(version))

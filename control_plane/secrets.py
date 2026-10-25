@@ -565,30 +565,6 @@ def resolve_effective_secret_bindings_from_store(
     return effective
 
 
-def resolve_lane_worker_secret_values(
-    *,
-    context_name: str,
-    instance_name: str,
-    database_url: str | None = None,
-) -> dict[str, str]:
-    """Resolve worker credentials stored for exactly this lane, never inherited ones."""
-    if not context_name.strip() or not instance_name.strip():
-        return {}
-    store = _open_secret_store(database_url)
-    if store is None:
-        return {}
-    try:
-        return resolve_secret_values_for_integration_from_store(
-            record_store=store,
-            integration=LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
-            context_name=context_name,
-            instance_name=instance_name,
-            scopes=frozenset({"context_instance"}),
-        )
-    finally:
-        store.close()
-
-
 def resolve_launchplane_service_secret(
     *, context_name: str, binding_key: str, database_url: str | None = None
 ) -> str:
@@ -723,9 +699,6 @@ def write_secret_value(
         context=context_name,
         instance=instance_name,
     )
-    capture_binding = require_capture_rotation_binding(
-        record_store, integration, existing_record, binding_key
-    )
     secret_id = (
         existing_record.secret_id
         if existing_record is not None
@@ -743,9 +716,7 @@ def write_secret_value(
             == plaintext_value
         ):
             binding = SecretBinding(
-                binding_id=capture_binding.binding_id
-                if capture_binding
-                else _binding_id(secret_id=secret_id, binding_key=binding_key),
+                binding_id=_binding_id(secret_id=secret_id, binding_key=binding_key),
                 secret_id=secret_id,
                 integration=integration,
                 binding_key=binding_key,
@@ -784,9 +755,6 @@ def write_secret_value(
             created_at=created_at,
             updated_at=now,
             updated_by=actor,
-            capture_boundary=existing_record.capture_boundary
-            if existing_record is not None
-            else None,
             last_validated_at=existing_record.last_validated_at
             if existing_record is not None
             else "",
@@ -794,9 +762,7 @@ def write_secret_value(
     )
     record_store.write_secret_binding(
         SecretBinding(
-            binding_id=capture_binding.binding_id
-            if capture_binding
-            else _binding_id(secret_id=secret_id, binding_key=binding_key),
+            binding_id=_binding_id(secret_id=secret_id, binding_key=binding_key),
             secret_id=secret_id,
             integration=integration,
             binding_key=binding_key,
@@ -818,28 +784,6 @@ def write_secret_value(
         )
     )
     return {"status": "ok", "secret_id": secret_id, "action": action, "version_id": version_id}
-
-
-def require_capture_rotation_binding(
-    store: SecretReadStore,
-    integration: str,
-    record: SecretRecord | None,
-    binding_key: str,
-) -> SecretBinding | None:
-    from control_plane.contracts.guest_capture_boundary import GUEST_CAPTURE_INTEGRATION
-
-    if integration != GUEST_CAPTURE_INTEGRATION:
-        return None
-    if record is None or record.capture_boundary is None:
-        raise ValueError("Adopt existing lane credentials before rotating a guest capture key.")
-    bindings = [
-        b
-        for b in store.list_secret_bindings(integration=integration)
-        if b.secret_id == record.secret_id
-    ]
-    if len(bindings) != 1 or bindings[0].binding_key != binding_key:
-        raise ValueError("Rotation must preserve the guest capture binding.")
-    return bindings[0]
 
 
 def expected_secret_binding_id(*, secret_id: str, binding_key: str) -> str:

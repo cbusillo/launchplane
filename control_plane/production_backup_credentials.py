@@ -2,24 +2,16 @@
 
 import hashlib
 import json
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
-from control_plane.contracts.guest_capture_boundary import GUEST_CAPTURE_INTEGRATION
-from control_plane.contracts.production_backup_authority import (
-    ProductionBackupPolicyRecord,
-    ProductionBackupTargetRecord,
-)
-from control_plane.guest_capture_credentials import plan_guest_credential_adoptions
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.production_backup_gate import SSH_KNOWN_HOSTS, SSH_PRIVATE_KEY
+from control_plane.guest_capture_credentials import CAPTURE_KEYS as BACKUP_CREDENTIAL_KEYS
 from control_plane.workflows.ship import utc_now_timestamp
-
-BACKUP_CREDENTIAL_KEYS = (SSH_PRIVATE_KEY, SSH_KNOWN_HOSTS)
 
 
 class BackupCredentialBindingRequest(BaseModel):
@@ -49,20 +41,17 @@ def credential_metadata(
     records = tuple(
         record
         for record in store.list_secret_records(
+            integration=LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
             context_name=context,
             instance_name=instance,
         )
         if record.scope == "context_instance"
         and (record.context, record.instance) == (context, instance)
-        and record.integration in {LAUNCHPLANE_WORKER_SECRET_INTEGRATION, GUEST_CAPTURE_INTEGRATION}
     )
-    bindings = tuple(
-        binding
-        for binding in store.list_secret_bindings(
-            context_name=context,
-            instance_name=instance,
-        )
-        if binding.integration in {LAUNCHPLANE_WORKER_SECRET_INTEGRATION, GUEST_CAPTURE_INTEGRATION}
+    bindings = store.list_secret_bindings(
+        integration=LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+        context_name=context,
+        instance_name=instance,
     )
     return records, bindings
 
@@ -87,7 +76,6 @@ def plan_credential_bindings(
     records: tuple[SecretRecord, ...],
     bindings: tuple[SecretBinding, ...],
     request: BackupCredentialBindingRequest,
-    capture_state: dict[str, list[dict[str, Any]]],
 ) -> tuple[dict[str, object], tuple[SecretBinding, ...]]:
     available = {item["binding_id"] for item in credential_options(records, bindings)}
     by_id = {b.binding_id: b for b in bindings}
@@ -121,7 +109,6 @@ def plan_credential_bindings(
                     b.model_dump(mode="json") for b in sorted(bindings, key=lambda b: b.binding_id)
                 ],
                 "request": {"bindings": request.bindings, "reason": request.reason},
-                "capture_state": capture_state,
             },
             sort_keys=True,
         ).encode()
@@ -136,35 +123,4 @@ def plan_credential_bindings(
         for item in changes
         if item["from_key"] != item["to_key"]
     )
-    selected_records = [record for record in records if record.secret_id in selected_secrets]
-    needs_adoption = any(record.capture_boundary is None for record in selected_records)
-    if needs_adoption:
-        complete_bindings = {binding.binding_id: binding for binding in bindings}
-        complete_bindings.update({binding.binding_id: binding for binding in replacements})
-        future_bindings = tuple(
-            complete_bindings.get(str(value["binding_id"]), SecretBinding.model_validate(value))
-            for value in capture_state["bindings"]
-        )
-        adopted_records, _ = plan_guest_credential_adoptions(
-            records=tuple(SecretRecord.model_validate(value) for value in capture_state["records"]),
-            bindings=future_bindings,
-            policies=tuple(
-                ProductionBackupPolicyRecord.model_validate(value)
-                for value in capture_state["policies"]
-            ),
-            targets=tuple(
-                ProductionBackupTargetRecord.model_validate(value)
-                for value in capture_state["targets"]
-            ),
-            context=selected_records[0].context,
-            instance=selected_records[0].instance,
-        )
-        if {record.secret_id for record in adopted_records} != selected_secrets:
-            raise ValueError(
-                "Backup authority or guest credential ownership is unavailable or ambiguous."
-            )
-    return {
-        "plan_sha256": digest,
-        "changes": changes,
-        "changed": bool(replacements) or needs_adoption,
-    }, replacements
+    return {"plan_sha256": digest, "changes": changes, "changed": bool(replacements)}, replacements

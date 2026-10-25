@@ -14,7 +14,6 @@ from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalI
 from control_plane.contracts.privileged_operation import PrivilegedOperationLocalOperatorActor
 from control_plane.privileged_operation_service import create_typed_privileged_operation_plan
 from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
-from control_plane.contracts.guest_capture_boundary import GUEST_CAPTURE_INTEGRATION
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -162,15 +161,12 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
                 (await self.post({**body, "reason": "Other reason"}, "rebind")).status_code, 409
             )
         for record in self.originals:
-            adopted = self.store.read_secret_record(record.secret_id)
-            self.assertEqual(adopted.current_version_id, record.current_version_id)
-            self.assertIsNotNone(adopted.capture_boundary)
-            self.assertEqual(adopted.integration, GUEST_CAPTURE_INTEGRATION)
+            self.assertEqual(self.store.read_secret_record(record.secret_id), record)
             self.assertEqual(len(self.store.list_secret_versions(secret_id=record.secret_id)), 1)
         self.assertEqual(
             set(
                 b.binding_key
-                for b in self.store.list_secret_bindings(integration=GUEST_CAPTURE_INTEGRATION)
+                for b in self.store.list_secret_bindings(integration="launchplane_worker")
             ),
             set(BACKUP_CREDENTIAL_KEYS),
         )
@@ -415,8 +411,13 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["result"]["status"], "pass")
         self.assertFalse(response.json()["result"]["capture_started"])
         self.assertEqual(len(self.store.list_secret_records()), len(self.originals))
-        self.assertEqual(
-            [command[0] for command in host.commands], ["launchplane-backup-boundary", "pvesm"]
+        self.assertFalse(
+            any(
+                command[0] == "vzdump"
+                or len(command) > 1
+                and command[1] in {"snapshot", "delsnapshot"}
+                for command in host.commands
+            )
         )
 
     async def test_saved_pending_proposal_preflight_does_not_apply_policy(self) -> None:
@@ -462,31 +463,11 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.store.read_privileged_operation_record(proposal.operation_id).status, "planned"
         )
-        self.assertEqual(
-            [command[0] for command in host.commands], ["launchplane-backup-boundary", "pvesm"]
-        )
-
-    async def test_canonical_bindings_offer_adoption_and_guest_readback(self) -> None:
-        for binding in self.store.list_secret_bindings():
-            key = next(
-                key
-                for key, identifier in self.selection.items()
-                if identifier == binding.binding_id
+        self.assertFalse(
+            any(
+                command[0] == "vzdump"
+                or len(command) > 1
+                and command[1] in {"snapshot", "delsnapshot"}
+                for command in host.commands
             )
-            self.store.write_secret_binding(binding.model_copy(update={"binding_key": key}))
-        body = await self.reviewed()
-        self.assertEqual((await self.post(body, "canonical-adoption")).status_code, 202)
-        response = await _asgi_request(
-            self.app,
-            "GET",
-            self.route.removesuffix("/apply"),
-            headers={"Cookie": self.sessions.session_cookie_header(self.session)},
         )
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(
-            {item["binding_id"] for item in response.json()["result"]["credentials"]},
-            set(self.selection.values()),
-        )
-        dry = await self.post({"bindings": self.selection, "reason": "Already guest-owned"})
-        self.assertEqual(dry.status_code, 202, dry.text)
-        self.assertFalse(dry.json()["result"]["changed"])

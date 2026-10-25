@@ -24,6 +24,9 @@ from control_plane.contracts.product_retirement import (
     provider_identifier_sha256,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretRecord, SecretBinding
+from control_plane.guest_capture_credentials import SSH_PRIVATE_KEY
+from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
 from control_plane.dokploy import api as dokploy_api
 from control_plane.product_retirement import (
     BoundProductRetirement,
@@ -104,6 +107,8 @@ class _Store:
             ),
         )
         self.previews: tuple[PreviewRecord, ...] = ()
+        self.secret_records: tuple[SecretRecord, ...] = ()
+        self.secret_bindings: tuple[SecretBinding, ...] = ()
         self.records: dict[str, object] = {}
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
@@ -145,8 +150,11 @@ class _Store:
     def list_runtime_environment_records(self, **_: str) -> tuple[RuntimeEnvironmentRecord, ...]:
         return self.runtime_records
 
-    def list_secret_records(self, **_: object) -> tuple[object, ...]:
-        return ()
+    def list_secret_records(self, **_: object) -> tuple[SecretRecord, ...]:
+        return self.secret_records
+
+    def list_secret_bindings(self, **_: object) -> tuple[SecretBinding, ...]:
+        return self.secret_bindings
 
     def list_preview_records(self, **_: object) -> tuple[PreviewRecord, ...]:
         return self.previews
@@ -553,6 +561,29 @@ class ProductRetirementTests(unittest.TestCase):
 
     def test_apply_transitions_before_effect_and_retires_authority(self) -> None:
         store = _Store()
+        guest_key = SecretRecord(
+            secret_id="guest-key",
+            scope="context_instance",
+            integration=LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+            name=SSH_PRIVATE_KEY,
+            context="example-site",
+            instance="prod",
+            current_version_id="guest-version",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        binding = SecretBinding(
+            binding_id="guest-binding",
+            secret_id=guest_key.secret_id,
+            integration=guest_key.integration,
+            binding_key=SSH_PRIVATE_KEY,
+            context=guest_key.context,
+            instance=guest_key.instance,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        store.secret_records = (guest_key,)
+        store.secret_bindings = (binding,)
         observation = _observation(domains=("domain-1",))
         plan = _plan(store, observation)
         request = _request(
@@ -605,6 +636,8 @@ class ProductRetirementTests(unittest.TestCase):
         self.assertFalse(store.profile.preview.enabled)
         self.assertEqual(store.runtime_records, ())
         self.assertIsNone(store.provider_target)
+        self.assertEqual(store.list_secret_records(), (guest_key,))
+        self.assertEqual(store.list_secret_bindings(), (binding,))
 
     def test_partial_domain_failure_leaves_retiring_profile_for_reconciliation(self) -> None:
         store = _Store()

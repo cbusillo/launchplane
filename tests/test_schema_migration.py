@@ -1276,15 +1276,12 @@ class SchemaMigrationTests(unittest.TestCase):
                     ),
                     patch("control_plane.storage.schema_migration.command.stamp") as stamp,
                     patch("control_plane.storage.schema_migration.command.upgrade") as upgrade,
-                    patch("control_plane.storage.schema_migration.PostgresRecordStore") as store,
                 ):
                     migrated_revision = migrate_schema(
                         database_url="postgresql+psycopg://launchplane:test@postgres/launchplane"
                     )
 
                 self.assertEqual(migrated_revision, SCHEMA_MIGRATION_TARGET_REVISION)
-                store.return_value.adopt_guest_capture_credentials.assert_called_once_with()
-                store.return_value.close.assert_called_once_with()
                 self.assertEqual(stamp.call_args.args[1], revision)
                 self.assertEqual(
                     upgrade.call_args.args[1],

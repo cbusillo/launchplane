@@ -1295,7 +1295,20 @@ class DokployProductRetirementAdapter:
             self._deleted_authority_refs.append(reference)
 
     def _disable_managed_secrets(self, records: tuple[SecretRecord, ...]) -> None:
+        from control_plane.guest_capture_credentials import CAPTURE_KEYS
+        from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
+
         for record in records:
+            bindings = self._record_store.list_secret_bindings(
+                integration=record.integration,
+                context_name=record.context,
+                instance_name=record.instance,
+            )
+            if record.integration == LAUNCHPLANE_WORKER_SECRET_INTEGRATION and any(
+                binding.secret_id == record.secret_id and binding.binding_key in CAPTURE_KEYS
+                for binding in bindings
+            ):
+                continue
             if record.status != "disabled":
                 if not self._record_store.disable_product_retirement_secret(
                     expected_record=record,
@@ -1305,11 +1318,7 @@ class DokployProductRetirementAdapter:
                     raise ProductRetirementBlockedError(
                         "Managed secret authority changed while retiring."
                     )
-            for binding in self._record_store.list_secret_bindings(
-                integration=record.integration,
-                context_name=record.context,
-                instance_name=record.instance,
-            ):
+            for binding in bindings:
                 if binding.secret_id == record.secret_id and binding.status != "disabled":
                     self._record_store.write_secret_binding(
                         binding.model_copy(

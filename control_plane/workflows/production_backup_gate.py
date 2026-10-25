@@ -8,6 +8,8 @@ from typing import Callable
 from control_plane.guest_capture_credentials import (
     resolve_guest_capture_values,
     shared_snapshot_retention,
+    SSH_PRIVATE_KEY,
+    SSH_KNOWN_HOSTS,
 )
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_authority import (
@@ -36,10 +38,6 @@ from control_plane.workflows.production_backup_provider import (
     execute_production_backup_provider,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-
-
-SSH_PRIVATE_KEY = "PRODUCTION_BACKUP_SSH_PRIVATE_KEY"
-SSH_KNOWN_HOSTS = "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS"
 
 
 def resolve_production_backup_binding(

@@ -4,10 +4,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.dokploy_target_record import IntegrationAllowanceKind
 from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretClass
-from control_plane.contracts.guest_capture_boundary import (
-    GuestCaptureBoundary,
-    GUEST_CAPTURE_INTEGRATION,
-)
 
 SecretScope = Literal["global", "context", "context_instance"]
 SecretPolicy = Literal["write_only"]
@@ -38,21 +34,9 @@ class SecretRecord(BaseModel):
     updated_at: str
     last_validated_at: str = ""
     updated_by: str = ""
-    capture_boundary: GuestCaptureBoundary | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "SecretRecord":
-        if self.integration == GUEST_CAPTURE_INTEGRATION:
-            if self.capture_boundary is None or self.scope != "context_instance":
-                raise ValueError(
-                    "Guest capture credentials require an exact guest boundary and a custody lane."
-                )
-        elif self.capture_boundary is not None:
-            raise ValueError("Only guest capture credentials may declare a capture boundary.")
         if not self.secret_id.strip():
             raise ValueError("secret record requires secret_id")
         if not self.integration.strip():

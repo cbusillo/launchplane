@@ -35,6 +35,9 @@ from control_plane.service_auth import (
     AuthorizationTarget,
     LaunchplaneIdentity,
     TerminalAgentIdentity,
+    GitHubHumanIdentity,
+    LocalAdminIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
@@ -48,10 +51,9 @@ from control_plane.guest_capture_credentials import (
 )
 from control_plane.workflows.production_backup_gate import (
     resolve_production_backup_binding,
-    SSH_PRIVATE_KEY,
-    SSH_KNOWN_HOSTS,
 )
 from control_plane.workflows.production_backup_provider import execute_production_backup_provider
+from control_plane.guest_capture_credentials import SSH_PRIVATE_KEY, SSH_KNOWN_HOSTS
 
 CREDENTIAL_ROUTE = "/v1/products/{product}/environments/prod/backup-worker-bindings"
 CREDENTIAL_APPLY_ROUTE = CREDENTIAL_ROUTE + "/apply"
@@ -94,6 +96,8 @@ def resolve_backup_preflight_binding(
         for target in plan.future_target_records
         if target.status == "active"
     }
+    if not set(policy.target_ids) <= targets.keys():
+        raise ValueError("Proposed capture targets are unavailable.")
     return ProductionBackupGateWorkerRequest(
         request=request,
         policy=policy,
@@ -236,11 +240,8 @@ def register_production_backup_credential_routes(
                 )
         profile = store.read_product_profile_record(product)
         records, bindings = credential_metadata(store, context=context, instance=instance)
-        capture_state = store.guest_capture_adoption_state()
         try:
-            plan, replacements = plan_credential_bindings(
-                profile, records, bindings, body, capture_state
-            )
+            plan, replacements = plan_credential_bindings(profile, records, bindings, body)
         except ValueError as error:
             if body.mode == "apply":
                 replay = store.prepare_db_only_mutation(
@@ -293,7 +294,6 @@ def register_production_backup_credential_routes(
                 instance=instance,
                 expected_records=records,
                 expected_bindings=bindings,
-                expected_capture_state=capture_state,
                 replacements=replacements,
                 reason=body.reason,
                 mutation=DbOnlyMutationRequest(
@@ -344,6 +344,18 @@ def register_production_backup_credential_routes(
         require_access(
             identity, "production_backup_authority.read", product, context, instance, trace
         )
+        if proposal_id and not (
+            director_agent_identity(identity)
+            or isinstance(identity, LocalAdminIdentity)
+            or isinstance(identity, GitHubHumanIdentity)
+            and identity.role == "admin"
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="Pending backup qualification requires a Director identity. Active policy qualification remains available.",
+            )
         store, expected_context, expected_instance = lane(record_store, product, trace)
         if (context, instance) != (expected_context, expected_instance):
             raise dependencies.http_error(

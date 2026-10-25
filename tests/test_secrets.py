@@ -523,14 +523,22 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                 )
 
                 self.assertEqual(
-                    control_plane_secrets.resolve_lane_worker_secret_values(
-                        context_name="site", instance_name="prod"
+                    control_plane_secrets.resolve_secret_values_for_integration_from_store(
+                        record_store=store,
+                        integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                        context_name="site",
+                        instance_name="prod",
+                        scopes=frozenset({"context_instance"}),
                     ),
                     {"PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "lane-backup-key"},
                 )
                 self.assertEqual(
-                    control_plane_secrets.resolve_lane_worker_secret_values(
-                        context_name="site", instance_name="testing"
+                    control_plane_secrets.resolve_secret_values_for_integration_from_store(
+                        record_store=store,
+                        integration=control_plane_secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                        context_name="site",
+                        instance_name="testing",
+                        scopes=frozenset({"context_instance"}),
                     ),
                     {},
                 )
