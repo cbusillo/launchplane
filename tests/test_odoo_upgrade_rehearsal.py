@@ -3638,6 +3638,7 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         spec = {
             "record": {
                 "rehearsal_id": self.identifier,
+                "product": "fixture",
                 "storage": budget,
                 "state": "switched",
                 "intent_sha256": hashlib.sha256(b"fixture").hexdigest(),

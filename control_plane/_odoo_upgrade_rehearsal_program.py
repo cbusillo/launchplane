@@ -121,23 +121,56 @@ def phase_stamp(spec,boundary,*,at=None):
     timing['observed'].setdefault(boundary,at or datetime.now(timezone.utc).isoformat())
 
 
-def compose(spec,root,*,image,database):
+def pre_switch_timing(spec,root):
+    path=root/(spec.get('receipt_action',spec['action'])+'.pre-switch.json')
+    if not path.exists() and not path.is_symlink():
+        return None
+    metadata=path.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode)!=0o600
+            or metadata.st_uid!=os.getuid() or metadata.st_size>65536):
+        raise RuntimeError('Invalid pre-switch timing custody')
+    saved=json.loads(path.read_text())
+    if (set(saved)!={'intent_sha256','record_binding_sha256','attempt_sha256','phase_timing'}
+            or saved['intent_sha256']!=spec['record']['intent_sha256']
+            or any(saved[key]!=spec[key] for key in ('record_binding_sha256','attempt_sha256'))):
+        raise RuntimeError('Pre-switch timing binding changed')
+    timing=saved['phase_timing']
+    if (timing['action']!=spec['action'] or timing['attempt_sha256']!=spec['attempt_sha256']
+            or 'pre_switch_verified' not in timing['observed']):
+        raise RuntimeError('Pre-switch boundary is unverified')
+    validation=checked_business_receipt(timing['pre_switch_validation'],spec['business_validation_identity'])
+    if validation['passed'] is not True:
+        raise RuntimeError('Pre-switch business verification failed')
+    return timing
+
+
+def runtime_identity(spec,image):
+    record=spec['record']
+    return {'product':record['product'],'context':record['rehearsal_id'],'instance':'rehearsal',
+        'environment_kind':'rehearsal','deployment_record_id':record['rehearsal_id'],
+        'artifact_id':record['target_artifact']['artifact_id'],
+        'source_git_ref':record['target_artifact']['source_commit'],'image_reference':image}
+
+
+def compose(spec,root,*,image,database,candidate=False):
     version=spec['record']['source_odoo_version'] if database.endswith('_source') else spec['versions'][image]
     environment={**spec['environment'],'ODOO_DB_NAME':database,'ODOO_VERSION':version}
-    environment['LAUNCHPLANE_RUNTIME_IDENTITY_JSON']=json.dumps({'product':spec['record']['product'],'context':spec['record']['rehearsal_id'],'instance':'rehearsal','environment_kind':'rehearsal','deployment_record_id':spec['record']['rehearsal_id'],'artifact_id':spec['artifacts'][image],'source_git_ref':spec['refs'][image],'image_reference':image})
+    environment['LAUNCHPLANE_RUNTIME_IDENTITY_JSON']=json.dumps(runtime_identity(spec,image))
     (root/'compose.yml').write_text(spec['compose'][image])
     os.chmod(root/'compose.yml',0o600)
     # Environment belongs only to this subprocess; no ambient product settings.
-    command(['docker','compose','--project-directory',str(root),'--env-file','/dev/null','-p',spec['record']['rehearsal_id'],'-f',str(root/'compose.yml'),'up','-d'],
+    services=['pre-switch-web'] if candidate else ['web','database','script-runner']
+    command(['docker','compose','--project-directory',str(root),'--env-file','/dev/null','-p',spec['record']['rehearsal_id'],'-f',str(root/'compose.yml'),'up','-d','--no-deps',*services],
         environment={'PATH':os.environ['PATH'],'HOME':os.environ['HOME'],**environment})
 
 
-def inspection(spec,database,image):
+def inspection(spec,database,image,*,candidate_may_run=False):
     namespace=spec['record']['rehearsal_id']
     return inspect_copy_runtime({
         'generation':{'namespace':namespace,'instance':'rehearsal','resources_binding_sha256':spec['resources_binding_sha256']},
         'compose_project':namespace,'database_name':database,'image_reference':image,
         'database_data_directory':spec['database_data_directory'],'storage_maintenance':True,
+        'pre_switch_candidate':True,'candidate_may_run':candidate_may_run,
     },expected_instance='rehearsal')
 
 
@@ -282,22 +315,52 @@ def copy_runner(spec,containers,database,*,fresh,dump_path=None,sanitize_only=Fa
                 phase_stamp(spec,boundary,at=at)
 
 
-def before_web(spec,containers,database):
+def connection_readback(spec,containers,database):
     result=docker('exec','-i','-e','ODOO_DB_NAME='+database,containers['script-runner'][0],'python3','-',database,
         spec['readback_spec'],stdin=spec['readback_program'].encode()).decode()
     if 'integration_readback_ok=true' not in result.splitlines():
         raise RuntimeError('Before-web connection readback failed')
+
+
+def before_web(spec,containers,database,*,start=True):
+    connection_readback(spec,containers,database)
     phase_stamp(spec,'before_web')
     docker('exec',containers['script-runner'][0],'python3','-c',
         "import hashlib,os;from pathlib import Path;Path("+repr(spec['web_gate_path'])+").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+chr(10)+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
-    docker('start',containers['web'][0])
-    phase_stamp(spec,'web_started')
+    if start:
+        docker('start',containers['web'][0])
+        phase_stamp(spec,'web_started')
 
 
-def private_health(spec,containers):
-    expected=spec['record']['target_artifact']['source_commit']
-    program="import json,sys,time,urllib.request\nfor attempt in range(60):\n try:\n  response=urllib.request.urlopen('http://web:8069/launchplane/health',timeout=5); body=json.load(response); identity=body.get('runtime_identity',body.get('launchplane_runtime_identity',{})); assert identity.get('source_git_ref',identity.get('source_revision'))==sys.argv[1]; assert identity.get('instance')=='rehearsal'; assert identity.get('context')==sys.argv[2]; assert identity.get('artifact_id')==sys.argv[3]; break\n except Exception:\n  if attempt==59: raise\n  time.sleep(1)\nresponse=urllib.request.urlopen('http://web:8069/web/login',timeout=5); assert response.status==200\n"
-    docker('exec',containers['script-runner'][0],'python3','-c',program,expected,spec['record']['rehearsal_id'],spec['record']['target_artifact']['artifact_id'])
+def private_health(spec,containers,*,hostname='web'):
+    expected=json.dumps(runtime_identity(spec,spec['target_image']))
+    program='''
+import json,sys,time,urllib.request
+class PrivateRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs):
+        raise RuntimeError('Private probe cannot follow redirects')
+opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),PrivateRedirects())
+expected=json.loads(sys.argv[1])
+assert sys.argv[2] in {'web','pre-switch-web'}
+base='http://'+sys.argv[2]+':8069'
+for attempt in range(60):
+    try:
+        with opener.open(base+'/launchplane/health',timeout=5) as response:
+            assert response.status==200
+            body=json.load(response)
+        identity=body.get('runtime_identity',body.get('launchplane_runtime_identity',{}))
+        if 'source_revision' in identity:
+            assert identity.get('source_git_ref',identity['source_revision'])==identity['source_revision']
+            identity['source_git_ref']=identity.pop('source_revision')
+        assert all(identity.get(key)==value for key,value in expected.items())
+        break
+    except Exception:
+        if attempt==59: raise
+        time.sleep(1)
+with opener.open(base+'/web/login',timeout=5) as response:
+    assert response.status==200
+'''
+    docker('exec',containers['script-runner'][0],'python3','-c',program,expected,hostname)
 
 
 def business_validation_precheck(spec,containers):
@@ -357,9 +420,10 @@ def product_command(arguments, *, stdin=None):
         process.wait()
 
 
-def business_validation(spec,containers):
+def business_validation(spec,containers,*,timed=True):
     expected=spec['business_validation_identity']
-    phase_stamp(spec,'product_started')
+    if timed:
+        phase_stamp(spec,'product_started')
     output=product_command(['docker','exec','-i','-e','ODOO_DB_NAME='+expected['database'],
         containers['script-runner'][0],'python3',BUSINESS_VALIDATION_ENTRYPOINT],
         stdin=json.dumps(expected,separators=(',',':')).encode())
@@ -370,7 +434,8 @@ def business_validation(spec,containers):
     try:
         result=json.loads(bytes.fromhex(markers[0].decode()))
         checked=checked_business_receipt(result,expected)
-        phase_stamp(spec,'receipt_observed')
+        if timed:
+            phase_stamp(spec,'receipt_observed')
         return checked
     except (ValueError,TypeError,KeyError):
         # Do not attach a parser exception or its input to provider logs.
@@ -697,6 +762,10 @@ def observe(spec, root, receipt, lock_held=False):
             'business_host_frozen':False,'completed':False,'raw_source_retained':raw.is_dir(),
             'prepare_not_started':prepare_not_started,
             'custody':custody_observation(spec,root,spec.get('receipt_action',action))}
+        if action in {'simulate-final','rebuild-final'}:
+            timing=pre_switch_timing(spec,root)
+            if timing is not None:
+                result['phase_timing']=timing
         custody=result['custody']
         if lock_held and spec.get('inspect_capture') is True and custody['effect_started']:
             result['retained_upgrade_logs_unavailable']=True
@@ -799,6 +868,30 @@ def prepared_rebuild_runtime(spec,root,database):
     return containers
 
 
+def verify_before_switch(spec,root,containers,database):
+    before_web(spec,containers,database,start=False)
+    compose(spec,root,image=spec['target_image'],database=database,candidate=True)
+    containers=inspection(spec,database,spec['target_image'],candidate_may_run=True)
+    try:
+        if (containers['web'][1].get('State',{}).get('Running') is not False
+                or containers['pre-switch-web'][1].get('State',{}).get('Running') is not True):
+            raise RuntimeError('Private switch endpoint is not held')
+        private_health(spec,containers,hostname='pre-switch-web')
+        validation=business_validation(spec,containers,timed=False)
+        if validation['passed'] is not True or validation['committed'] is not True:
+            raise RuntimeError('Pre-switch business verification failed')
+        connection_readback(spec,containers,database)
+        spec['phase_timing']['pre_switch_validation']=validation
+        phase_stamp(spec,'pre_switch_verified')
+        save(root/(spec.get('receipt_action',spec['action'])+'.pre-switch.json'),{
+            'intent_sha256':spec['record']['intent_sha256'],
+            'record_binding_sha256':spec['record_binding_sha256'],
+            'attempt_sha256':spec['attempt_sha256'],'phase_timing':spec['phase_timing']})
+    finally:
+        docker('stop',containers['pre-switch-web'][0])
+    return inspection(spec,database,spec['target_image'])
+
+
 def upgrade_final(spec,root,containers):
     names=database_names(spec)
     clone(spec,containers,names['final_source'],names['final_upgrade'])
@@ -810,7 +903,9 @@ def upgrade_final(spec,root,containers):
     copy_runner(spec,containers,names['final_upgrade'],fresh=False)
     spec['phase_elapsed']['final-upgrade']=time.monotonic()-upgrade_started
     switch_started=time.monotonic()
-    before_web(spec,containers,names['final_upgrade'])
+    containers=verify_before_switch(spec,root,containers,names['final_upgrade'])
+    docker('start',containers['web'][0])
+    phase_stamp(spec,'web_started')
     private_health(spec,containers)
     phase_stamp(spec,'private_switch_verified')
     spec['phase_elapsed']['private-switch']=time.monotonic()-switch_started

@@ -516,6 +516,10 @@ def rehearsal_host_spec(
                     "ODOO_VERSION": "${ODOO_VERSION:?missing}",
                 }
             )
+        payload["services"]["pre-switch-web"] = {
+            **payload["services"]["web"],
+            "profiles": ["pre-switch"],
+        }
         rendered[image] = yaml.safe_dump(payload, sort_keys=False)
     environment = {
         **shape,
@@ -549,12 +553,6 @@ def rehearsal_host_spec(
         "target_image": new,
         "versions": {
             new: artifact_odoo_version(record.target_artifact),
-        },
-        "artifacts": {
-            new: record.target_artifact.artifact_id,
-        },
-        "refs": {
-            new: record.target_artifact.source_commit,
         },
         "workflow": {
             **{
@@ -1292,7 +1290,7 @@ class OdooRehearsalAdapter:
         if abandoned_attempt_sha256:
             spec["abandoned_attempt_sha256"] = abandoned_attempt_sha256
             spec["abandoned_action"] = abandoned_action or "validate-business"
-        if self.request.action == "validate-business":
+        if self.request.action in {"simulate-final", "rebuild-final", "validate-business"}:
             spec["business_validation_identity"] = business_validation_identity(
                 record, operation_key
             )
@@ -1481,6 +1479,14 @@ class OdooRehearsalAdapter:
         timings = list(record.phase_timings)
         if result.get("phase_timing") is not None:
             timing = RehearsalPhaseTiming.model_validate(result["phase_timing"])
+            if timing.pre_switch_validation is not None and any(
+                getattr(timing.pre_switch_validation, key) != value
+                for key, value in {
+                    **business_validation_identity(record, ""),
+                    "attempt_sha256": timing.attempt_sha256,
+                }.items()
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
             prior_timing = next(
                 (item for item in timings if item.attempt_sha256 == timing.attempt_sha256), None
             )
