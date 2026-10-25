@@ -616,30 +616,6 @@ def _compile_testing_route(
             not isinstance(reference, str) for reference in references
         ):
             raise ValueError("Testing predecessor middleware is malformed.")
-        # Service names can differ only after every service has been bound to
-        # the same observed backend above. Keep all aliases in legacy_routers:
-        # observation must still reject drift in any of them after takeover.
-        behavior = {
-            **configuration,
-            "rule": f"Host(`{host}`)",
-            "entryPoints": sorted(set(points)),
-            "priority": priority,
-            "middlewares": [
-                reference if "@" in reference else reference + "@" + provider
-                for reference in references
-            ],
-        }
-        service = str(router.get("service") or "")
-        service = service if "@" in service else service + "@" + provider
-        behavior["loadBalancer"] = raw["services"][service]["loadBalancer"]
-        behavior.pop("service", None)
-        group = tuple(sorted(set(points)))
-        if used_entrypoints & set(points):
-            if equivalents.get(group) != behavior:
-                raise ValueError("Testing predecessor aliases have conflicting routing behavior.")
-            continue
-        equivalents[group] = behavior
-        used_entrypoints.update(points)
         middlewares = []
         for reference in router.get("middlewares", []):
             if not isinstance(reference, str):
@@ -669,6 +645,24 @@ def _compile_testing_route(
             and connection_middleware + "@file" not in middlewares
         ):
             middlewares.append(connection_middleware + "@file")
+        behavior = {
+            **configuration,
+            "rule": f"Host(`{host}`)",
+            "entryPoints": sorted(set(points)),
+            "priority": priority,
+            "middlewares": middlewares,
+        }
+        service = str(router.get("service") or "")
+        service = service if "@" in service else service + "@" + provider
+        behavior["loadBalancer"] = raw["services"][service]["loadBalancer"]
+        behavior.pop("service", None)
+        group = tuple(sorted(set(points)))
+        if used_entrypoints & set(points):
+            if equivalents.get(group) != behavior:
+                raise ValueError("Testing predecessor aliases have conflicting routing behavior.")
+            continue
+        equivalents[group] = behavior
+        used_entrypoints.update(points)
         tls = configuration.get("tls")
         if tls is not None and (
             not isinstance(tls, dict) or set(tls) - {"certResolver", "options"}

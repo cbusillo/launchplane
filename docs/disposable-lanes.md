@@ -1373,7 +1373,10 @@ remains outside takeover and above every application winner. A changed internal
 route on an application listener still refuses. Duplicate Docker router families
 may describe one predecessor only when every alias binds the same physically
 verified backend and has equivalent host, listeners, effective priority,
-middleware, TLS and load-balancer behavior. The plan retains every alias for
+middleware, TLS and load-balancer behavior. Middleware equivalence uses the
+emitted route after preserving or adding the required testing connection CSP;
+an alias may omit that managed header when its resulting middleware order agrees.
+Unknown Docker middleware and other routing differences still refuse. The plan retains every alias for
 subsequent drift checks and emits one owned winner per equivalent group. It
 never deletes a live router or changes proxy configuration to make admission pass.
 
