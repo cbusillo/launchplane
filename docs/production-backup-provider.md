@@ -111,12 +111,11 @@ A canonical pair still needs review/apply when the guest binding is missing.
 The same control supports an endpoint-only transition after approved targets
 change host or SSH username. It adds a successor binding to the same ordered
 pair and custody only when guest kind, ID, storage and prefix stay identical,
-the destination has no different pair, and no active policy on any lane/action
-still consumes any prior endpoint binding. Potentially relevant unresolved
-consumer authority refuses the transition. Its digest and commit recheck those
-consumers under the metadata lock. Startup and policy application never move an
-already-bound pair automatically. Historical endpoint bindings remain aliases
-of the same guest credential; no secret is copied or widened.
+and the destination has no different pair. Its digest and commit recheck the
+current lane's authority and all relevant prior bindings under the metadata
+lock. Startup and policy application never move an already-bound pair
+automatically. Historical endpoint bindings remain aliases of the same guest
+credential; no secret is copied or widened.
 
 All products with an approved policy for the same complete boundary resolve the
 one pinned pair. A product's old key remains on its old guest after its policy
@@ -135,8 +134,8 @@ ordinary binding relabelling retain that scope. Product retirement preserves
 only the pinned pair, explicitly lists it as retained and excludes it from the
 plan's delete/disable effects. Retiring a product does not retire its guest's
 backup authority, including a currently unused guest key. Retiring that guest's
-credential remains a separate managed-secret action in its custody lane. Initial key
-setup may precede policy activation, but capture needs both active authority
+credential remains a separate managed-secret action in its custody lane. Initial
+key setup may precede policy activation, but capture needs both active authority
 and a configured guest binding. Do not create a second pair for another product
 on the same boundary. The worker ignores workstation keys and ambient SSH
 configuration. The Linux worker keeps key material in anonymous memory-backed
@@ -184,13 +183,16 @@ listing. This proves capture and presence; it is not a full restore test or a
 PBS datastore-wide verification job. Driver-specific logical backup verification
 and recovery exercises remain separate evidence.
 
-Snapshot pruning runs only after both captures pass. For a shared guest and
-prefix, it retains the highest count among all active policies, including a
-policy awaiting review renewal. Each deletion holds a backup-authority read guard while recomputing that floor,
-so policy changes cannot race a prune. Backup-policy writers take their matching
-lock before the general product-authority lock; a slow delete does not hold that
-general lock. Operation progress and lease checks run before the retention guard.
- It removes only names
+Snapshot pruning runs only after both captures pass. It retains the highest
+count among all active policies for the guest kind, ID and prefix across host
+names, including policies awaiting review renewal. This protects historical
+endpoint aliases during target changes. Different hosts reusing a guest ID can
+therefore retain extra snapshots; credential selection still requires the
+complete pinned boundary. Each deletion holds a backup-authority read guard
+while recomputing the floor, so policy changes cannot race a prune.
+Backup-policy writers take their matching lock before the general
+product-authority lock; a slow delete does not hold that general lock. Operation
+progress and lease checks run before the retention guard. It removes only names
 matching this provider's configured prefix and timestamp/hash format, preserves
 the just-created snapshot, and retains at least one snapshot even when retention
 is zero. Existing snapshots outside that format are kept. Retention failure is

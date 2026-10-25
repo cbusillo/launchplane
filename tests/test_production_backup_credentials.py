@@ -562,7 +562,7 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             frozenset(record.secret_id for record in self.originals),
         )
 
-    def revise_capture_endpoint(self, host: str, username: str = "capture") -> None:
+    def revise_capture_endpoint(self, host: str) -> None:
         for current in self.store.list_production_backup_target_records(status="active"):
             if current.target_id not in _policy().target_ids:
                 continue
@@ -573,29 +573,8 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
                 target_revision=current.target_revision + 1,
                 supersedes_record_id=current.record_id,
             )
-            payload["destination"].update(host=host, username=username)
+            payload["destination"].update(host=host, username="capture")
             self.store.write_production_backup_target_record(type(current).model_validate(payload))
-
-    def add_original_endpoint_consumer(self) -> Any:
-        source_payload = _source_target().model_dump(mode="json")
-        source_payload.update(target_id="historical-source", record_id="", target_digest="")
-        source = type(_source_target()).model_validate(source_payload)
-        destination_payload = _destination_target().model_dump(mode="json")
-        destination_payload.update(target_id="historical-storage", record_id="", target_digest="")
-        destination = type(_destination_target()).model_validate(destination_payload)
-        self.store.write_production_backup_target_record(source)
-        self.store.write_production_backup_target_record(destination)
-        payload = _policy().model_dump(mode="json")
-        payload.update(
-            product="other", context="other", record_id="", policy_id="", policy_digest=""
-        )
-        payload["fast_snapshot"]["source_target_id"] = source.target_id
-        payload["independent_backup"].update(
-            source_target_id=source.target_id, destination_target_id=destination.target_id
-        )
-        policy = type(_policy()).model_validate(payload)
-        self.store.write_production_backup_policy_record(policy)
-        return policy
 
     async def test_reviewed_endpoint_transition_reuses_the_pair_without_changing_secret_data(
         self,
@@ -625,7 +604,6 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             pin.model_dump(exclude={"boundary"}), old_pin.model_dump(exclude={"boundary"})
         )
-        self.assertFalse(state["consumers"])
         self.assertEqual(self.store.list_secret_records(), records)
         self.assertEqual(
             tuple(
@@ -661,47 +639,6 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             with self.subTest(change=change), self.assertRaises(ValueError):
                 validate_guest_capture_enrollment(candidate, state)
-
-    async def test_all_historical_endpoint_consumers_block_the_next_transition(self) -> None:
-        self.assertEqual((await self.post(await self.reviewed(), "original-pin")).status_code, 202)
-        self.revise_capture_endpoint("second.invalid")
-        self.assertEqual((await self.post(await self.reviewed(), "second-pin")).status_code, 202)
-        consumer = self.add_original_endpoint_consumer()
-        self.revise_capture_endpoint("third.invalid")
-        denied = await self.post({"bindings": self.selection, "reason": "Third endpoint"})
-        self.assertEqual(denied.status_code, 409, denied.text)
-        payload = consumer.model_dump(mode="json")
-        payload.update(
-            record_id="",
-            policy_digest="",
-            policy_revision=consumer.policy_revision + 1,
-            supersedes_record_id=consumer.record_id,
-            status="retired",
-        )
-        self.store.write_production_backup_policy_record(type(consumer).model_validate(payload))
-        self.assertEqual((await self.post(await self.reviewed(), "third-pin")).status_code, 202)
-
-    async def test_consumer_appearing_before_commit_refuses_endpoint_enrollment(self) -> None:
-        self.assertEqual((await self.post(await self.reviewed(), "original-pin")).status_code, 202)
-        self.revise_capture_endpoint("new-endpoint.invalid")
-        body = await self.reviewed()
-        commit = self.store.compare_and_rebind_worker_credentials
-
-        def racing_commit(**kwargs: Any) -> Any:
-            self.add_original_endpoint_consumer()
-            return commit(**kwargs)
-
-        with patch.object(self.store, "compare_and_rebind_worker_credentials", racing_commit):
-            denied = await self.post(body, "raced-endpoint")
-        self.assertEqual(denied.status_code, 409, denied.text)
-        old_boundary = capture_boundary(_policy(), _source_target(), _destination_target())
-        self.assertIsNone(
-            self.store.read_guest_capture_binding(
-                old_boundary.model_copy(
-                    update={"host": "new-endpoint.invalid", "username": "capture"}
-                )
-            )
-        )
 
     async def test_failed_pin_rolls_back_rebinding_and_its_receipt(self) -> None:
         body = await self.reviewed()

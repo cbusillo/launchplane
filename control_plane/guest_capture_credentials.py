@@ -130,12 +130,6 @@ def validate_guest_capture_enrollment(
             exclude={"host", "username"}
         ):
             raise ValueError("These credentials already belong to another guest boundary.")
-    if prior and any(
-        not consumer.get("boundary_id")
-        or consumer["boundary_id"] in {pin.boundary.event_id for pin in prior}
-        for consumer in state["consumers"]
-    ):
-        raise ValueError("The prior capture endpoint still has active or unresolved consumers.")
 
 
 def guest_capture_metadata(
@@ -198,7 +192,7 @@ def shared_snapshot_retention(
 ) -> int:
     source = binding.source_target.destination
     assert isinstance(source, ProxmoxGuestBackupDestinationReference)
-    guest_identity = source.host.lower(), source.guest_kind, source.guest_id
+    guest_identity = source.guest_kind, source.guest_id
     targets = {
         target.target_id: target
         for target in store.list_production_backup_target_records(status="active")
@@ -213,6 +207,6 @@ def shared_snapshot_retention(
         guest = target.destination
         if not isinstance(guest, ProxmoxGuestBackupDestinationReference):
             continue
-        if (guest.host.lower(), guest.guest_kind, guest.guest_id) == guest_identity:
+        if (guest.guest_kind, guest.guest_id) == guest_identity:
             retention = max(retention, policy.fast_snapshot.retention_count)
     return retention

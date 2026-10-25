@@ -56,65 +56,6 @@ def guest_capture_bindings(session: Session) -> tuple[GuestCaptureCredential, ..
     )
 
 
-def _consumer_state(
-    session: Session, pins: tuple[GuestCaptureCredential, ...]
-) -> list[dict[str, Any]]:
-    from control_plane.storage.postgres import (
-        LaunchplaneProductionBackupPolicyRow,
-        LaunchplaneProductionBackupTargetRow,
-    )
-
-    if not pins:
-        return []
-    boundaries = {pin.boundary.event_id for pin in pins}
-    prefixes = {pin.boundary.snapshot_prefix for pin in pins}
-    targets = {
-        row.target_id: row
-        for row in session.scalars(
-            select(LaunchplaneProductionBackupTargetRow).where(
-                LaunchplaneProductionBackupTargetRow.status == "active"
-            )
-        )
-    }
-    consumers: list[dict[str, Any]] = []
-    for row in session.scalars(
-        select(LaunchplaneProductionBackupPolicyRow)
-        .where(LaunchplaneProductionBackupPolicyRow.status == "active")
-        .order_by(LaunchplaneProductionBackupPolicyRow.record_id)
-    ):
-        snapshot = row.payload.get("fast_snapshot")
-        if (
-            isinstance(snapshot, dict)
-            and isinstance(snapshot.get("snapshot_prefix"), str)
-            and snapshot["snapshot_prefix"] not in prefixes
-        ):
-            continue
-        try:
-            policy = ProductionBackupPolicyRecord.model_validate(row.payload)
-            if policy.fast_snapshot.snapshot_prefix not in prefixes:
-                continue
-            source = ProductionBackupTargetRecord.model_validate(
-                targets[policy.fast_snapshot.source_target_id].payload
-            )
-            destination = ProductionBackupTargetRecord.model_validate(
-                targets[policy.independent_backup.destination_target_id].payload
-            )
-            boundary = capture_boundary(policy, source, destination)
-        except (ValueError, KeyError):
-            consumers.append({"policy_record_id": row.record_id, "boundary_id": ""})
-            continue
-        if boundary.event_id in boundaries:
-            consumers.append(
-                {
-                    "policy_record_id": row.record_id,
-                    "source_record_id": source.record_id,
-                    "destination_record_id": destination.record_id,
-                    "boundary_id": boundary.event_id,
-                }
-            )
-    return consumers
-
-
 def enroll_guest_capture_binding_in_session(
     store: PostgresRecordStore,
     session: Session,
@@ -207,13 +148,6 @@ def enrollment_state(
         "policies": [policy_row.payload for policy_row in policies],
         "targets": [target_row.payload for target_row in targets],
         "pins": relevant,
-        "consumers": _consumer_state(
-            session,
-            tuple(
-                guest_capture_credential_from_event(SecretAuditEvent.model_validate(payload))
-                for payload in relevant
-            ),
-        ),
     }
 
 

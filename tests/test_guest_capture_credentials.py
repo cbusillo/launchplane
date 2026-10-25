@@ -161,6 +161,26 @@ class GuestCaptureCredentialTests(unittest.TestCase):
         self.store.write_production_backup_policy_record(type(_policy()).model_validate(payload))
         self.assertEqual(shared_snapshot_retention(self.store, self.binding), 20)
 
+    def test_shared_prefix_retention_covers_a_reactivated_host_alias(self) -> None:
+        targets = []
+        for current in (_source_target(), _destination_target()):
+            payload = current.model_dump(mode="json")
+            payload.update(target_id="alias-" + current.target_id, record_id="", target_digest="")
+            payload["destination"]["host"] = "guest-alias.invalid"
+            target = type(current).model_validate(payload)
+            self.store.write_production_backup_target_record(target)
+            targets.append(target)
+        payload = _policy().model_dump(mode="json")
+        payload.update(
+            product="other", context="other", record_id="", policy_id="", policy_digest=""
+        )
+        payload["fast_snapshot"].update(source_target_id=targets[0].target_id, retention_count=20)
+        payload["independent_backup"].update(
+            source_target_id=targets[0].target_id, destination_target_id=targets[1].target_id
+        )
+        self.store.write_production_backup_policy_record(type(_policy()).model_validate(payload))
+        self.assertEqual(shared_snapshot_retention(self.store, self.binding), 20)
+
     def test_unbound_extra_pair_cannot_displace_existing_guest_credential(self) -> None:
         payload = _policy().model_dump(mode="json")
         payload.update(
