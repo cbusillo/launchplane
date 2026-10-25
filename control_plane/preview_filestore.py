@@ -324,11 +324,17 @@ def prepare_locked(spec, root):
         receipt = json.loads(receipt_path.read_text())
         if any(receipt.get(key) != snapshot[key] for key in ('snapshot_id', 'database_sha256', 'filestore_sha256')):
             raise RuntimeError('Preview snapshot differs from its service receipt')
+        dump_path = lower.parent / 'database.dump'
+        if dump_path.is_symlink() or not dump_path.is_file():
+            raise RuntimeError('Preview snapshot database dump custody is invalid')
+        dump_bytes = dump_path.stat().st_size
+        if not 0 < dump_bytes <= min(snapshot['storage_budget']['database_bytes'], snapshot['storage_budget']['staging_bytes']):
+            raise RuntimeError('Preview snapshot database dump exceeds reviewed bounds')
         available_path = Path(data['Mountpoint'])
         while not available_path.exists():
             available_path = available_path.parent
         space = os.statvfs(available_path)
-        if space.f_bavail * space.f_frsize < snapshot['storage_budget']['reserve_bytes'] + snapshot['storage_budget']['database_bytes'] + snapshot['storage_budget']['staging_bytes']:
+        if space.f_bavail * space.f_frsize < snapshot['storage_budget']['reserve_bytes'] + snapshot['storage_budget']['database_bytes'] + dump_bytes:
             raise RuntimeError('Preview overlay lacks reviewed disk headroom')
         declaration = {'name': name, 'driver': 'local', 'driver_opts': options,
             'labels': {'io.launchplane.preview-snapshot': snapshot['snapshot_id']}}

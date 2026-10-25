@@ -114,8 +114,9 @@ An owned reset restarts the runner even if cleanup fails, with web still held.
 Later deploys retain an existing
 overlay and its original source, even when the newest snapshot changes.
 
-Admission charges the database, dump staging and existing reserve against real
-filesystem availability. The shared lower is already allocated and adds no
+Admission charges the full database allowance, the bounded dump's actual bytes
+and existing reserve against real filesystem availability. The testing snapshot's
+filestore staging allowance is not charged again. The shared lower adds no
 per-preview filestore charge. Upper writes consume the unchanged host quota.
 The configured memory floor also applies to a new snapshot restore on an
 existing provider target. Restore avoids recursive ownership changes that
