@@ -96,13 +96,13 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
             zfs_pools[os.makedev(int(major), int(minor))] = fields[1].split('/')[0]
     required = {}
     available = {}
-    def demand(path, size, keep_reserve=False):
+    def demand(path, size):
         path = Path(path).resolve(strict=True)
         device = path.stat().st_dev
         backing = ('zfs', zfs_pools[device]) if device in zfs_pools else ('device', device)
         stat = os.statvfs(path)
         free = stat.f_bavail * stat.f_frsize
-        if size or keep_reserve:
+        if size:
             required[backing] = required.get(backing, 0) + size
             available[backing] = min(available.get(backing, free), free)
     backings = {}
@@ -110,14 +110,11 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         name = spec.get('preview_volumes', {}).get(role, gen['namespace'] + suffix)
         volume = json.loads(docker('volume', 'inspect', name))[0]
         backings[role] = volume['Mountpoint']
-        cloned = False
         if role == 'data' and filestore_charged_as_staging:
             size = 0
         elif role == 'data' and filestore_clone_source is not None:
-            decisions['data'] = cloned = filestore_clone_proved(filestore_clone_source, backings[role])
-            if cloned:
-                size = 0
-        demand(backings[role], size, keep_reserve=cloned)
+            decisions['data'] = filestore_clone_proved(filestore_clone_source, backings[role])
+        demand(backings[role], size)
     # SSH capture stages on the host; native capture/assembly stages in the
     # runner's writable layer. Require known backing rather than guessing overlay space.
     driver = containers['script-runner'][1].get('GraphDriver', {})
@@ -142,8 +139,7 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         while not snapshot_path.exists():
             snapshot_path = snapshot_path.parent
         decisions['snapshot'] = filestore_clone_proved(backings['data'], snapshot_path)
-        snapshot_filestore = 0 if decisions['snapshot'] else budget['filestore_bytes']
-        demand(snapshot_path, budget['database_bytes'] + snapshot_filestore)
+        demand(snapshot_path, budget['database_bytes'] + budget['filestore_bytes'])
     capacity = all(available[backing] >= size + budget['reserve_bytes'] for backing, size in required.items())
     return capacity
 """
