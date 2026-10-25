@@ -348,7 +348,7 @@ def main():
         item = volume(name)
         overlay = name.endswith('-filestore') and item.get('Driver') == 'local' and item.get('HasOptions')
         if overlay:
-            _, _, _, private = inspect_preview_filestore(name.removesuffix('-filestore'), spec['project'])
+            _, _, _, private = inspect_preview_filestore(name.removesuffix('-filestore'), spec['project'], allow_missing_backing=destroying)
             paths[name + '-writable'] = backing_path(str(private))
         # Docker's default local allocation has no remote/bind backing options.
         if not overlay and (item.get("Driver") != "local" or item.get("HasOptions") is not False):

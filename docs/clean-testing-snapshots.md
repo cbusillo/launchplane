@@ -97,8 +97,11 @@ uses a Docker local overlay volume with the frozen snapshot filestore as its
 read-only lower. Its private upper and work directories live beside the preview
 data volume's `_data`, outside application mounts. Docker mounts the overlay at
 the preview database's filestore directory in both application containers.
-The volume uses `userxattr`; there is no full-copy fallback. Preparation refuses
-to replace a populated database or filestore. Later deploys retain an existing
+The volume uses `userxattr`; there is no full-copy fallback. Preparation preserves
+populated databases and filestores unless the existing exact-volume receipt and
+SQL witness prove an owned attempt that never opened to a user. Those incomplete
+legacy full copies can transition to an overlay without copying the filestore
+again. Later deploys retain an existing
 overlay and its original source, even when the newest snapshot changes.
 
 Admission charges the database, dump staging and existing reserve against real
@@ -107,7 +110,14 @@ per-preview filestore charge. Upper writes consume the unchanged host quota.
 The configured memory floor also applies to a new snapshot restore on an
 existing provider target. Restore avoids recursive ownership changes that
 would copy every lower file into the upper. The lower must already match the
-workflow UID and GID.
+workflow UID and GID. Ordinary maintenance also skips recursive ownership and
+mode changes on an overlay, so the next deploy does not copy its lower up.
+
+The inert preparation plan checks source receipts, storage ownership and disk
+headroom before creating application storage. Launchplane persists the planned
+volume declarations and environment on the target before allocation. An
+interrupted allocation retains that target and its original operation for
+recovery, rather than deleting the target that owns the partial storage.
 
 The restore stops the preview writer and restores the frozen dump into a missing
 database, then uses the existing credential, sanitizer, module-update and
@@ -121,9 +131,10 @@ data. Later builds keep Client edits. The marker inherited from testing cannot
 prove a preview restore. Retry evidence records both the requested snapshot and
 the original snapshot retained by the attempt.
 
-Each preview restore takes a nonblocking exclusive lock for its Compose project
-before runtime inspection. The lock spans preparation, restore, sanitization, module
-work and cleanup. Every host subprocess inherits its descriptor, so a retry
+Preparation and restore use the same nonblocking exclusive lock for their
+Compose project. Each host pass retains it through its own work; the restore
+holds it through runtime inspection, sanitization, module work and cleanup.
+Every host subprocess inherits its descriptor, so a retry
 refuses while an earlier run or its surviving children still hold it. Different
 preview targets can restore concurrently. The persistent target lock is separate
 from the shared snapshot read lock, which is released after copying.
@@ -170,11 +181,12 @@ Snapshot bytes remain in private host custody, independently of testing or
 preview volume retirement. Cleanup keeps the published source and its predecessor,
 unexpired issued preview plans, active or uncertain preview operations, and
 incomplete host restore attempts. Every overlay volume also pins its lower
-snapshot, including completed or sleeping previews and volumes without running
+snapshot by its validated snapshot label, including completed or sleeping previews and volumes without running
 containers. Preparation creates that pin under the shared snapshot lock before
 deployment. Preview retirement removes the overlay and private writable backing
-with the preview's other volumes. Unknown overlay custody defers snapshot
-retirement. Only obsolete copies with matching immutable
+with the preview's other volumes. An orphaned overlay still pins its source and
+can be retired by its project after the writable backing has disappeared.
+Invalid source labels defer snapshot retirement. Only obsolete copies with matching immutable
 service receipts may be removed. Host copying uses a shared read lock; retirement uses an exclusive lock. The
 read lock is released after copying, before sanitizer and module work. Attempt
 metadata is retired only after every original volume and physical backing is

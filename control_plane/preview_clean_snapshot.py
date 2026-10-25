@@ -191,6 +191,11 @@ def restore_preview_snapshot(containers, source_lock):
         write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False})
         if owned_unreleased:
             docker('stop', runner)
+            legacy = Path(volume['Mountpoint']) / 'filestore' / database
+            if legacy.resolve() != legacy.absolute() or legacy.is_mount():
+                raise RuntimeError('Preview legacy filestore custody is aliased')
+            if legacy.exists():
+                shutil.rmtree(legacy)
             _, _, lower, private = overlay
             for directory in (private / 'upper', private / 'work'):
                 shutil.rmtree(directory)

@@ -116,12 +116,11 @@ def retire_clean_snapshot_bytes(spec, root):
         pinned = set()
         overlay_names = docker('volume', 'ls', '--filter', 'label=io.launchplane.preview-snapshot', '--format', '{{.Name}}').decode().splitlines()
         for name in overlay_names:
-            if not name.endswith('-filestore'):
-                raise RuntimeError('Snapshot overlay reader identity is unavailable')
             volume = json.loads(docker('volume', 'inspect', name))[0]
-            project = (volume.get('Labels') or {}).get('com.docker.compose.project')
-            _, _, lower, _ = inspect_preview_filestore(name.removesuffix('-filestore'), project)
-            pinned.add(lower.parent.name)
+            snapshot_id = (volume.get('Labels') or {}).get('io.launchplane.preview-snapshot', '')
+            if not isinstance(snapshot_id, str) or not re.fullmatch(r'[a-f0-9]{64}', snapshot_id):
+                raise RuntimeError('Snapshot overlay reader identity is unavailable')
+            pinned.add(snapshot_id)
         attempts = root / 'preview-attempts'
         inventory = None
         inventory_read = False

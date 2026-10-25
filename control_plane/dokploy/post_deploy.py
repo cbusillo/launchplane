@@ -1,5 +1,6 @@
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
+from control_plane.filestore_permissions import FILESTORE_PERMISSION_PROGRAM
 from control_plane.production_recipient_evidence import (
     WRITER_ACTION_MARKER,
     WRITER_ACTIONS,
@@ -3185,8 +3186,7 @@ workflow_identity_key=$(docker exec -u root \
             filestore_database_path="$filestore_database_path/$ODOO_DATABASE_NAME"
         fi
         mkdir -p "$ODOO_FILESTORE_ROOT" "$filestore_database_path"
-        chown -R "$target_owner" "$filestore_database_path"
-        chmod -R ug+rwX "$filestore_database_path"
+        python3 -I -c "import base64;exec(base64.b64decode(\"{base64.b64encode(FILESTORE_PERMISSION_PROGRAM.encode()).decode()}\"))" "$filestore_database_path" "$target_owner"
 
         rm -rf "$WORKFLOW_SSH_DIR"
         install -d -m 700 -o "$WORKFLOW_UID" -g "$WORKFLOW_GID" "$WORKFLOW_SSH_DIR"

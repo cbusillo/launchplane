@@ -25,7 +25,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.volumes: dict[str, dict[str, Any]] = {}
         for name in ("preview-data", "preview-db", "preview-logs"):
-            path = self.root / name / "_data"
+            path = self.root / "volumes" / name / "_data"
             path.mkdir(parents=True)
             (path / "needed-data").write_text("preserve me")
             self.volumes[name] = {
@@ -56,6 +56,8 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         self.calls.append(args)
         if args[0] == "ps":
             value = "\n".join(self.containers)
+        elif args[0] == "info":
+            value = str(self.root)
         elif args[:2] == ["volume", "ls"]:
             value = "\n".join(self.volumes)
         elif args[:2] == ["volume", "inspect"]:
@@ -136,7 +138,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         lower = self.root / CLEAN_SNAPSHOT_STATE_DIRECTORY / snapshot_id / "filestore"
         lower.mkdir(parents=True)
         name = "preview-data-filestore"
-        mountpoint = self.root / name / "_data"
+        mountpoint = self.root / "volumes" / name / "_data"
         mountpoint.mkdir(parents=True)
         self.volumes[name] = {
             "Name": name,
@@ -164,6 +166,14 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         self.assertEqual(self.run_program()[0], 1)
         self.spec["operation"] = "destroy"
         self.assertEqual(self.run_program()[0], 1)
+        self.containers.pop("foreign")
+        self.volumes.pop("preview-data")
+        self.containers["preview"]["Mounts"] = [
+            mount
+            for mount in self.containers["preview"]["Mounts"]
+            if mount["Name"] != "preview-data"
+        ]
+        self.assertEqual(self.run_program()[0], 0)
 
     def test_existing_local_data_is_preserved_by_read_only_inspection(self) -> None:
         status, evidence = self.run_program()
