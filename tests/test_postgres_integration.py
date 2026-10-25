@@ -4234,13 +4234,13 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
     def test_preview_drop_startup_joins_an_already_applied_delivery_drop(self) -> None:
         from control_plane.storage.migrations.versions import (
             e7c1d5e9a3b6_drop_retired_delivery_tables as held,
-            da72490fce13_join_topics_retirement as topics_join,
+            a5d9f1b3c7e4_join_archive_topics_retirement as archive_join,
         )
 
         with _isolated_postgres_database() as url:
             alembic_command.upgrade(_alembic_config(url), held.revision)
-            self.assertEqual(migrate_schema(database_url=url), topics_join.revision)
-            self.assertEqual(migrate_schema(database_url=url), topics_join.revision)
+            self.assertEqual(migrate_schema(database_url=url), archive_join.revision)
+            self.assertEqual(migrate_schema(database_url=url), archive_join.revision)
 
     def test_preview_drop_refuses_busy_table_and_retained_dependency(self) -> None:
         from control_plane.storage.migrations.versions import (
