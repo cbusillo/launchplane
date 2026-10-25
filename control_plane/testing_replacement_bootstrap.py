@@ -335,10 +335,6 @@ def bootstrap_plan(
         if (lane.context, lane.instance) == (request.context, "testing")
     )
     generation = store.read_fresh_odoo_testing_generation(product, request.context)
-    if generation is None and lane.base_url:
-        raise ValueError(
-            "An established testing address requires the native same-address testing rebuild."
-        )
     if generation is not None and (
         generation.operation_id != operation.operation_id
         or generation.target_id != resources.target_id

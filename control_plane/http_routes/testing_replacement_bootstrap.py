@@ -29,6 +29,7 @@ from control_plane.testing_replacement_bootstrap import (
     bootstrap_plan_payload,
     bootstrap_wire_payload,
 )
+from control_plane.testing_replacement_resources import NativeTestingRebuildRequired
 
 
 def register_testing_replacement_bootstrap_routes(
@@ -69,7 +70,7 @@ def register_testing_replacement_bootstrap_routes(
                     result = await run_in_worker_thread(
                         lambda: bootstrap_plan_payload(bootstrap_plan(record_store, product, body))
                     )
-                except TestingBootstrapPrerequisiteError as error:
+                except (TestingBootstrapPrerequisiteError, NativeTestingRebuildRequired) as error:
                     refuse(409, error.code, str(error))
             elif body.mode == "readback":
                 result = await run_in_worker_thread(adapter.readback)

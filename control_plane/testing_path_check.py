@@ -21,6 +21,8 @@ from control_plane.contracts.odoo_walkthrough import (
 from control_plane.testing_replacement_resources import (
     resource_context,
     TestingReplacementResourcesRequest,
+    NativeTestingRebuildRequired,
+    require_legacy_testing_target,
 )
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.testing_initial_generation import (
@@ -92,6 +94,8 @@ def read_testing_prerequisites(
         except TestingCredentialVersionsMissing:
             state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING
             description = "Configure the missing managed local passwords before comparing testing and production."
+        except NativeTestingRebuildRequired as error:
+            state, code, description = "blocked", error.code, str(error)
         except TestingBootstrapPrerequisiteError as error:
             state, code = "unknown" if error.unavailable else "blocked", error.code
             description = str(error)  # Fixed code-owned text, never the underlying exception.
@@ -272,6 +276,8 @@ def read_testing_prerequisites(
         provider = store.read_provider_target_record(context_name=context, instance_name="testing")
         if target.target_type != "compose" or provider.target_id != target_id.target_id:
             raise ValueError("Testing resource authority disagrees.")
+        if intent != "provision":
+            require_legacy_testing_target(store, target, target_id.target_id)
         if target.pending_public_host_effects:
             raise ValueError("Testing has pending route effects.")
         if any(

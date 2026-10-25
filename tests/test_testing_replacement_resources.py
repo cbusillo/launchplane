@@ -16,6 +16,7 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.testing_replacement_resources import (
     ROUTE,
     TestingReplacementResourcesRequest,
+    NativeTestingRebuildRequired,
     resource_request_payload,
     resource_wire_payload,
 )
@@ -125,6 +126,28 @@ class TestingReplacementResourceHttpTests(
 ):
     def setUp(self) -> None:
         TestingReplacementResourceFixture.__init__(self, self)
+
+    async def test_native_lane_keeps_its_address_before_legacy_resource_allocation(self) -> None:
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        ).model_copy(update={"source_label": "service:testing-rebuild"})
+        self.store.write_dokploy_target_record(target)
+        with patch(
+            "control_plane.testing_replacement_resources.source.read_dokploy_config"
+        ) as provider:
+            response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], NativeTestingRebuildRequired.code)
+        provider.assert_not_called()
+        preparation = self.store.read_disposable_resource_preparation(self.operation.operation_id)
+        assert preparation is not None
+        self.assertFalse(preparation.replacement_target_id)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            target,
+        )
 
     async def test_unused_capacity_read_refusal_is_rejected_before_a_provider_checkpoint(
         self,
