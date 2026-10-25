@@ -417,11 +417,14 @@ class PrivateTestingTransportTests(unittest.TestCase):
 
     def test_foreign_provider_metadata_and_attached_shared_network_are_refused(self) -> None:
         original = deepcopy(self.compose)
+        change: dict[str, object]
         for change in (
             {"labels": {"dokploy.application.id": "foreign", "dokploy.service": "bridge"}},
             {"labels": {"dokploy.application.id": "fixture-testing", "dokploy.service": "foreign"}},
             {"labels": ["malformed"]},
             {"networks": ["dokploy-network"]},
+            {"networks": {}},
+            {"networks": ["${RECIPIENT_NET:-dokploy-network}"]},
         ):
             self.compose = deepcopy(original)
             self.compose["services"]["bridge"].update(change)

@@ -104,7 +104,8 @@ qualifies the recipient.
 
 Dokploy conversion may declare its standard external network without attaching
 a service. Verification ignores only that exact unused declaration when the
-reviewed source has no networks. Service attachments, other network definitions
+reviewed source has no networks and every service omits network wiring.
+Service attachments, other network definitions
 and every other part of the render must still match the reviewed source.
 
 Before any provider effect, a rejected attempt may be replaced by a fresh reviewed

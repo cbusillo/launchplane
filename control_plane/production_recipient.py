@@ -716,7 +716,6 @@ class ProductionRecipientAdapter:
             raise RecipientSourceNotMaterialized("The recipient source is not materialized.")
         actual = read_provider_compose(converted)
         actual.pop("name", None)
-        compose.discard_unused_dokploy_network(actual, expected=expected)
         for name, service in actual.get("services", {}).items():
             labels = service.pop("labels", {})
             if isinstance(labels, list):
@@ -746,7 +745,13 @@ class ProductionRecipientAdapter:
                 raise RecipientAuthorityChanged(
                     "Provider-added labels are not private recipient metadata."
                 )
-        if interpolate(actual, values) != interpolate(expected, values):
+        actual = interpolate(actual, values)
+        expected = interpolate(expected, values)
+        if not expected.get("networks") and all(
+            "networks" not in service for service in actual["services"].values()
+        ):
+            compose.discard_unused_dokploy_network(actual, expected=expected)
+        if actual != expected:
             raise RecipientAuthorityChanged(
                 "The actual provider render differs from reviewed source and limits."
             )

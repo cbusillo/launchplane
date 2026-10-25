@@ -790,6 +790,26 @@ class ActivationTests(unittest.TestCase):
         local.assertEqual(local.run_activation().response_status_code, 202)
         local.assertEqual(local.store.list_secret_versions(secret_id="testing-password"), versions)
 
+    def test_private_source_network_survives_unused_provider_metadata(self) -> None:
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        document: dict[str, Any] = deepcopy(COMPOSE)
+        document["networks"] = {"backend": {"internal": True}}
+        document["services"]["web"]["networks"] = ["backend"]
+        with patch(
+            "control_plane.testing_activation.read_product_compose",
+            return_value=json.dumps(document),
+        ):
+            self.adapter.request = self.request.model_copy(
+                update={"reviewed_plan_sha256": self.adapter.current().plan_sha256}
+            )
+            self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
+            production,
+        )
+
     def test_activation_and_original_key_replay_preserve_production_old_target_hold_and_fence(
         self,
     ) -> None:

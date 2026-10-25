@@ -476,7 +476,7 @@ class ProductionRecipientTests(unittest.TestCase):
 
     def converted_with_unused_provider_network(self, **kwargs: Any) -> str:
         document = json.loads(self.provider[kwargs["compose_id"]]["composeFile"])
-        document["networks"] = {"dokploy-network": {"external": True}}
+        document.setdefault("networks", {})["dokploy-network"] = {"external": True}
         return json.dumps(document)
 
     def test_unused_provider_network_allows_original_key_reconciliation(self) -> None:
@@ -514,6 +514,10 @@ class ProductionRecipientTests(unittest.TestCase):
         for networks, attachment in (
             ({"dokploy-network": {"external": True}}, ["dokploy-network"]),
             ({"dokploy-network": {"external": True}}, {"dokploy-network": {}}),
+            (
+                {"dokploy-network": {"external": True}},
+                ["${RECIPIENT_NET:-dokploy-network}"],
+            ),
             ({"dokploy-network": {"external": True, "name": "foreign-network"}}, None),
             ({"dokploy-network": {"external": 1}}, None),
             ({"foreign-network": {"external": True}}, None),
@@ -531,6 +535,31 @@ class ProductionRecipientTests(unittest.TestCase):
                     self.assertRaises(ValueError),
                 ):
                     self.adapter.verify(saved)
+        self.assert_old_preserved()
+
+    def test_provider_network_is_not_normalized_for_declared_source_networks(self) -> None:
+        self.document["networks"] = {"backend": {"internal": True}}
+        self.document["services"]["web"]["networks"] = ["backend"]
+        self.adapter.request = self.body.model_copy(
+            update={"reviewed_plan_sha256": self.adapter.current().plan_sha256}
+        )
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=self.converted_with_unused_provider_network,
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+        self.assert_old_preserved()
+
+    def test_interpolated_source_network_cannot_join_provider_network(self) -> None:
+        self.document["services"]["web"]["networks"] = ["${RECIPIENT_NET:-dokploy-network}"]
+        self.adapter.request = self.body.model_copy(
+            update={"reviewed_plan_sha256": self.adapter.current().plan_sha256}
+        )
+        with patch(
+            "control_plane.production_recipient.compose.fetch_dokploy_converted_compose_file",
+            side_effect=self.converted_with_unused_provider_network,
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
         self.assert_old_preserved()
 
     def test_storage_alias_ports_missing_limits_buffer_pool_or_mutable_app_image_refuse(
