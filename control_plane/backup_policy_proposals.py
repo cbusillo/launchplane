@@ -19,8 +19,10 @@ from control_plane.contracts.privileged_operation import (
     privileged_operation_pre_state_digest,
 )
 from control_plane.durable_operation_authorization import (
+    DurableOperationAuthorizationCaptureError,
+    capture_durable_operation_authorization,
+    managed_github_id_rule_allows,
     read_active_authz_policy_record,
-    require_single_managed_github_id_rule_identity,
 )
 from control_plane.http_routes.support import AuthorizationAllows, HttpErrorFactory
 from control_plane.privileged_operation_registry import plan_backup_policy_proposal
@@ -37,6 +39,10 @@ from control_plane.service_auth import (
     LocalOperatorIdentity,
     TerminalAgentIdentity,
 )
+
+
+class BackupPolicyDecisionAuthorizationError(PermissionError):
+    pass
 
 
 def propose_backup_policy(
@@ -104,7 +110,9 @@ def decide_backup_policy(
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> PrivilegedOperationWriteResult:
     if identity.role != "admin" or not isinstance(record.request, BackupPolicyProposalInput):
-        raise ValueError("Backup policy decisions require a signed-in administrator.")
+        raise BackupPolicyDecisionAuthorizationError(
+            "Backup policy decisions require a signed-in administrator."
+        )
     policy = record.request.authority.policy
     target = AuthorizationTarget(scope="instance", instances=(policy.instance,))
     if not authorization_allows(
@@ -114,31 +122,13 @@ def decide_backup_policy(
         context=policy.context,
         target=target,
     ):
-        raise ValueError("Backup policy decision is unauthorized.")
-    active = read_active_authz_policy_record(record_store)
-    rule = require_single_managed_github_id_rule_identity(
-        policy=active.policy,
-        identity=identity,
-        action="production_backup_authority.write",
-        product=policy.product,
-        context=policy.context,
-        target=target,
-    )
+        raise BackupPolicyDecisionAuthorizationError("Backup policy decision is unauthorized.")
     actor = PrivilegedOperationActor(
         identity_type="github_human", github_id=identity.github_id, login=identity.login
     )
-    if decision == "decline":
-        return cancel_privileged_operation(
-            record_store=record_store,
-            operation_id=record.operation_id,
-            actor_github_id=actor.github_id,
-            actor_login=actor.login,
-            source_event_id=source_event_id,
-            reason="Director declined the proposed backup policy.",
-            now=now,
-        )
     if (
-        record.status in {"approved", "executing", "executed", "execution_failed"}
+        decision == "approve"
+        and record.status in {"approved", "executing", "executed", "execution_failed"}
         and record.approval is not None
     ):
         store = require_privileged_operation_store(record_store)
@@ -151,6 +141,44 @@ def decide_backup_policy(
                 and event.actor == actor
             ):
                 return PrivilegedOperationWriteResult("replayed", record, event)
+    active = read_active_authz_policy_record(record_store)
+    try:
+        authorization = capture_durable_operation_authorization(
+            identity=identity,
+            action="production_backup_authority.write",
+            product=policy.product,
+            context=policy.context,
+            instances=(policy.instance,),
+            policy_record=active,
+            authorized_at=now().astimezone(timezone.utc).isoformat(),
+        )
+    except DurableOperationAuthorizationCaptureError as error:
+        raise BackupPolicyDecisionAuthorizationError(
+            "Backup decisions require supported immutable human authority."
+        ) from error
+    if authorization.grant == "policy_rule" and not managed_github_id_rule_allows(
+        policy=active.policy,
+        github_id=identity.github_id,
+        managed_set_id=authorization.managed_set_id,
+        managed_rule_id=authorization.managed_rule_id,
+        action=authorization.action,
+        product=authorization.product,
+        context=authorization.context,
+        target=target,
+    ):
+        raise BackupPolicyDecisionAuthorizationError(
+            "Backup decisions require immutable human authority."
+        )
+    if decision == "decline":
+        return cancel_privileged_operation(
+            record_store=record_store,
+            operation_id=record.operation_id,
+            actor_github_id=actor.github_id,
+            actor_login=actor.login,
+            source_event_id=source_event_id,
+            reason="Director declined the proposed backup policy.",
+            now=now,
+        )
     if record.status == "planned":
         fresh = plan_backup_policy_proposal(record_store, record.request)
         if fresh != record.evidence:
@@ -168,8 +196,11 @@ def decide_backup_policy(
         policy_revision=active.revision,
         policy_sha256=active.policy_sha256,
         policy_source=active.source,
-        managed_set_id=rule.managed_set_id,
-        managed_rule_id=rule.managed_rule_id,
+        managed_set_id=authorization.managed_set_id,
+        managed_rule_id=authorization.managed_rule_id,
+        grant="policy_administrator"
+        if authorization.grant == "policy_administrator"
+        else "policy_rule",
         expires_at=record.expires_at,
         reason="Director approved the service-pinned backup policy.",
         rollback_class="policy_cas",

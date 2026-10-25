@@ -641,8 +641,13 @@ class PrivilegedOperationApproval(BaseModel):
     policy_revision: int = Field(ge=1)
     policy_sha256: str
     policy_source: str
-    managed_set_id: str
-    managed_rule_id: str
+    managed_set_id: str = ""
+    managed_rule_id: str = ""
+    grant: Literal["policy_rule", "policy_administrator"] = Field(
+        default="policy_rule",
+        exclude_if=lambda value: value == "policy_rule",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     expires_at: str
     reason: str = Field(min_length=1, max_length=4000)
     rollback_class: Literal["key_retained", "policy_cas", "activation_revoke"] = "key_retained"
@@ -668,8 +673,6 @@ class PrivilegedOperationApproval(BaseModel):
         for field_name in (
             "policy_record_id",
             "policy_source",
-            "managed_set_id",
-            "managed_rule_id",
             "reason",
         ):
             object.__setattr__(
@@ -677,6 +680,16 @@ class PrivilegedOperationApproval(BaseModel):
                 field_name,
                 required_token(str(getattr(self, field_name)), field_name),
             )
+        if self.grant == "policy_administrator":
+            if self.descriptor_id != "production-backup-policy":
+                raise ValueError("Administrator backup approval is limited to backup policies.")
+            if self.managed_set_id or self.managed_rule_id:
+                raise ValueError("Administrator backup approval carries no managed rule.")
+        else:
+            for field_name in ("managed_set_id", "managed_rule_id"):
+                object.__setattr__(
+                    self, field_name, required_token(str(getattr(self, field_name)), field_name)
+                )
         if self.expires_at:
             object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
         return self
