@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import click
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.text_fields import require_text
@@ -1697,6 +1698,38 @@ def _execute_refresh(
                 target_type="compose",
                 target_id=compose_id,
             )
+        from control_plane.preview_filestore import prepare_preview_filestore
+
+        def prepare_filestore(dispatch: Callable[[], None]) -> None:
+            with guard():
+                checkpoint_provider_effect("preview_filestore_prepare")
+                dispatch()
+
+        filestore = None
+        current_compose = yaml.safe_load(str(target_payload.get("composeFile") or ""))
+        retained_filestore = isinstance(current_compose, dict) and "odoo_filestore" in (
+            current_compose.get("volumes") or {}
+        )
+        if restore_clean_snapshot or retained_filestore:
+            if restore_clean_snapshot:
+                memory_capacity.require_preview_host_memory_capacity(
+                    host=host,
+                    token=token,
+                    server_id=str(target_payload.get("serverId") or ""),
+                    database_url=database_url,
+                )
+            filestore = prepare_preview_filestore(
+                host=host,
+                token=token,
+                server_id=str(target_payload.get("serverId") or ""),
+                project=str(target_payload.get("appName") or ""),
+                data_volume=environment_values["ODOO_DATA_VOLUME"],
+                database_volume=environment_values["ODOO_DB_VOLUME"],
+                logs_volume=environment_values["ODOO_LOG_VOLUME"],
+                database_name=environment_values["ODOO_DB_NAME"],
+                snapshot=plan.clean_snapshot if restore_clean_snapshot else None,
+                dispatch_guard=prepare_filestore,
+            )
         compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=request.image_reference,
             hold_web_until_integration_readback=web_held_until_integration_readback(
@@ -1708,6 +1741,7 @@ def _execute_refresh(
             mount_workflow_ssh=restore_upstream,
             protect_workflow_ssh=restore_upstream,
             domain_certificate_type=plan.domain_certificate_type,
+            preview_filestore=filestore,
         )
 
         def qualify_resources() -> None:

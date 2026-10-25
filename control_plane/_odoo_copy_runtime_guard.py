@@ -4,6 +4,7 @@ import inspect
 
 from control_plane.copy_readback_diagnostics import CopyReadbackRefused, readback_predicate_library
 from control_plane._odoo_snapshot_files import CLEAN_SNAPSHOT_STATE_DIRECTORY
+from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
 
 COPY_WEB_GATE_READ_PROGRAM = r"""
 import hashlib,os,sys
@@ -20,7 +21,8 @@ else:
 
 
 VOLUME_BACKING_INSPECTION_LIBRARY = (
-    readback_predicate_library()
+    PREVIEW_FILESTORE_LIBRARY
+    + readback_predicate_library()
     + inspect.getsource(CopyReadbackRefused)
     + r"""
 
@@ -32,11 +34,17 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
     paths, identities, backings = [], set(), {}
     for name in sorted(volumes):
         volume = json.loads(docker("volume", "inspect", name))[0]
-        if volume.get("Driver") != "local" or volume.get("Options") not in (None, {}):
+        overlay = volume.get('Options', {}).get('type') == 'overlay' if isinstance(volume.get('Options'), dict) else False
+        if overlay:
+            if expected_binding is not None or not name.endswith('-filestore'):
+                raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
+            _, _, _, private = inspect_preview_filestore(name.removesuffix('-filestore'),
+                (volume.get('Labels') or {}).get('com.docker.compose.project'))
+        elif volume.get("Driver") != "local" or volume.get("Options") not in (None, {}):
             raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
         if expected_binding is not None and (volume.get("Labels") or {}).get("io.launchplane.testing-resources") != expected_binding:
             raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
-        backing = Path(volume["Mountpoint"]).resolve(strict=True)
+        backing = (private / 'upper' if overlay else Path(volume["Mountpoint"])).resolve(strict=True)
         identity = (backing.stat().st_dev, backing.stat().st_ino)
         if (expected_binding is not None or require_distinct) and identity in identities:
             raise CopyReadbackRefused(ReadbackPredicate.BACKING_DISTINCT)
@@ -49,10 +57,14 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
         for mount in container.get("Mounts", []):
             if not mount.get("Source"):
                 continue
-            source_path = Path(mount["Source"]).resolve(strict=False)
+            source_paths = [Path(mount['Source'])]
+            if mount.get('Type') == 'volume' and mount.get('Name'):
+                foreign = json.loads(docker('volume', 'inspect', mount['Name']))[0]
+                source_paths = volume_storage_paths(foreign)
+            source_paths = [path.resolve(strict=False) for path in source_paths]
             if any(source_path == path or source_path.is_relative_to(path)
                    or (mount.get("RW", True) and path.is_relative_to(source_path))
-                   for path in paths):
+                   for path in paths for source_path in source_paths):
                 raise CopyReadbackRefused(ReadbackPredicate.STORAGE_CONSUMERS)
     return backings
 """
@@ -94,6 +106,12 @@ def inspect_copy_runtime(spec, *, expected_instance):
             containers[service] = (identifier, container)
     if set(containers) != {"web", "database", "script-runner"}:
         raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
+    filestore_name = names['data'] + '-filestore'
+    overlay_filestore = expected_instance == 'preview' and any(
+        mount.get('Name') == filestore_name for _, item in containers.values() for mount in item.get('Mounts', []))
+    if overlay_filestore:
+        inspect_preview_filestore(names['data'], project)
+        volumes.add(filestore_name)
     for service, (identifier, container) in containers.items():
         configuration = container["Config"]
         if container.get("HostConfig", {}).get("Privileged") or container.get("HostConfig", {}).get("NetworkMode") == "host" or container.get("HostConfig", {}).get("PidMode") not in (None, "", "private"):
@@ -101,6 +119,11 @@ def inspect_copy_runtime(spec, *, expected_instance):
         if any(container.get("HostConfig", {}).get("PortBindings", {}).values()):
             raise CopyReadbackRefused(ReadbackPredicate.PORTS)
         expected = {names['database']} if service == "database" else {names['data'], names['logs']}
+        if overlay_filestore and service != 'database':
+            expected.add(filestore_name)
+            overlays = [mount for mount in container.get('Mounts', []) if mount.get('Name') == filestore_name]
+            if len(overlays) != 1 or overlays[0].get('Destination') != '/volumes/data/filestore/' + database:
+                raise CopyReadbackRefused(ReadbackPredicate.MOUNTS)
         mounts = container.get("Mounts")
         if not isinstance(mounts, list) or {item.get("Name") for item in mounts} != expected or any(item.get("Type") != "volume" for item in mounts):
             raise CopyReadbackRefused(ReadbackPredicate.MOUNTS)

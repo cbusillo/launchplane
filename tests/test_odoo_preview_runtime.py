@@ -1820,12 +1820,16 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                         "composeId": "compose-cm-pr-45",
                         "environmentId": "env-cm-preview",
                         "serverId": "server-nonprod",
+                        "appName": dry_run.compose_name,
                         "env": f"{PREVIEW_FISHBOWL_SOURCE_ENV_KEY}={previous_source}"
                         if previous_source
                         else "",
                     },
                 ),
             ) as fetch_target_payload,
+            patch(
+                "control_plane.preview_filestore.prepare_preview_filestore", return_value=None
+            ) as prepare_filestore,
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
             ) as sync_source,
@@ -1880,6 +1884,9 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "pass")
+        if snapshot is not None:
+            self.assertEqual(prepare_filestore.call_args.kwargs["snapshot"], snapshot)
+            self.assertEqual(prepare_filestore.call_args.kwargs["project"], dry_run.compose_name)
         self.assertEqual(
             result.module_install_update_evidence.get("upstream_restore_requested"),
             str(restore_upstream).lower(),

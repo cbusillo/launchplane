@@ -114,18 +114,7 @@ def wait_for_idle_preview_runner(containers):
 def restore_preview_snapshot(containers, source_lock):
     wait_for_idle_preview_runner(containers)
     snapshot = spec['snapshot']
-    binding = {key: spec[key] for key in ('compose_project', 'database_name', 'preview_volumes')}
-    binding.update({key: snapshot[key] for key in ('server_id', 'product', 'context')})
-    binding['volume_backings'] = {}
-    for role, name in spec['preview_volumes'].items():
-        volume = json.loads(docker('volume', 'inspect', name))[0]
-        backing = Path(volume['Mountpoint'])
-        created = volume.get('CreatedAt')
-        if not isinstance(created, str) or not created:
-            raise RuntimeError('Preview storage creation identity is unavailable')
-        metadata = backing.stat()
-        binding['volume_backings'][role] = {'created_at': created, 'path': str(backing),
-            'device': metadata.st_dev, 'inode': metadata.st_ino}
+    binding = preview_attempt_binding(spec['compose_project'], spec['database_name'], spec['preview_volumes'], snapshot)
 
     attempt_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
     attempts = clean_snapshot_root(snapshot['snapshot_id']).parent / 'preview-attempts'
@@ -178,11 +167,17 @@ def restore_preview_snapshot(containers, source_lock):
     if (volume.get('Driver') != 'local' or volume.get('Options')
         or (volume.get('Labels') or {}).get('com.docker.compose.project') != spec['compose_project']):
         raise RuntimeError('Preview data volume is not exclusively owned')
-    clones = {}
+    overlay_mounts = [mount for mount in containers['script-runner'][1]['Mounts']
+        if mount.get('Name') == mounts[0]['Name'] + '-filestore']
+    overlay = inspect_preview_filestore(mounts[0]['Name'], spec['compose_project']) if overlay_mounts else None
+    if overlay and overlay[2] != path / 'filestore':
+        raise RuntimeError('Preview overlay differs from its retained snapshot')
+    if (present == '0' or restart) and overlay is None:
+        raise RuntimeError('A new snapshot preview requires its overlay filestore')
     if (present == '0' or restart) and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
-        containers, snapshot['storage_budget'], runner_staging_bytes=(path / 'database.dump').stat().st_size,
-        host_staging_bytes=0, filestore_clone_source=path.parent, clone_decisions=clones):
-        raise RuntimeError('Preview snapshot clone lacks reviewed storage headroom')
+        containers, {**snapshot['storage_budget'], 'filestore_bytes': 0},
+        runner_staging_bytes=(path / 'database.dump').stat().st_size, host_staging_bytes=0):
+        raise RuntimeError('Preview overlay lacks reviewed storage headroom')
     mounted = docker('ps', '--all', '--filter', 'volume=' + mounts[0]['Name'],
         '--format', '{{.ID}}').decode().splitlines()
     if set(mounted) != {runner, containers['web'][0]}:
@@ -192,20 +187,16 @@ def restore_preview_snapshot(containers, source_lock):
     if restart:
         docker('exec', containers['database'][0], 'sh', '-c', 'dropdb --if-exists --force -U "$POSTGRES_USER" -- "$1"', '_', database)
         present = '0'
-    docker('pause', runner)
-    try:
-        destination = Path(volume['Mountpoint']) / 'filestore' / database
-        if destination.resolve() != destination.absolute():
-            raise RuntimeError('Preview filestore is aliased')
-        if present == '0':
-            if destination.exists():
-                if not owned_unreleased:
-                    raise RuntimeError('Preserve preview filestore without an owned unreleased attempt')
-                shutil.rmtree(destination)
-            write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False})
-            copy_filestore(path / 'filestore', destination, clones.get('data', False))
-    finally:
-        docker('unpause', runner)
+    if present == '0':
+        write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False})
+        if owned_unreleased:
+            docker('stop', runner)
+            _, _, lower, private = overlay
+            for directory in (private / 'upper', private / 'work'):
+                shutil.rmtree(directory)
+                directory.mkdir(mode=0o700)
+                os.chown(directory, lower.stat().st_uid, lower.stat().st_gid)
+            docker('start', runner)
     dump = '/tmp/preview-snapshot-' + uuid.uuid4().hex + '.dump'
     try:
         if present == '0':
@@ -214,7 +205,9 @@ def restore_preview_snapshot(containers, source_lock):
         gid = docker('exec', runner, 'id', '-g').decode().strip()
         if not uid.isdigit() or not gid.isdigit():
             raise RuntimeError('Preview workflow identity is unavailable')
-        docker('exec', '-u', 'root', runner, 'chown', '-R', uid + ':' + gid, '/volumes/data', *([dump] if present == '0' else []))
+        if overlay and (overlay[2].stat().st_uid, overlay[2].stat().st_gid) != (int(uid), int(gid)):
+            raise RuntimeError('Preview overlay ownership differs from its workflow identity')
+        docker('exec', '-u', 'root', runner, 'chown', uid + ':' + gid, '/volumes/data', *([dump] if present == '0' else []))
         fcntl.flock(source_lock, fcntl.LOCK_UN)
         arguments = ['exec', '-i']
         environment = {**spec['workflow_environment'], 'PLATFORM_INSTANCE': 'preview',

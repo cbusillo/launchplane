@@ -57,7 +57,7 @@ retiring the volume removes it too. Every child of a restore inherits its
 namespace lock, so staging is never removed while a child still runs.
 
 The space check charges the SSH filestore once, as staging, and the runner the
-dump. Snapshot and preview filestores retain their full capacity budget even
+dump. Snapshot filestores retain their full capacity budget even
 when a real `cp --reflink=always` probe proves block sharing. Cloning saves
 physical pool space, but dataset quotas can still charge each reference;
 the available filesystem bytes must cover the whole admitted budget and reserve.
@@ -92,12 +92,27 @@ host aliases before copying. Its schedule
 uses the immutable image bound to the preview request, without requiring
 a separate image setting in the runtime environment. Snapshot schedules use
 the existing restore execution budget, independently of the shorter deployment
-wait. An explicit schedule execution timeout still takes precedence. Its filestore
-is cloned or copied into exclusively owned storage with the preview writer
-stopped and runner paused. It restores the frozen dump into a missing
+wait. An explicit schedule execution timeout still takes precedence. A new preview
+uses a Docker local overlay volume with the frozen snapshot filestore as its
+read-only lower. Its private upper and work directories live beside the preview
+data volume's `_data`, outside application mounts. Docker mounts the overlay at
+the preview database's filestore directory in both application containers.
+The volume uses `userxattr`; there is no full-copy fallback. Preparation refuses
+to replace a populated database or filestore. Later deploys retain an existing
+overlay and its original source, even when the newest snapshot changes.
+
+Admission charges the database, dump staging and existing reserve against real
+filesystem availability. The shared lower is already allocated and adds no
+per-preview filestore charge. Upper writes consume the unchanged host quota.
+The configured memory floor also applies to a new snapshot restore on an
+existing provider target. Restore avoids recursive ownership changes that
+would copy every lower file into the upper. The lower must already match the
+workflow UID and GID.
+
+The restore stops the preview writer and restores the frozen dump into a missing
 database, then uses the existing credential, sanitizer, module-update and
 connection-readback boundary before starting web. Existing preview databases
-and Client edits are preserved. A failed initial clone carries an exact volume-generation-bound ownership
+and Client edits are preserved. A failed initial restore carries an exact volume-generation-bound ownership
 receipt and a preview-specific SQL witness. An owned attempt that never opened
 to a user can restart from its verified source after a partial restore or failed
 module build. Ready metadata is fsynced before either gate or web is released.
@@ -107,7 +122,7 @@ prove a preview restore. Retry evidence records both the requested snapshot and
 the original snapshot retained by the attempt.
 
 Each preview restore takes a nonblocking exclusive lock for its Compose project
-before runtime inspection. The lock spans copying, restore, sanitization, module
+before runtime inspection. The lock spans preparation, restore, sanitization, module
 work and cleanup. Every host subprocess inherits its descriptor, so a retry
 refuses while an earlier run or its surviving children still hold it. Different
 preview targets can restore concurrently. The persistent target lock is separate
@@ -121,9 +136,8 @@ active exec roots; it does not establish custody of arbitrary in-container
 descendants after their exec root dies.
 
 PostgreSQL 17 and separate preview database volumes still require a full
-database restore. The #4057 capability provides filestore reflinks where the
-actual filesystem supports them, with full-copy fallback. It does not provide
-database copy-on-write.
+database restore. Snapshot capture retains its existing clone-or-copy behavior;
+only new preview filestores use overlays. This does not provide database copy-on-write.
 
 ## Product transition and custody
 
@@ -155,7 +169,12 @@ Existing Client-used previews remain protected.
 Snapshot bytes remain in private host custody, independently of testing or
 preview volume retirement. Cleanup keeps the published source and its predecessor,
 unexpired issued preview plans, active or uncertain preview operations, and
-incomplete host clone attempts. Only obsolete copies with matching immutable
+incomplete host restore attempts. Every overlay volume also pins its lower
+snapshot, including completed or sleeping previews and volumes without running
+containers. Preparation creates that pin under the shared snapshot lock before
+deployment. Preview retirement removes the overlay and private writable backing
+with the preview's other volumes. Unknown overlay custody defers snapshot
+retirement. Only obsolete copies with matching immutable
 service receipts may be removed. Host copying uses a shared read lock; retirement uses an exclusive lock. The
 read lock is released after copying, before sanitizer and module work. Attempt
 metadata is retired only after every original volume and physical backing is

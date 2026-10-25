@@ -1,8 +1,10 @@
 from control_plane._odoo_snapshot_files import SNAPSHOT_FILES_LIBRARY
+from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
 
 
 CLEAN_TESTING_SNAPSHOT_LIBRARY = (
     SNAPSHOT_FILES_LIBRARY
+    + PREVIEW_FILESTORE_LIBRARY
     + r"""
 import json
 from pathlib import Path
@@ -112,6 +114,14 @@ def retire_clean_snapshot_bytes(spec, root):
                 raise RuntimeError('Snapshot retirement custody is unavailable')
             shutil.rmtree(tombstone)
         pinned = set()
+        overlay_names = docker('volume', 'ls', '--filter', 'label=io.launchplane.preview-snapshot', '--format', '{{.Name}}').decode().splitlines()
+        for name in overlay_names:
+            if not name.endswith('-filestore'):
+                raise RuntimeError('Snapshot overlay reader identity is unavailable')
+            volume = json.loads(docker('volume', 'inspect', name))[0]
+            project = (volume.get('Labels') or {}).get('com.docker.compose.project')
+            _, _, lower, _ = inspect_preview_filestore(name.removesuffix('-filestore'), project)
+            pinned.add(lower.parent.name)
         attempts = root / 'preview-attempts'
         inventory = None
         inventory_read = False
