@@ -7,8 +7,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
-
 
 EveryCodeWorkRequestSource = Literal["github_issue_label", "manual", "reconciliation"]
 EveryCodeWorkRequestState = Literal["queued", "claimed", "running", "done", "blocked"]
@@ -332,111 +330,6 @@ def recover_stale_every_code_work_request(
             ),
         }
     )
-
-
-def close_every_code_work_request_for_pull_request(
-    record: EveryCodeWorkRequestRecord,
-    *,
-    pr_url: str,
-    merged: bool,
-    closed_at: str,
-) -> EveryCodeWorkRequestRecord | None:
-    normalized_pr_url = pr_url.strip()
-    if not normalized_pr_url:
-        raise ValueError("Every Code PR close update requires pr_url")
-    if not closed_at.strip():
-        raise ValueError("Every Code PR close update requires closed_at")
-    stored_pr_url = record.result_pr_url.strip()
-    if stored_pr_url and stored_pr_url != normalized_pr_url:
-        return None
-    if record.state in {"done", "blocked"}:
-        if not stored_pr_url or _every_code_request_has_pull_request_closure_summary(record):
-            return None
-        closure_summary = (
-            f"Linked pull request merged: {normalized_pr_url}"
-            if merged
-            else f"Linked pull request closed without merge: {normalized_pr_url}"
-        )
-        existing_summary = record.result_summary.strip()
-        summary = f"{closure_summary}\n{existing_summary}" if existing_summary else closure_summary
-        return record.model_copy(
-            update={
-                "updated_at": _latest_every_code_timestamp(record.updated_at, closed_at),
-                "result_summary": summary,
-            }
-        )
-
-    state: EveryCodeWorkRequestState = "done" if merged else "blocked"
-    summary = (
-        f"Linked pull request merged: {normalized_pr_url}"
-        if merged
-        else f"Linked pull request closed without merge: {normalized_pr_url}"
-    )
-    error_message = "" if merged else summary
-    updates: dict[str, object] = {
-        "state": state,
-        "updated_at": closed_at,
-        "finished_at": closed_at,
-        "result_pr_url": normalized_pr_url,
-        "result_summary": summary,
-        "error_message": error_message,
-    }
-    if not record.claimed_at.strip():
-        updates["claimed_at"] = closed_at
-    if not record.claimed_by_host.strip():
-        updates["claimed_by_host"] = "github-pull-request-close"
-    if not record.started_at.strip():
-        updates["started_at"] = closed_at
-    return record.model_copy(update=updates)
-
-
-def _every_code_request_has_pull_request_closure_summary(
-    record: EveryCodeWorkRequestRecord,
-) -> bool:
-    summary = record.result_summary.strip()
-    return summary.startswith("Linked pull request merged:") or summary.startswith(
-        "Linked pull request closed without merge:"
-    )
-
-
-def _latest_every_code_timestamp(current: str, candidate: str) -> str:
-    current_datetime = parse_launchplane_mutation_timestamp(
-        current, field_name="Every Code work request updated_at"
-    )
-    candidate_datetime = parse_launchplane_mutation_timestamp(
-        candidate, field_name="Every Code pull request closed_at"
-    )
-    return candidate if candidate_datetime > current_datetime else current
-
-
-def close_every_code_work_request_for_issue(
-    record: EveryCodeWorkRequestRecord,
-    *,
-    closed_at: str,
-    reason: str = "",
-) -> EveryCodeWorkRequestRecord | None:
-    if not closed_at.strip():
-        raise ValueError("Every Code issue close update requires closed_at")
-    if record.state in {"done", "blocked"}:
-        return None
-
-    normalized_reason = reason.strip().lower()
-    suffix = f" ({normalized_reason})" if normalized_reason else ""
-    summary = f"Source issue closed{suffix}: {record.issue_url.strip()}"
-    updates: dict[str, object] = {
-        "state": "done",
-        "updated_at": closed_at,
-        "finished_at": closed_at,
-        "result_summary": summary,
-        "error_message": "",
-    }
-    if not record.claimed_at.strip():
-        updates["claimed_at"] = closed_at
-    if not record.claimed_by_host.strip():
-        updates["claimed_by_host"] = "github-issue-close"
-    if not record.started_at.strip():
-        updates["started_at"] = closed_at
-    return record.model_copy(update=updates)
 
 
 def add_seconds_to_timestamp(timestamp: str, seconds: int) -> str:

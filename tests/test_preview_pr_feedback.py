@@ -205,7 +205,6 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
                     side_effect=[
                         {"user": {"login": "code-agent"}, "head": {"ref": "feature/preview"}},
                         {"user": {"login": "Mbanks89"}},
-                        {"owner": {"login": "cbusillo", "type": "User"}},
                         [{"name": "preview-ready"}],
                         {},
                         {},
@@ -254,13 +253,10 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
         self.assertIn(
             "Confirm the preview resolves: Improve image previews", source_issue_call.kwargs["body"]
         )
-        self.assertIn("/preview ok", source_issue_call.kwargs["body"])
-        self.assertNotIn("/preview approve", source_issue_call.kwargs["body"])
         self.assertIn("author%3AMbanks89", source_issue_call.kwargs["body"])
-        self.assertIn("assignee%3Acbusillo", source_issue_call.kwargs["body"])
-        self.assertEqual(github_request.call_args_list[3].kwargs["method"], "POST")
+        self.assertEqual(github_request.call_args_list[2].kwargs["method"], "POST")
         self.assertEqual(
-            github_request.call_args_list[3].kwargs["body"], {"labels": ["preview-ready"]}
+            github_request.call_args_list[2].kwargs["body"], {"labels": ["preview-ready"]}
         )
 
     def test_ready_feedback_updates_issue_comment_without_review_request(self) -> None:
@@ -303,7 +299,6 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
                             "head": {"ref": every_code_worktree_branch(request)},
                         },
                         {"user": {"login": "Mbanks89"}},
-                        {"owner": {"login": "cbusillo", "type": "User"}},
                         [{"name": "preview-ready"}],
                         {},
                         {},
@@ -341,7 +336,6 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(update_comment.call_args_list[0].kwargs["comment_id"], 123)
         self.assertEqual(update_comment.call_args_list[1].kwargs["comment_id"], 456)
-        self.assertIn("comment `/preview ok`", update_comment.call_args_list[1].kwargs["body"])
         self.assertNotIn("reviewer", update_comment.call_args_list[1].kwargs["body"].lower())
         self.assertEqual(
             [
