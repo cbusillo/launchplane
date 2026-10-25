@@ -529,6 +529,31 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBound
                 self.assertEqual(response.status_code, 409, response.text)
                 execute.assert_not_called()
 
+    async def test_destroyed_preview_refresh_refuses_stale_or_unknown_teardown_authority(
+        self,
+    ) -> None:
+        for verified in (False, True):
+            with self.subTest(verified=verified):
+                fixture = DirectorBoundedWritesFixture(self)
+                barrier = datetime.now(timezone.utc) + timedelta(seconds=1)
+                destroyed = fixture.preview.model_copy(
+                    update={
+                        "state": "destroyed",
+                        "serving_generation_id": "",
+                        "destroy_reason": _odoo_preview_destroy_reason(
+                            plan_id="newer-destroy", issued_at=barrier.isoformat()
+                        )
+                        if verified
+                        else "",
+                    }
+                )
+                fixture.store.write_preview_record(destroyed)
+                with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+                    response = await fixture.preview_apply()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], "odoo_preview_plan_stale")
+                execute.assert_not_called()
+
     async def test_existing_preview_rechecks_protection_between_effects(self) -> None:
         for operation in ("refresh", "destroy"):
             with self.subTest(operation=operation):

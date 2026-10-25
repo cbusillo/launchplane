@@ -438,8 +438,9 @@ only; they cannot admit runtime sync or another preview mutation. Unknown facts 
 observations retain their separate service-collector requirement. Same-key
 observation and lifecycle finalization remain available after evidence expires.
 A unique service preview is required. A fresh issued refresh plan can rebuild
-an owned destroyed preview, retaining its history until the new generation
-passes. The issued plan must postdate the completed teardown; unknown teardown
+an owned destroyed preview whose provider target still exists, retaining its
+history until the new generation passes. The issued plan must postdate the
+recorded teardown authority; unknown teardown
 authority and stale plans still refuse. Other disposable-lane operations do not
 gain permission from destroyed history. A staff hold or recorded `in_use`, `only_copy` or shared
 resource report refuses refresh even after that report expires or its binding
