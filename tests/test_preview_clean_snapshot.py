@@ -485,6 +485,44 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.run_script()
         self.assertIn(["docker", "start", "web"], self.calls)
 
+    def test_transient_health_probe_finishes_before_restore(self) -> None:
+        command = self.command
+        runner = self.containers["script-runner"]
+        runner["ExecIDs"] = ["health-probe"]
+        observations = 0
+
+        def health_probe(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            nonlocal observations
+            if arguments == ["docker", "inspect", "script-runner"]:
+                observations += 1
+                if observations > 2:
+                    runner["ExecIDs"] = []
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=health_probe):
+            self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_retry_recovers_paused_runner_before_exec_or_copy(self) -> None:
+        command = self.command
+        runner = self.containers["script-runner"]
+        runner["State"] = {"Status": "paused"}
+        self.paused = True
+
+        def paused_runner(
+            arguments: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            if arguments[:2] == ["docker", "exec"] and "script-runner" in arguments:
+                self.assertFalse(self.paused)
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=paused_runner):
+            self.run_script()
+        self.assertLess(
+            self.calls.index(["docker", "unpause", "script-runner"]),
+            self.calls.index(["docker", "stop", "web"]),
+        )
+
     def test_every_command_inherits_target_lock_and_child_blocks_retry_after_failure(self) -> None:
         command = self.command
         child: subprocess.Popen[bytes] | None = None

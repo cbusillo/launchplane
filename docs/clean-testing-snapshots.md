@@ -95,7 +95,11 @@ preview targets can restore concurrently. The persistent target lock is separate
 from the shared snapshot read lock, which is released after copying.
 Runtime inspection also requires the runner's Docker `ExecIDs` to be empty;
 an in-container restore can outlive its host CLI client. Active or unavailable
-exec custody refuses before any preview data or web state changes.
+exec custody refuses before any preview data or web state changes. An owned
+runner left paused by an interrupted copy is unpaused under the target lock;
+the idle check briefly retries to let a short health probe finish. This checks
+active exec roots; it does not establish custody of arbitrary in-container
+descendants after their exec root dies.
 
 PostgreSQL 17 and separate preview database volumes still require a full
 database restore. The #4057 capability provides filestore reflinks where the

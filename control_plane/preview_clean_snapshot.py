@@ -75,6 +75,7 @@ PREVIEW_CLEAN_SNAPSHOT_PROGRAM = (
 import base64
 import shutil
 import tempfile
+import time
 import uuid
 
 
@@ -97,10 +98,21 @@ def one_inspection(identifier):
     return rows[0]
 
 
+def wait_for_idle_preview_runner(containers):
+    runner, inspection = containers['script-runner']
+    if inspection.get('State', {}).get('Status') == 'paused':
+        docker('unpause', runner)
+    for attempt in range(3):
+        inspection = one_inspection(runner)
+        if 'ExecIDs' in inspection and inspection['ExecIDs'] in (None, []):
+            return
+        if attempt < 2:
+            time.sleep(0.1)
+    raise RuntimeError('Preview runner execution custody is active or unavailable')
+
+
 def restore_preview_snapshot(containers, source_lock):
-    runner_inspection = containers['script-runner'][1]
-    if 'ExecIDs' not in runner_inspection or runner_inspection['ExecIDs'] not in (None, []):
-        raise RuntimeError('Preview runner execution custody is active or unavailable')
+    wait_for_idle_preview_runner(containers)
     snapshot = spec['snapshot']
     binding = {key: spec[key] for key in ('compose_project', 'database_name', 'preview_volumes')}
     binding.update({key: snapshot[key] for key in ('server_id', 'product', 'context')})
