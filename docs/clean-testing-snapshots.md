@@ -34,7 +34,26 @@ qualified source. Existing guarded recovery owns retry and storage admission.
 The host saves a bounded PostgreSQL dump and an independent filestore copy
 outside every application volume. It verifies their hashes and atomically
 renames the completed directory. It uses the existing clone-or-copy behavior
-for the filestore; full-copy headroom remains required.
+for the filestore.
+
+## Storage
+
+An SSH refresh stages the source dump and filestore on disk in
+`launchplane-restore-staging` beside the testing data volume's `_data`
+directory, never in `/tmp`, which may be a RAM disk. The container cannot see
+that directory. Because it is on the volume's own filesystem, the filestore
+moves into the volume by rename, with the runner paused, and is never copied
+twice. The next restore removes staging that a killed run left behind;
+retiring the volume removes it too. Every child of a restore inherits its
+namespace lock, so staging is never removed while a child still runs.
+
+The space check charges the SSH filestore once, as staging, and the runner the
+dump. Copies from testing into the snapshot and from the snapshot into a new
+preview are charged zero only when a real `cp --reflink=always` probe between
+the same two filesystems succeeds; otherwise they are charged in full and
+refused when they do not fit. A copy admitted as a clone runs
+`cp --reflink=always` and fails rather than falling back to a full copy the
+check did not charge. Database restores are always charged in full.
 
 The newest qualified immutable database-backed capture is the preview source,
 separate from the current testing generation. Worker completion records it
@@ -108,8 +127,8 @@ proved gone or replaced. Unknown hard-crash partial directories remain in
 custody; they are never swept by filename.
 Unknown reader evidence preserves copies. Reviewed headroom is checked before
 testing stops; insufficient capacity keeps the previous source usable.
-PostgreSQL restore and full filestore-copy headroom are also required for a new
-preview. Neither cleanup path removes testing originals, backups or unknown files.
+PostgreSQL restore headroom, and filestore headroom unless a clone is proved,
+are also required for a new preview. Neither cleanup path removes testing originals, backups or unknown files.
 
 Obsolete snapshot retirement commits an atomic tombstone rename before deleting
 bytes, so an interrupted delete can finish on the next pass. Cleanup errors and

@@ -799,7 +799,7 @@ class TestingProviderDenied(Exception):
 
 def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False)
+        stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
@@ -905,6 +905,33 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
         # Keep the receipt even on success: original-key readback remains possible.
     finally:
         os.close(directory)
+
+
+def restore_lock_path(namespace):
+    return Path(tempfile.gettempdir()) / (namespace + "-copy.lock")
+
+
+def discard_interrupted_restore_staging(staging):
+    if staging.exists():
+        shutil.rmtree(staging)
+
+
+def unpause_runner_left_by_interrupted_landing(containers):
+    if containers["script-runner"][1].get("State", {}).get("Status") == "paused":
+        docker("unpause", containers["script-runner"][0])
+
+
+def move_staged_filestore_into_volume(runner, staged, destination):
+    docker("pause", runner)
+    try:
+        if destination.resolve() != destination:
+            raise RuntimeError("Testing filestore is aliased")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            os.rename(destination, staged.parent / "replaced-filestore")
+        os.rename(staged, destination)
+    finally:
+        docker("unpause", runner)
 
 
 def restore_main():
@@ -1054,6 +1081,7 @@ def restore_main():
             artifacts=files['artifacts']
         print(prefix+json.dumps({'type':'complete','runner':containers['script-runner'][1]['Id'],'resume':present=='1','artifacts':artifacts}),flush=True)
         return
+    unpause_runner_left_by_interrupted_landing(containers)
     present = docker("exec", "-i", containers["database"][0], "sh", "-c",
         'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
         "_", database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
@@ -1071,7 +1099,11 @@ def restore_main():
         files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
         staged_bytes = sum(item['size'] for item in files['chunks'])
         assembly_bytes = sum(capture[part]['size'] for part in ('database', 'filestore'))
-    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes):
+    data_backing = Path(json.loads(docker("volume", "inspect", namespace + "-data"))[0]["Mountpoint"]).resolve(strict=True)
+    restore_staging = restore_staging_path(data_backing)
+    discard_interrupted_restore_staging(restore_staging)
+    clones = {}
+    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes, clone_decisions=clones):
         raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
@@ -1118,7 +1150,8 @@ def restore_main():
                 if source["ODOO_UPSTREAM_USER"] == "root"
                 else ["pg_dump", "-U", source["ODOO_UPSTREAM_DB_USER"], "-Fc", source["ODOO_UPSTREAM_DB_NAME"]]
             )
-            staging = Path(tempfile.mkdtemp(prefix=namespace + "-copy-"))
+            restore_staging.mkdir(mode=0o700)
+            staging = restore_staging
             dump = staging / "database.dump"
             with dump.open("xb") as output:
                 command([*ssh, destination, remote], stdout=output)
@@ -1131,8 +1164,7 @@ def restore_main():
             )
             command(["rsync", *rsync_options,
                 "-e", shlex.join(ssh), destination + ":" + path.rstrip("/") + "/", str(filestore) + "/"])
-            docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
-            docker("cp", str(filestore) + "/.", runner + ":/volumes/data/filestore/" + database)
+            move_staged_filestore_into_volume(runner, filestore, data_backing / "filestore" / database)
             docker("cp", str(dump), runner + ":" + dump_path)
             docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
         uid = docker("exec", runner, "id", "-u").decode().strip()
@@ -1161,7 +1193,7 @@ def restore_main():
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
         if gen.get('clean_snapshot_enabled'):
-            snapshot = capture_clean_snapshot(spec, containers)
+            snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot'))
             print('clean_testing_snapshot_completed=true')
             print('clean_snapshot_database_sha256=' + snapshot['database_sha256'])
             print('clean_snapshot_filestore_sha256=' + snapshot['filestore_sha256'])
@@ -1189,7 +1221,7 @@ def restore_main():
 
 
 def main():
-    global inspection_only
+    global inspection_only, inherited_lock_descriptors
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     inspection_only = bool(spec.get('inspection_only'))
     namespace = spec["generation"]["namespace"]
@@ -1198,12 +1230,13 @@ def main():
     if spec.get('inspection_only') and not spec.get('verification_only'):
         restore_main()
         return
-    path = str(Path(tempfile.gettempdir()) / (namespace + "-copy.lock"))
+    path = restore_lock_path(namespace)
     # This coordination file is disposable across host reboot/tmp cleanup. Its
     # existence is not copy evidence; every execution uses the same flock inode.
     descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        inherited_lock_descriptors = (descriptor,)
         restore_main()
     finally:
         os.close(descriptor)

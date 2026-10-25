@@ -556,12 +556,139 @@ class HostCapacityTests(unittest.TestCase):
                 )
                 budget["staging_bytes"] = 10
                 self.assertTrue(namespace["storage_capacity"](spec, containers, budget))
-                spec["generation"]["source_mode"] = "ssh"
-                namespace["tempfile"] = SimpleNamespace(gettempdir=lambda: root / "-staging")
-                self.assertFalse(namespace["storage_capacity"](spec, containers, budget))
                 containers["script-runner"][1]["GraphDriver"] = {}
                 with self.assertRaises(RuntimeError):
                     namespace["storage_capacity"](spec, containers, budget)
+
+    def test_staged_filestore_is_charged_once_and_proven_clones_as_free(self) -> None:
+        import shutil
+        import subprocess
+
+        from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
+
+        namespace: dict[str, Any] = {}
+        exec(CLEAN_TESTING_SNAPSHOT_LIBRARY + STORAGE_MAINTENANCE_LIBRARY, namespace)
+        clones = False
+
+        def probe(arguments: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+            self.assertEqual(arguments[:2], ["cp", "--reflink=always"])
+            if clones:
+                shutil.copyfile(arguments[-2], arguments[-1])
+            return subprocess.CompletedProcess(arguments, 0 if clones else 1)
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for name in ("data/_data", "db/_data", "overlay", "home"):
+                (root / name).mkdir(parents=True)
+            namespace["docker"] = lambda *arguments: json.dumps(
+                [
+                    {
+                        "Mountpoint": str(
+                            root / ("db" if arguments[-1].endswith("-db") else "data") / "_data"
+                        )
+                    }
+                ]
+            ).encode()
+            spec: dict[str, Any] = {
+                "generation": {"namespace": "fixture", "source_mode": "ssh"},
+                "copy_binding_sha256": "a" * 64,
+            }
+            containers = {
+                "script-runner": (
+                    "runner",
+                    {"GraphDriver": {"Data": {"UpperDir": str(root / "overlay")}}},
+                )
+            }
+            budget = {
+                "database_bytes": 10,
+                "filestore_bytes": 40,
+                "staging_bytes": 50,
+                "reserve_bytes": 1,
+            }
+
+            def admitted(available: int) -> bool:
+                with patch.object(
+                    os, "statvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)
+                ):
+                    return bool(namespace["storage_capacity"](spec, containers, budget))
+
+            with (
+                patch("pathlib.Path.home", return_value=root / "home"),
+                patch("subprocess.run", side_effect=probe),
+                patch("time.sleep"),
+            ):
+                self.assertFalse(admitted(70))
+                self.assertTrue(admitted(71))
+                spec["generation"]["clean_snapshot_enabled"] = True
+                self.assertFalse(admitted(120))
+                self.assertTrue(admitted(121))
+                clones = True
+                self.assertFalse(admitted(80))
+                self.assertTrue(admitted(81))
+            self.assertEqual([path for path in root.rglob("*") if path.is_file()], [])
+
+    def test_a_cloned_filestore_still_needs_the_reserve_on_its_own_filesystem(self) -> None:
+        import shutil
+        import subprocess
+
+        namespace: dict[str, Any] = {"json": json, "inherited_lock_descriptors": ()}
+        exec(STORAGE_MAINTENANCE_LIBRARY, namespace)
+
+        def probe(arguments: list[str], **_: Any) -> subprocess.CompletedProcess[bytes]:
+            shutil.copyfile(arguments[-2], arguments[-1])
+            return subprocess.CompletedProcess(arguments, 0)
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for name in ("data", "db", "overlay", "snapshot"):
+                (root / name).mkdir()
+            namespace["docker"] = lambda *arguments: json.dumps(
+                [{"Mountpoint": str(root / arguments[-1])}]
+            ).encode()
+            spec = {
+                "generation": {"namespace": "preview"},
+                "preview_volumes": {"data": "data", "database": "db"},
+                "staging_directory": str(root / "snapshot"),
+            }
+            containers = {
+                "script-runner": (
+                    "runner",
+                    {"GraphDriver": {"Data": {"UpperDir": str(root / "overlay")}}},
+                )
+            }
+            budget = {
+                "database_bytes": 10,
+                "filestore_bytes": 40,
+                "staging_bytes": 50,
+                "reserve_bytes": 5,
+            }
+            real_stat = Path.stat
+
+            def device(path: Path, **kwargs: Any) -> Any:
+                metadata = real_stat(path, **kwargs)
+                if path.is_relative_to(root / "data"):
+                    return SimpleNamespace(st_dev=metadata.st_dev + 1, st_mode=metadata.st_mode)
+                return metadata
+
+            def free(path: Any) -> SimpleNamespace:
+                available = 1 if Path(path).is_relative_to(root / "data") else 1000
+                return SimpleNamespace(f_bavail=available, f_frsize=1)
+
+            with (
+                patch("pathlib.Path.stat", autospec=True, side_effect=device),
+                patch.object(os, "statvfs", side_effect=free),
+                patch("subprocess.run", side_effect=probe),
+            ):
+                self.assertFalse(
+                    namespace["storage_capacity"](
+                        spec,
+                        containers,
+                        budget,
+                        runner_staging_bytes=1,
+                        host_staging_bytes=0,
+                        filestore_clone_source=root / "snapshot",
+                    )
+                )
 
     def test_filestore_permission_failure_is_recorded_per_copy(self) -> None:
         from datetime import timedelta
