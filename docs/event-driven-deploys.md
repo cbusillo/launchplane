@@ -371,6 +371,12 @@ reservation. The webhook request never waits on a deploy.
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,
     the verified build's run id and attempt (or `destroy`), and the preview's
     current lifecycle state, so a repeated reconcile replays it.
+    Reconciliation reuses the retained issued plan for the same target binding,
+    including an existing successor, while it is valid or already completed.
+    Changed bindings and expired unfinished plans receive a deterministic
+    successor derived from the retained operation. That successor still requires
+    the existing executor exclusion, original observation, grace, quiescence and
+    compare-and-swap before any provider effect.
   - **Generic-web:** the build is verified with `verify_generic_web_build`
     (`purpose` `preview`), and the refresh or destroy runs in-process as the
     generic-web preview refresh and destroy routes do, driver extensions

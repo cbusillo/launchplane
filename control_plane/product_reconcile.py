@@ -246,6 +246,7 @@ TESTING_DEPLOY_MAX_FAILED_ATTEMPTS = 3
 PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS = 3
 TESTING_DEPLOY_MAX_ATTEMPT_CHAIN = 20
 PREVIEW_APPLY_TIMEOUT_SECONDS = 600
+PREVIEW_PLAN_RECOVERY_MAX_STEPS = 100
 # A generic-web refresh waits for the deploy and then for health, each up to this
 # long, inside the request's lease.
 GENERIC_WEB_PREVIEW_TIMEOUT_SECONDS = 300
@@ -2487,34 +2488,16 @@ def _run_preview_operation(
             plan["omitted_integration_credential_keys"] = list(
                 issued_plan.omitted_integration_credential_keys
             )
-        if reservation is not None and cast(
-            PostgresRecordStore, record_store
-        ).read_original_mutation_intent(reservation):
-            from control_plane.preview_reservation_recovery import original_preview_intent
-
-            original = original_preview_intent(reservation, profile=profile, store=record_store)
-            validate_odoo_preview_profile_authority(
-                profile=profile, issued_plan=original.issued_plan
-            )
-            if (
-                original.issued_plan.dry_run_plan != issued_plan.dry_run_plan
-                or original.issued_plan.plan_request.manifest != issued_plan.plan_request.manifest
-                or original.issued_plan.plan_request.image_reference
-                != issued_plan.plan_request.image_reference
-            ):
-                # Fresh target discovery has changed the request. Preserve the
-                # original reservation and use guarded different-key supersession.
-                binding_digest = _fingerprint(
-                    issued_plan.model_dump(mode="json", exclude={"plan_provenance"})
-                )
-                operation_key += f":binding-{binding_digest[:16]}"
-                plan_id = build_odoo_preview_plan_id(
-                    scope=reservation_scope, idempotency_key=operation_key
-                )
-                issued_plan = issue_odoo_preview_apply_plan(result=issued_plan, plan_id=plan_id)
-                plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
-            else:
-                issued_plan = original.issued_plan
+        operation_key, issued_plan = _retained_preview_operation_plan(
+            record_store=record_store,
+            profile=profile,
+            operation_key=operation_key,
+            reservation_scope=reservation_scope,
+            fresh_plan=issued_plan,
+        )
+        assert issued_plan.plan_provenance is not None
+        plan_id = issued_plan.plan_provenance.plan_id
+        plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
         result = run_issued_plan(issued_plan, allow_mutation=operation != "destroy" or allow_retry)
         return finish_result(result, issued_plan)
     except PreviewMemoryCapacityRefused as error:
@@ -2534,6 +2517,52 @@ def _run_preview_operation(
         if is_transient_dokploy_error(error):
             plan["preview_transport_retryable"] = True
         return _preview_failure(plan, "preview_apply_failed")
+
+
+def _retained_preview_operation_plan(
+    *,
+    record_store: ProductReconcileStore,
+    profile: LaunchplaneProductProfileRecord,
+    operation_key: str,
+    reservation_scope: str,
+    fresh_plan: OdooPreviewApplyInputsResult,
+) -> tuple[str, OdooPreviewApplyInputsResult]:
+    from control_plane.preview_reservation_recovery import original_preview_intent
+
+    assert fresh_plan.plan_provenance is not None
+    base_key = operation_key
+    binding_key = f"{base_key}:binding-{_fingerprint(fresh_plan.model_dump(mode='json', exclude={'plan_provenance'}))[:16]}"
+    for _step in range(PREVIEW_PLAN_RECOVERY_MAX_STEPS):
+        plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
+        reservation = record_store.read_idempotency_record(
+            scope=reservation_scope,
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=plan_id,
+        )
+        if reservation is None or not cast(
+            PostgresRecordStore, record_store
+        ).read_original_mutation_intent(reservation):
+            return operation_key, issue_odoo_preview_apply_plan(result=fresh_plan, plan_id=plan_id)
+        original = original_preview_intent(reservation, profile=profile, store=record_store)
+        retained = original.issued_plan
+        validate_odoo_preview_profile_authority(profile=profile, issued_plan=retained)
+        same_binding = (
+            retained.dry_run_plan == fresh_plan.dry_run_plan
+            and retained.plan_request.manifest == fresh_plan.plan_request.manifest
+            and retained.plan_request.image_reference == fresh_plan.plan_request.image_reference
+        )
+        assert retained.plan_provenance is not None
+        if same_binding and (
+            reservation.state == "completed"
+            or retained.plan_provenance.expires_at > fresh_plan.plan_provenance.issued_at
+        ):
+            return operation_key, retained
+        operation_key = (
+            binding_key
+            if operation_key == base_key and not same_binding
+            else f"{binding_key}:after-{_fingerprint({'reservation': reservation.record_id})[:16]}"
+        )
+    raise ProductReconcileError("Preview operation history exceeds the recovery bound.")
 
 
 def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
