@@ -867,8 +867,6 @@ The clean-slate shell uses URL-owned product selection under the service-owned
   may show exact-change identity, Client acceptance, independent engineering
   evidence, dependency health, admission, and landing outcomes.
 - The unused Work graph and Issue inbox routes are removed.
-- Existing `/ui/engineering/every-code` belongs to the Every Code design that
-  [DIRECTION.md](../DIRECTION.md) retires. It receives no new UI work.
 - Existing `/ui/engineering/merge-train` behavior remains in scope only where
   it presents or executes guarded admission and truthful landing evidence from
   DB-backed policy. It must not infer a planning queue or make forge projections

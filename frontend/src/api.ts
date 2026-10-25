@@ -58,7 +58,6 @@ import type {
   EnqueueOdooProdRollbackResponse,
   EnqueueProductionBackupGateData,
   EnqueueProductionBackupGateResponse,
-  EveryCodeSummaryResponse,
   GovernanceProjectionResponse,
   ListHumanPrivilegedOperationsData,
   ListHumanPrivilegedOperationsResponse,
@@ -477,18 +476,6 @@ export function readProductPromotionWorkflowDelivery(
 ): Promise<ProductPromotionWorkflowDeliveryStatusResponse> {
   return requestJson<ProductPromotionWorkflowDeliveryStatusResponse>(
     `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/promotion/workflow-deliveries/${encodeURIComponent(deliveryId)}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
-export function readEveryCodeSummary(
-  limit = 12,
-  signal?: AbortSignal,
-): Promise<EveryCodeSummaryResponse> {
-  return requestJson<EveryCodeSummaryResponse>(
-    `/v1/every-code/summary?limit=${encodeURIComponent(String(limit))}`,
     "GET",
     undefined,
     signal,

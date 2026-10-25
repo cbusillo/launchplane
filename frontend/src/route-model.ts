@@ -23,7 +23,6 @@ export type EnvironmentView =
 
 export type EngineeringView =
   | "hub"
-  | "every-code"
   | "merge-train"
   | "tenant-admission"
   | "governance-projection"
@@ -68,9 +67,6 @@ export function engineeringViewLabel(view: EngineeringView): string {
   if (view === "github-delivery") {
     return "GitHub delivery";
   }
-  if (view === "every-code") {
-    return "Every Code";
-  }
   if (view === "merge-train") {
     return "Merge train";
   }
@@ -111,7 +107,6 @@ export function parseAppRoute(pathname: string): AppRoute {
     if (
       routeSegments.length === 1 &&
       [
-        "every-code",
         "merge-train",
         "tenant-admission",
         "governance-projection",

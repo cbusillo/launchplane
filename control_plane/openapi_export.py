@@ -189,8 +189,6 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}": (
         "read_product_promotion_workflow_delivery"
     ),
-    "/v1/every-code/summary": "read_every_code_summary",
-    "/v1/every-code/work-requests": "list_every_code_work_requests",
     "/v1/previews/readiness": "read_preview_readiness",
     "/v1/repo-product-mapping": "read_repo_product_mapping",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
