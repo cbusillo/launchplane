@@ -7,8 +7,10 @@ import re
 from collections.abc import Callable, Mapping
 
 import click
+import yaml
 
-from control_plane.dokploy import api, post_deploy, source
+from control_plane.dokploy import api, compose, post_deploy, source
+from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimeOperation
 from control_plane.contracts.disposable_lane import (
     ODOO_PREVIEW_RESOURCES_OK_MARKER,
     ODOO_PREVIEW_RESOURCES_BINDING_MARKER,
@@ -40,21 +42,15 @@ def require_existing_preview_resources(
     instance: str,
     environment: dict[str, str],
     checkpoint: Callable[[], None],
-) -> None:
+    operation: OdooPreviewRuntimeOperation = "refresh",
+) -> str:
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=compose_id
     )
-    current = api.parse_dokploy_env_text(str(payload.get("env") or ""))
-    volumes = [environment.get(key, "") for key in RESOURCE_KEYS]
-    if (
-        payload.get("composeId") != compose_id
-        or len(set(volumes)) != len(RESOURCE_KEYS)
-        or any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,200}", name) for name in volumes)
-        or any(current.get(key) != environment.get(key) for key in RESOURCE_KEYS)
-    ):
-        raise click.ClickException(
-            "Existing preview storage changed or is unavailable; refresh refused."
-        )
+    binding = _preview_resource_binding(payload, compose_id=compose_id, environment=environment)
+    if operation == "destroy":
+        _require_preview_destroy_source(payload)
+    volumes = [environment[key] for key in RESOURCE_KEYS]
     schedule_type, lookup_id, project, server_id = post_deploy._resolve_dokploy_schedule_runtime(
         host=host,
         token=token,
@@ -62,7 +58,14 @@ def require_existing_preview_resources(
         compose_name=compose_name,
         target_payload=payload,
     )
-    spec = {"compose_id": compose_id, "project": project, "volumes": volumes}
+    if operation == "destroy":
+        volumes = _preview_destroy_volumes(payload, project=project, environment=environment)
+    spec = {
+        "compose_id": compose_id,
+        "project": project,
+        "volumes": volumes,
+        "operation": operation,
+    }
     encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
     digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
     name = "Launchplane existing preview resource inspection"
@@ -133,19 +136,78 @@ def require_existing_preview_resources(
         host=host, token=token, target_type="compose", target_id=compose_id
     )
 
-    # No provider-side write is accepted as inspection. A changed placement or
-    # environment needs a new read, not reuse of a successful old schedule log.
-    def binding(value: Mapping[str, object]) -> tuple[object, ...]:
-        env = api.parse_dokploy_env_text(str(value.get("env") or ""))
-        return (
-            value.get("composeId"),
-            value.get("serverId"),
-            value.get("appName"),
-            *(env.get(key) for key in RESOURCE_KEYS),
+    if _preview_resource_binding(latest, compose_id=compose_id, environment=environment) != binding:
+        raise click.ClickException("Preview target changed during resource inspection.")
+    return binding
+
+
+def require_preview_resource_binding(
+    *, host: str, token: str, compose_id: str, environment: dict[str, str], binding: str
+) -> None:
+    payload = api.fetch_dokploy_target_payload(
+        host=host, token=token, target_type="compose", target_id=compose_id
+    )
+    if (
+        _preview_resource_binding(payload, compose_id=compose_id, environment=environment)
+        != binding
+    ):
+        raise click.ClickException("Preview target changed after resource inspection.")
+
+
+def _preview_resource_binding(
+    payload: Mapping[str, object], *, compose_id: str, environment: dict[str, str]
+) -> str:
+    current = api.parse_dokploy_env_text(str(payload.get("env") or ""))
+    volumes = [environment.get(key, "") for key in RESOURCE_KEYS]
+    if (
+        payload.get("composeId") != compose_id
+        or len(set(volumes)) != len(RESOURCE_KEYS)
+        or any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,200}", name) for name in volumes)
+        or any(current.get(key) != environment.get(key) for key in RESOURCE_KEYS)
+    ):
+        raise click.ClickException("Existing preview storage changed or is unavailable.")
+    fields = ("composeId", "serverId", "appName", "sourceType", "composePath", "composeFile")
+    value = {key: payload.get(key) for key in fields}
+    value["volumes"] = volumes
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def _require_preview_destroy_source(payload: Mapping[str, object]) -> None:
+    if payload.get("sourceType") != "raw" or payload.get("composePath") != "docker-compose.yml":
+        raise click.ClickException("Preview destruction source is unavailable or unsupported.")
+    try:
+        actual = yaml.safe_load(str(payload.get("composeFile") or ""))
+    except yaml.YAMLError:
+        raise click.ClickException("Preview destruction source is invalid.") from None
+    expected = yaml.safe_load(
+        compose.render_odoo_raw_compose_file(
+            image_reference="inspection", hold_web_until_integration_readback=True
+        )
+    )
+    if (
+        not isinstance(actual, dict)
+        or "include" in actual
+        or actual.get("volumes") != expected["volumes"]
+        or not isinstance(actual.get("services"), dict)
+        or any(
+            not isinstance(service, dict) or "extends" in service
+            for service in actual["services"].values()
+        )
+    ):
+        raise click.ClickException(
+            "Preview destruction storage declarations are unsafe or unsupported."
         )
 
-    if binding(latest) != binding(payload):
-        raise click.ClickException("Preview target changed during resource inspection.")
+
+def _preview_destroy_volumes(
+    payload: Mapping[str, object], *, project: str, environment: dict[str, str]
+) -> list[str]:
+    declarations = yaml.safe_load(str(payload["composeFile"]))["volumes"]
+    explicit = {"${" + key + ":?missing}": environment[key] for key in RESOURCE_KEYS}
+    return [
+        explicit[declaration["name"]] if declaration else f"{project}_{key}"
+        for key, declaration in declarations.items()
+    ]
 
 
 # This program only inspects. It cannot create, start, stop, reset or delete a
@@ -217,7 +279,7 @@ def backing_path(value):
 def main():
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     names = set(spec["volumes"])
-    if len(spec["volumes"]) != 3 or len(names) != 3 or not spec["project"]:
+    if not names or len(names) != len(spec["volumes"]) or not spec["project"]:
         raise RuntimeError("Invalid inspection scope")
     paths = {}
 
@@ -233,8 +295,12 @@ def main():
             raise RuntimeError("Aliased storage backing")
         paths[name] = path
 
+    destroying = spec.get("operation") == "destroy"
+    existing_names = set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) if destroying else names
     for name in names:
-        add_volume(name)
+        if name in existing_names:
+            add_volume(name)
+
     def resolved_backing(path, seen=frozenset()):
         # A bind-backed volume can outlive an intermediate container/unmount.
         # Follow daemon-owned device records, including unmounted volumes.
@@ -270,7 +336,7 @@ def main():
                 raise RuntimeError("Mount inventory unavailable")
             if ours:
                 host = item.get("HostConfig")
-                if not isinstance(host, dict) or host.get("PortBindings") not in (None, {}) or host.get("NetworkMode") == "host":
+                if not destroying and (not isinstance(host, dict) or host.get("PortBindings") not in (None, {}) or host.get("NetworkMode") == "host"):
                     raise RuntimeError("Preview has shared host networking")
                 declared = config.get("Volumes") or {}
                 if not isinstance(declared, dict):
@@ -296,7 +362,7 @@ def main():
                     path = resolved_backing(path)
                 overlap = any(path == candidate or path in candidate.parents or candidate in path.parents for candidate in paths.values())
                 if ours:
-                    if mount.get("RW") is not False and (mount.get("Type") != "volume" or paths.get(mount.get("Name")) != path):
+                    if not destroying and mount.get("RW") is not False and (mount.get("Type") != "volume" or paths.get(mount.get("Name")) != path):
                         raise RuntimeError("Unexpected writable preview mount")
                 else:
                     device_overlap = False
@@ -306,7 +372,7 @@ def main():
                         if isinstance(device, str) and device.startswith("/"):
                             device = resolved_backing(backing_path(device))
                             device_overlap = any(device == candidate or device in candidate.parents or candidate in device.parents for candidate in paths.values())
-                    if device_overlap or overlap or mount.get("Name") in paths:
+                    if device_overlap or overlap or mount.get("Name") in names or mount.get("Name") in paths:
                         if not device_overlap and mount.get("Type") == "bind" and mount.get("RW") is False and all(path != candidate and candidate not in path.parents for candidate in paths.values()):
                             continue
                         raise RuntimeError("Storage is used outside this preview")

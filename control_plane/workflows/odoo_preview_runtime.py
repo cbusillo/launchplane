@@ -1429,16 +1429,15 @@ def _original_compose_id_from_complete_inventory(
     return matches[0] if matches else ""
 
 
-def _destroyed_preview_absence_verified(
+def _read_absent_preview_compose_inventory(
     *, host: str, token: str, plan: OdooPreviewDokployDryRunPlan
-) -> bool:
-    """A missing lookup is insufficient: require stable inventory and removed domains."""
+) -> tuple[tuple[str, str, str], ...] | None:
     inventory = _complete_preview_compose_inventory(host=host, token=token)
     if any(
         identifier == plan.compose_ref or name == plan.compose_name
         for _, identifier, name in inventory
     ):
-        return False
+        return None
     searched = dokploy_api.dokploy_request(
         host=host,
         token=token,
@@ -1454,7 +1453,7 @@ def _destroyed_preview_absence_verified(
         if total is not None and (
             type(total) is not int or not isinstance(searched, list) or total != len(searched)
         ):
-            return False
+            return None
     if (
         not isinstance(searched, list)
         or len(searched) >= 25
@@ -1467,6 +1466,19 @@ def _destroyed_preview_absence_verified(
             for item in searched
         )
     ):
+        return None
+    return (
+        inventory
+        if _complete_preview_compose_inventory(host=host, token=token) == inventory
+        else None
+    )
+
+
+def _destroyed_preview_absence_verified(
+    *, host: str, token: str, plan: OdooPreviewDokployDryRunPlan
+) -> bool:
+    inventory = _read_absent_preview_compose_inventory(host=host, token=token, plan=plan)
+    if inventory is None:
         return False
     try:
         domains = (
@@ -1956,49 +1968,71 @@ def _execute_destroy(
             error_message="" if absent else "Preview provider absence is unknown.",
         )
 
-    def checkpoint_destroy_effect(phase: str) -> None:
-        if plan.delete_volumes:
-            from control_plane.odoo_preview_resources import (
-                preview_resource_environment,
-                require_existing_preview_resources,
-            )
+    from control_plane.odoo_preview_resources import (
+        preview_resource_environment,
+        require_existing_preview_resources,
+        require_preview_resource_binding,
+    )
 
+    environment = preview_resource_environment(plan.compose_name)
+    binding: str | None = None
+    if plan.delete_volumes:
+        try:
             try:
-                require_existing_preview_resources(
+                binding = require_existing_preview_resources(
                     host=host,
                     token=token,
                     compose_id=compose_id,
                     compose_name=plan.compose_name,
                     context=context,
                     instance=plan.preview_slug,
-                    environment=preview_resource_environment(plan.compose_name),
+                    environment=environment,
                     checkpoint=provider_lease_check or (lambda: None),
+                    operation=plan.operation,
                 )
             except dokploy_api.DokployRequestFailed as error:
-                if error.status_code != 404 or not _destroyed_preview_absence_verified(
-                    host=host, token=token, plan=plan
+                if (
+                    error.status_code != 404
+                    or _read_absent_preview_compose_inventory(host=host, token=token, plan=plan)
+                    is None
                 ):
                     raise
+        except click.ClickException as error:
+            return _apply_result(
+                request=request, status="blocked", compose_id=compose_id, error_message=str(error)
+            )
+
+    def checkpoint_destroy_effect(phase: str) -> None:
+        if plan.delete_volumes:
+            if binding is not None:
+                require_preview_resource_binding(
+                    host=host,
+                    token=token,
+                    compose_id=compose_id,
+                    environment=environment,
+                    binding=binding,
+                )
+            elif _read_absent_preview_compose_inventory(host=host, token=token, plan=plan) is None:
+                raise click.ClickException("Preview provider absence changed before teardown.")
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(phase)
 
-    guard = provider_mutation_guard or nullcontext
-    with guard():
-        destroy_result = destroy_dokploy_preview_resource(
-            record_store=record_store,
-            context=context,
-            instance=plan.preview_slug,
-            host=host,
-            token=token,
-            resource_type="compose",
-            resource_id=compose_id,
-            domain_host=plan.domain_host,
-            delete_volumes=plan.delete_volumes,
-            continue_after_domain_cleanup_error=False,
-            propagate_domain_lookup_error=propagate_domain_lookup_error,
-            missing_resource_is_clean=True,
-            before_provider_mutation=checkpoint_destroy_effect,
-        )
+    destroy_result = destroy_dokploy_preview_resource(
+        record_store=record_store,
+        context=context,
+        instance=plan.preview_slug,
+        host=host,
+        token=token,
+        resource_type="compose",
+        resource_id=compose_id,
+        domain_host=plan.domain_host,
+        delete_volumes=plan.delete_volumes,
+        continue_after_domain_cleanup_error=False,
+        propagate_domain_lookup_error=propagate_domain_lookup_error,
+        missing_resource_is_clean=True,
+        before_provider_mutation=checkpoint_destroy_effect,
+        provider_mutation_guard=provider_mutation_guard,
+    )
     if destroy_result.cleanup_errors and destroy_result.cleanup_errors[0].startswith(
         f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}:"
     ):

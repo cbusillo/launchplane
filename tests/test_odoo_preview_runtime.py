@@ -401,6 +401,9 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.preview_resources = self.enterContext(
             patch("control_plane.odoo_preview_resources.require_existing_preview_resources")
         )
+        self.preview_resource_binding = self.enterContext(
+            patch("control_plane.odoo_preview_resources.require_preview_resource_binding")
+        )
         self.enterContext(
             patch("control_plane.dokploy.memory_capacity.require_preview_host_memory_capacity")
         )
@@ -2810,6 +2813,16 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 ]
             return {}
 
+        def inspect(**kwargs: object) -> str:
+            self.assertFalse(guarded)
+            return "inspected-binding"
+
+        def recheck(**kwargs: object) -> None:
+            self.assertTrue(guarded)
+            self.assertEqual(kwargs["binding"], "inspected-binding")
+
+        self.preview_resource_binding.side_effect = recheck
+        self.preview_resources.side_effect = inspect
         with (
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
@@ -2846,7 +2859,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertTrue(delete_payload["deleteVolumes"])
         from control_plane.odoo_preview_resources import preview_resource_environment
 
-        self.assertTrue(self.preview_resources.called)
+        self.assertEqual(self.preview_resources.call_count, 1)
+        self.assertEqual(self.preview_resource_binding.call_count, 2)
         for call in self.preview_resources.call_args_list:
             self.assertEqual(
                 call.kwargs["environment"], preview_resource_environment(dry_run.compose_name)
@@ -2875,7 +2889,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 preview_context="fixture-preview",
                 request=OdooPreviewDokployApplyRequest(dry_run_plan=plan),
             )
-        self.assertNotEqual(result.status, "pass")
+        self.assertEqual(result.status, "blocked")
         self.assertFalse(
             any(call.kwargs.get("method") == "POST" for call in provider.call_args_list)
         )
@@ -2937,6 +2951,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
 
     def test_apply_destroy_treats_missing_compose_after_domain_delete_as_clean(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        self.preview_resources.side_effect = DokployRequestFailed(
+            method="GET", path="/api/compose.one", detail="Not Found", status_code=404
+        )
         dry_run = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
                 runtime_plan=_runtime_plan(operation="destroy", target=_target()),
