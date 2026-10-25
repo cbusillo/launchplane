@@ -3524,7 +3524,7 @@ published timing history with the existing recovery metadata.
 | `T2` | The first `sql_sanitized` stamp emitted by the rehearsal copy runner, after committed SQL-only sanitization and independent integration readback, before registry startup. Later post-hook sanitization stamps do not replace it. |
 | Upgrade | `module_update_completed`, after exact declared module witnesses and installed/pending-state checks. |
 | `T3` | `before_web`, after the final connection readback and before opening the web gate. `web_started` records the subsequent private web start. |
-| `T4` | `pre_switch_verified`, after the separate candidate passes exact image/source/product/deployment identity, private HTTP health/login, its committed product-owned business scenarios and fresh connection isolation. `pre_switch_validation` retains that passing receipt under the simulation/rebuild attempt. No public route is involved. |
+| `T4` | `pre_switch_verified`, after the separate candidate passes exact image/source/product/deployment identity and private HTTP health/login, and script-runner passes the product-owned committed business scenarios against that same final database followed by fresh connection isolation. `pre_switch_validation` retains that passing receipt under the simulation/rebuild attempt. No public route is involved. |
 | `T5` | `private_switch_verified`, after the private health/identity and login checks pass. |
 | `T6` | Bounded by `product_started` and `receipt_observed` for the first committed product validation, which must have passed. The product verifies its writes through a fresh cursor before returning the receipt. These bounds do not claim the exact commit instant. |
 
@@ -3550,10 +3550,14 @@ consuming product's browser, authentication, canonical URL/logo, integration
 and release acceptance requirements. Product commit uncertainty, including an
 unverified pending postcheck, stays unknown.
 The `pre-switch-verification` elapsed term measures candidate checks separately
-from `private-switch`, which starts after T4. The final upgraded snapshot's
+from `private-switch`, which starts after T4.
+Older `private-switch` values also included before-web readback and gate
+publication; use UTC boundaries when comparing those generations.
+The final upgraded snapshot's
 business-history hash includes the latest simulation/rebuild's pre-switch
-receipt followed by the post-switch validation history; an older candidate's
-discarded writes are not attributed to a rebuilt copy. Legacy histories retain
+receipt followed by the preserved post-switch validation journal. An older
+candidate's pre-switch receipt is excluded after rebuild; historical post-switch
+receipts remain in that journal. Legacy histories retain
 their original hash when they contain no pre-switch receipt.
 
 #### Private product business validation

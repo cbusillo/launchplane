@@ -313,6 +313,22 @@ class RehearsalTimingTests(unittest.TestCase):
                         },
                     },
                 )
+        from control_plane._odoo_rehearsal_business_validation import business_validation_history
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        current = repeated
+        final = self.fixture.copy("final_upgrade")
+        verification: dict[str, Any] = {
+            "state": "verified",
+            "copies": [item.model_dump(mode="json") for item in (*current.copies, final)],
+            "elapsed_seconds": {},
+        }
+        verifier = self.fixture.adapter("verify")
+        with self.assertRaises(RehearsalRefused):
+            verifier.publish(current, verification)
+        history = business_validation_history(current.model_dump(mode="json"))
+        verification["copies"][-1]["business_validation_sha256"] = canonical_json_sha256(history)
+        self.assertEqual(verifier.publish(current, verification)["state"], "verified")
 
 
 class HostTimingTests(unittest.TestCase):

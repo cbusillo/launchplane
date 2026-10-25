@@ -2570,28 +2570,44 @@ class RehearsalHostSafetyTests(unittest.TestCase):
         (root / ".execution.lock").touch()
         error_text = "psycopg2.errors.UndefinedColumn: column legacy_code does not exist"
         secret = "fixture-password-do-not-export"
-        with patch.object(
-            self.host["subprocess"],
-            "run",
-            side_effect=[
-                subprocess.CompletedProcess([], 1, b"", b"transient startup error"),
-                subprocess.CompletedProcess(
-                    [], 7, b"initialization stopped", (error_text + "\nPASSWORD=" + secret).encode()
-                ),
-                subprocess.CompletedProcess([], 9, b"", b"cleanup also failed"),
-            ],
+        for cleanup in (
+            subprocess.CompletedProcess([], 9, b"", b"cleanup also failed"),
+            RuntimeError("Candidate stop inventory is unverified"),
         ):
-            with self.assertRaises(self.host["RehearsalCommandFailure"]) as failure:
-                with self.host["command_failure_scope"](spec, root):
-                    try:
-                        self.host["command"](["transient-child"])
-                    except self.host["RehearsalCommandFailure"]:
-                        pass
-                    try:
-                        self.host["command"](["fixture-child"])
-                    finally:
-                        self.host["command"](["cleanup-child"])
-        self.assertEqual(failure.exception.diagnostic["exit_status"], 9)
+            self.host["command_failure_path"](spec, root).unlink(missing_ok=True)
+            with (
+                self.subTest(cleanup=type(cleanup).__name__),
+                patch.object(
+                    self.host["subprocess"],
+                    "run",
+                    side_effect=[
+                        subprocess.CompletedProcess([], 1, b"", b"transient startup error"),
+                        subprocess.CompletedProcess(
+                            [],
+                            7,
+                            b"initialization stopped",
+                            (error_text + "\nPASSWORD=" + secret).encode(),
+                        ),
+                        cleanup,
+                    ],
+                ),
+            ):
+                expected_error = (
+                    RuntimeError
+                    if isinstance(cleanup, RuntimeError)
+                    else self.host["RehearsalCommandFailure"]
+                )
+                with self.assertRaises(expected_error):
+                    with self.host["command_failure_scope"](spec, root):
+                        try:
+                            self.host["command"](["transient-child"])
+                        except self.host["RehearsalCommandFailure"]:
+                            pass
+                        try:
+                            self.host["command"](["fixture-child"])
+                        finally:
+                            self.host["command"](["cleanup-child"])
+                self.assertEqual(self.host["read_command_failure"](spec, root)["exit_status"], 7)
         diagnostic = self.host["read_command_failure"](spec, root)
         self.assertEqual(
             diagnostic["step"],

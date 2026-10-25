@@ -1535,13 +1535,12 @@ class OdooRehearsalAdapter:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         if not set(old_copies) <= {copy.database for copy in updated.copies}:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        if self.request.action == "verify" and record.business_validations:
+        history = business_validation_history(record.model_dump(mode="json"))
+        if self.request.action == "verify" and history:
             final = next(
                 (copy for copy in updated.copies if copy.database.endswith("_final_upgrade")), None
             )
-            if final is None or final.business_validation_sha256 != canonical_json_sha256(
-                business_validation_history(record.model_dump(mode="json"))
-            ):
+            if final is None or final.business_validation_sha256 != canonical_json_sha256(history):
                 raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         self.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)
         public = self.public(updated)

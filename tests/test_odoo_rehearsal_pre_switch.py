@@ -35,6 +35,7 @@ class PreSwitchVerificationTests(unittest.TestCase):
         self.containers["pre-switch-web"] = ("c" * 64, self.candidate[1])
         self.containers["web"][1]["State"]["Running"] = False
         self.events: list[str] = []
+        self.stopped: list[str] = []
         for key in ("clone", "compose", "sql", "copy_runner", "before_web"):
             self.host[key] = Mock()
         self.host["before_web"].side_effect = lambda spec, *args, **kwargs: self.host[
@@ -52,7 +53,25 @@ class PreSwitchVerificationTests(unittest.TestCase):
 
     def docker(self, *args: str, **kwargs: Any) -> bytes:
         if args[0] == "ps":
-            return ("c" * 64 + "\n").encode()
+            project = "com.docker.compose.project"
+            service = "com.docker.compose.service"
+            inventory = {
+                "c" * 64: {project: self.fixture.identifier, service: "pre-switch-web"},
+                "d" * 64: {project: "another-project", service: "pre-switch-web"},
+                "e" * 64: {project: self.fixture.identifier, service: "script-runner"},
+            }
+            filters = [
+                args[index + 1].removeprefix("label=").split("=", 1)
+                for index, arg in enumerate(args)
+                if arg == "--filter"
+            ]
+            return "\n".join(
+                key
+                for key, labels in inventory.items()
+                if all(labels.get(name) == value for name, value in filters)
+            ).encode()
+        if args[0] == "stop":
+            self.stopped.extend(args[1:])
         if args[0] == "start":
             self.assertIn("pre_switch_verified", self.spec["phase_timing"]["observed"])
             self.events.append("switch")
@@ -143,6 +162,7 @@ class PreSwitchVerificationTests(unittest.TestCase):
         for failed in ("compose", "inspection"):
             with self.subTest(failed=failed):
                 self.host["docker"].reset_mock()
+                self.stopped.clear()
                 self.host["compose"].side_effect = (
                     RuntimeError("interrupted start") if failed == "compose" else None
                 )
@@ -156,16 +176,7 @@ class PreSwitchVerificationTests(unittest.TestCase):
                         self.containers,
                         self.spec["business_validation_identity"]["database"],
                     )
-                self.assertIn(
-                    ("stop", "c" * 64), [call.args for call in self.host["docker"].call_args_list]
-                )
-                selected = next(
-                    call.args for call in self.host["docker"].call_args_list if call.args[0] == "ps"
-                )
-                self.assertIn(
-                    "label=com.docker.compose.project=" + self.fixture.identifier, selected
-                )
-                self.assertIn("label=com.docker.compose.service=pre-switch-web", selected)
+                self.assertEqual(self.stopped, ["c" * 64])
                 self.host["business_validation"].assert_not_called()
 
 
