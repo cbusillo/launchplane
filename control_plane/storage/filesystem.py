@@ -277,7 +277,7 @@ from control_plane.storage.product_authority_bundle import (
     odoo_instance_override_records_match,
     SecretRecordConflictError,
     require_bundle_context_owner,
-    require_product_profile_writes,
+    require_absent_products,
     ProductAuthorityBundle,
     ProductProfileConflictError,
     ProviderTargetWrite,
@@ -399,12 +399,6 @@ class FilesystemRecordStore:
             return self._write_model_locked(record_type, record_id, model)
 
     def _write_model_locked(self, record_type: str, record_id: str, model: BaseModel) -> Path:
-        if isinstance(model, LaunchplaneProductProfileRecord):
-            require_product_profile_writes(
-                (model,),
-                self._list_product_profile_records_locked(),
-                inventory_records=self._iter_repository_inventory_records_locked(),
-            )
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_path = tempfile.mkstemp(
@@ -549,12 +543,7 @@ class FilesystemRecordStore:
             return
         with self._product_authority_bundle_lock():
             profiles = self._list_product_profile_records_locked()
-            require_product_profile_writes(
-                bundle.product_profiles,
-                profiles,
-                inventory_records=self._iter_repository_inventory_records_locked(),
-                absent_product_ids=bundle.absent_product_ids,
-            )
+            require_absent_products(bundle.absent_product_ids, profiles)
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
             for model_type, record_type, expected_records in (
@@ -1249,11 +1238,6 @@ class FilesystemRecordStore:
                 return "replayed"
             self._write_model_locked(record_type, record.record_id, record)
             return "written"
-
-    def _iter_repository_inventory_records_locked(self) -> Iterator[RepositoryInventoryRecord]:
-        yield from self._list_models_locked(
-            RepositoryInventoryRecord, "launchplane_repository_inventory_records"
-        )
 
     def list_repository_inventory_records(
         self,

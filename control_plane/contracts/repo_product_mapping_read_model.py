@@ -7,9 +7,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
-    RepoProductClassification,
     product_profiles_share_repository,
 )
+
+RepoProductClassification = Literal[
+    "managed_runtime", "active_awareness", "support_dependency", "out_of_scope"
+]
 
 
 class RepoProductMappingProductStore(Protocol):
@@ -132,7 +135,7 @@ def _product_profile_entry(profile: LaunchplaneProductProfileRecord) -> RepoProd
     environments = tuple(lane.instance for lane in profile.lanes)
     return RepoProductMappingEntry(
         repository=profile.repository,
-        classification=profile.classification,
+        classification="managed_runtime",
         product=profile.product,
         display_name=profile.display_name,
         driver_id=profile.driver_id,

@@ -27,7 +27,6 @@ def director_preview_override_allowed(
     if (
         existing is None
         or not existing.is_active
-        or not existing.is_managed_runtime
         or existing.driver_id != "odoo"
         or not existing.preview.enabled
         or existing.preview.historical_transport
