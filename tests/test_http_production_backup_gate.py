@@ -67,12 +67,16 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         )
+        sessions = HumanSessionManager(
+            config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+        )
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             bearer_identity_config=_local_operator_bearer_config(),
             authz_policy=policy,
             record_store_factory=lambda: fixture.store,
             control_plane_root_path=fixture.root,
+            human_session_manager=sessions,
         )
         path = f"/v1/products/{fixture.profile.product}/releases/{accepted.record_id}/backup-continuation"
         body: dict[str, object] = {"reason": "Capture enrollment is qualified"}
@@ -90,6 +94,42 @@ class ProductionBackupGateHttpTests(unittest.IsolatedAsyncioTestCase):
                 "fail",
             )
             body.update(apply=True, expected_digest=planned.json()["review_digest"])
+            read_only_policy = policy.model_copy(
+                update={
+                    "local_operators": (
+                        policy.local_operators[0].model_copy(
+                            update={
+                                "actions": ("product_environment.read",),
+                            }
+                        ),
+                    ),
+                }
+            )
+            restricted_app = create_launchplane_fastapi_app(
+                verifier=_RejectingVerifier(),
+                bearer_identity_config=_local_operator_bearer_config(),
+                authz_policy=read_only_policy,
+                record_store_factory=lambda: fixture.store,
+                control_plane_root_path=fixture.root,
+            )
+            denied_apply = await request(
+                restricted_app, "POST", path, headers=headers, payload=body
+            )
+            self.assertEqual(denied_apply.status_code, 403, denied_apply.text)
+            self.assertEqual(
+                fixture.store.read_verireel_prod_backup_gate_operation_record(operation_id).status,
+                "fail",
+            )
+            human_session = sessions.issue(_github_human_identity(role="read_only"))
+            human_headers = _browser_mutation_headers(sessions, human_session)
+            for product in (fixture.profile.product, "missing-product"):
+                human_path = (
+                    f"/v1/products/{product}/releases/{accepted.record_id}/backup-continuation"
+                )
+                denied_human = await request(
+                    app, "POST", human_path, headers=human_headers, payload=body
+                )
+                self.assertEqual(denied_human.status_code, 403, denied_human.text)
             applied = await request(app, "POST", path, headers=headers, payload=body)
             self.assertEqual(applied.status_code, 200, applied.text)
             self.assertEqual(applied.json()["status"], "queued")

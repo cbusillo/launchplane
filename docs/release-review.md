@@ -1164,7 +1164,7 @@ is unknown. Snapshot or archive evidence, changed backup authority, a newer
 decision, held releases, changed source pair, missing rollback baseline or a
 later started step refuses. Apply compares the exact reviewed operation and
 failed backup evidence transactionally. The operation retains its complete prior
-attempt, review digest, authenticated actor, reason and time. Repeating an applied
+attempt and failed backup record, review digest, authenticated actor, reason and time. Repeating an applied
 review returns its receipt, even after the worker advances, without requeueing.
 Expired or consumed passing captures and stopped promotions need their own
 supported recovery; this control cannot reset them. Inspecting release progress

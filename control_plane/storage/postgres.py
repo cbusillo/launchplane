@@ -18428,6 +18428,7 @@ class PostgresRecordStore(HumanSessionStore):
                 or self._read_payload(model_type=BackupGateRecord, payload=backup_row.payload)
                 != expected_backup
                 or resumed.previous_attempt != expected
+                or resumed.previous_backup != expected_backup
                 or resumed.status != "pending"
                 or resumed.operation_id != expected.operation_id
                 or resumed.binding != expected.binding

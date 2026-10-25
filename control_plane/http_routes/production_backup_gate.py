@@ -143,6 +143,13 @@ def register_production_backup_gate_routes(
         admin = isinstance(identity, LocalAdminIdentity | LocalOperatorIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
+        if not admin:
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="Release continuation requires a scoped admin.",
+            )
         if not isinstance(record_store, PostgresRecordStore):
             raise common.http_error(
                 status_code=503,
@@ -160,7 +167,7 @@ def register_production_backup_gate_routes(
                 code="not_found",
                 message="Release continuation was not found.",
             ) from error
-        if not admin or not common.authorization_allows(
+        if not common.authorization_allows(
             identity=identity,
             action=PRODUCTION_BACKUP_GATE_EXECUTE_ACTION
             if review.apply

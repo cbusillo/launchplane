@@ -62,6 +62,23 @@ def require_precapture_failure(operation: VeriReelProdBackupGateOperationRecord)
         raise ValueError("backup_capture_outcome_not_proven_absent")
 
 
+def _has_continuation_receipt(
+    operation: VeriReelProdBackupGateOperationRecord,
+    review: BackupContinuationReview,
+    actor: str,
+) -> bool:
+    if not review.apply or not review.expected_digest:
+        return False
+    prior = operation
+    while prior.previous_attempt is not None:
+        if prior.continuation_digest == review.expected_digest:
+            if prior.continuation_reason != review.reason or prior.continuation_actor != actor:
+                raise ValueError("backup_continuation_replay_conflict")
+            return True
+        prior = prior.previous_attempt
+    return False
+
+
 def continue_release_backup(
     *,
     store: PostgresRecordStore,
@@ -85,20 +102,14 @@ def continue_release_backup(
         profile=profile, decision=decision, step=steps[0]
     )
     operation = store.read_verireel_prod_backup_gate_operation_record(operation_id)
-    if review.apply and review.expected_digest:
-        prior = operation
-        while prior.previous_attempt is not None:
-            if prior.continuation_digest == review.expected_digest:
-                if prior.continuation_reason != review.reason or prior.continuation_actor != actor:
-                    raise ValueError("backup_continuation_replay_conflict")
-                return BackupContinuationResult(
-                    trace_id=trace_id,
-                    decision_record_id=decision_record_id,
-                    operation_id=operation_id,
-                    review_digest=review.expected_digest,
-                    status="replayed",
-                )
-            prior = prior.previous_attempt
+    if _has_continuation_receipt(operation, review, actor):
+        return BackupContinuationResult(
+            trace_id=trace_id,
+            decision_record_id=decision_record_id,
+            operation_id=operation_id,
+            review_digest=review.expected_digest,
+            status="replayed",
+        )
     require_precapture_failure(operation)
     assert operation.binding is not None
     if _covering_decision(store, product, decision_record_id=decision_record_id) is None:
@@ -155,6 +166,7 @@ def continue_release_backup(
         resumed = operation.model_copy(
             update={
                 "previous_attempt": operation,
+                "previous_backup": backup,
                 "continuation_digest": digest,
                 "continuation_reason": review.reason,
                 "continuation_actor": actor,
@@ -176,7 +188,16 @@ def continue_release_backup(
         if not store.continue_precapture_backup_operation(
             expected=operation, resumed=resumed, expected_backup=backup
         ):
-            raise ValueError("backup_continuation_review_changed")
+            current = store.read_verireel_prod_backup_gate_operation_record(operation_id)
+            if not _has_continuation_receipt(current, review, actor):
+                raise ValueError("backup_continuation_review_changed")
+            return BackupContinuationResult(
+                trace_id=trace_id,
+                decision_record_id=decision_record_id,
+                operation_id=operation_id,
+                review_digest=digest,
+                status="replayed",
+            )
     return BackupContinuationResult(
         trace_id=trace_id,
         decision_record_id=decision_record_id,
