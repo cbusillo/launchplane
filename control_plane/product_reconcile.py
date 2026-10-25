@@ -2552,16 +2552,28 @@ def _retained_preview_operation_plan(
             and retained.plan_request.image_reference == fresh_plan.plan_request.image_reference
         )
         assert retained.plan_provenance is not None
-        if same_binding and (
+        result = reservation.response_payload.get("result")
+        superseded = (
             reservation.state == "completed"
-            or retained.plan_provenance.expires_at > fresh_plan.plan_provenance.issued_at
-        ):
-            return operation_key, retained
-        operation_key = (
+            and reservation.response_status_code == 409
+            and isinstance(result, dict)
+            and result.get("status") == "fail"
+        )
+        successor_key = (
             binding_key
             if operation_key == base_key and not same_binding
             else f"{binding_key}:after-{_fingerprint({'reservation': reservation.record_id})[:16]}"
         )
+        if (
+            same_binding
+            and not superseded
+            and (
+                reservation.state == "completed"
+                or retained.plan_provenance.expires_at > fresh_plan.plan_provenance.issued_at
+            )
+        ):
+            return operation_key, retained
+        operation_key = successor_key
     raise ProductReconcileError("Preview operation history exceeds the recovery bound.")
 
 

@@ -6088,11 +6088,31 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             self.assertEqual(observed["preview_plan_id"], successor["preview_plan_id"])
             self.assertEqual(self.provider.applied, [])
             _MinuteClock.ticks += ODOO_PREVIEW_PLAN_TTL_SECONDS // 60 + 1
-            finished = True
             self.request("preview", 5)
             renewed = self.run_once().last_plan
-            self.assertEqual(renewed["preview_result_status"], "pass")
+            self.assertEqual(renewed["preview_operation_status"], "reconcile_required")
             self.assertNotEqual(renewed["preview_plan_id"], successor["preview_plan_id"])
+            expire(renewed)
+            self.request("preview", 5)
+            observed_renewal = self.run_once().last_plan
+            self.assertEqual(observed_renewal["preview_operation_status"], "reconcile_required")
+            self.assertEqual(observed_renewal["preview_plan_id"], renewed["preview_plan_id"])
+            changed = False
+            self.request("preview", 5)
+            restored_binding = self.run_once().last_plan
+            self.assertEqual(restored_binding["preview_operation_status"], "reconcile_required")
+            self.assertNotEqual(restored_binding["preview_plan_id"], first["preview_plan_id"])
+            expire(restored_binding)
+            changed = True
+            self.request("preview", 5)
+            changed_again = self.run_once().last_plan
+            self.assertEqual(changed_again["preview_operation_status"], "reconcile_required")
+            expire(changed_again)
+            _MinuteClock.ticks += ODOO_PREVIEW_PLAN_TTL_SECONDS // 60 + 1
+            finished = True
+            self.request("preview", 5)
+            completed = self.run_once().last_plan
+            self.assertEqual(completed["preview_result_status"], "pass")
             self.assertEqual(self.store.list_preview_records()[0].state, "active")
             self.assertEqual(self.provider.applied, [("refresh", 5)])
 
