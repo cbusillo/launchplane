@@ -8,7 +8,10 @@ From this repository, use `scripts/set-preview-override.py` with the installed
 Launchplane write-action helper and its existing private configuration. The
 service-authenticated Director agent can conditionally set one nonsecret key
 on an existing enabled Odoo preview. Deletion and edits to other profile
-fields still require full product-profile authority. The helper preserves
+fields still require full product-profile authority, apart from the existing
+verified-image scan activation and the one-way [clean-snapshot opt-in](clean-testing-snapshots.md#product-transition-and-custody).
+Snapshot opt-in uses the same conditional profile route with an already reviewed
+testing budget; it does not use the runtime-key helper below. The helper preserves
 every other profile field and prints no supplied value. It creates no scope
 or grant and starts no deployment.
 

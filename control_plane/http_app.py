@@ -776,7 +776,10 @@ from control_plane.contracts.route_binding_record import (
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
-from control_plane.preview_override_authorization import director_preview_override_allowed
+from control_plane.preview_override_authorization import (
+    director_preview_override_allowed,
+    director_preview_snapshot_allowed,
+)
 from control_plane import artifact_scan as control_plane_artifact_scan
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
@@ -13799,7 +13802,10 @@ def create_launchplane_fastapi_app(
             director_preview_write
             and control_plane_artifact_scan.is_artifact_scan_activation(existing_profile, profile)
         )
-        if director_preview_write and not scan_activation:
+        snapshot_activation = director_preview_write and director_preview_snapshot_allowed(
+            existing_profile, profile
+        )
+        if director_preview_write and not (scan_activation or snapshot_activation):
             try:
                 integration_key_markers = latest_active_runtime_key_safety_policy(
                     cast(RuntimeKeySafetyPolicyReadStore, record_store)
@@ -13817,7 +13823,7 @@ def create_launchplane_fastapi_app(
                     status_code=403,
                     trace_id=trace_id,
                     code="authorization_denied",
-                    message="Director agents may conditionally set one non-secret preview override.",
+                    message="Director agents may conditionally change only bounded preview settings.",
                 )
         if profile.odoo_business_hours != (
             existing_profile.odoo_business_hours if existing_profile else None

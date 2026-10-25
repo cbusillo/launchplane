@@ -75,6 +75,83 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
         replay = await self.post()
         self.assertEqual(replay.status_code, 202, replay.text)
 
+    def prepare_snapshot_opt_in(self) -> None:
+        current = self.before.model_dump(mode="json")
+        current["lanes"][0]["odoo_testing_drill_storage"] = {
+            "database_bytes": 10,
+            "filestore_bytes": 20,
+            "staging_bytes": 30,
+            "reserve_bytes": 40,
+            "retained_copy_bindings": ["a" * 64],
+        }
+        self.before = LaunchplaneProductProfileRecord.model_validate(current)
+        self.store.write_product_profile_record(self.before)
+        self.headers["If-Match"] = f'"{product_profile_record_sha256(self.before)}"'
+        self.after = self.before.model_dump(mode="json")
+        self.after["preview"]["clean_testing_snapshot"] = True
+
+    async def test_director_opts_into_clean_snapshots_with_existing_budget(self) -> None:
+        self.prepare_snapshot_opt_in()
+        response = await self.post()
+        self.assertEqual(response.status_code, 202, response.text)
+        expected = LaunchplaneProductProfileRecord.model_validate(self.after)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), expected)
+        self.assertEqual(expected.lanes, self.before.lanes)
+        replay = await self.post()
+        self.assertEqual(replay.status_code, 202, replay.text)
+
+    async def test_snapshot_opt_in_cannot_install_a_missing_storage_budget(self) -> None:
+        self.prepare_snapshot_opt_in()
+        current = self.before.model_dump(mode="json")
+        current["lanes"][0].pop("odoo_testing_drill_storage")
+        self.before = LaunchplaneProductProfileRecord.model_validate(current)
+        self.store.write_product_profile_record(self.before)
+        self.headers["If-Match"] = f'"{product_profile_record_sha256(self.before)}"'
+        response = await self.post()
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
+
+    async def test_snapshot_opt_in_preserves_budget_retention_drill_and_profile_authority(
+        self,
+    ) -> None:
+        self.prepare_snapshot_opt_in()
+        variants = []
+        for budget_key, budget_value in (("filestore_bytes", 1), ("retained_copy_bindings", [])):
+            changed = deepcopy(self.after)
+            changed["lanes"][0]["odoo_testing_drill_storage"][budget_key] = budget_value
+            variants.append(changed)
+        drill = deepcopy(self.after)
+        drill["lanes"][0]["odoo_testing_drill_enabled"] = True
+        variants.append(drill)
+        override = deepcopy(self.after)
+        override["preview"]["override_env"]["OTHER_SETTING"] = "other"
+        variants.append(override)
+        for field, value in (("repository", "example/other"), ("display_name", "Other")):
+            variants.append({**deepcopy(self.after), field: value})
+        for payload in variants:
+            with self.subTest(payload=payload):
+                response = await self.post(payload)
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(
+                    self.store.read_product_profile_record(self.before.product), self.before
+                )
+
+    async def test_scoped_agent_cannot_opt_in_and_director_cannot_opt_out(self) -> None:
+        self.prepare_snapshot_opt_in()
+        with scoped_agent_transport():
+            refused = await self.post()
+        self.assertEqual(refused.status_code, 403, refused.text)
+        accepted = await self.post()
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.before = self.store.read_product_profile_record(self.before.product)
+        self.headers["If-Match"] = f'"{product_profile_record_sha256(self.before)}"'
+        self.headers["Idempotency-Key"] = "snapshot-opt-out"
+        self.after = self.before.model_dump(mode="json")
+        self.after["preview"]["clean_testing_snapshot"] = False
+        refused = await self.post()
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
+
     async def test_addon_payload_saves_without_touching_template_or_production(self) -> None:
         payload = OdooPostDeployPayload.model_validate(
             {
