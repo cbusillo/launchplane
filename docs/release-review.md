@@ -1217,27 +1217,31 @@ and cannot satisfy this release gate.
 
 ### Product issue release waits
 
-The planning writer can attach a `release` pointer to a structured wait with
-`gh-plan.py wait ISSUE --waiting-for EVENT --ends-when CONDITION
---release-product PRODUCT --release-commit FULL_SOURCE_SHA
---release-next-action "Next agent: verify the repaired flow in production"
---evidence REVIEW`. The pointer binds the first wait and names the product's
-source commit; the published summary shows that binding.
+The planning writer attaches a `release` pointer with `wait` or `create`,
+using `--release-product`, `--release-commit` and `--release-next-action`.
+It binds the first `--waiting-for` / `--ends-when` pair, shows the product and
+source commit in the visible summary and preserves independent waits.
 
-The release-completion worker resolves matching waits on open issues in
-repositories covered by the product repository's existing planning authority only after a passed accepted forward release still matches production.
-It proves the required commit is the released commit or its ancestor, so a release
-already underway without the fix cannot clear the wait. It preserves other
-products, later source changes, human tests and other event waits. Rollbacks,
-failed runs and incomplete ancestry/history reads preserve the wait.
+After a passed accepted forward release matches production, the completion
+worker searches for that visible summary in repositories covered by the
+product repository's existing planning authority. Full trusted wait records
+remain authoritative. The required source commit must equal or precede the
+released commit; another product or a later commit stays waiting. Failed runs,
+temporary hotfix decisions and rollback runs do not resolve these waits.
 
-Resolution records the release decision and next agent action, then reuses planning
-status reconciliation. It does not close the issue or claim follow-up verification.
-A lost response retries from the current trusted wait; an already-closed release
-record still retries its unfinished wait resolution. Settled records are checked
-again on the existing settled-decision cadence, so a late-recorded wait is picked
-up without a worker restart. One malformed issue cannot starve other issues;
-incomplete scopes stay retryable. Resolution uses the configured planning identity
-and the same trusted author policy as the other planning readers. Only issues updated since a successful scan are reread on later passes; the
-cutoff advances only after the whole scan succeeds. Update the catalog readers
-and deploy the matching planning-package pin before recording release pointers.
+Only the current production decision is checked on the existing settled-decision
+cadence. Historical release records remain settled. Search indexing is eventual:
+a newly recorded or newly indexed wait is found on a later pass without a cutoff.
+Incomplete search coverage and individual failures remain explicit and retryable;
+independent repositories can progress. The adapter uses the existing GraphQL
+reader and search pagination, without crawling every open issue or comment.
+
+The configured planning token's provider-confirmed bot identity must already be
+a trusted wait author before any comment is posted. Resolution records the
+release evidence and conditional next action, then reuses status reconciliation.
+It does not close the issue or claim production verification. Its marker applies
+only to the previous wait state it observed, preserving a newer recorded wait;
+selected states remain self-contained when copied by claim or status writers.
+A later rollback does not retract a completed release event or its follow-up.
+Update catalog readers and deploy the matching planning-package pin before
+recording release pointers.

@@ -143,7 +143,7 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.release_event_waits.planning_scope_resolver",
-                return_value=lambda repo: SimpleNamespace(repository=repo),
+                return_value=lambda repo: SimpleNamespace(repository=repo, trusted_author_ids=()),
             ),
             patch("control_plane.release_event_waits.resolve_repository_release_waits") as resolve,
         ):
@@ -161,11 +161,31 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             self.assertEqual(resolve.call_args.kwargs["product"], self.profile.product)
             self.assertTrue(callable(resolve.call_args.kwargs["contains_commit"]))
 
-    def test_completion_retries_release_waits_even_after_record_closes(self) -> None:
-        self.advance()
-        self.advance()
-        self.assertEqual(self.settle_waits.call_count, 2)
-        self.assertEqual(self.settle_waits.call_args.kwargs["decision"], self.decision)
+    def test_only_current_release_waits_recheck_after_record_settlement(self) -> None:
+        from control_plane.release_invitation import SETTLED_DECISION_RECHECK_SECONDS
+
+        backoff = ReleaseInvitationBackoff()
+        with (
+            patch(
+                "control_plane.release_event_waits.release_version",
+                return_value=self.decision.checklist.candidate,
+            ),
+            patch("control_plane.release_event_waits.monotonic", return_value=1000) as clock,
+        ):
+            self.advance(backoff)
+            self.advance(backoff)
+            self.assertEqual(self.settle_waits.call_count, 1)
+            self.assertEqual(self.issue["state"], "closed")
+            clock.return_value += SETTLED_DECISION_RECHECK_SECONDS + 1
+            self.advance(backoff)
+            self.assertEqual(self.settle_waits.call_count, 2)
+            clock.return_value += SETTLED_DECISION_RECHECK_SECONDS + 1
+            with patch(
+                "control_plane.release_event_waits.release_version",
+                return_value=self.decision.checklist.production,
+            ):
+                self.advance(backoff)
+            self.assertEqual(self.settle_waits.call_count, 2)
 
     def test_worker_closes_release_record_without_invitation_or_equal_lanes(self) -> None:
         self.advance()
