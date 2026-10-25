@@ -10,6 +10,10 @@ from control_plane.contracts.production_backup_authority import (
 from control_plane.contracts.production_backup_gate import ProductionBackupGateWorkerRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.guest_capture_credential import (
+    GuestCaptureBoundary,
+    GuestCaptureCredential,
+)
 
 
 SSH_PRIVATE_KEY = "PRODUCTION_BACKUP_SSH_PRIVATE_KEY"
@@ -21,7 +25,7 @@ def capture_boundary(
     policy: ProductionBackupPolicyRecord,
     source: ProductionBackupTargetRecord,
     destination: ProductionBackupTargetRecord,
-) -> tuple[str, str, str, str, str, str]:
+) -> GuestCaptureBoundary:
     guest, storage = source.destination, destination.destination
     if not isinstance(guest, ProxmoxGuestBackupDestinationReference) or not isinstance(
         storage, ProxmoxStorageBackupDestinationReference
@@ -29,13 +33,59 @@ def capture_boundary(
         raise ValueError("Capture requires guest and storage authority.")
     if (guest.host.lower(), guest.username) != (storage.host.lower(), storage.username):
         raise ValueError("Capture targets must use the same endpoint.")
-    return (
-        guest.host.lower(),
-        guest.username,
-        guest.guest_kind,
-        guest.guest_id,
-        storage.storage_id,
-        policy.fast_snapshot.snapshot_prefix,
+    return GuestCaptureBoundary(
+        host=guest.host.lower(),
+        username=guest.username,
+        guest_kind=guest.guest_kind,
+        guest_id=guest.guest_id,
+        storage_id=storage.storage_id,
+        snapshot_prefix=policy.fast_snapshot.snapshot_prefix,
+    )
+
+
+def plan_guest_capture_credential(
+    boundary: GuestCaptureBoundary,
+    records: tuple[SecretRecord, ...],
+    bindings: tuple[SecretBinding, ...],
+    context: str,
+    instance: str,
+) -> GuestCaptureCredential:
+    available = {
+        record.secret_id: record
+        for record in records
+        if record.scope == "context_instance"
+        and record.integration == secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION
+        and (record.context, record.instance) == (context, instance)
+        and record.status == "configured"
+    }
+    selected = {}
+    for key in CAPTURE_KEYS:
+        matches = [
+            binding
+            for binding in bindings
+            if binding.secret_id in available
+            and binding.integration == secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION
+            and (binding.context, binding.instance) == (context, instance)
+            and binding.binding_key == key
+            and binding.status == "configured"
+        ]
+        if len(matches) != 1:
+            raise ValueError("Capture credentials are missing or ambiguous.")
+        selected[key] = matches[0]
+    private_key, hosts = selected[SSH_PRIVATE_KEY], selected[SSH_KNOWN_HOSTS]
+    if private_key.secret_id == hosts.secret_id or any(
+        binding.secret_id in {private_key.secret_id, hosts.secret_id}
+        and binding.binding_id not in {private_key.binding_id, hosts.binding_id}
+        and binding.status == "configured"
+        for binding in bindings
+    ):
+        raise ValueError("Capture credentials have ambiguous consumers.")
+    return GuestCaptureCredential(
+        boundary=boundary,
+        private_key_secret_id=private_key.secret_id,
+        known_hosts_secret_id=hosts.secret_id,
+        custody_context=context,
+        custody_instance=instance,
     )
 
 
@@ -44,64 +94,39 @@ def guest_capture_metadata(
     binding: ProductionBackupGateWorkerRequest,
 ) -> tuple[tuple[SecretBinding, SecretRecord], ...]:
     boundary = capture_boundary(binding.policy, binding.source_target, binding.destination_target)
-    targets = {
-        target.target_id: target
-        for target in store.list_production_backup_target_records(status="active")
-    }
-    lanes: dict[tuple[str, str], set[tuple[str, str, str, str, str, str]]] = {}
-    for policy in store.list_production_backup_policy_records(status="active"):
-        source = targets.get(policy.fast_snapshot.source_target_id)
-        destination = targets.get(policy.independent_backup.destination_target_id)
-        if source is None or destination is None:
-            continue
-        try:
-            candidate = capture_boundary(policy, source, destination)
-        except ValueError:
-            continue
-        lanes.setdefault((policy.context, policy.instance), set()).add(candidate)
-    records = {
-        record.secret_id: record
-        for record in store.list_secret_records(
-            integration=secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION
-        )
-        if record.scope == "context_instance" and record.status == "configured"
-    }
-    bindings = store.list_secret_bindings(integration=secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION)
-    candidates: dict[tuple[str, ...], tuple[tuple[SecretBinding, SecretRecord], ...]] = {}
-    for lane, boundaries in lanes.items():
-        if boundary not in boundaries:
-            continue
-        matches_by_key = {
-            key: [
-                (credential, records[credential.secret_id])
-                for credential in bindings
-                if credential.secret_id in records
-                and credential.binding_key == key
-                and credential.status == "configured"
-                and (credential.context, credential.instance) == lane
-                and (records[credential.secret_id].context, records[credential.secret_id].instance)
-                == lane
-            ]
-            for key in CAPTURE_KEYS
-        }
-        if not any(matches_by_key.values()):
-            continue
-        if boundaries != {boundary} or any(
-            len(matches) != 1 for matches in matches_by_key.values()
+    credential = store.read_guest_capture_binding(boundary)
+    if credential is None:
+        raise ValueError("The guest capture credential has not been bound.")
+    selected = []
+    for secret_id, key in (
+        (credential.private_key_secret_id, SSH_PRIVATE_KEY),
+        (credential.known_hosts_secret_id, SSH_KNOWN_HOSTS),
+    ):
+        record = store.read_secret_record(secret_id)
+        matches = [
+            item
+            for item in store.list_secret_bindings(
+                integration=secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                context_name=credential.custody_context,
+                instance_name=credential.custody_instance,
+            )
+            if item.secret_id == secret_id
+            and item.binding_key == key
+            and item.status == "configured"
+            and (item.context, item.instance)
+            == (credential.custody_context, credential.custody_instance)
+        ]
+        if (
+            record.integration != secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION
+            or record.status != "configured"
+            or record.scope != "context_instance"
+            or not matches
+            or (record.context, record.instance)
+            != (credential.custody_context, credential.custody_instance)
         ):
-            raise ValueError("Guest capture credential ownership is ambiguous.")
-        selected = [matches[0] for matches in matches_by_key.values()]
-        identifiers = tuple(sorted(record.secret_id for _, record in selected))
-        if len(set(identifiers)) != len(CAPTURE_KEYS) or any(
-            credential.secret_id in identifiers and credential not in [item[0] for item in selected]
-            for credential in bindings
-            if credential.status == "configured"
-        ):
-            raise ValueError("Guest capture credentials have ambiguous consumers.")
-        candidates[identifiers] = tuple(selected)
-    if len(candidates) != 1:
-        raise ValueError("Guest capture credentials are missing or ambiguous.")
-    return next(iter(candidates.values()))
+            raise ValueError("The guest capture credential is unavailable or changed.")
+        selected.append((max(matches, key=lambda item: (item.updated_at, item.binding_id)), record))
+    return tuple(selected)
 
 
 def resolve_guest_capture_values(

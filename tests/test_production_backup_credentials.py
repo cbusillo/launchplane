@@ -26,6 +26,9 @@ from tests.http_app_test_support import (
     _github_oauth_config,
 )
 from tests.support.stores import sqlite_database_url
+from tests.support.auth import scoped_agent_test
+from control_plane.storage.guest_capture_bindings import GUEST_CAPTURE_BINDING_WRITE_STEP
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from tests.test_production_backup_authority import (
     _profile,
     _policy,
@@ -471,3 +474,105 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
                 for command in host.commands
             )
         )
+
+    @scoped_agent_test
+    async def test_scoped_caller_can_qualify_active_policy_but_cannot_probe_pending_proposal(
+        self,
+    ) -> None:
+        self.assertEqual((await self.post(await self.reviewed(), "bind")).status_code, 202)
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_operators": [
+                    {
+                        "subjects": ["scoped"],
+                        "token_labels": ["scoped"],
+                        "products": ["example-product"],
+                        "contexts": ["example-product"],
+                        "instances": ["prod"],
+                        "actions": ["production_backup_authority.read"],
+                    }
+                ],
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=policy,
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="scoped-fixture",
+                local_operator_subject="scoped",
+                local_operator_token_label="scoped",
+            ),
+        )
+        query = "/v1/production-backup-authority/preflight?product=example-product&context=example-product&instance=prod&promotion_action=generic_web_prod_promotion.execute"
+        host = BackupHost()
+        with (
+            patch("control_plane.secrets._decrypt_secret_value", return_value="fixture"),
+            patch(
+                "control_plane.workflows.production_backup_provider.subprocess.run",
+                side_effect=host.run,
+            ) as provider,
+        ):
+            active = await _asgi_request(
+                app, "GET", query, headers={"Authorization": "Bearer scoped-fixture"}
+            )
+            self.assertEqual(active.status_code, 200, active.text)
+            self.assertEqual(active.json()["result"]["status"], "pass")
+            provider.reset_mock()
+            denied = await _asgi_request(
+                app,
+                "GET",
+                query + "&proposal_id=pending-fixture",
+                headers={"Authorization": "Bearer scoped-fixture"},
+            )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        provider.assert_not_called()
+
+    async def test_canonical_pair_needs_pin_apply_and_replays_without_relabelling(self) -> None:
+        for binding in self.store.list_secret_bindings():
+            key = next(
+                key
+                for key, identifier in self.selection.items()
+                if identifier == binding.binding_id
+            )
+            self.store.write_secret_binding(binding.model_copy(update={"binding_key": key}))
+        dry = await self.post(
+            {"bindings": self.selection, "reason": "Bind the existing guest pair"}
+        )
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.assertTrue(dry.json()["result"]["changed"])
+        body = {
+            "mode": "apply",
+            "bindings": self.selection,
+            "reason": "Bind the existing guest pair",
+            "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
+        }
+        self.assertEqual((await self.post(body, "canonical-pin")).status_code, 202)
+        self.assertTrue((await self.post(body, "canonical-pin")).json()["replayed"])
+        after = await self.post({"bindings": self.selection, "reason": "Already guest-bound"})
+        self.assertEqual(after.status_code, 202, after.text)
+        self.assertFalse(after.json()["result"]["changed"])
+        self.assertEqual(
+            self.store.guest_capture_secret_ids(),
+            frozenset(record.secret_id for record in self.originals),
+        )
+
+    async def test_failed_pin_rolls_back_rebinding_and_its_receipt(self) -> None:
+        body = await self.reviewed()
+
+        def fail_after_pin(step: str) -> None:
+            if step == GUEST_CAPTURE_BINDING_WRITE_STEP:
+                raise RuntimeError("injected")
+
+        with patch.object(
+            self.store, "_after_product_authority_bundle_step", side_effect=fail_after_pin
+        ):
+            with self.assertRaises(RuntimeError):
+                await self.post(body, "pin-rollback")
+        self.assertFalse(self.store.guest_capture_secret_ids())
+        self.assertEqual(
+            {binding.binding_key for binding in self.store.list_secret_bindings()},
+            {record.name for record in self.originals},
+        )
+        self.assertEqual((await self.post(body, "pin-rollback")).status_code, 202)

@@ -89,29 +89,42 @@ the lock does not resolve different IP/name aliases into physical identity.
 ## Host and credential prerequisites
 
 A capture credential belongs to its exact host, SSH user, guest kind and ID,
-PBS storage and snapshot prefix. The stored pair stays in its original lane's
-`launchplane_worker` integration, with `context_instance` scope and the keys
-`PRODUCTION_BACKUP_SSH_PRIVATE_KEY` and `PRODUCTION_BACKUP_SSH_KNOWN_HOSTS`.
-Active backup policies and their current targets associate that pair with its
-guest. A requesting product reuses the single configured pair from a lane whose
-policy has the same complete boundary. No migration, copy or second secret
-version is created; earlier service versions retain their existing lookup.
+PBS storage and snapshot prefix. A service-owned, create-only guest binding
+references the existing private-key and host-verification secret IDs. It is a
+typed, versioned metadata record in the secret audit store, with a deterministic
+boundary ID and fixed service provenance. Neither key value nor ciphertext is
+read or copied to create it. Existing secret records, bindings and encrypted
+versions stay unchanged in `launchplane_worker`, with their original
+`context_instance` custody and rotation scope. Older binaries can still parse
+and use those records.
 
-Missing or incomplete pairs, multiple configured pairs for one boundary, shared
-secret consumers and a credential lane naming multiple boundaries refuse before
-decryption. Invalid unrelated policies are excluded from credential selection.
-The host boundary probe remains the final check that the selected key reaches
-only the policy's guest, storage and prefix, with restore disabled. A policy
-change cannot make the key reach a different guest: that probe still refuses.
-Use one canonical endpoint for a physical guest.
+Startup reconciles missing guest bindings under the deployment and product
+metadata locks. It seeds only unambiguous configured pairs against current
+active policy and target records, skips invalid unrelated metadata, and never
+reinterprets an already-bound key after a policy move. Accepted initial policy
+application and the reviewed worker-binding control can seed later pairs in
+those same transactions. The control's digest includes the selected lane's
+policy/target revisions and relevant guest bindings; its optional
+`promotion_action` selects an action when a lane has several capture boundaries.
+A canonical pair still needs review/apply when the guest binding is missing.
 
-The original lane keeps custody and its existing managed-secret rotation path.
-Product retirement preserves capture credentials, since retiring a product does
-not retire the guest's backup authority. Initial credential setup still uses the
-reviewed worker-binding control, before or after policy activation; a capture
-requires both configured credentials and active matching authority. Do not store
-a second pair for another product on the same boundary. The worker ignores
-workstation keys and ambient SSH configuration. The Linux worker keeps key material in anonymous memory-backed
+All products with an approved policy for the same complete boundary resolve the
+one pinned pair. A product's old key remains on its old guest after its policy
+moves; it cannot become a second candidate on the destination guest. A second
+pair cannot displace an existing guest binding. Missing, disabled or conflicting
+credentials refuse before SSH. The host boundary probe remains the final check
+that the selected key reaches only the policy's guest, storage and prefix,
+with restore disabled. Use one canonical endpoint for a physical guest.
+
+Rotate the existing named records through the original lane's managed-secret
+workflow. The guest binding pins secret IDs, so new encrypted versions and
+ordinary binding relabelling retain that scope. Product retirement preserves
+only the pinned pair and excludes it from the plan's affected secret records;
+retiring a product does not retire its guest's backup authority. Initial key
+setup may precede policy activation, but capture needs both active authority
+and a configured guest binding. Do not create a second pair for another product
+on the same boundary. The worker ignores workstation keys and ambient SSH
+configuration. The Linux worker keeps key material in anonymous memory-backed
 files with mode 0600, exposes them to SSH through its own procfs descriptors, and
 closes them on completion. It never writes the material to disk. A runtime
 without Linux memfd support fails closed. Strict host-key checking stays enabled.
@@ -375,5 +388,6 @@ Only the Director’s authenticated agents and admins can qualify pending
 proposals; other callers retain qualification of their active policies.
 It executes only the boundary read and exact PBS storage-status check. It
 neither captures nor approves nor applies the policy. Its response reports the
-proposed policy revision and `capture_started: false`; mismatched or stale
+proposed policy revision, opaque `credential_binding_id` and
+`capture_started: false`; mismatched or stale
 proposals refuse. Without a proposal ID, the route qualifies active authority.

@@ -1276,6 +1276,7 @@ class SchemaMigrationTests(unittest.TestCase):
                     ),
                     patch("control_plane.storage.schema_migration.command.stamp") as stamp,
                     patch("control_plane.storage.schema_migration.command.upgrade") as upgrade,
+                    patch("control_plane.storage.schema_migration.PostgresRecordStore"),
                 ):
                     migrated_revision = migrate_schema(
                         database_url="postgresql+psycopg://launchplane:test@postgres/launchplane"

@@ -270,6 +270,7 @@ def bind_product_retirement_authority(
         context_name=context,
         instance_name=request.instance,
     )
+    secret_records = product_retirement_secret_records(record_store, secret_records)
     if not request.include_previews and active_preview_ids(
         record_store=record_store, profile=profile
     ):
@@ -1140,7 +1141,9 @@ class DokployProductRetirementAdapter:
             context_name=self._plan.context,
             instance_name=self._plan.instance,
         )
-        if _secret_snapshot(current_secrets) != (
+        if _secret_snapshot(
+            product_retirement_secret_records(self._record_store, current_secrets)
+        ) != (
             self._plan.authority_snapshot.secret_record_refs,
             self._plan.authority_snapshot.secret_record_sha256,
         ):
@@ -1192,7 +1195,9 @@ class DokployProductRetirementAdapter:
             current_secrets = self._record_store.list_secret_records(
                 context_name=self._plan.context, instance_name=self._plan.instance
             )
-            if _secret_snapshot(current_secrets) != (
+            if _secret_snapshot(
+                product_retirement_secret_records(self._record_store, current_secrets)
+            ) != (
                 self._plan.authority_snapshot.secret_record_refs,
                 self._plan.authority_snapshot.secret_record_sha256,
             ):
@@ -1295,20 +1300,12 @@ class DokployProductRetirementAdapter:
             self._deleted_authority_refs.append(reference)
 
     def _disable_managed_secrets(self, records: tuple[SecretRecord, ...]) -> None:
-        from control_plane.guest_capture_credentials import CAPTURE_KEYS
-        from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
-
-        for record in records:
+        for record in product_retirement_secret_records(self._record_store, records):
             bindings = self._record_store.list_secret_bindings(
                 integration=record.integration,
                 context_name=record.context,
                 instance_name=record.instance,
             )
-            if record.integration == LAUNCHPLANE_WORKER_SECRET_INTEGRATION and any(
-                binding.secret_id == record.secret_id and binding.binding_key in CAPTURE_KEYS
-                for binding in bindings
-            ):
-                continue
             if record.status != "disabled":
                 if not self._record_store.disable_product_retirement_secret(
                     expected_record=record,
@@ -1696,6 +1693,14 @@ def _domain_id(payload: Mapping[str, object]) -> str:
 
 def _runtime_ref(record: RuntimeEnvironmentRecord) -> str:
     return f"runtime_environment:{record.scope}:{record.context}:{record.instance}"
+
+
+def product_retirement_secret_records(
+    store: object, records: tuple[SecretRecord, ...]
+) -> tuple[SecretRecord, ...]:
+    reader = getattr(store, "guest_capture_secret_ids", None)
+    protected = cast(frozenset[str], reader()) if callable(reader) else frozenset()
+    return tuple(record for record in records if record.secret_id not in protected)
 
 
 def _secret_snapshot(

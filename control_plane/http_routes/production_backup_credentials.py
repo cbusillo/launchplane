@@ -54,6 +54,7 @@ from control_plane.workflows.production_backup_gate import (
 )
 from control_plane.workflows.production_backup_provider import execute_production_backup_provider
 from control_plane.guest_capture_credentials import SSH_PRIVATE_KEY, SSH_KNOWN_HOSTS
+from control_plane.guest_capture_credentials import capture_boundary
 
 CREDENTIAL_ROUTE = "/v1/products/{product}/environments/prod/backup-worker-bindings"
 CREDENTIAL_APPLY_ROUTE = CREDENTIAL_ROUTE + "/apply"
@@ -241,7 +242,10 @@ def register_production_backup_credential_routes(
         profile = store.read_product_profile_record(product)
         records, bindings = credential_metadata(store, context=context, instance=instance)
         try:
-            plan, replacements = plan_credential_bindings(profile, records, bindings, body)
+            capture_state = store.guest_capture_enrollment_state(context, instance)
+            plan, replacements = plan_credential_bindings(
+                profile, records, bindings, body, capture_state
+            )
         except ValueError as error:
             if body.mode == "apply":
                 replay = store.prepare_db_only_mutation(
@@ -294,6 +298,8 @@ def register_production_backup_credential_routes(
                 instance=instance,
                 expected_records=records,
                 expected_bindings=bindings,
+                expected_capture_state=capture_state,
+                capture_promotion_action=body.promotion_action,
                 replacements=replacements,
                 reason=body.reason,
                 mutation=DbOnlyMutationRequest(
@@ -395,6 +401,9 @@ def register_production_backup_credential_routes(
                     "error_code": result.error_code if unchanged else "backup_authority_changed",
                     "policy_record_id": binding.policy.record_id,
                     "policy_revision": binding.policy.policy_revision,
+                    "credential_binding_id": capture_boundary(
+                        binding.policy, binding.source_target, binding.destination_target
+                    ).event_id,
                     "boundary_status": result.evidence.get("boundary_status", "unverified")
                     if unchanged
                     else "unverified",

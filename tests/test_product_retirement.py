@@ -109,6 +109,7 @@ class _Store:
         self.previews: tuple[PreviewRecord, ...] = ()
         self.secret_records: tuple[SecretRecord, ...] = ()
         self.secret_bindings: tuple[SecretBinding, ...] = ()
+        self.guest_secret_ids: frozenset[str] = frozenset()
         self.records: dict[str, object] = {}
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
@@ -152,6 +153,9 @@ class _Store:
 
     def list_secret_records(self, **_: object) -> tuple[SecretRecord, ...]:
         return self.secret_records
+
+    def guest_capture_secret_ids(self) -> frozenset[str]:
+        return self.guest_secret_ids
 
     def list_secret_bindings(self, **_: object) -> tuple[SecretBinding, ...]:
         return self.secret_bindings
@@ -584,6 +588,7 @@ class ProductRetirementTests(unittest.TestCase):
         )
         store.secret_records = (guest_key,)
         store.secret_bindings = (binding,)
+        store.guest_secret_ids = frozenset((guest_key.secret_id,))
         observation = _observation(domains=("domain-1",))
         plan = _plan(store, observation)
         request = _request(
