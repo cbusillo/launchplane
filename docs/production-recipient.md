@@ -98,8 +98,8 @@ Preparation also materializes the reviewed raw Compose file in the recipient's
 own Dokploy directory under that same host execution fence. Dokploy's converted
 Compose read requires this file even before deployment. Matching files replay;
 different files and symlink paths refuse. Preparation preserves other files,
-including the runtime environment file, and verifies the source digest before
-requesting the actual provider render. A saved provider configuration alone never
+including the runtime environment file, and binds the compared source bytes into
+the resource evidence before requesting the actual provider render. A saved provider configuration alone never
 qualifies the recipient.
 
 Before any provider effect, a rejected attempt may be replaced by a fresh reviewed
