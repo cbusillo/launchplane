@@ -114,13 +114,18 @@ moves; it cannot become a second candidate on the destination guest. A second
 pair cannot displace an existing guest binding. Missing, disabled or conflicting
 credentials refuse before SSH. The host boundary probe remains the final check
 that the selected key reaches only the policy's guest, storage and prefix,
-with restore disabled. Use one canonical endpoint for a physical guest.
+with restore disabled. Use one canonical endpoint for a physical guest. A new
+storage or prefix is a new forced-command boundary, which needs its own
+host-bound credential and reviewed enrollment; changing policy alone never
+widens an existing key's host scope.
 
 Rotate the existing named records through the original lane's managed-secret
 workflow. The guest binding pins secret IDs, so new encrypted versions and
 ordinary binding relabelling retain that scope. Product retirement preserves
-only the pinned pair and excludes it from the plan's affected secret records;
-retiring a product does not retire its guest's backup authority. Initial key
+only the pinned pair, explicitly lists it as retained and excludes it from the
+plan's delete/disable effects. Retiring a product does not retire its guest's
+backup authority, including a currently unused guest key. Retiring that guest's
+credential remains a separate managed-secret action in its custody lane. Initial key
 setup may precede policy activation, but capture needs both active authority
 and a configured guest binding. Do not create a second pair for another product
 on the same boundary. The worker ignores workstation keys and ambient SSH
@@ -306,7 +311,7 @@ commit refuse. If a response is lost, retain the original request/key and use
 **Check capture boundary and PBS** calls
 `GET /v1/production-backup-authority/preflight` with product, context, instance
 and promotion action, under existing `production_backup_authority.read`.
-Launchplane internally resolves the same exact-lane worker credentials and
+Launchplane internally resolves the pinned guest capture credentials and
 runs only `launchplane-backup-boundary` and the bound `pvesm status` check.
 The response reports policy revision, exact capture-only boundary agreement and
 active PBS reachability, without coordinates or credential/provider output.

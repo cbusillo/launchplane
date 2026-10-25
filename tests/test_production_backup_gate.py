@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime, timedelta, timezone
 import os
 import json
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
@@ -319,7 +320,7 @@ class ProductionBackupGateTests(unittest.TestCase):
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "worker-private",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "worker-hosts",
                 },
-            ) as worker_secrets,
+            ),
             patch(
                 "control_plane.workflows.production_backup_gate.execute_production_backup_provider",
                 return_value=ProductionBackupGateWorkerResult(
@@ -335,10 +336,6 @@ class ProductionBackupGateTests(unittest.TestCase):
                 control_plane_root_path=self.root,
                 lease_owner="test-worker",
             )
-        worker_secrets.assert_called_once_with(
-            self.store,
-            self.binding,
-        )
         self.assertEqual(provider.call_args.kwargs["ssh_private_key"], "worker-private")
         self.assertEqual(provider.call_args.kwargs["ssh_known_hosts"], "worker-hosts")
 
@@ -457,8 +454,28 @@ class ProductionBackupGatePostgresTests(unittest.TestCase):
                 with store.production_backup_retention_guard():
                     future = executor.submit(revise)
                     self.assertTrue(started.wait(5))
-                    with self.assertRaises(FutureTimeoutError):
-                        future.result(timeout=0.1)
+                    engine = create_engine(store.database_url)
+                    try:
+                        with engine.connect() as probe:
+                            deadline = time.monotonic() + 5
+                            waiting = False
+                            while time.monotonic() < deadline:
+                                waiting = bool(
+                                    probe.scalar(
+                                        text(
+                                            "select exists(select 1 from pg_locks "
+                                            "where locktype = 'advisory' and not granted "
+                                            "and database = (select oid from pg_database "
+                                            "where datname = current_database()))"
+                                        )
+                                    )
+                                )
+                                if waiting or future.done():
+                                    break
+                                Event().wait(0.01)
+                            self.assertTrue(waiting)
+                    finally:
+                        engine.dispose()
                     unrelated = executor.submit(
                         store.write_runtime_environment_record,
                         RuntimeEnvironmentRecord(
