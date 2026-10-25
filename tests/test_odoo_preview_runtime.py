@@ -1937,6 +1937,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         wait_deploy.assert_called_once()
         module_update.assert_called_once()
         if snapshot is not None:
+            self.assertEqual(
+                module_update.call_args.kwargs["clean_preview_image_reference"],
+                render_compose.call_args.kwargs["image_reference"],
+            )
             adapter = SimpleNamespace(
                 _apply_request=SimpleNamespace(apply=SimpleNamespace(dry_run_plan=dry_run)),
                 _control_plane_root=Path("."),

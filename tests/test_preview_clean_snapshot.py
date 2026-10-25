@@ -291,7 +291,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def service_schedule(self, snapshot: CleanTestingSnapshot) -> dict[str, str]:
         environment = {
-            "DOCKER_IMAGE_REFERENCE": self.image,
             "ODOO_DB_NAME": self.database,
             "ODOO_DATA_VOLUME": "preview-data",
             "ODOO_DB_VOLUME": "preview-db",
@@ -340,6 +339,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 ),
                 env_file=None,
                 clean_preview_snapshot=snapshot,
+                clean_preview_image_reference=self.image,
             )
         return evidence
 
