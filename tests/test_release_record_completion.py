@@ -1,4 +1,6 @@
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
@@ -12,6 +14,7 @@ from control_plane.client_release import (
 )
 from control_plane.release_invitation import advance_release_invitations, ReleaseInvitationBackoff
 from control_plane.release_review_record import release_decision_marker
+from control_plane.release_event_waits import settle_product_release_waits
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.test_release_review import decision, profile, seed
 
@@ -39,6 +42,9 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         self.comments: list[dict[str, Any]] = []
         self.calls: list[tuple[str, str]] = []
         self.lose_response = ""
+        self.settle_waits = self.enterContext(
+            patch("control_plane.release_event_waits.settle_product_release_waits")
+        )
         self.release_run: ClientReleaseRunView | None = ClientReleaseRunView(
             decision_record_id=self.decision.record_id,
             rollback_drill=False,
@@ -83,6 +89,81 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
 
     def advance(self, backoff: ReleaseInvitationBackoff | None = None) -> None:
         advance_release_invitations(store=self.store, control_plane_root=self.root, backoff=backoff)
+
+    def test_release_waits_require_successful_forward_release_and_current_production(self) -> None:
+        assert self.release_run is not None
+        for state, mode in (("stopped", "promote"), ("running", "promote"), ("passed", "rollback")):
+            with (
+                self.subTest(state=state, mode=mode),
+                patch(
+                    "control_plane.release_event_waits.release_version",
+                    side_effect=AssertionError("Must not read production"),
+                ),
+            ):
+                settle_product_release_waits(
+                    store=self.store,
+                    control_plane_root=self.root,
+                    profile=self.profile,
+                    decision=self.decision.model_copy(update={"release_start": mode}),
+                    run=self.release_run.model_copy(update={"state": state}),
+                )
+        with (
+            patch(
+                "control_plane.release_event_waits.release_version",
+                return_value=self.decision.checklist.production,
+            ),
+            patch("control_plane.release_event_waits.resolve_repository_release_waits") as resolve,
+        ):
+            settle_product_release_waits(
+                store=self.store,
+                control_plane_root=self.root,
+                profile=self.profile,
+                decision=self.decision,
+                run=self.release_run,
+            )
+            resolve.assert_not_called()
+        with (
+            patch(
+                "control_plane.release_event_waits.release_version",
+                return_value=self.decision.checklist.candidate,
+            ),
+            patch(
+                "control_plane.release_event_waits.resolve_merge_train_policy_record",
+                return_value=SimpleNamespace(policy=SimpleNamespace(policies=())),
+            ),
+            patch(
+                "control_plane.release_event_waits.launchplane_github_token",
+                return_value=nullcontext("test-token"),
+            ),
+            patch(
+                "control_plane.release_event_waits.resolve_delivery_github_app_id", return_value=77
+            ),
+            patch("control_plane.release_event_waits.resolve_repository_release_waits") as resolve,
+        ):
+            settle_product_release_waits(
+                store=self.store,
+                control_plane_root=self.root,
+                profile=self.profile,
+                decision=self.decision,
+                run=self.release_run,
+            )
+            self.assertEqual(resolve.call_args.kwargs["product"], self.profile.product)
+            self.assertEqual(
+                resolve.call_args.kwargs["released_commit"],
+                self.decision.checklist.candidate.source_commit,
+            )
+
+    def test_completion_retries_release_waits_even_after_record_closes(self) -> None:
+        self.advance()
+        self.advance()
+        self.assertEqual(self.settle_waits.call_count, 2)
+        self.assertEqual(self.settle_waits.call_args.kwargs["decision"], self.decision)
+
+    def test_failed_release_does_not_resolve_production_waits(self) -> None:
+        assert self.release_run is not None
+        self.release_run = self.release_run.model_copy(update={"state": "running"})
+        self.advance()
+        self.settle_waits.assert_not_called()
 
     def test_worker_closes_release_record_without_invitation_or_equal_lanes(self) -> None:
         self.advance()

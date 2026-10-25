@@ -567,6 +567,7 @@ def _settle_release_record(
 ) -> bool:
     from control_plane.client_release import read_client_release_run
     from control_plane.release_review_record import release_decision_marker
+    from control_plane.release_event_waits import settle_product_release_waits
 
     with store.release_review_publication_lock(record_id=decision.record_id):
         run = read_client_release_run(store=store, profile=profile, decision=decision)
@@ -618,6 +619,13 @@ def _settle_release_record(
             ):
                 raise ValueError("Release record identity was not confirmed.")
             if issue.get("state") == "closed":
+                settle_product_release_waits(
+                    store=store,
+                    control_plane_root=control_plane_root,
+                    profile=profile,
+                    decision=decision,
+                    run=run,
+                )
                 return True
             if (
                 store.read_product_profile_record(profile.product) != profile
@@ -645,6 +653,13 @@ def _settle_release_record(
                 if not isinstance(result, dict) or not isinstance(result.get("id"), int):
                     raise ValueError("Release outcome publication was not confirmed.")
             _close_issue(path=path, token=token, number=number)
+            settle_product_release_waits(
+                store=store,
+                control_plane_root=control_plane_root,
+                profile=profile,
+                decision=decision,
+                run=run,
+            )
             return True
     return False
 
