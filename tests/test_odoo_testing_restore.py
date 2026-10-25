@@ -34,6 +34,7 @@ from control_plane.odoo_testing_restore import (
     TestingCredentialsOverlap,
     TestingCredentialVersionsMissing,
     FreshOdooTestingGeneration,
+    FreshRestoreScriptArguments,
     generation_binding,
     build_fresh_testing_restore_script,
     fresh_testing_restore_spec,
@@ -152,6 +153,58 @@ class TestingCredentialProofTests(unittest.TestCase):
 
 
 class FreshTestingHostProgramTests(unittest.TestCase):
+    spec: dict[str, Any]
+    arguments: FreshRestoreScriptArguments
+
+    def test_coordinate_only_source_uses_bound_runtime_ssh_directory(self) -> None:
+        directory = self.root / "source-reader"
+        directory.mkdir()
+        identity = directory / "id_rsa"
+        identity.write_text("fixture identity")
+        (directory / "known_hosts").write_text("fixture host")
+        self.arguments["source_environment"] = self.spec["source"]
+        self.arguments["runtime_environment"] = {"DATA_WORKFLOW_SSH_DIR": str(directory)}
+        self.spec = fresh_testing_restore_spec(**self.arguments)
+
+        status, output = self.run_program()
+
+        self.assertEqual(status, 0, output)
+        command = next(command for command in self.calls if command[0] == "ssh")
+        self.assertEqual(command[command.index("-i") + 1], str(identity))
+        self.assertIn("UserKnownHostsFile=" + str(directory / "known_hosts"), command)
+
+    def test_explicit_source_ssh_identity_precedes_bound_runtime_metadata(self) -> None:
+        self.arguments["runtime_environment"] = {
+            "DATA_WORKFLOW_SSH_KEY": "/other/identity",
+            "DATA_WORKFLOW_SSH_DIR": "/other/ssh",
+        }
+        self.spec = fresh_testing_restore_spec(**self.arguments)
+
+        status, output = self.run_program()
+
+        self.assertEqual(status, 0, output)
+        command = next(command for command in self.calls if command[0] == "ssh")
+        source = self.arguments["source_environment"]
+        self.assertEqual(command[command.index("-i") + 1], source["DATA_WORKFLOW_SSH_KEY"])
+        self.assertIn(
+            "UserKnownHostsFile=" + source["DATA_WORKFLOW_SSH_DIR"] + "/known_hosts", command
+        )
+
+    def test_coordinate_only_source_uses_bound_runtime_ssh_identity(self) -> None:
+        runtime = {
+            "DATA_WORKFLOW_SSH_KEY": "/reader/identity",
+            "DATA_WORKFLOW_SSH_DIR": "/reader/ssh",
+        }
+        self.arguments["source_environment"] = self.spec["source"]
+        self.arguments["runtime_environment"] = runtime
+        self.spec = fresh_testing_restore_spec(**self.arguments)
+
+        status, output = self.run_program()
+
+        self.assertEqual(status, 0, output)
+        command = next(command for command in self.calls if command[0] == "ssh")
+        self.assertEqual(command[command.index("-i") + 1], runtime["DATA_WORKFLOW_SSH_KEY"])
+
     def test_snapshot_headroom_is_required_before_stopping_testing(self) -> None:
         from types import SimpleNamespace
 
@@ -344,7 +397,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             "DATA_WORKFLOW_SSH_KEY": "/existing/read-only-identity",
             "DATA_WORKFLOW_SSH_DIR": "/existing/ssh",
         }
-        self.spec: dict[str, Any] = fresh_testing_restore_spec(
+        self.arguments = FreshRestoreScriptArguments(
             generation=self.gen,
             compose_project=self.gen.namespace,
             image_reference="registry.invalid/odoo@sha256:" + "f" * 64,
@@ -357,6 +410,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             clear_stale_lock=False,
             data_workflow_lock_path="/volumes/data/.fixture_workflow_lock",
         )
+        self.spec = fresh_testing_restore_spec(**self.arguments)
         self.containers: dict[str, dict[str, Any]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
         self.calls: list[list[str]] = []
