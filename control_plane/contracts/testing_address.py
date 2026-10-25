@@ -22,6 +22,7 @@ class TestingAddressPlan(FrozenRecord):
     product: str
     context: str
     retirement_operation_id: str
+    reason: str = Field(min_length=1)
     publication_key: str
     publication_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     profile: LaunchplaneProductProfileRecord

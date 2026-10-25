@@ -251,7 +251,7 @@ OPERATION_SPECS = (
     OperationSpec(
         "POST",
         TESTING_ADDRESS_ROUTE,
-        "Amend the current native Odoo testing lane's canonical hostname from exact retained custody, preserving its copy, original hostname and operation fences; verify both public runtime identities before publishing canonical metadata.",
+        "Amend the current native Odoo testing lane's canonical hostname from exact retained custody, preserving its copy, original hostname and operation fences; verify both public runtime identities before publishing canonical metadata. Cancel an unpublished amendment under its original request and key to restore the route preimage.",
         ("service_api",),
         ("dry-run", "apply", "readback"),
         "apply",

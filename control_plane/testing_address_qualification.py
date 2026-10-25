@@ -127,14 +127,14 @@ def _qualify_address_domains(
                             )
                         seen.add(target.target_id)
                         projects.add(str(actual["appName"]))
-                    rows.append(
-                        {
-                            "id": target.target_id,
-                            "category": target.category,
-                            "server": actual.get("serverId"),
-                            "matches": matches,
-                        }
-                    )
+                        rows.append(
+                            {
+                                "id": target.target_id,
+                                "server": actual.get("serverId"),
+                                "project": actual["appName"],
+                                "matches": matches,
+                            }
+                        )
         if page.next_offset is None:
             break
         offset = page.next_offset
@@ -143,18 +143,67 @@ def _qualify_address_domains(
     )
     if check.inventory_digest != digest or seen != retained_ids:
         raise ValueError("The hostname recipient inventory is incomplete or changed.")
-    return canonical_json_sha256({"membership": digest, "recipients": rows}), tuple(
+    return canonical_json_sha256(sorted(rows, key=lambda item: str(item["id"]))), tuple(
         sorted(projects)
     )
 
 
+def qualify_retained_address_domains(
+    *, host: str, token: str, hostname: str, retained_ids: frozenset[str], server_id: str
+) -> tuple[str, tuple[str, ...]]:
+    rows = []
+    projects = set()
+    for target_id in sorted(retained_ids):
+        actual = api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=target_id
+        )
+        domains = actual.get("domains")
+        if not isinstance(domains, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("host"), str) for item in domains
+        ):
+            raise ValueError("The retained hostname domain inventory is incomplete.")
+        matches = [
+            item
+            for item in domains
+            if isinstance(item, dict)
+            and isinstance(item.get("host"), str)
+            and str(item["host"]).casefold() == hostname.casefold()
+        ]
+        if (
+            actual.get("composeId") != target_id
+            or actual.get("serverId") != server_id
+            or not actual.get("appName")
+            or len(matches) != 1
+            or actual.get("autoDeploy") is not False
+            or api.list_dokploy_schedules(
+                host=host, token=token, target_id=target_id, schedule_type="compose"
+            )
+        ):
+            raise ValueError("The retained hostname recipient changed before dispatch.")
+        projects.add(str(actual["appName"]))
+        rows.append(
+            {
+                "id": target_id,
+                "server": actual.get("serverId"),
+                "project": actual["appName"],
+                "matches": matches,
+            }
+        )
+    return canonical_json_sha256(rows), tuple(sorted(projects))
+
+
 def address_transport(
-    root: Path, store: PostgresRecordStore, plan: TestingAddressPlan
+    root: Path, store: PostgresRecordStore, plan: TestingAddressPlan, *, recovery: bool = False
 ) -> DokployTestingRouteTransport:
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
     )
     identity = plan.before.inventory.runtime_identity if plan.before.inventory else None
+    if recovery:
+        from control_plane.testing_address_storage import read_testing_address_recovery_copy
+
+        current = read_testing_address_recovery_copy(store, plan)
+        identity = current.inventory.runtime_identity if current.inventory else None
     if identity is None:
         raise ValueError("The current testing copy requires its runtime identity.")
     return DokployTestingRouteTransport(
@@ -168,7 +217,9 @@ def address_transport(
         public_aliases=plan.route_after.aliases,
         entrypoints=plan.route_after.public_entrypoints,
         old_runtime_identity=identity,
-        address_recipients={
+        address_recipients=None
+        if recovery
+        else {
             "hostname": plan.route_after.host,
             "projects": plan.retained_projects,
             "entrypoints": plan.route_after.public_entrypoints,
@@ -202,6 +253,7 @@ def plan_testing_address(
     retirement_operation_id: str,
     reservation_operation_id: str,
     hostname: str,
+    reason: str,
 ) -> TestingAddressPlan:
     retained = store.read_retained_testing_generation(retirement_operation_id)
     if retained is None or (retained.plan.product, retained.plan.context) != (product, context):
@@ -312,6 +364,7 @@ def plan_testing_address(
             product=product,
             context=context,
             retirement_operation_id=retirement_operation_id,
+            reason=reason,
             publication_key=publication.plan.key,
             publication_sha256=canonical_json_sha256(publication.model_dump(mode="json")),
             profile=profile,

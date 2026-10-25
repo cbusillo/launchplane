@@ -1309,9 +1309,10 @@ Use `mode: dry-run` first. The service saves an immutable private plan and retur
 its `plan_sha256`, current target ID, new canonical hostname and retained original
 hostname. Review that result, then send the same request with `mode: apply`,
 `reviewed_plan_sha256`, and one stable `Idempotency-Key`. `mode: readback` uses the
-same reviewed hash. The installed operator helper's service transport supplies
+same reviewed hash. The installed Launchplane service helper's transport supplies
 the existing credential; no provider credential, caller-supplied topology or new
 grant is an input. Generated agent/OpenAPI contracts describe this service API.
+The reviewed reason is retained in the immutable plan and applied receipt.
 
 The plan requires exact retained hostname custody in the same product/context,
 a superseded original recipient operation, complete credential-visible provider
@@ -1321,6 +1322,12 @@ router labels must remain strictly below the existing lane-owned priority, with
 known listeners. Foreign domains, matching foreign routers, automatic restart
 policies and incomplete observations refuse qualification. The original executor
 locks and all retained custody hashes are rechecked; no old fence is released.
+The retained recipient facts form the comparison digest. Unrelated provider
+membership is not part of that digest. A full census is required before the first
+attempt; a continuing original observes its recorded writer, and a dispatch
+rechecks only the retained recipients and current physical ingress. Matching
+applied or dormant TCP routers also refuse qualification because
+[TCP routing precedes HTTP routing](https://doc.traefik.io/traefik/reference/routing-configuration/tcp/routing/router/).
 
 The existing physical route fence writes one owned document with a rule for the
 new hostname and the original hostname. Backend, TLS, middleware and listeners
@@ -1331,6 +1338,20 @@ Odoo override intent. The original publication, candidate, restore generation,
 retirement and resources remain unchanged. A lost metadata reply resolves from
 the committed address receipt. Preserve the original request and key on any
 unknown outcome; do not clear old operation fences or edit publication history.
+The metadata transaction checks the original lease again immediately before commit.
+
+If the unpublished amendment cannot finish, send `mode: apply` with
+`operation: cancel`, the original reviewed hash, reason and `Idempotency-Key`.
+Cancellation settles and excludes the original forward writer before restoring
+the recorded owned-file preimage through the same fenced mechanism. Its own
+uncertain inverse must settle before cancellation can complete. It can preserve
+later inventory, runtime and unrelated profile edits while restoring the route;
+it never overwrites a different copy or binding. `mode: readback` with
+`operation: cancel` and the same key verifies the restored preimage. Completed
+cancellation permits a fresh plan and key; it does not certify public health.
+An already committed canonical publication cannot be cancelled by this path;
+retrieve its original amend result instead. Database uncertainty retains the
+original fence until the publication transaction can be observed conclusively.
 
 Native refresh and later rebuild admission resolve this additive address receipt.
 A later rebuild keeps the original hostname as an alias. Ordinary deploy and

@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from functools import cached_property
 import json
 from pathlib import Path
 from typing import Literal, cast
@@ -9,9 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.testing_address import TestingAddressPlan, ADDRESS_SCOPE
 from control_plane.contracts.promotion_record import HealthcheckEvidence
-from control_plane.dokploy import source
-from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+from control_plane.dokploy import source, api
+from control_plane.dokploy.native_copy_stream import (
+    NativeSourceUnavailable,
+    NativeSourceAuthorizationDenied,
+)
 from control_plane.dokploy.testing_route import observe_testing_route, route_document
+from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteWriterAttempt,
     TestingRouteExecutionIntent,
@@ -30,6 +35,7 @@ from control_plane.testing_address_qualification import (
     address_transport,
     exclude_address_executors,
     qualify_address_domains,
+    qualify_retained_address_domains,
 )
 from control_plane.testing_address_storage import (
     commit_testing_address,
@@ -53,6 +59,7 @@ class TestingAddressRequest(BaseModel):
     reservation_operation_id: str = Field(min_length=1)
     hostname: str = Field(pattern=r"^[a-z0-9.-]+$")
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"
+    operation: Literal["amend", "cancel"] = "amend"
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     reason: str = Field(min_length=1)
 
@@ -74,10 +81,20 @@ def address_plan_result(plan: TestingAddressPlan, *, applied: bool) -> dict[str,
 
 class TestingAddressAdapter:
     def __init__(
-        self, root: Path, store: PostgresRecordStore, plan: TestingAddressPlan, trace_id: str
+        self,
+        root: Path,
+        store: PostgresRecordStore,
+        plan: TestingAddressPlan,
+        trace_id: str,
+        *,
+        cancel: bool = False,
     ) -> None:
         self.root, self.store, self.plan, self.trace_id = root, store, plan, trace_id
-        self.transport = address_transport(root, store, plan)
+        self.cancel = cancel
+
+    @cached_property
+    def transport(self) -> DokployTestingRouteTransport:
+        return address_transport(self.root, self.store, self.plan, recovery=self.cancel)
 
     def provider_target_origin(self) -> ProviderTargetOrigin:
         return ProviderTargetOrigin(
@@ -95,17 +112,25 @@ class TestingAddressAdapter:
     def reconciliation_key(self) -> str:
         return self.plan.digest
 
-    def provider_guard(self) -> None:
+    def provider_guard(self, *, full_census: bool = False) -> None:
         host, token = source.read_dokploy_config(
             control_plane_root=self.root, database_url=self.store.database_url
         )
-        digest, projects = qualify_address_domains(
-            host=host,
-            token=token,
-            hostname=self.plan.route_after.host,
-            retained_ids=frozenset(str(item.target_id) for item in self.plan.reservations),
-            server_id=self.plan.server_id,
-        )
+        qualify = qualify_address_domains if full_census else qualify_retained_address_domains
+        try:
+            digest, projects = qualify(
+                host=host,
+                token=token,
+                hostname=self.plan.route_after.host,
+                retained_ids=frozenset(str(item.target_id) for item in self.plan.reservations),
+                server_id=self.plan.server_id,
+            )
+        except api.DokployRequestFailed as error:
+            if error.status_code in {401, 403}:
+                raise NativeSourceAuthorizationDenied(
+                    "The existing provider identity denied the retained hostname recipient read."
+                ) from error
+            raise
         if digest != self.plan.domain_inventory_sha256 or projects != self.plan.retained_projects:
             raise ValueError("The hostname provider inventory changed since review.")
 
@@ -168,10 +193,22 @@ class TestingAddressAdapter:
         with exclude_address_executors(self.store, tuple(self.plan.operation_sha256)):
             return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
 
+    def cancel_readback(self) -> dict[str, object]:
+        from control_plane.testing_address_cancellation import read_cancelled_address
+
+        return read_cancelled_address(self)
+
+    def cancel_original(self, lease: ProviderOperationLease) -> ProviderMutationOutcome:
+        from control_plane.testing_address_cancellation import cancel_testing_address
+
+        return cancel_testing_address(self, lease)
+
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         with exclude_address_executors(self.store, tuple(self.plan.operation_sha256)):
+            if self.cancel:
+                return self.cancel_original(lease)
             record = read_testing_address(self.store, self.plan.publication_key)
             if record is not None:
                 if record.state != "applied" or record.plan != self.plan:
@@ -199,7 +236,8 @@ class TestingAddressAdapter:
         )
         try:
             guard()
-            self.provider_guard()
+            if original_effect is None:
+                self.provider_guard(full_census=True)
         except (ValueError, FileNotFoundError) as error:
             if original_effect is None:
                 raise ProviderMutationRejectedError(error) from error

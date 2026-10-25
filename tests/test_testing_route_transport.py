@@ -55,7 +55,9 @@ class TestingRouteTransportTests(unittest.TestCase):
     new_identity: RuntimeIdentity
 
     def test_address_amendment_uses_fenced_writer_without_changing_runtime(self) -> None:
-        before = self.plan
+        payload = self.plan.model_dump()
+        list(payload["template"]["http"]["routers"].values())[-1]["priority"] += 5
+        before = TestingLaneRoute.model_validate(payload)
         self.raw = self.fixture.apply(before, before.new_backend)
         self.route_file.write_text(json.dumps(route_document(before, before.new_backend)))
         self.plan = routing.amend_testing_route_address(before, "canonical.invalid")
@@ -88,6 +90,16 @@ class TestingRouteTransportTests(unittest.TestCase):
                 item["priority"] for item in self.plan.template["http"]["routers"].values()
             ),
         }
+        self.raw["tcpRouters"] = {
+            "foreign@file": {
+                "rule": f"HostSNI(`{self.plan.host}`)",
+                "entryPoints": ["websecure"],
+                "status": "enabled",
+            }
+        }
+        with self.assertRaises(NativeSourceUnavailable):
+            self.publish(self.plan.new_backend, self.plan.old_backend, address_preimage=before)
+        self.raw.pop("tcpRouters")
         self.publish(self.plan.new_backend, self.plan.old_backend, address_preimage=before)
         self.assertEqual(
             observe_testing_route(self.plan, self.raw, json.loads(self.route_file.read_text())),

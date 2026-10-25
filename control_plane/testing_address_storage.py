@@ -19,7 +19,10 @@ from control_plane.contracts.testing_address import (
     TestingAddressRecord,
     TestingAddressPlan,
 )
-from control_plane.contracts.testing_publication import TestingPublicationRecord
+from control_plane.contracts.testing_publication import (
+    TestingPublicationRecord,
+    TestingServingSnapshot,
+)
 from control_plane.dokploy.testing_route import TestingLaneRoute
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage import postgres as db
@@ -29,6 +32,30 @@ from control_plane.storage.product_authority_bundle import (
 )
 
 ADDRESS_PLAN_ROUTE = ADDRESS_ROUTE + ":plan"
+
+
+def read_testing_address_recovery_copy(
+    store: PostgresRecordStore, plan: TestingAddressPlan
+) -> TestingServingSnapshot:
+    from control_plane.testing_publication_storage import read_snapshot, testing_binding_authority
+
+    current = read_snapshot(store, product=plan.product, context=plan.context)
+    for snapshot in (current, plan.before):
+        if (
+            snapshot.provider.provider_id != "dokploy"
+            or snapshot.provider.target_category != "compose"
+            or snapshot.provider.target_id != snapshot.target_id.target_id
+        ):
+            raise ValueError("Protective address recovery requires consistent native copy custody.")
+    if (
+        current.target_id.target_id != plan.before.target_id.target_id
+        or current.target.target_name != plan.before.target.target_name
+        or current.target.project_name != plan.before.target.project_name
+        or testing_binding_authority(current.binding)
+        != testing_binding_authority(plan.before.binding)
+    ):
+        raise ValueError("Protective address recovery cannot replace another copy or binding.")
+    return current
 
 
 def require_testing_address_health(
@@ -224,6 +251,59 @@ def read_address_plan(store: PostgresRecordStore, digest: str) -> TestingAddress
     return record.plan
 
 
+def require_address_publication_lease(
+    store: PostgresRecordStore,
+    session: Any,
+    plan: TestingAddressPlan,
+    reservation: LaunchplaneIdempotencyRecord,
+) -> None:
+    row = session.scalar(
+        store._idempotency_statement(
+            scope=reservation.scope,
+            route_path=reservation.route_path,
+            idempotency_key=reservation.idempotency_key,
+            for_update=True,
+        )
+    )
+    lease = LaunchplaneIdempotencyRecord.model_validate(row.payload) if row else None
+    if (
+        lease is None
+        or lease.state != "running"
+        or lease.reconciliation_key != plan.digest
+        or not store._mutation_reservation_matches(lease, reservation)
+        or parse_launchplane_mutation_timestamp(
+            lease.lease_expires_at, field_name="lease_expires_at"
+        )
+        <= parse_launchplane_mutation_timestamp(
+            store._database_mutation_timestamp(session), field_name="observed_at"
+        )
+    ):
+        raise ValueError("The original address operation no longer owns its publication.")
+
+
+def settled_testing_address(
+    store: PostgresRecordStore, plan: TestingAddressPlan
+) -> TestingAddressRecord | None:
+    with store._session_factory() as session:
+        store._begin_serialized_write(session)
+        store._lock_product_authority_bundle_write(session)
+        store._lock_landing_authority(session, "testing-address:" + plan.publication_key)
+        row = session.scalar(
+            store._idempotency_statement(
+                scope=ADDRESS_SCOPE,
+                route_path=ADDRESS_ROUTE,
+                idempotency_key=plan.publication_key,
+                for_update=True,
+            )
+        )
+        if row is None:
+            return None
+        record = TestingAddressRecord.model_validate(row.payload["response_payload"])
+        if record.state != "applied" or record.plan != plan:
+            raise ValueError("The original address operation has another committed publication.")
+        return record
+
+
 def commit_testing_address(
     store: PostgresRecordStore,
     plan: TestingAddressPlan,
@@ -238,30 +318,7 @@ def commit_testing_address(
         store._lock_product_authority_bundle_write(session)
         store._lock_route_binding_write(session, binding_key=plan.binding_after.binding_key)
         store._lock_landing_authority(session, "testing-address:" + plan.publication_key)
-        row = session.scalar(
-            store._idempotency_statement(
-                scope=reservation.scope,
-                route_path=reservation.route_path,
-                idempotency_key=reservation.idempotency_key,
-                for_update=True,
-            )
-        )
-        lease = LaunchplaneIdempotencyRecord.model_validate(row.payload) if row else None
-        if (
-            lease is None
-            or lease.state != "running"
-            or (
-                lease.reconciliation_key != plan.digest
-                or not store._mutation_reservation_matches(lease, reservation)
-                or parse_launchplane_mutation_timestamp(
-                    lease.lease_expires_at, field_name="lease_expires_at"
-                )
-                <= parse_launchplane_mutation_timestamp(
-                    store._database_mutation_timestamp(session), field_name="observed_at"
-                )
-            )
-        ):
-            raise ValueError("The original address operation no longer owns its publication.")
+        require_address_publication_lease(store, session, plan, reservation)
         prior = session.scalar(
             store._idempotency_statement(
                 scope=ADDRESS_SCOPE,
@@ -344,6 +401,7 @@ def commit_testing_address(
             plan=plan, state="applied", applied_at=now, public_health=public_health
         )
         _save_address_evidence(store, session, result, plan_only=False)
+        require_address_publication_lease(store, session, plan, reservation)
         session.commit()
         return result
 

@@ -3,6 +3,37 @@ from typing import Any
 from control_plane.dokploy.route_rules import host_rule_may_match
 
 
+def testing_address_tcp_may_match(rule: object, hostname: str) -> bool:
+    import re
+
+    if not isinstance(rule, str):
+        return True
+    literal = re.fullmatch(r"HostSNI\(`([a-zA-Z0-9.-]+)`\)", rule.strip())
+    return literal is None or literal.group(1).casefold() == hostname.casefold()
+
+
+def qualify_testing_address_tcp_routes(
+    raw: dict[str, Any], hostname: str, entrypoints: tuple[str, ...]
+) -> None:
+    routers = raw.get("tcpRouters", {})
+    if not isinstance(routers, dict):
+        raise ValueError("Applied TCP router inventory is incomplete")
+    for router in routers.values():
+        if not isinstance(router, dict):
+            raise ValueError("Applied TCP router ownership is incomplete")
+        if not testing_address_tcp_may_match(router.get("rule"), hostname):
+            continue
+        points = router.get("entryPoints")
+        if (
+            not isinstance(points, list)
+            or not points
+            or any(not isinstance(point, str) for point in points)
+        ):
+            raise ValueError("Applied TCP router listeners are unavailable")
+        if set(points) & set(entrypoints):
+            raise ValueError("A TCP router can intercept the testing hostname")
+
+
 def qualify_testing_address_recipients(
     containers: list[dict[str, Any]], spec: dict[str, Any]
 ) -> str:
@@ -38,6 +69,14 @@ def qualify_testing_address_recipients(
                 }
             )
         for key, rule in labels.items():
+            if key.startswith("traefik.tcp.routers.") and key.endswith(".rule"):
+                listeners = labels.get(key.removesuffix(".rule") + ".entrypoints")
+                if (
+                    not isinstance(listeners, str)
+                    or not listeners
+                    or set(listeners.split(",")) & points
+                ) and testing_address_tcp_may_match(rule, hostname):
+                    raise ValueError("A latent TCP router can intercept the testing hostname")
             if not key.startswith("traefik.http.routers.") or not key.endswith(".rule"):
                 continue
             if not isinstance(rule, str):

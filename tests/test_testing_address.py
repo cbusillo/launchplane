@@ -4,6 +4,9 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 import asyncio
+from collections.abc import Callable
+from tests import test_testing_route_transport as transport_tests
+from control_plane.provider_operations import DurableProviderOperationResult
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_address import TestingAddressPlan, address_binding
@@ -30,8 +33,11 @@ from tests.test_odoo_testing_restore import generation
 
 
 class TestingAddressTests(unittest.TestCase):
+    database_url = ""
+
     def setUp(self) -> None:
         self.fixture = publication_tests.TestingPublicationTests()
+        self.fixture.database_url = self.database_url
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.prepare()
@@ -103,6 +109,7 @@ class TestingAddressTests(unittest.TestCase):
             product=self.product,
             context=self.context,
             retirement_operation_id=self.operation.operation_id,
+            reason="Restore canonical testing hostname",
             publication_key=self.publication.plan.key,
             publication_sha256=canonical_json_sha256(self.publication.model_dump(mode="json")),
             profile=self.store.read_product_profile_record(self.product),
@@ -201,6 +208,26 @@ class TestingAddressTests(unittest.TestCase):
             self.commit()
         self.assertEqual(self.fixture.current(), before)
         self.assertEqual(self.store.read_product_profile_record(self.product), profile)
+
+    def test_expiry_during_canonical_transaction_rolls_back_every_record(self) -> None:
+        from control_plane.testing_address_storage import read_testing_address
+
+        before = self.fixture.current()
+        profile = self.store.read_product_profile_record(self.product)
+        expired = (
+            datetime.fromisoformat(self.reservation.lease_expires_at) + timedelta(seconds=1)
+        ).isoformat()
+        times = iter((self.now.isoformat(), expired))
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            side_effect=lambda _session: next(times, expired),
+        ):
+            with self.assertRaises(ValueError):
+                self.commit()
+        self.assertEqual(self.fixture.current(), before)
+        self.assertEqual(self.store.read_product_profile_record(self.product), profile)
+        self.assertIsNone(read_testing_address(self.store, self.plan.publication_key))
 
     def test_amended_copy_accepts_an_ordinary_later_testing_build(self) -> None:
         from tests.test_testing_rebuild_service import exercise_published_copy_maintenance
@@ -373,10 +400,13 @@ class TestingAddressTests(unittest.TestCase):
             self.assertTrue(result.response_payload["result"]["applied"])
             apply.assert_called_once()
 
-    def test_lost_route_reply_recovers_original_attempt_before_canonical_publication(self) -> None:
+    def native_address_execution(
+        self,
+    ) -> tuple[
+        transport_tests.TestingRouteTransportTests, Callable[[bool], DurableProviderOperationResult]
+    ]:
         from tests.test_testing_route_transport import TestingRouteTransportTests
         from control_plane.dokploy.testing_route import route_document
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
         from control_plane.testing_address import TestingAddressAdapter, ROUTE
         from control_plane.provider_operations import run_durable_provider_operation
 
@@ -431,13 +461,18 @@ class TestingAddressTests(unittest.TestCase):
             ),
         }
         digest = client.read()["address_recipients_sha256"]
-        self.plan = self.plan.model_copy(update={"recipient_sha256": digest})
-        original = self.fixture.current()
+        self.plan = self.plan.model_copy(
+            update={"recipient_sha256": digest, "provider_project": native.candidate_project}
+        )
+        self.unrelated_inventory_churning = False
 
-        def run() -> object:
+        def provider_check(*, full_census: bool = False) -> None:
+            if full_census and self.unrelated_inventory_churning:
+                raise ValueError("An unrelated preview prevented a provider membership snapshot")
+
+        def run(cancel: bool) -> DurableProviderOperationResult:
             with (
-                patch("control_plane.testing_address.address_transport", return_value=client),
-                patch.object(TestingAddressAdapter, "provider_guard"),
+                patch.object(TestingAddressAdapter, "provider_guard", side_effect=provider_check),
                 patch(
                     "control_plane.testing_rebuild_service.read_public_testing_health",
                     side_effect=lambda base, _path, _identity: next(
@@ -454,19 +489,27 @@ class TestingAddressTests(unittest.TestCase):
                     lease_owner="fixture",
                     response_trace_id="fixture-address",
                     adapter=TestingAddressAdapter(
-                        native.root, self.store, self.plan, "fixture-address"
+                        native.root, self.store, self.plan, "fixture-address", cancel=cancel
                     ),
                     original_intent={"testing_address_plan": self.plan.model_dump(mode="json")},
                 )
 
+        return native, run
+
+    def test_lost_route_reply_recovers_original_attempt_before_canonical_publication(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        native, run = self.native_address_execution()
+        original = self.fixture.current()
         native.before_publish = lambda: setattr(native, "lose_writer_reply", True)
         with self.assertRaises(NativeSourceUnavailable):
-            run()
+            run(False)
         self.assertEqual(self.fixture.current(), original)
         sends = native.remote_modes.count("publish_v2")
         native.before_publish = None
         native.lose_writer_reply = False
-        run()
+        self.unrelated_inventory_churning = True
+        run(False)
         self.assertEqual(native.remote_modes.count("publish_v2"), sends)
         self.assertEqual(
             published_testing_copy(self.store, product=self.product, context=self.context),
@@ -476,8 +519,138 @@ class TestingAddressTests(unittest.TestCase):
             effective_testing_route(self.store, self.publication), self.plan.route_after
         )
 
+    def test_original_key_cancellation_restores_route_after_profile_changes(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.dokploy.testing_route import route_document
+        from control_plane.testing_address_storage import read_testing_address
+
+        native, run = self.native_address_execution()
+        self.health = (self.health[0].model_copy(update={"status": "pending"}), self.health[1])
+        with self.assertRaises(NativeSourceUnavailable):
+            run(False)
+        self.assertIsNone(read_testing_address(self.store, self.plan.publication_key))
+        profile = self.store.read_product_profile_record(self.product)
+        changed = profile.model_copy(
+            update={"updated_at": (self.now + timedelta(seconds=1)).isoformat()}
+        )
+        self.store.write_product_profile_record(changed)
+        result = run(True)
+        self.assertEqual(result.status, "completed")
+        payload = result.response_payload["result"]
+        assert isinstance(payload, dict)
+        self.assertTrue(payload["cancelled"])
+        self.assertEqual(
+            json.loads(native.route_file.read_text()),
+            route_document(self.plan.route_before, self.plan.route_before.new_backend),
+        )
+        self.assertEqual(self.store.read_product_profile_record(self.product), changed)
+        self.assertIsNone(read_testing_address(self.store, self.plan.publication_key))
+
+    def test_lost_inverse_reply_settles_before_cancellation_completes(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane.testing_address_cancellation import INVERSE_ROUTE
+        from control_plane.contracts.testing_address import ADDRESS_SCOPE
+
+        native, run = self.native_address_execution()
+        self.health = (self.health[0].model_copy(update={"status": "pending"}), self.health[1])
+        with self.assertRaises(NativeSourceUnavailable):
+            run(False)
+        native.before_publish = lambda: setattr(native, "lose_writer_reply", True)
+        with self.assertRaises(NativeSourceUnavailable):
+            run(True)
+        sends = native.remote_modes.count("publish_v2")
+        native.before_publish = None
+        native.lose_writer_reply = False
+        result = run(True)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(native.remote_modes.count("publish_v2"), sends)
+        inverse = self.store.read_idempotency_record(
+            scope=ADDRESS_SCOPE, route_path=INVERSE_ROUTE, idempotency_key=self.plan.digest
+        )
+        assert inverse is not None
+        self.assertEqual(inverse.state, "completed")
+
+    def test_http_original_key_cancellation(self) -> None:
+        if self.store.database_dialect_name != "postgresql":
+            self.skipTest("The mutation HTTP boundary requires PostgreSQL fencing")
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.testing_address import TestingAddressAdapter, ROUTE
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        native, _ = self.native_address_execution()
+        save_address_plan(self.store, self.plan)
+        self.health = (self.health[0].model_copy(update={"status": "pending"}), self.health[1])
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=native.root,
+        )
+        body = {
+            "context": self.context,
+            "retirement_operation_id": self.operation.operation_id,
+            "reservation_operation_id": self.operation.operation_id,
+            "hostname": self.hostname,
+            "reason": self.plan.reason,
+            "mode": "apply",
+            "reviewed_plan_sha256": self.plan.digest,
+        }
+
+        def post(**changes: object) -> Any:
+            return asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "original-address-http",
+                    },
+                    payload={**body, **changes},
+                )
+            )
+
+        with (
+            patch.object(TestingAddressAdapter, "provider_guard"),
+            patch(
+                "control_plane.testing_rebuild_service.read_public_testing_health",
+                side_effect=lambda base, _path, _identity: next(
+                    item for item in self.health if item.urls[0].startswith(base + "/")
+                ),
+            ),
+        ):
+            response = post()
+            self.assertEqual(response.status_code, 409, response.text)
+            response = post(operation="cancel")
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertTrue(response.json()["result"]["cancelled"])
+            response = post(mode="readback", operation="cancel")
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertTrue(response.json()["result"]["preimage_restored"])
+
 
 class TestingAddressRecipientTests(unittest.TestCase):
+    def test_matching_tcp_routes_are_refused_but_other_names_and_private_listeners_are_ignored(
+        self,
+    ) -> None:
+        from control_plane.dokploy.testing_address_recipients import (
+            qualify_testing_address_tcp_routes,
+        )
+
+        hostname = "canonical-testing.example.invalid"
+        raw: dict[str, Any] = {
+            "tcpRouters": {"other@file": {"rule": "HostSNI(`elsewhere.example.invalid`)"}}
+        }
+        qualify_testing_address_tcp_routes(raw, hostname, ("websecure",))
+        raw["tcpRouters"]["other@file"] = {"rule": "HostSNI(`*`)", "entryPoints": ["database"]}
+        qualify_testing_address_tcp_routes(raw, hostname, ("websecure",))
+        raw["tcpRouters"]["other@file"]["entryPoints"] = ["websecure"]
+        with self.assertRaises(ValueError):
+            qualify_testing_address_tcp_routes(raw, hostname, ("websecure",))
+
     def test_domain_census_refuses_another_recipient_and_preserves_denials(self) -> None:
         from control_plane import testing_address_qualification as qualification
         from control_plane.dokploy_inventory import InventoryPage
@@ -549,6 +722,9 @@ class TestingAddressRecipientTests(unittest.TestCase):
             digest, projects = qualification.qualify_address_domains(**arguments)
             self.assertTrue(digest)
             self.assertEqual(projects, ("retained-project",))
+            page.inventory_digest = "unrelated-preview-membership"
+            page.projects[0].name = "Renamed unrelated project metadata"
+            self.assertEqual(qualification.qualify_address_domains(**arguments), (digest, projects))
             payloads["foreign"]["domains"] = [{"domainId": "foreign-domain", "host": hostname}]
             with self.assertRaises(ValueError):
                 qualification.qualify_address_domains(**arguments)
