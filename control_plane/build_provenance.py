@@ -567,18 +567,28 @@ def _download_manifest(
         for artifact in (_object(item, "artifact") for item in _list(payload.get("artifacts")))
         if artifact.get("name") == name
     ]
-    inventory = payload.get("artifacts")
-    total_count = payload.get("total_count")
-    if (
-        not artifacts
-        and isinstance(inventory, list)
-        and type(total_count) is int
-        and total_count == len(inventory)
-    ):
-        raise BuildNotPublished(
-            f"Run {run_id} uploaded no {name} artifact.",
-            code="manifest_artifact_missing",
+    if not artifacts:
+        all_payload = _object(
+            transport.get_json(
+                f"/repos/{repository_path}/actions/runs/{run_id}/artifacts?per_page=100"
+            ),
+            "run artifacts",
         )
+        inventory = all_payload.get("artifacts")
+        total_count = all_payload.get("total_count")
+        if (
+            isinstance(inventory, list)
+            and type(total_count) is int
+            and total_count == len(inventory)
+            and not any(
+                str(_object(item, "artifact").get("name", "")).startswith(MANIFEST_ARTIFACT_PREFIX)
+                for item in inventory
+            )
+        ):
+            raise BuildNotPublished(
+                f"Run {run_id} uploaded no artifact manifest in any attempt.",
+                code="manifest_artifact_missing",
+            )
     if len(artifacts) != 1:
         raise BuildProvenanceError(
             f"Run {run_id} must upload exactly one {name} artifact.",

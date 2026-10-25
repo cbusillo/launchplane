@@ -86,14 +86,17 @@ reservation. The webhook request never waits on a deploy.
     text. Agent-facing readers use the code and run id; the error can contain
     upstream response text and API paths. Missing evidence
     leaves the lane unchanged with a recorded reason.
-  - A successful Build that uploaded no current-attempt artifact manifest is
+  - A successful Build that uploaded no artifact manifest in any attempt is
     validation only when a complete artifact inventory proves that absence.
     Testing selection skips it without a rejected-build warning or consuming
     the publication verification budget. Partial or malformed inventories,
-    duplicate or expired manifests, invalid contents and mismatched identities
+    old-attempt-only, duplicate or expired manifests, invalid contents and mismatched identities
     remain failed verification attempts. Commit-specific and preview verifiers
     still refuse an absent manifest; a green validation-only Build never
     proves a deployable artifact.
+    Successful JSON reads share one snapshot within each selection; the next
+    selection and subsequent lane-movement checks read fresh evidence. Read
+    failures and downloaded archives are never cached by that snapshot.
   - If testing already runs the desired artifact, stop unless its declared
     application testing inputs or product qualification need the existing
     deployment path again, as described below.

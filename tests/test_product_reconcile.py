@@ -1829,21 +1829,27 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
         for run_id, commit in zip(sorted(validation_runs, reverse=True), docs, strict=True):
             self.github.add_run(run_id, commit)
         get_json = self.github.get_json
+        reads: list[str] = []
 
         def publications(path: str) -> object:
+            reads.append(path)
             if "/artifacts?" in path:
                 run_id = int(path.split("/actions/runs/")[1].split("/")[0])
                 if run_id in validation_runs:
                     return {"total_count": 0, "artifacts": []}
             return get_json(path)
 
-        with patch.object(self.github, "get_json", publications):
-            plan, desired = _plan_testing_target(
-                record_store=self.store,
-                profile=_generic_web_profile(),
-                repository_id=REPOSITORY_ID,
-                transport=self.github,
-            )
+        for _ in range(2):
+            reads.clear()
+            with patch.object(self.github, "get_json", publications):
+                plan, desired = _plan_testing_target(
+                    record_store=self.store,
+                    profile=_generic_web_profile(),
+                    repository_id=REPOSITORY_ID,
+                    transport=self.github,
+                )
+            self.assertIn(f"/repos/{REPOSITORY}", reads)
+            self.assertEqual(len(reads), len(set(reads)))
         self.assertEqual(plan["action"], "deploy", plan)
         self.assertEqual(plan["desired_commit"], DEPLOYABLE)
         self.assertIsNotNone(desired)
@@ -1857,7 +1863,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                     if run_id in validation_runs:
                         manifest = {
                             "id": run_id * 10,
-                            "name": "artifact-manifest-1",
+                            "name": f"artifact-manifest-{self.github.runs[run_id]['run_attempt']}",
                             "expired": expired,
                         }
                         artifacts = [manifest] if expired else [manifest, manifest]

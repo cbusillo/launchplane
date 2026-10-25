@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, Mock, patch
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
     MAX_MANIFEST_BYTES,
+    MANIFEST_ARTIFACT_PREFIX,
     BuildProvenanceError,
     BuildNotPublished,
     VerifiedBuildArtifact,
@@ -293,7 +294,9 @@ def _generic_web_manifest(**changes: object) -> dict[str, object]:
 
 class GenericWebBuildProvenanceTests(unittest.TestCase):
     def test_only_complete_artifact_absence_is_not_a_publication(self) -> None:
-        github = FakeGitHub(runs=[_run()], manifest=_generic_web_manifest())
+        build_run = _run()
+        build_run["run_attempt"] = 2
+        github = FakeGitHub(runs=[build_run], manifest=_generic_web_manifest())
         read = github.get_json
 
         def inventory(payload: dict[str, object], path: str) -> object:
@@ -308,17 +311,30 @@ class GenericWebBuildProvenanceTests(unittest.TestCase):
             self.assertRaises(BuildNotPublished) as caught,
         ):
             self.verify(github)
-        self.assertEqual(caught.exception.run_id, 7)
-        self.assertEqual(caught.exception.code, "manifest_artifact_missing")
+        self.assertEqual(caught.exception.run_id, build_run["id"])
 
-        manifest = {"id": 70, "name": "artifact-manifest-1", "expired": False}
+        manifest = {
+            "id": int(str(build_run["id"])) * 10,
+            "name": f"{MANIFEST_ARTIFACT_PREFIX}{build_run['run_attempt']}",
+            "expired": False,
+        }
+        duplicates = {"total_count": 2, "artifacts": [manifest, manifest]}
         inventories: tuple[dict[str, object], ...] = (
             {"total_count": 1, "artifacts": []},
             {"total_count": 0},
             {"total_count": False, "artifacts": []},
             {"artifacts": []},
-            {"total_count": 2, "artifacts": [manifest, manifest]},
+            duplicates,
             {"total_count": 1, "artifacts": [{**manifest, "expired": True}]},
+            {
+                "total_count": 1,
+                "artifacts": [
+                    {
+                        **manifest,
+                        "name": f"{MANIFEST_ARTIFACT_PREFIX}{int(str(build_run['run_attempt'])) - 1}",
+                    }
+                ],
+            },
         )
         for payload in inventories:
             with (
@@ -328,6 +344,8 @@ class GenericWebBuildProvenanceTests(unittest.TestCase):
             ):
                 self.verify(github)
             self.assertNotIsInstance(rejected.exception, BuildNotPublished)
+            if payload is duplicates:
+                self.assertEqual(caught.exception.code, rejected.exception.code)
 
     def test_historical_preview_proof_requires_the_exact_recorded_image(self) -> None:
         image = f"{IMAGE_REPOSITORY}@sha256:{'c' * 64}"

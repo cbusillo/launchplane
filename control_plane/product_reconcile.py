@@ -3366,6 +3366,20 @@ def latest_verified_testing_build(
     return verified
 
 
+@dataclass
+class _BuildSelectionSnapshot:
+    transport: BuildProvenanceTransport
+    responses: dict[str, object] = field(default_factory=dict)
+
+    def get_json(self, path: str) -> object:
+        if path not in self.responses:
+            self.responses[path] = self.transport.get_json(path)
+        return self.responses[path]
+
+    def get_bytes(self, path: str) -> bytes:
+        return self.transport.get_bytes(path)
+
+
 def _desired_release(
     *,
     transport: BuildProvenanceTransport,
@@ -3377,6 +3391,7 @@ def _desired_release(
     current_image_digest: str = "",
     selection: dict[str, object] | None = None,
 ) -> tuple[VerifiedBuildArtifact | VerifiedGenericWebBuild | None, list[dict[str, object]], str]:
+    transport = _BuildSelectionSnapshot(transport)
     default_branch = profile.default_branch
     workflow_file = BUILD_WORKFLOW_PATH.rsplit("/", 1)[-1]
     query = urlencode(
@@ -3413,7 +3428,7 @@ def _desired_release(
         ):
             raise
         return None, [], "build_workflow_missing"
-    runs = _list(payload.get("workflow_runs"))
+    runs = list(_list(payload.get("workflow_runs")))
     # A held or explicitly rolled-back lane may be beyond the newest page.
     # Search bounded history rather than making a busy repository stay held.
     for page in range(2, 21):
