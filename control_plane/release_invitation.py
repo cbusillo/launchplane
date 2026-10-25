@@ -60,6 +60,15 @@ class ReleaseInvitationBackoff:
     release_waits: dict[str, tuple[str, float]] = field(default_factory=dict)
 
 
+def _client_release_requests_enabled(profile: LaunchplaneProductProfileRecord) -> bool:
+    return (
+        profile.is_active
+        and profile.production_use != "prelaunch"
+        and profile.release_on_acceptance != "director_standing"
+        and profile.owner.is_set
+    )
+
+
 def advance_release_invitations(
     *,
     store: object,
@@ -69,7 +78,6 @@ def advance_release_invitations(
 ) -> None:
     """Cold notification reads never occupy the accepted-release worker."""
     from control_plane.storage.postgres import PostgresRecordStore
-    from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
 
     if not isinstance(store, PostgresRecordStore):
         return
@@ -100,9 +108,15 @@ def advance_release_invitations(
                     profile.product,
                     type(error).__name__,
                 )
-            publish_release_invitation(
-                store=store, control_plane_root=control_plane_root, profile=profile, backoff=backoff
-            )
+            if _client_release_requests_enabled(profile):
+                _settle_completed_invitation(
+                    store=store,
+                    control_plane_root=control_plane_root,
+                    profile=profile,
+                    production=release_version(store=store, profile=profile, instance="prod"),
+                    candidate=release_version(store=store, profile=profile, instance="testing"),
+                    backoff=backoff,
+                )
         except Exception as error:
             now = monotonic()
             previous, next_log = (
@@ -114,19 +128,11 @@ def advance_release_invitations(
                 continue
             if backoff is not None:
                 backoff.diagnostics[profile.product] = (type(error), now + 300)
-            if isinstance(error, ReleaseInvitationNotesUnavailable):
-                _LOGGER.warning(
-                    "release invitation unavailable product=%s error_type=%s reason=%s",
-                    profile.product,
-                    type(error).__name__,
-                    error,
-                )
-            else:
-                _LOGGER.warning(
-                    "release invitation unavailable product=%s error_type=%s",
-                    profile.product,
-                    type(error).__name__,
-                )
+            _LOGGER.warning(
+                "release invitation unavailable product=%s error_type=%s",
+                profile.product,
+                type(error).__name__,
+            )
         else:
             if backoff is not None:
                 backoff.diagnostics.pop(profile.product, None)
@@ -789,7 +795,10 @@ def _settle_completed_invitation(
                 ):
                     continue
                 created_at = _timestamp(comment.get("created_at"))
-                if not candidate_markers.intersection(lines) or (
+                reviewed_request = _request_marker(
+                    profile, previous_decision
+                ) in lines and created_at <= _timestamp(decision.decided_at)
+                if not (candidate_markers.intersection(lines) or reviewed_request) or (
                     previous_decision is not None
                     and created_at <= _timestamp(previous_decision.decided_at)
                     and comment is not continued_request
@@ -844,13 +853,7 @@ def publish_release_invitation(
     urgent_checklist_digest: str = "",
 ) -> bool:
     origin = launchplane_public_origin_from_env()
-    if (
-        not origin
-        or not profile.is_active
-        or profile.production_use == "prelaunch"
-        or profile.release_on_acceptance == "director_standing"
-        or not profile.owner.is_set
-    ):
+    if not origin or not _client_release_requests_enabled(profile):
         return False
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
@@ -1105,8 +1108,6 @@ def publish_release_invitation(
                     last_decision=last_decision,
                     control_plane_root=control_plane_root,
                 )
-                # An explicit urgent-open retry only confirms the existing request;
-                # routine workers retain the scheduled reminder behavior.
                 if reminded or _now() < due or urgent_reason:
                     _remember_delivery(backoff, receipt, due, reminded)
                     return True

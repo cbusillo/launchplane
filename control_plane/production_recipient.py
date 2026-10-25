@@ -745,7 +745,13 @@ class ProductionRecipientAdapter:
                 raise RecipientAuthorityChanged(
                     "Provider-added labels are not private recipient metadata."
                 )
-        if interpolate(actual, values) != interpolate(expected, values):
+        actual = interpolate(actual, values)
+        expected = interpolate(expected, values)
+        if not expected.get("networks") and all(
+            "networks" not in service for service in actual["services"].values()
+        ):
+            compose.discard_unused_dokploy_network(actual, expected=expected)
+        if actual != expected:
             raise RecipientAuthorityChanged(
                 "The actual provider render differs from reviewed source and limits."
             )
