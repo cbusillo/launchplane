@@ -76,6 +76,8 @@ class TestingRouteTests(unittest.TestCase):
         payload["aliases"] = (alias,)
         for router in payload["template"]["http"]["routers"].values():
             router["rule"] = testing_route_rule(self.host, (alias,))
+            if "tls" in router:
+                router["tls"]["domains"] = [{"main": self.host}, {"main": alias}]
         retained = TestingLaneRoute.model_validate(payload)
         raw = self.apply(retained, self.old)
         rebuilt = compile_testing_route(

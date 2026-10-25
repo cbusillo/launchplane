@@ -40,6 +40,12 @@ def read_testing_address_recovery_copy(
     from control_plane.testing_publication_storage import read_snapshot, testing_binding_authority
 
     current = read_snapshot(store, product=plan.product, context=plan.context)
+    applied = read_testing_address(store, plan.publication_key)
+    expected_binding = (
+        plan.binding_after
+        if applied is not None and applied.state == "applied" and applied.plan == plan
+        else plan.before.binding
+    )
     for snapshot in (current, plan.before):
         if (
             snapshot.provider.provider_id != "dokploy"
@@ -51,8 +57,7 @@ def read_testing_address_recovery_copy(
         current.target_id.target_id != plan.before.target_id.target_id
         or current.target.target_name != plan.before.target.target_name
         or current.target.project_name != plan.before.target.project_name
-        or testing_binding_authority(current.binding)
-        != testing_binding_authority(plan.before.binding)
+        or testing_binding_authority(current.binding) != testing_binding_authority(expected_binding)
     ):
         raise ValueError("Protective address recovery cannot replace another copy or binding.")
     return current

@@ -113,6 +113,8 @@ class TestingRouteTransportTests(unittest.TestCase):
         payload["aliases"] = (alias,)
         for router in payload["template"]["http"]["routers"].values():
             router["rule"] = routing.testing_route_rule(self.plan.host, (alias,))
+            if "tls" in router:
+                router["tls"]["domains"] = [{"main": self.plan.host}, {"main": alias}]
         self.plan = TestingLaneRoute.model_validate(payload)
         self.client.public_aliases = (alias,)
         self.client.payload["aliases"] = (alias,)

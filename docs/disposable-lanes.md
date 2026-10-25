@@ -1323,15 +1323,20 @@ known listeners. Foreign domains, matching foreign routers, automatic restart
 policies and incomplete observations refuse qualification. The original executor
 locks and all retained custody hashes are rechecked; no old fence is released.
 The retained recipient facts form the comparison digest. Unrelated provider
-membership is not part of that digest. A full census is required before the first
-attempt; a continuing original observes its recorded writer, and a dispatch
-rechecks only the retained recipients and current physical ingress. Matching
+membership is not part of that digest. A full census runs immediately before
+each actual route dispatch, including retries of an unsent or busy writer.
+A continuing original that only observes its recorded writer needs no new census.
+The bounded census runs in the worker; dispatch rechecks its lease and physical
+fence afterward. Matching
 applied or dormant TCP routers also refuse qualification because
 [TCP routing precedes HTTP routing](https://doc.traefik.io/traefik/reference/routing-configuration/tcp/routing/router/).
 
 The existing physical route fence writes one owned document with a rule for the
-new hostname and the original hostname. Backend, TLS, middleware and listeners
-stay the same. Original-attempt receipts settle an uncertain writer before another
+new hostname and the original hostname. Backend, TLS resolver/options, middleware
+and listeners stay the same. Each hostname gets a separate `tls.domains` main
+entry so its certificate order and renewal remain independent; see
+[Traefik ACME domain definition](https://doc.traefik.io/traefik/reference/install-configuration/tls/certificate-resolvers/acme/#domain-definition).
+Original-attempt receipts settle an uncertain writer before another
 dispatch. Both HTTPS origins must return the current testing runtime identity
 before one transaction updates the lane base URL, binding provenance and canonical
 Odoo override intent. The original publication, candidate, restore generation,
@@ -1344,7 +1349,10 @@ If the unpublished amendment cannot finish, send `mode: apply` with
 `operation: cancel`, the original reviewed hash, reason and `Idempotency-Key`.
 Cancellation settles and excludes the original forward writer before restoring
 the recorded owned-file preimage through the same fenced mechanism. Its own
-uncertain inverse must settle before cancellation can complete. It can preserve
+uncertain inverse must settle before cancellation can complete. Once an inverse
+exists, forward amendment and its readback refuse until cancellation finishes;
+the original operation cannot change direction while a late inverse may run.
+It can preserve
 later inventory, runtime and unrelated profile edits while restoring the route;
 it never overwrites a different copy or binding. `mode: readback` with
 `operation: cancel` and the same key verifies the restored preimage. Completed
@@ -1352,6 +1360,9 @@ cancellation permits a fresh plan and key; it does not certify public health.
 An already committed canonical publication cannot be cancelled by this path;
 retrieve its original amend result instead. Database uncertainty retains the
 original fence until the publication transaction can be observed conclusively.
+After a matching canonical commit, readback checks the same current copy and its
+fresh runtime identity without depending on retained containers remaining present.
+Original retained operation and custody records must still match.
 
 Native refresh and later rebuild admission resolve this additive address receipt.
 A later rebuild keeps the original hostname as an alias. Ordinary deploy and

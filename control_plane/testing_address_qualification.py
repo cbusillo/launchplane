@@ -148,50 +148,6 @@ def _qualify_address_domains(
     )
 
 
-def qualify_retained_address_domains(
-    *, host: str, token: str, hostname: str, retained_ids: frozenset[str], server_id: str
-) -> tuple[str, tuple[str, ...]]:
-    rows = []
-    projects = set()
-    for target_id in sorted(retained_ids):
-        actual = api.fetch_dokploy_target_payload(
-            host=host, token=token, target_type="compose", target_id=target_id
-        )
-        domains = actual.get("domains")
-        if not isinstance(domains, list) or any(
-            not isinstance(item, dict) or not isinstance(item.get("host"), str) for item in domains
-        ):
-            raise ValueError("The retained hostname domain inventory is incomplete.")
-        matches = [
-            item
-            for item in domains
-            if isinstance(item, dict)
-            and isinstance(item.get("host"), str)
-            and str(item["host"]).casefold() == hostname.casefold()
-        ]
-        if (
-            actual.get("composeId") != target_id
-            or actual.get("serverId") != server_id
-            or not actual.get("appName")
-            or len(matches) != 1
-            or actual.get("autoDeploy") is not False
-            or api.list_dokploy_schedules(
-                host=host, token=token, target_id=target_id, schedule_type="compose"
-            )
-        ):
-            raise ValueError("The retained hostname recipient changed before dispatch.")
-        projects.add(str(actual["appName"]))
-        rows.append(
-            {
-                "id": target_id,
-                "server": actual.get("serverId"),
-                "project": actual["appName"],
-                "matches": matches,
-            }
-        )
-    return canonical_json_sha256(rows), tuple(sorted(projects))
-
-
 def address_transport(
     root: Path, store: PostgresRecordStore, plan: TestingAddressPlan, *, recovery: bool = False
 ) -> DokployTestingRouteTransport:

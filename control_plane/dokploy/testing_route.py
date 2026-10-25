@@ -233,6 +233,16 @@ class TestingLaneRoute(FrozenRecord):
             for router in routers.values()
         ):
             raise ValueError("Testing route template crosses its admitted host or service.")
+        if self.aliases and any(
+            "tls" in router
+            and (
+                not isinstance(router["tls"], dict)
+                or router["tls"].get("domains")
+                != [{"main": name} for name in (self.host, *self.aliases)]
+            )
+            for router in routers.values()
+        ):
+            raise ValueError("Testing aliases require independent hostname certificates.")
         return self
 
 
@@ -251,6 +261,8 @@ def amend_testing_route_address(before: TestingLaneRoute, hostname: str) -> Test
     )
     for router in payload["template"]["http"]["routers"].values():
         router["rule"] = testing_route_rule(hostname, (before.host,))
+        if "tls" in router:
+            router["tls"]["domains"] = [{"main": hostname}, {"main": before.host}]
     return TestingLaneRoute.model_validate(payload)
 
 

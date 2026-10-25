@@ -466,8 +466,8 @@ class TestingAddressTests(unittest.TestCase):
         )
         self.unrelated_inventory_churning = False
 
-        def provider_check(*, full_census: bool = False) -> None:
-            if full_census and self.unrelated_inventory_churning:
+        def provider_check() -> None:
+            if self.unrelated_inventory_churning:
                 raise ValueError("An unrelated preview prevented a provider membership snapshot")
 
         def run(cancel: bool) -> DurableProviderOperationResult:
@@ -518,6 +518,50 @@ class TestingAddressTests(unittest.TestCase):
         self.assertEqual(
             effective_testing_route(self.store, self.publication), self.plan.route_after
         )
+        for router in json.loads(native.route_file.read_text())["http"]["routers"].values():
+            if "tls" in router:
+                self.assertEqual(
+                    router["tls"]["domains"],
+                    [{"main": self.plan.route_after.host}, {"main": self.plan.route_before.host}],
+                )
+        native.containers.pop("retired")
+        from control_plane.testing_address import TestingAddressAdapter
+
+        with patch(
+            "control_plane.testing_rebuild_service.read_public_testing_health",
+            side_effect=lambda base, _path, _identity: next(
+                item for item in self.health if item.urls[0].startswith(base + "/")
+            ),
+        ):
+            readback = TestingAddressAdapter(
+                native.root, self.store, self.plan, "fixture-readback"
+            ).readback()
+        self.assertTrue(readback["applied"])
+
+    def test_dispatch_requalifies_after_an_unsent_original_attempt(self) -> None:
+        from control_plane.contracts.testing_address import ADDRESS_SCOPE
+        from control_plane.testing_address import ADDRESS_EFFECT_ROUTE
+        from control_plane.dokploy.testing_route import route_document
+
+        native, run = self.native_address_execution()
+        self.unrelated_inventory_churning = True
+        with self.assertRaises(ValueError):
+            run(False)
+        self.assertIsNotNone(
+            self.store.read_idempotency_record(
+                scope=ADDRESS_SCOPE,
+                route_path=ADDRESS_EFFECT_ROUTE,
+                idempotency_key=self.plan.digest,
+            )
+        )
+        self.assertEqual(
+            json.loads(native.route_file.read_text()),
+            route_document(self.plan.route_before, self.plan.route_before.new_backend),
+        )
+        with self.assertRaises(ValueError):
+            run(False)
+        self.unrelated_inventory_churning = False
+        self.assertEqual(run(False).status, "completed")
 
     def test_original_key_cancellation_restores_route_after_profile_changes(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
@@ -559,6 +603,11 @@ class TestingAddressTests(unittest.TestCase):
         with self.assertRaises(NativeSourceUnavailable):
             run(True)
         sends = native.remote_modes.count("publish_v2")
+        with self.assertRaises(ValueError):
+            run(False)
+        from control_plane.testing_address_storage import read_testing_address
+
+        self.assertIsNone(read_testing_address(self.store, self.plan.publication_key))
         native.before_publish = None
         native.lose_writer_reply = False
         result = run(True)
@@ -575,11 +624,21 @@ class TestingAddressTests(unittest.TestCase):
             self.skipTest("The mutation HTTP boundary requires PostgreSQL fencing")
         from control_plane.http_app import create_launchplane_fastapi_app
         from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
         from control_plane.testing_address import TestingAddressAdapter, ROUTE
         from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
         from tests.support.http import request
 
         native, _ = self.native_address_execution()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="address-test-policy",
+                revision=1,
+                source="test:testing-address",
+                updated_at=self.now.isoformat(),
+                policy=LaunchplaneAuthzPolicy(),
+            )
+        )
         save_address_plan(self.store, self.plan)
         self.health = (self.health[0].model_copy(update={"status": "pending"}), self.health[1])
         app = create_launchplane_fastapi_app(

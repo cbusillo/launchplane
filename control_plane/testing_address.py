@@ -35,7 +35,6 @@ from control_plane.testing_address_qualification import (
     address_transport,
     exclude_address_executors,
     qualify_address_domains,
-    qualify_retained_address_domains,
 )
 from control_plane.testing_address_storage import (
     commit_testing_address,
@@ -94,7 +93,11 @@ class TestingAddressAdapter:
 
     @cached_property
     def transport(self) -> DokployTestingRouteTransport:
-        return address_transport(self.root, self.store, self.plan, recovery=self.cancel)
+        applied = read_testing_address(self.store, self.plan.publication_key)
+        committed = applied is not None and applied.state == "applied" and applied.plan == self.plan
+        return address_transport(
+            self.root, self.store, self.plan, recovery=self.cancel or committed
+        )
 
     def provider_target_origin(self) -> ProviderTargetOrigin:
         return ProviderTargetOrigin(
@@ -112,13 +115,12 @@ class TestingAddressAdapter:
     def reconciliation_key(self) -> str:
         return self.plan.digest
 
-    def provider_guard(self, *, full_census: bool = False) -> None:
+    def provider_guard(self) -> None:
         host, token = source.read_dokploy_config(
             control_plane_root=self.root, database_url=self.store.database_url
         )
-        qualify = qualify_address_domains if full_census else qualify_retained_address_domains
         try:
-            digest, projects = qualify(
+            digest, projects = qualify_address_domains(
                 host=host,
                 token=token,
                 hostname=self.plan.route_after.host,
@@ -148,9 +150,7 @@ class TestingAddressAdapter:
         from control_plane.testing_rebuild_service import read_public_testing_health
         from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
 
-        identity = (
-            self.plan.before.inventory.runtime_identity if self.plan.before.inventory else None
-        )
+        identity = self.transport.old_runtime_identity
         if identity is None or not self.present():
             raise ValueError("The amended testing route has not converged.")
         started = datetime.now(UTC)
@@ -172,6 +172,7 @@ class TestingAddressAdapter:
     def readback(self) -> dict[str, object]:
         from control_plane.testing_serving_copy import published_testing_copy
 
+        self.require_forward_operation()
         record = read_testing_address(self.store, self.plan.publication_key)
         if record is None or record.state != "applied" or record.plan != self.plan:
             raise ValueError("The original address amendment has no applied receipt.")
@@ -226,7 +227,20 @@ class TestingAddressAdapter:
             provider_effect_performed=record is None,
         )
 
+    def require_forward_operation(self) -> None:
+        from control_plane.testing_address_cancellation import INVERSE_ROUTE
+
+        if (
+            self.store.read_idempotency_record(
+                scope=ADDRESS_SCOPE, route_path=INVERSE_ROUTE, idempotency_key=self.plan.digest
+            )
+            is not None
+        ):
+            raise ValueError("The original address cancellation must finish before a fresh plan.")
+
     def apply_original(self, operation_lease: ProviderOperationLease) -> None:
+        self.require_forward_operation()
+
         def guard() -> None:
             operation_lease.assert_current()
             verify_testing_address_sources(self.store, self.plan)
@@ -236,8 +250,6 @@ class TestingAddressAdapter:
         )
         try:
             guard()
-            if original_effect is None:
-                self.provider_guard(full_census=True)
         except (ValueError, FileNotFoundError) as error:
             if original_effect is None:
                 raise ProviderMutationRejectedError(error) from error
