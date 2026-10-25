@@ -660,6 +660,7 @@ def run_compose_post_deploy_update(
     allow_historical_sender_contract: bool = False,
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
     clean_preview_snapshot: CleanTestingSnapshot | None = None,
+    clean_preview_image_reference: str = "",
     fresh_restore_source_environment: dict[str, str] | None = None,
     prepare_native_source: Callable[[dict[str, object], str], dict[str, object]] | None = None,
     clear_preview_fishbowl_source: bool = False,
@@ -679,9 +680,12 @@ def run_compose_post_deploy_update(
     if clean_preview_snapshot is not None and (
         run_destructive_restore
         or fresh_testing_generation is not None
+        or not clean_preview_image_reference
         or runtime_key_safety_environment_class(target_definition.instance) != "preview"
     ):
-        raise ValueError("Clean preview restore requires its own snapshot and no upstream source.")
+        raise ValueError(
+            "Clean preview restore requires its own snapshot and image, with no upstream source."
+        )
     if fresh_testing_generation is not None:
         if (
             not run_destructive_restore
@@ -935,7 +939,7 @@ def run_compose_post_deploy_update(
             server_id=schedule_server_id or "",
             compose_project=compose_app_name,
             database_name=database_name,
-            image_reference=desired_env_map["DOCKER_IMAGE_REFERENCE"],
+            image_reference=clean_preview_image_reference,
             workflow_environment=resolved_workflow_environment_overrides,
             runtime_environment=desired_env_map,
             readback_spec=readback_policy.encoded_spec(),

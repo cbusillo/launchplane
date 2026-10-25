@@ -86,7 +86,9 @@ lookup, including before the product has published its first snapshot. There
 is no production or live-testing fallback. The preview and snapshot must be on
 the same execution server; cross-host transport is not implied.
 
-The copy receives no source SSH mount or upstream connection. Its filestore
+The copy receives no source SSH mount or upstream connection. Its schedule
+uses the immutable image bound to the preview request, without requiring
+a separate image setting in the runtime environment. Its filestore
 is cloned or copied into exclusively owned storage with the preview writer
 stopped and runner paused. It restores the frozen dump into a missing
 database, then uses the existing credential, sanitizer, module-update and

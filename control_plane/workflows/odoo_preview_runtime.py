@@ -1855,6 +1855,7 @@ def _execute_refresh(
             workflow_environment_overrides=runtime_override_environment,
             run_destructive_restore=restore_upstream,
             clean_preview_snapshot=plan.clean_snapshot if restore_clean_snapshot else None,
+            clean_preview_image_reference=request.image_reference if restore_clean_snapshot else "",
             preview_ssh_source_directory=environment_values.get("DATA_WORKFLOW_SSH_DIR", "")
             if restore_upstream
             else "",
