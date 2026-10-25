@@ -581,8 +581,12 @@ def fresh_testing_restore_spec(
         "native_files_program": NATIVE_TESTING_FILES_PROGRAM,
         "website_settings_program": WEBSITE_SETTINGS_PROGRAM,
         "workflow_environment": workflow_environment,
-        "ssh_key_path": source_environment.get("DATA_WORKFLOW_SSH_KEY", ""),
-        "ssh_directory": source_environment.get("DATA_WORKFLOW_SSH_DIR", ""),
+        "ssh_key_path": source_environment.get(
+            "DATA_WORKFLOW_SSH_KEY", runtime_environment.get("DATA_WORKFLOW_SSH_KEY", "")
+        ),
+        "ssh_directory": source_environment.get(
+            "DATA_WORKFLOW_SSH_DIR", runtime_environment.get("DATA_WORKFLOW_SSH_DIR", "")
+        ),
     }
     return spec
 

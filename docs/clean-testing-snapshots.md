@@ -42,6 +42,11 @@ for the filestore.
 
 ## Storage
 
+An SSH refresh uses the saved host SSH directory and identity from the bound
+runtime environment when its source mapping contains only source coordinates.
+An explicit source transport selection takes precedence. These paths remain
+host-only metadata; no identity file or SSH directory enters an application container.
+
 An SSH refresh stages the source dump and filestore on disk in
 `launchplane-restore-staging` beside the testing data volume's `_data`
 directory, never in `/tmp`, which may be a RAM disk. The container cannot see
