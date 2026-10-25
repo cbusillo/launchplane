@@ -98,6 +98,9 @@ def one_inspection(identifier):
 
 
 def restore_preview_snapshot(containers, source_lock):
+    runner_inspection = containers['script-runner'][1]
+    if 'ExecIDs' not in runner_inspection or runner_inspection['ExecIDs'] not in (None, []):
+        raise RuntimeError('Preview runner execution custody is active or unavailable')
     snapshot = spec['snapshot']
     binding = {key: spec[key] for key in ('compose_project', 'database_name', 'preview_volumes')}
     binding.update({key: snapshot[key] for key in ('server_id', 'product', 'context')})

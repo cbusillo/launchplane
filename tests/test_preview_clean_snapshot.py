@@ -86,6 +86,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.containers: dict[str, dict[str, Any]] = {
             role: {
                 "Id": role,
+                "ExecIDs": None,
                 "Config": {
                     "Image": self.image,
                     "Labels": {
@@ -456,11 +457,33 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                         snapshot=self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
                     )
                 self.assertFalse(self.calls)
+                with (
+                    patch.object(
+                        self, "command", side_effect=RuntimeError("independent inspection")
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "independent inspection"),
+                ):
+                    self.run_script(compose_project="another-preview")
             return command(arguments, **kwargs)
 
         with patch.object(self, "command", side_effect=concurrent):
             self.run_script()
         self.assertTrue(checked)
+
+    def test_orphaned_container_exec_blocks_restore_until_it_exits(self) -> None:
+        runner = self.containers["script-runner"]
+        for active in (["surviving-restore"], "unreadable"):
+            with self.subTest(active=active):
+                runner["ExecIDs"] = active
+                with self.assertRaisesRegex(RuntimeError, "Preview runner execution custody"):
+                    self.run_script()
+                self.assertNotIn(["docker", "stop", "web"], self.calls)
+        runner.pop("ExecIDs")
+        with self.assertRaisesRegex(RuntimeError, "Preview runner execution custody"):
+            self.run_script()
+        runner["ExecIDs"] = None
+        self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_every_command_inherits_target_lock_and_child_blocks_retry_after_failure(self) -> None:
         command = self.command
