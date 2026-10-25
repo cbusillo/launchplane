@@ -1,11 +1,19 @@
 """An app-only candidate project, with web held behind its exact run receipt."""
 
-import hashlib
 import json
+import shlex
 
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.dokploy.slot_maintenance import maintenance_payload, payload_digest
+from control_plane.dokploy.slot_maintenance import slot_run_marker, slot_run_stamp
+
+
+def held_slot_command(plan: OdooCutoverPlan, command: str) -> str:
+    marker, stamp = slot_run_marker(plan), slot_run_stamp(plan)
+    return (
+        f'while [ "$(cat {shlex.quote(marker)} 2>/dev/null)" != "{stamp}" ]; do sleep 1; done; '
+        f"exec {command}"
+    )
 
 
 def slot_runtime_identity(plan: OdooCutoverPlan, identity: RuntimeIdentity) -> dict[str, object]:
@@ -39,13 +47,20 @@ def render_odoo_app_slot_compose(
     """
     if not data_volume or not private_network:
         raise ValueError("candidate requires explicit authoritative volume/network records")
-    digest = payload_digest(maintenance_payload(plan))
-    marker = f"/volumes/data/.launchplane-cutovers/{digest}/web-ready"
-    expected = hashlib.sha256(plan.new.model_dump_json().encode()).hexdigest()
-    web = (
-        f'while [ "$(cat {marker} 2>/dev/null)" != "{expected}" ]; do sleep 1; done; '
-        "exec /venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
+    startup = "/venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
+    web = held_slot_command(plan, startup)
+    scheduler = held_slot_command(
+        plan,
+        f"{startup} --scheduler --ready-file {shlex.quote(slot_run_marker(plan))} "
+        f"--ready-token {slot_run_stamp(plan)}",
     )
+    environment = {
+        "ODOO_MAX_CRON_THREADS": "0",
+        "ODOO_DB_NAME": plan.new.binding.database,
+        "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": json.dumps(
+            slot_runtime_identity(plan, plan.new.runtime_identity), sort_keys=True
+        ),
+    }
     base = {
         "image": plan.new.image,
         "pull_policy": "always",
@@ -55,19 +70,18 @@ def render_odoo_app_slot_compose(
         "volumes": ["data:/volumes/data"],
         "labels": {"traefik.enable": "false"},
         "healthcheck": {"disable": True},
-        "environment": {
-            "ODOO_MAX_CRON_THREADS": "0",
-            "ODOO_DB_NAME": plan.new.binding.database,
-            "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": json.dumps(
-                slot_runtime_identity(plan, plan.new.runtime_identity), sort_keys=True
-            ),
-        },
+        "environment": environment,
         "entrypoint": ["/bin/sh", "-c"],
     }
     return json.dumps(
         {
             "services": {
                 "web": {**base, "command": web.replace("$", "$$")},
+                "scheduler": {
+                    **base,
+                    "environment": {**environment, "ODOO_MAX_CRON_THREADS": "1"},
+                    "command": scheduler.replace("$", "$$"),
+                },
                 "script-runner": {**base, "command": "exec sleep infinity"},
             },
             "volumes": {"data": {"external": True, "name": data_volume}},

@@ -47,6 +47,18 @@ def payload_digest(payload: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def slot_run_directory(plan: OdooCutoverPlan) -> str:
+    return "/volumes/data/.launchplane-cutovers/" + payload_digest(maintenance_payload(plan))
+
+
+def slot_run_marker(plan: OdooCutoverPlan) -> str:
+    return slot_run_directory(plan) + "/web-ready"
+
+
+def slot_run_stamp(plan: OdooCutoverPlan) -> str:
+    return hashlib.sha256(plan.new.model_dump_json().encode()).hexdigest()
+
+
 def run_planned_slot_maintenance(
     plan: OdooCutoverPlan,
     *,
@@ -75,7 +87,7 @@ def run_planned_slot_maintenance(
         raise ValueError("maintenance runner is not the candidate's immutable image")
     payload = maintenance_payload(plan)
     digest = payload_digest(payload)
-    directory = "/volumes/data/.launchplane-cutovers/" + digest
+    directory = slot_run_directory(plan)
     request = json.dumps({"directory": directory, "payload": payload})
     # This script does not import Odoo or load a registry. It owns a durable
     # attempt marker before the child, and exposes only its receipt/guard ID.
@@ -194,7 +206,7 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
         )
     # Only the validated full-run receipt releases the candidate's startup
     # guard. No registry-capable web process can precede the SQL commit.
-    stamp = hashlib.sha256(plan.new.model_dump_json().encode()).hexdigest()
+    stamp = slot_run_stamp(plan)
     execute(
         (
             "docker",
@@ -206,7 +218,7 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
             "import os,sys; from pathlib import Path; p=Path(sys.argv[1]); "
             "t=p.with_suffix('.pending'); t.write_text(sys.stdin.read()); "
             "f=os.open(t,os.O_RDONLY); os.fsync(f); os.close(f); os.replace(t,p)",
-            directory + "/web-ready",
+            slot_run_marker(plan),
         ),
         stamp,
     )

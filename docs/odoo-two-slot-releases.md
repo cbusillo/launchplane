@@ -328,3 +328,26 @@ whose settings outcome is unproved remains conservative: without a verified
 retained snapshot, rollback disables collection even if the failure occurred
 before a settings receipt was produced. Only a pre-maintenance abort proves
 that the candidate's maintenance never began.
+
+### Logical writers and physical services
+
+Each configured logical writer remains bound in both slots. Several roles may
+share one physical container within a slot, with the slot's immutable image.
+A container cannot serve both slots or images. Fencing and handoff stop, observe
+and start each physical container once while returning complete logical coverage.
+
+Typed startup keeps all logical writer-to-Compose-service bindings in its durable
+authority, recreates each service once while stopped, and refreshes every shared
+binding to the newly observed container. Original-operation recovery also
+inventories/removes duplicate remnants once per physical service. It retains
+logical database drain checks even when a container is absent. Effective settings
+are inspected once per physical container after full logical coverage validation.
+
+The rendered candidate includes separate web, scheduler and idle maintenance-runner
+services. Web and scheduler wait on the same exact native-maintenance run marker.
+The scheduler uses odoo-devkit's `--scheduler --ready-file --ready-token` startup
+mode: cron enabled, HTTP disabled, without repeating initialization or overrides.
+Artifacts used for this topology must include that startup capability. Older
+images without it cannot qualify scheduler startup. Installed host binding and
+isolated qualification remain prerequisites to lane activation; this source
+capability alone proves no live release.
