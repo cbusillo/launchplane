@@ -390,6 +390,8 @@ class PreviewResourceCollectorTests(unittest.TestCase):
             "env": "\n".join(f"{key}={value}" for key, value in environment.items()),
         }
         _require_preview_destroy_source(payload)
+        with self.assertRaises(click.ClickException):
+            _require_preview_destroy_source({**payload, "randomize": True})
         declared_names = _preview_destroy_volumes(payload, project="app", environment=environment)
         self.assertTrue(set(environment.values()).issubset(declared_names))
         implicit_names = {

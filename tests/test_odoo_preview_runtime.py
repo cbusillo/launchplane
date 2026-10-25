@@ -2894,6 +2894,101 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             any(call.kwargs.get("method") == "POST" for call in provider.call_args_list)
         )
 
+    def test_destroy_readback_refusal_preserves_actual_effect_custody(self) -> None:
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        for scenario in ("first-domain", "compose-only", "after-domain", "post-failure"):
+            attempted = scenario in {"after-domain", "post-failure"}
+            checkpoint = Mock()
+            with self.subTest(scenario=scenario):
+                self.preview_resource_binding.side_effect = (
+                    [None, click.ClickException("Target changed")]
+                    if scenario == "after-domain"
+                    else None
+                    if scenario == "post-failure"
+                    else click.ClickException("Target changed")
+                )
+
+                def provider(**kwargs: object) -> object:
+                    if kwargs.get("method") == "POST" and scenario == "post-failure":
+                        raise click.ClickException("Provider transport failed")
+                    if kwargs["path"] == "/api/domain.byComposeId":
+                        return (
+                            []
+                            if scenario == "compose-only"
+                            else [{"domainId": "owned-domain", "host": plan.domain_host}]
+                        )
+                    return {}
+
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                        side_effect=provider,
+                    ) as calls,
+                ):
+                    result = execute_odoo_preview_dokploy_apply(
+                        control_plane_root=Path("."),
+                        record_store=preview_target_inventory(),
+                        preview_context="fixture-preview",
+                        request=OdooPreviewDokployApplyRequest(dry_run_plan=plan),
+                        provider_effect_checkpoint=checkpoint,
+                    )
+                self.assertEqual(result.status, "fail" if attempted else "blocked")
+                self.assertEqual(result.provider_effect_attempted, attempted)
+                self.assertEqual(
+                    [
+                        call.kwargs["path"]
+                        for call in calls.call_args_list
+                        if call.kwargs.get("method") == "POST"
+                    ],
+                    ["/api/domain.delete"] if attempted else [],
+                )
+
+                self.assertEqual(checkpoint.call_count, 1 if attempted else 0)
+
+    def test_destroy_absence_change_before_first_post_is_no_effect(self) -> None:
+        from control_plane.dokploy.api import DokployRequestFailed
+
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target())
+            )
+        )
+        self.preview_resources.side_effect = DokployRequestFailed(
+            method="GET", path="/api/compose.one", detail="Not Found", status_code=404
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._read_absent_preview_compose_inventory",
+                side_effect=[(), click.ClickException("Inventory unavailable")],
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                return_value=[],
+            ) as calls,
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                record_store=preview_target_inventory(),
+                preview_context="fixture-preview",
+                request=OdooPreviewDokployApplyRequest(dry_run_plan=plan),
+            )
+        self.assertEqual(result.status, "blocked")
+        self.assertFalse(result.provider_effect_attempted)
+        self.assertFalse(any(call.kwargs.get("method") == "POST" for call in calls.call_args_list))
+
     def test_destroy_missing_lookup_requires_complete_independent_absence(self) -> None:
         from control_plane.dokploy.api import DokployRequestFailed
 

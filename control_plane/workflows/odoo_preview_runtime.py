@@ -2002,7 +2002,10 @@ def _execute_destroy(
                 request=request, status="blocked", compose_id=compose_id, error_message=str(error)
             )
 
+    effect_attempted = False
+
     def checkpoint_destroy_effect(phase: str) -> None:
+        nonlocal effect_attempted
         if plan.delete_volumes:
             if binding is not None:
                 require_preview_resource_binding(
@@ -2016,6 +2019,7 @@ def _execute_destroy(
                 raise click.ClickException("Preview provider absence changed before teardown.")
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(phase)
+        effect_attempted = True
 
     destroy_result = destroy_dokploy_preview_resource(
         record_store=record_store,
@@ -2059,17 +2063,17 @@ def _execute_destroy(
             status="pass",
             compose_id=compose_id,
             domain_id=domain_id,
-            provider_effect_attempted=True,
+            provider_effect_attempted=effect_attempted,
             steps=steps,
         )
     return _apply_result(
         request=request,
-        status="fail",
+        status="fail" if effect_attempted else "blocked",
         error_message="; ".join(destroy_result.cleanup_errors)
         or "Preview provider absence is unknown.",
         compose_id=compose_id,
         domain_id=domain_id,
-        provider_effect_attempted=True,
+        provider_effect_attempted=effect_attempted,
         steps=steps,
     )
 

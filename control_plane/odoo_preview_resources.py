@@ -186,7 +186,11 @@ def _preview_resource_binding(
 
 
 def _require_preview_destroy_source(payload: Mapping[str, object]) -> None:
-    if payload.get("sourceType") != "raw" or payload.get("composePath") != "docker-compose.yml":
+    if (
+        payload.get("sourceType") != "raw"
+        or payload.get("composePath") != "docker-compose.yml"
+        or payload.get("randomize")
+    ):
         raise click.ClickException("Preview destruction source is unavailable or unsupported.")
     try:
         actual = yaml.safe_load(str(payload.get("composeFile") or ""))
