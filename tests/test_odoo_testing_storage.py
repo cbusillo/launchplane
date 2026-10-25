@@ -560,6 +560,86 @@ class HostCapacityTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     namespace["storage_capacity"](spec, containers, budget)
 
+    def test_datasets_share_capacity_only_within_the_same_zfs_pool(self) -> None:
+        namespace: dict[str, Any] = {"json": json}
+        exec(STORAGE_MAINTENANCE_LIBRARY, namespace)
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for name in ("data", "db", "overlay", "snapshot"):
+                (root / name).mkdir()
+            namespace["docker"] = lambda *arguments: json.dumps(
+                [{"Mountpoint": str(root / arguments[-1])}]
+            ).encode()
+            namespace["clean_snapshot_root"] = lambda *_args, **_kwargs: root / "snapshot" / "copy"
+            namespace["filestore_clone_proved"] = lambda *_args: False
+            spec = {
+                "generation": {"namespace": "fixture", "clean_snapshot_enabled": True},
+                "preview_volumes": {"data": "data", "database": "db"},
+                "copy_binding_sha256": "a" * 64,
+                "staging_directory": str(root / "snapshot"),
+            }
+            containers = {
+                "script-runner": (
+                    "runner",
+                    {"GraphDriver": {"Data": {"UpperDir": str(root / "overlay")}}},
+                )
+            }
+            budget = {
+                "database_bytes": 10,
+                "filestore_bytes": 40,
+                "staging_bytes": 50,
+                "reserve_bytes": 5,
+            }
+            real_stat = Path.stat
+            real_read = Path.read_text
+
+            def device(path: Path, **kwargs: Any) -> Any:
+                metadata = real_stat(path, **kwargs)
+                number = 2 if path.is_relative_to(root / "snapshot") else 1
+                return SimpleNamespace(st_dev=os.makedev(0, number), st_mode=metadata.st_mode)
+
+            for filesystem, source, admitted in (
+                ("zfs", "tank/home", False),
+                ("zfs", "other/home", True),
+                ("ext4", "/dev/fixture", True),
+            ):
+                mounts = (
+                    f"1 0 0:1 / / rw shared:1 - {filesystem} tank/docker rw\n"
+                    f"2 1 0:2 / /home rw - {filesystem} {source} rw\n"
+                )
+
+                def read(path: Path, *args: Any, **kwargs: Any) -> str:
+                    if path == Path("/proc/self/mountinfo"):
+                        return mounts
+                    return real_read(path, *args, **kwargs)
+
+                with (
+                    self.subTest(filesystem=filesystem, source=source),
+                    patch("pathlib.Path.stat", autospec=True, side_effect=device),
+                    patch("pathlib.Path.read_text", autospec=True, side_effect=read),
+                    patch.object(
+                        os, "statvfs", return_value=SimpleNamespace(f_bavail=100, f_frsize=1)
+                    ),
+                ):
+                    self.assertEqual(
+                        namespace["storage_capacity"](
+                            spec, containers, budget, runner_staging_bytes=1, host_staging_bytes=0
+                        ),
+                        admitted,
+                    )
+                    with patch.object(
+                        os, "statvfs", return_value=SimpleNamespace(f_bavail=106, f_frsize=1)
+                    ):
+                        self.assertTrue(
+                            namespace["storage_capacity"](
+                                spec,
+                                containers,
+                                budget,
+                                runner_staging_bytes=1,
+                                host_staging_bytes=0,
+                            )
+                        )
+
     def test_staged_filestore_is_charged_once_and_proven_clones_as_free(self) -> None:
         import shutil
         import subprocess

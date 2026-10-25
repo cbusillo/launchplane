@@ -81,18 +81,30 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
     gen = spec['generation']
     decisions = {} if clone_decisions is None else clone_decisions
     filestore_charged_as_staging = host_staging_bytes is None and gen.get('source_mode', 'ssh') != 'container-export'
-    # Group demands on the same actual backing filesystem. Comparing each
-    # volume independently would admit two allocations against the same free bytes.
+    zfs_pools = {}
+    try:
+        mounts = Path('/proc/self/mountinfo').read_text().splitlines()
+    except FileNotFoundError:
+        if os.uname().sysname == 'Linux':
+            raise
+        mounts = []
+    for mount in mounts:
+        backing, filesystem = mount.split(' - ', 1)
+        fields = filesystem.split()
+        if fields[0] == 'zfs':
+            major, minor = backing.split()[2].split(':')
+            zfs_pools[os.makedev(int(major), int(minor))] = fields[1].split('/')[0]
     required = {}
     available = {}
     def demand(path, size, keep_reserve=False):
         path = Path(path).resolve(strict=True)
         device = path.stat().st_dev
+        backing = ('zfs', zfs_pools[device]) if device in zfs_pools else ('device', device)
         stat = os.statvfs(path)
         free = stat.f_bavail * stat.f_frsize
         if size or keep_reserve:
-            required[device] = required.get(device, 0) + size
-        available[device] = min(available.get(device, free), free)
+            required[backing] = required.get(backing, 0) + size
+        available[backing] = min(available.get(backing, free), free)
     backings = {}
     for role, suffix, size in (('database', '-db', budget['database_bytes']), ('data', '-data', budget['filestore_bytes'])):
         name = spec.get('preview_volumes', {}).get(role, gen['namespace'] + suffix)
@@ -132,7 +144,7 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0,
         decisions['snapshot'] = filestore_clone_proved(backings['data'], snapshot_path)
         snapshot_filestore = 0 if decisions['snapshot'] else budget['filestore_bytes']
         demand(snapshot_path, budget['database_bytes'] + snapshot_filestore)
-    capacity = all(available[device] >= size + budget['reserve_bytes'] for device, size in required.items())
+    capacity = all(available[backing] >= size + budget['reserve_bytes'] for backing, size in required.items())
     return capacity
 """
 STORAGE_MAINTENANCE_LIBRARY = (
