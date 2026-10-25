@@ -470,7 +470,6 @@
   padding: 0 10px;
 }
 
-.engineering-every-code-list,
 .engineering-dry-run ul,
 .engineering-controller-records ul {
   display: grid;
@@ -480,7 +479,6 @@
   list-style: none;
 }
 
-.engineering-every-code-item > header,
 .engineering-controller-summary,
 .engineering-dry-run > header,
 .engineering-controller-records > header {
@@ -490,17 +488,12 @@
   gap: 16px;
 }
 
-.engineering-every-code-item > header > div,
 .engineering-controller-summary > div,
 .engineering-dry-run > header > div,
 .engineering-controller-records > header > div {
   display: grid;
   min-width: 0;
   gap: 3px;
-}
-
-.engineering-every-code-item h2 {
-  overflow-wrap: anywhere;
 }
 
 .engineering-status-chip {
@@ -639,7 +632,6 @@
   font-weight: 650;
 }
 
-.engineering-every-code-item,
 .engineering-merge-targets,
 .engineering-policy-card,
 .engineering-controller-summary,
@@ -650,16 +642,6 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
-}
-
-.engineering-every-code-list {
-  gap: 12px;
-}
-
-.engineering-every-code-item {
-  display: grid;
-  gap: 13px;
-  padding: 17px 18px;
 }
 
 .engineering-provenance-row {
@@ -2033,7 +2015,6 @@
     font-size: 19px;
   }
 
-  .engineering-every-code-item > header,
   .engineering-controller-summary,
   .engineering-dry-run > header,
   .engineering-controller-records > header {

@@ -8,7 +8,6 @@ import type {
   DiscussionTopicsResponse,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
-  EveryCodeSummaryResponse,
   GitHubHumanIdentityResponse,
   GovernanceProjectionResponse,
   MergeAdmissionRecord,
@@ -1479,53 +1478,6 @@ export function activityForFixture(
   };
 }
 
-export function everyCodeForFixture(
-  fixture: DataFixtureMode,
-): EveryCodeSummaryResponse {
-  assertEngineeringFixtureAvailable(fixture);
-  const summaries =
-    fixture === "empty"
-      ? []
-      : fixture === "missing"
-        ? [
-            engineeringEveryCodeSummary({
-              freshness: "missing",
-              issueNumber: 319,
-              state: "blocked",
-              summaryStatus: "stuck",
-              title: "Refresh external check evidence",
-            }),
-          ]
-        : [
-            engineeringEveryCodeSummary({
-              freshness: "verified",
-              issueNumber: 308,
-              state: "running",
-              summaryStatus: "active",
-              title: "Finish the admin evidence route",
-            }),
-            engineeringEveryCodeSummary({
-              freshness: "recorded",
-              issueNumber: 302,
-              state: "done",
-              summaryStatus: "complete",
-              title: "Publish generated API contracts",
-            }),
-          ];
-  return {
-    status: "ok",
-    summary: {
-      generated_at: OBSERVED_AT,
-      issue_number: null,
-      repository: "",
-      schema_version: 1,
-      state_filter: "",
-      summaries,
-    },
-    trace_id: "fixture-every-code-summary",
-  };
-}
-
 export function mergeTrainTargetsForFixture(
   fixture: DataFixtureMode,
 ): MergeTrainPolicyTargetsResponse {
@@ -1884,77 +1836,6 @@ export function tenantAdmissionForFixture(
     },
     status: "ok",
     trace_id: "fixture-tenant-admission",
-  };
-}
-
-function engineeringEveryCodeSummary({
-  freshness,
-  issueNumber,
-  state,
-  summaryStatus,
-  title,
-}: {
-  freshness: "verified" | "recorded" | "missing";
-  issueNumber: number;
-  state: "running" | "done" | "blocked";
-  summaryStatus: "active" | "complete" | "stuck";
-  title: string;
-}) {
-  const hasEvidence = freshness !== "missing";
-  return {
-    claimed_at: hasEvidence ? "2026-07-14T14:15:00Z" : "",
-    claimed_by_host: hasEvidence ? "every-code-fixture" : "",
-    evidence: [
-      {
-        code: "work_request_state",
-        detail: hasEvidence
-          ? "The durable work-request state was recorded by Launchplane."
-          : "No current worker evidence is available.",
-        recorded_at: hasEvidence ? OBSERVED_AT : "",
-        sensitivity: "internal" as const,
-        source_url: `https://example.invalid/example/control-plane/issues/${issueNumber}`,
-        state: freshness,
-      },
-    ],
-    finished_at: state === "done" ? OBSERVED_AT : "",
-    issue_number: issueNumber,
-    issue_title: title,
-    issue_url: `https://example.invalid/example/control-plane/issues/${issueNumber}`,
-    next_action:
-      state === "blocked"
-        ? "Restore worker evidence before rerunning."
-        : state === "done"
-          ? "Review the result pull request."
-          : "Wait for the current worker attempt to finish.",
-    provenance: {
-      detail: hasEvidence
-        ? "Durable Every Code work-request summary."
-        : "Every Code worker evidence is missing.",
-      freshness_status: freshness,
-      recorded_at: hasEvidence ? OBSERVED_AT : "",
-      refreshed_at: hasEvidence ? OBSERVED_AT : "",
-      sensitivity: "internal" as const,
-      source_kind: hasEvidence ? ("record" as const) : ("unsupported" as const),
-      source_record_id: hasEvidence ? `fixture-request-${issueNumber}` : "",
-      source_url: `https://example.invalid/example/control-plane/issues/${issueNumber}`,
-      stale_after: hasEvidence ? STALE_AFTER : "",
-    },
-    queued_at: "2026-07-14T14:00:00Z",
-    repository: "example/control-plane",
-    request_id: `fixture-request-${issueNumber}`,
-    result_pr_url:
-      state === "done"
-        ? `https://example.invalid/example/control-plane/pull/${issueNumber + 100}`
-        : "",
-    result_summary: state === "done" ? "The scoped change completed successfully." : "",
-    safe_to_rerun: state === "blocked" && hasEvidence,
-    source: "github_issue_label",
-    started_at: hasEvidence ? "2026-07-14T14:17:00Z" : "",
-    state,
-    summary_status: summaryStatus,
-    trigger_actor: "platform-operator",
-    trigger_label: "every-code",
-    updated_at: OBSERVED_AT,
   };
 }
 
