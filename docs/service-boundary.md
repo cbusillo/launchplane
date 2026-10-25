@@ -467,8 +467,6 @@ remaining domain and storage removal is tracked in #2437.
 - Every Code local automation work-request routes (Every Code is retired; see
   `DIRECTION.md`. These routes and the Every Code sections below remain only
   until their readers move):
-  - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
-    human-session, and Every Code worker-token callers)
   - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
   - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
@@ -697,8 +695,8 @@ replace an uncertain operation with a new key. The direct generic-web promotion
 binding always rewrites the generated request to `dry_run=true`; live promotion
 remains the separate product-owned workflow-dispatch path.
 
-The Engineering Ops browser routes consume the generated Every Code summary,
-merge-train policy-target, and controller-status read models directly.
+The Engineering Ops browser routes consume the generated merge-train
+policy-target and controller-status read models directly.
 Merge-train UI is status-only: target selection comes exclusively
 from `GET /v1/work-graph/merge-train/policy-targets`, while controller and
 legacy worker POST routes are never derived from data or invoked dynamically.
@@ -1177,16 +1175,6 @@ service has recorded a matching Director-agent dry-run for the same payload. The
 requests still use Launchplane records, redacted responses, runtime key-safety
 policy, and managed secret storage. Terminal-agent credentials remain read-only.
 
-`GET /v1/every-code/summary` returns a compact agent-safe projection of Every
-Code work requests. It requires `every_code_work_request.read` for
-product/context `launchplane` and supports `repository`, `issue_number`,
-`state`, `limit`, and `offset` query parameters. Summary entries include source
-links, state, summary status, claim metadata, timestamps, result PR URL, and
-safe rerun guidance. They intentionally omit raw webhook delivery ids, error
-messages, issue bodies, prompt text, local checkout paths, and local worker
-hostnames. Entries include compact agent-context provenance and evidence so
-callers can tell recorded request state apart from source-of-truth links.
-
 `GET /v1/previews/readiness` returns a compact agent-safe projection of Every
 Code preview gate records. It requires `every_code_preview_gate.read` for
 product/context `launchplane` and supports `repository`, `pr_number`, `status`,
@@ -1432,7 +1420,7 @@ preview context; awareness entries do not imply Launchplane runtime ownership.
 `GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
 for public-safe skill preflight. It requires `product_environment.read` for
 product/context `launchplane`, accepts an optional `repository` filter, and
-composes the existing repo-product mapping, Every Code summary, preview
+composes the existing repo-product mapping, preview
 readiness, and optional exact tenant-admission projections under named sections.
 Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
 writes no
@@ -3160,8 +3148,6 @@ For reviewed reconciliation of provider-absent legacy preview history, see
   human-session callers)
 - `GET /v1/dokploy/inventory` (native FastAPI for bearer-token and
   human-session callers)
-- `GET /v1/every-code/summary` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
 - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
   human-session, and Every Code worker-token callers)
 - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,

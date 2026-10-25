@@ -9,10 +9,6 @@ from control_plane.contracts.every_code_notifications import (
 )
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
-from control_plane.contracts.every_code_summary_read_model import (
-    EveryCodeSummaryReadModel,
-    build_every_code_summary_read_model,
-)
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.http_routes.every_code_support import (
     ensure_every_code_read_allowed,
@@ -21,7 +17,6 @@ from control_plane.http_routes.every_code_support import (
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.service_auth import LaunchplaneIdentity
-from control_plane.workflows.ship import utc_now_timestamp
 
 
 class EveryCodeWorkRequestRecordsResponse(BaseModel):
@@ -40,14 +35,6 @@ class EveryCodeWorkRequestRecordResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     request: EveryCodeWorkRequestRecord
-
-
-class EveryCodeSummaryResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["ok"] = "ok"
-    trace_id: str
-    summary: EveryCodeSummaryReadModel
 
 
 class EveryCodePrFeedbackRecordsResponse(BaseModel):
@@ -249,67 +236,6 @@ def register_every_code_work_request_read_routes(
     dependencies: ReadRouteDependencies,
     read_identity: Callable[..., LaunchplaneIdentity | None],
 ) -> None:
-    def read_every_code_summary(
-        identity: Annotated[LaunchplaneIdentity | None, Depends(read_identity)],
-        record_store: Annotated[object, Depends(dependencies.get_record_store)],
-        repository: Annotated[str, Query()] = "",
-        issue_number: Annotated[str, Query()] = "",
-        state: Annotated[str, Query()] = "",
-        limit: Annotated[str, Query()] = "50",
-        offset: Annotated[str, Query()] = "0",
-    ) -> EveryCodeSummaryResponse:
-        trace_id = dependencies.next_trace_id()
-        ensure_every_code_read_allowed(
-            dependencies=dependencies,
-            identity=identity,
-            trace_id=trace_id,
-            action="every_code_work_request.read",
-            message="Workflow cannot read Every Code work requests.",
-        )
-        every_code_store = cast(
-            EveryCodeWorkRequestListStore,
-            every_code_read_store_or_503(
-                record_store,
-                dependencies=dependencies,
-                trace_id=trace_id,
-                capability="work_request_list",
-            ),
-        )
-        try:
-            summary = build_every_code_summary_read_model(
-                generated_at=utc_now_timestamp(),
-                record_store=every_code_store,
-                repository=repository.strip(),
-                issue_number=every_code_optional_int(
-                    issue_number,
-                    "issue_number",
-                    dependencies=dependencies,
-                    trace_id=trace_id,
-                ),
-                state=state.strip(),
-                limit=every_code_pagination_value(
-                    limit,
-                    "limit",
-                    default=50,
-                    dependencies=dependencies,
-                    trace_id=trace_id,
-                ),
-                offset=every_code_pagination_value(
-                    offset,
-                    "offset",
-                    default=0,
-                    dependencies=dependencies,
-                    trace_id=trace_id,
-                ),
-            )
-        except ValueError as error:
-            raise every_code_invalid_payload_error(
-                dependencies=dependencies,
-                trace_id=trace_id,
-                error=error,
-            ) from error
-        return EveryCodeSummaryResponse(trace_id=trace_id, summary=summary)
-
     def list_every_code_work_requests(
         identity: Annotated[LaunchplaneIdentity | None, Depends(read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
@@ -400,15 +326,6 @@ def register_every_code_work_request_read_routes(
         404: {"model": dependencies.error_response_model},
         503: {"model": dependencies.error_response_model},
     }
-    app.add_api_route(
-        "/v1/every-code/summary",
-        read_every_code_summary,
-        methods=["GET"],
-        response_model=EveryCodeSummaryResponse,
-        operation_id="read_every_code_summary",
-        summary="Read Every Code work request summary",
-        responses=responses,
-    )
     app.add_api_route(
         "/v1/every-code/work-requests",
         list_every_code_work_requests,

@@ -3124,14 +3124,6 @@ preflights.
 - Historical Every Code feedback records retain their actor and source-issue
   provenance. The removed webhook no longer ingests PR or issue comments.
 
-- Agent callers should prefer `GET /v1/every-code/summary` over raw work-request
-  reads when they only need status. The summary projection links back to the
-  issue and result PR, reports whether work is active, stuck, complete, or
-  rerunnable, and includes safe rerun guidance without exposing webhook delivery
-  ids, blocked error messages, issue bodies, prompt text, local checkout paths,
-  or local worker hostnames. Summary entries include compact agent-context
-  provenance and evidence for the source issue and recorded work-request state.
-
 ## Agent Context, Authorization, and Merge Train Records
 
 - Agent callers should prefer `GET /v1/previews/readiness` over raw preview-gate
@@ -3141,7 +3133,7 @@ preflights.
   fields are bounded and redacted so provider-only internals, local paths, and
   secret-shaped values are not copied into agent context payloads.
 - Agent callers can use `GET /v1/agent/context` for a single read-only preflight
-  context. It aggregates the existing repo-product mapping, Every Code summary,
+  context. It aggregates the existing repo-product mapping,
   preview readiness and optional exact tenant-admission projections, then reports each
   section as available, unauthorized, or unavailable. It is not a persisted
   record and must not fetch or store issue bodies.
