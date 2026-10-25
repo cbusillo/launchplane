@@ -193,17 +193,19 @@ def restore_preview_snapshot(containers, source_lock):
         write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False, 'overlay_filestore': True})
         if owned_unreleased:
             docker('stop', runner)
-            legacy = Path(volume['Mountpoint']) / 'filestore' / database
-            if legacy.resolve() != legacy.absolute() or legacy.is_mount():
-                raise RuntimeError('Preview legacy filestore custody is aliased')
-            if legacy.exists():
-                shutil.rmtree(legacy)
-            _, _, lower, private = overlay
-            for directory in (private / 'upper', private / 'work'):
-                shutil.rmtree(directory)
-                directory.mkdir(mode=0o700)
-                os.chown(directory, lower.stat().st_uid, lower.stat().st_gid)
-            docker('start', runner)
+            try:
+                legacy = Path(volume['Mountpoint']) / 'filestore' / database
+                if legacy.resolve() != legacy.absolute() or legacy.is_mount():
+                    raise RuntimeError('Preview legacy filestore custody is aliased')
+                if legacy.exists():
+                    shutil.rmtree(legacy)
+                _, _, lower, private = overlay
+                for directory in (private / 'upper', private / 'work'):
+                    shutil.rmtree(directory)
+                    directory.mkdir(mode=0o700)
+                    os.chown(directory, lower.stat().st_uid, lower.stat().st_gid)
+            finally:
+                docker('start', runner)
     dump = '/tmp/preview-snapshot-' + uuid.uuid4().hex + '.dump'
     try:
         if present == '0':

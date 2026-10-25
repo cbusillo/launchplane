@@ -1097,6 +1097,37 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(extra.exists())
         self.assertIn(["docker", "start", "web"], self.calls)
 
+    def test_owned_cleanup_failure_restarts_runner_and_keeps_web_held(self) -> None:
+        self.runner_failure = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        attachment = self.private / "upper" / "attempt-attachment"
+        attachment.write_bytes(b"preserve failed cleanup")
+        self.calls.clear()
+        remove = shutil.rmtree
+
+        def fail_upper_reset(path: Path, *args: Any, **kwargs: Any) -> None:
+            if path == self.private / "upper":
+                raise PermissionError("fixture cleanup failure")
+            remove(path, *args, **kwargs)
+
+        with patch.object(shutil, "rmtree", side_effect=fail_upper_reset):
+            with self.assertRaises(PermissionError):
+                self.run_script()
+        self.assertIn(["docker", "start", "script-runner"], self.calls)
+        self.assertLess(
+            self.calls.index(["docker", "stop", "script-runner"]),
+            self.calls.index(["docker", "start", "script-runner"]),
+        )
+        self.assertIn(["docker", "stop", "web"], self.calls)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+        self.assertFalse(self.present)
+        self.assertFalse(any(call[:2] == ["docker", "cp"] for call in self.calls))
+        self.assertEqual(attachment.read_bytes(), b"preserve failed cleanup")
+        self.assertEqual(
+            (self.source / "filestore/attachment").read_bytes(), b"clean snapshot attachment"
+        )
+
     def test_qualified_copy_preserves_edits_after_api_completion_failure(self) -> None:
         self.run_script()
         attachment = self.data / "filestore" / self.database / "attachment"

@@ -10,7 +10,7 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from control_plane.odoo_preview_resources import PREVIEW_RESOURCE_PROGRAM
+from control_plane.odoo_preview_resources import PREVIEW_RESOURCE_PROGRAM, RESOURCE_KEYS
 from control_plane._odoo_snapshot_files import CLEAN_SNAPSHOT_STATE_DIRECTORY
 from control_plane.contracts.disposable_lane import (
     ODOO_PREVIEW_RESOURCES_OK_MARKER,
@@ -135,6 +135,49 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         self.assertEqual(self.run_program()[0], 1)
         self.spec["pending_filestore"] = "preview-db"
         self.assertEqual(self.run_program()[0], 1)
+
+    def test_collector_qualifies_pending_overlay_before_compose_declares_it(self) -> None:
+        import click
+        from control_plane.dokploy import api, compose, post_deploy
+        from control_plane.odoo_preview_resources import require_existing_preview_resources
+
+        environment = dict(zip(RESOURCE_KEYS, self.volumes))
+        payload = {
+            "composeId": self.spec["compose_id"],
+            "appName": self.spec["project"],
+            "serverId": "fixture-server",
+            "composeFile": compose.render_odoo_raw_compose_file(
+                image_reference="fixture", hold_web_until_integration_readback=True
+            ),
+            "env": "\n".join(f"{key}={value}" for key, value in environment.items()),
+        }
+
+        def schedule(**kwargs: Any) -> dict[str, str]:
+            script = kwargs["schedule_payload"]["script"]
+            encoded = script.split("python3 - ")[1].split(" ")[0]
+            _, evidence = self.run_program(json.loads(base64.b64decode(encoded)))
+            return evidence
+
+        with (
+            patch.object(api, "fetch_dokploy_target_payload", return_value=payload),
+            patch.object(api, "find_matching_dokploy_schedule", return_value=None),
+            patch.object(post_deploy, "run_manual_data_schedule", side_effect=schedule),
+        ):
+            kwargs: dict[str, Any] = {
+                "host": "fixture",
+                "token": "fixture",
+                "compose_id": payload["composeId"],
+                "compose_name": "preview",
+                "context": "example",
+                "instance": "pr-42",
+                "environment": environment,
+                "checkpoint": lambda: None,
+                "pending_filestore": True,
+            }
+            require_existing_preview_resources(**kwargs)
+            self.volumes.pop("preview-db")
+            with self.assertRaises(click.ClickException):
+                require_existing_preview_resources(**kwargs)
 
     def test_overlay_ownership_includes_hidden_writable_backing(self) -> None:
         project = self.spec["project"]

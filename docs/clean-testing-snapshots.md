@@ -106,8 +106,11 @@ owned incomplete legacy attempts can restart with an overlay without copying
 the filestore again. A declared overlay that is missing refuses deployment when
 the database or writable filestore could contain retained preview data.
 An empty target can resume allocation after its compose was persisted, including
-an interruption before the first receipt. An owned incomplete allocation can
+an interruption before the first receipt. Existing-target qualification permits
+the pending overlay to be absent before compose declares it; the data, database
+and log volumes must still exist. An owned incomplete allocation can
 reconstruct its overlay before the database has its completed restore witness.
+An owned reset restarts the runner even if cleanup fails, with web still held.
 Later deploys retain an existing
 overlay and its original source, even when the newest snapshot changes.
 

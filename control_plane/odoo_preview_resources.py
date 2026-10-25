@@ -54,7 +54,9 @@ def require_existing_preview_resources(
         _require_preview_destroy_source(payload)
     volumes = [environment[key] for key in RESOURCE_KEYS]
     declaration = yaml.safe_load(str(payload.get("composeFile") or ""))
-    if isinstance(declaration, dict) and "odoo_filestore" in declaration.get("volumes", {}):
+    if pending_filestore or (
+        isinstance(declaration, dict) and "odoo_filestore" in declaration.get("volumes", {})
+    ):
         volumes.append(environment["ODOO_DATA_VOLUME"] + "-filestore")
     schedule_type, lookup_id, project, server_id = post_deploy._resolve_dokploy_schedule_runtime(
         host=host,
