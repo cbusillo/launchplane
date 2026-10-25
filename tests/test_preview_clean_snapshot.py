@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from typing import Any
 from types import SimpleNamespace
@@ -85,6 +86,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.containers: dict[str, dict[str, Any]] = {
             role: {
                 "Id": role,
+                "ExecIDs": None,
                 "Config": {
                     "Image": self.image,
                     "Labels": {
@@ -441,6 +443,128 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
     def test_module_update_does_not_hold_the_shared_source_lock(self) -> None:
         self.run_script()
         self.assertTrue(self.module_lock_available)
+
+    def test_same_target_refuses_another_snapshot_before_inspecting_runtime(self) -> None:
+        command = self.command
+        checked = False
+
+        def concurrent(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            nonlocal checked
+            if not checked:
+                checked = True
+                with self.assertRaises(BlockingIOError):
+                    self.run_script(
+                        snapshot=self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
+                    )
+                self.assertFalse(self.calls)
+                with (
+                    patch.object(
+                        self, "command", side_effect=RuntimeError("independent inspection")
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "independent inspection"),
+                ):
+                    self.run_script(compose_project="another-preview")
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=concurrent):
+            self.run_script()
+        self.assertTrue(checked)
+
+    def test_orphaned_container_exec_blocks_restore_until_it_exits(self) -> None:
+        runner = self.containers["script-runner"]
+        for active in (["surviving-restore"], "unreadable"):
+            with self.subTest(active=active):
+                runner["ExecIDs"] = active
+                with self.assertRaisesRegex(RuntimeError, "Preview runner execution custody"):
+                    self.run_script()
+                self.assertNotIn(["docker", "stop", "web"], self.calls)
+        runner.pop("ExecIDs")
+        with self.assertRaisesRegex(RuntimeError, "Preview runner execution custody"):
+            self.run_script()
+        runner["ExecIDs"] = None
+        self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_transient_health_probe_finishes_before_restore(self) -> None:
+        command = self.command
+        runner = self.containers["script-runner"]
+        runner["ExecIDs"] = ["health-probe"]
+        observations = 0
+
+        def health_probe(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            nonlocal observations
+            if arguments == ["docker", "inspect", "script-runner"]:
+                observations += 1
+                if observations > 2:
+                    runner["ExecIDs"] = []
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=health_probe):
+            self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
+
+    def test_retry_recovers_paused_runner_before_exec_or_copy(self) -> None:
+        command = self.command
+        runner = self.containers["script-runner"]
+        runner["State"] = {"Status": "paused"}
+        self.paused = True
+
+        def paused_runner(
+            arguments: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            if arguments[:2] == ["docker", "exec"] and "script-runner" in arguments:
+                self.assertFalse(self.paused)
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=paused_runner):
+            self.run_script()
+        self.assertLess(
+            self.calls.index(["docker", "unpause", "script-runner"]),
+            self.calls.index(["docker", "stop", "web"]),
+        )
+
+    def test_every_command_inherits_target_lock_and_child_blocks_retry_after_failure(self) -> None:
+        command = self.command
+        child: subprocess.Popen[bytes] | None = None
+        self.runner_failure = True
+
+        def inherited(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            nonlocal child
+            descriptors = kwargs.get("pass_fds", ())
+            self.assertTrue(descriptors, arguments)
+            if arguments[-1:] == ["clean-snapshot"]:
+                child = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; print('ready', flush=True); sys.stdin.read()",
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    pass_fds=descriptors,
+                )
+                self.assertIsNotNone(child.stdout)
+                assert child.stdout is not None
+                self.assertEqual(child.stdout.readline(), b"ready\n")
+            return command(arguments, **kwargs)
+
+        try:
+            with (
+                patch.object(self, "command", side_effect=inherited),
+                self.assertRaises(RuntimeError),
+            ):
+                self.run_script()
+            self.assertIsNotNone(child)
+            self.calls.clear()
+            with self.assertRaises(BlockingIOError):
+                self.run_script()
+            self.assertFalse(self.calls)
+        finally:
+            if child is not None:
+                child.communicate(timeout=10)
+        self.runner_failure = False
+        self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_abandoned_attempt_releases_snapshot_only_after_every_backing_is_gone(self) -> None:
         self.runner_failure = True
