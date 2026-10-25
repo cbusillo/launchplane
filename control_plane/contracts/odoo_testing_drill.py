@@ -8,8 +8,6 @@ TESTING_STORAGE_BUDGET_REQUIRED = "testing_storage_budget_required"
 
 
 class OdooTestingDrillStorageBudget(BaseModel):
-    """Admin-supplied working headroom, never an inferred source-size guarantee."""
-
     model_config = ConfigDict(extra="forbid", strict=True)
 
     database_bytes: int = Field(gt=0)
