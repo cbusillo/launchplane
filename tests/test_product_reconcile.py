@@ -29,6 +29,7 @@ from cryptography.fernet import Fernet
 
 from control_plane.build_provenance import (
     BUILD_WORKFLOW_PATH,
+    MANIFEST_ARTIFACT_PREFIX,
     BuildProvenanceError,
     GitHubBuildProvenanceTransport,
     verify_build_artifact,
@@ -1863,7 +1864,7 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
                     if run_id in validation_runs:
                         manifest = {
                             "id": run_id * 10,
-                            "name": f"artifact-manifest-{self.github.runs[run_id]['run_attempt']}",
+                            "name": f"{MANIFEST_ARTIFACT_PREFIX}{self.github.runs[run_id]['run_attempt']}",
                             "expired": expired,
                         }
                         artifacts = [manifest] if expired else [manifest, manifest]
