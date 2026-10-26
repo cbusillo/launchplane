@@ -190,6 +190,29 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
         self.assertEqual(original.state, "completed")
         self.assertFalse(self.store.list_held_provider_target_reservations())
 
+    def test_unreviewed_plan_preserves_rehearsal_without_host_apply(self) -> None:
+        operation = self.retirement()
+        native = native_fixture(self.prepared, self.key, "a" * 64)
+        held = self.store.list_held_provider_target_reservations()
+        original = operation.original(self.prepared)
+        with (
+            patch.object(type(operation), "host", return_value=native) as host,
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            reviewed = operation.plan()["plan_sha256"]
+            stale = ("0" if reviewed[0] != "0" else "1") + reviewed[1:]
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": stale}
+            )
+            with self.assertRaises(RehearsalRefused):
+                self.run_retirement(operation)
+        self.assertNotIn("apply", [call.args[0] for call in host.call_args_list])
+        self.assertEqual(
+            self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), self.prepared
+        )
+        self.assertEqual(operation.original(self.prepared), original)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), held)
+
     def test_failed_publication_keeps_original_hold_record_and_target_registration(self) -> None:
         operation = self.retirement()
         native = native_fixture(self.prepared, self.key, "b" * 64)
