@@ -24,6 +24,8 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.storage import postgres as db
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.testing_route_refresh import testing_route_domains
+from control_plane.dokploy.testing_route import TestingLaneRoute
 from control_plane.route_binding_reconcile import route_binding_authority_projection
 from control_plane.testing_candidate_runtime import (
     testing_profile_binding,
@@ -57,6 +59,19 @@ def testing_binding_authority(
         binding.source.source_versions.get("testing_publication"),
         binding.source.source_versions.get("testing_route"),
         binding.source.source_versions.get("testing_address"),
+    )
+
+
+def testing_binding_matches_route(
+    actual: EnvironmentRouteBindingRecord | None,
+    expected: EnvironmentRouteBindingRecord,
+    route: TestingLaneRoute,
+) -> bool:
+    authority = testing_binding_authority(actual)
+    if authority == testing_binding_authority(expected):
+        return True
+    return authority == testing_binding_authority(
+        expected.model_copy(update={"domains": testing_route_domains(route)})
     )
 
 

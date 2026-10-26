@@ -455,9 +455,12 @@ class TestingAddressTests(unittest.TestCase):
         from control_plane.dokploy.testing_route import route_document, compile_testing_route
         from control_plane.dokploy.testing_route_transport import DokployTestingRouteTransport
         from control_plane.dokploy import api
-        from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
+        from tests.test_native_testing_route_refresh import refresh_testing_binding_http
+        from tests.test_testing_rebuild_service import exercise_published_copy_maintenance
+        from control_plane.testing_address_storage import read_testing_address_recovery_copy
+        from control_plane.workflows.public_ingress_monitor import _tls_monitor_targets
 
-        self.commit()
+        receipt = self.commit()
         route = self.plan.route_after
         routed = TestingRouteTests()
         routed.setUp()
@@ -486,10 +489,58 @@ class TestingAddressTests(unittest.TestCase):
             ),
             patch.object(DokployTestingRouteTransport, "read", return_value=frame),
         ):
-            refresh = plan_native_testing_route_refresh(
-                self.store, root=self.fixture.fixture.root, current=binding
+            for key in ("repair-alias", "repeat-alias", "later-deploy-alias"):
+                response = asyncio.run(
+                    refresh_testing_binding_http(
+                        self.store,
+                        self.fixture.fixture.root,
+                        self.product,
+                        self.context,
+                        datetime.now(UTC),
+                        key,
+                    )
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                refreshed = self.fixture.current().binding
+                assert refreshed is not None
+                self.assertEqual(
+                    {(item.domain_name, item.role) for item in refreshed.domains},
+                    {(route.host, "primary"), *((alias, "alias") for alias in route.aliases)},
+                )
+                self.assertEqual(
+                    published_testing_copy(self.store, product=self.product, context=self.context),
+                    self.publication,
+                )
+                read_testing_address_recovery_copy(self.store, self.plan)
+                self.assertEqual(self.commit(), receipt)
+                profile = self.store.read_product_profile_record(self.product)
+                lane = next(item for item in profile.lanes if item.instance == "testing")
+                targets = _tls_monitor_targets(record_store=self.store, profile=profile, lane=lane)
+                self.assertEqual(
+                    {(item.tls_domain_name, item.tls_domain_role) for item in targets},
+                    {(item.domain_name, item.role) for item in refreshed.domains},
+                )
+                if key == "repeat-alias":
+                    exercise_published_copy_maintenance(self, self.fixture)
+                    inventory = self.fixture.current().inventory
+                    assert inventory is not None and inventory.runtime_identity is not None
+                    frame["old_identity"] = inventory.runtime_identity.model_dump(mode="json")
+            before_drift = self.fixture.current().binding
+            frame["raw"] = deepcopy(raw)
+            for router in owned["http"]["routers"]:
+                frame["raw"]["routers"][router + "@file"]["rule"] = f"Host(`{route.host}`)"
+            response = asyncio.run(
+                refresh_testing_binding_http(
+                    self.store,
+                    self.fixture.fixture.root,
+                    self.product,
+                    self.context,
+                    datetime.now(UTC),
+                    "missing-managed-alias",
+                )
             )
-        self.assertEqual(refresh.status, "unchanged")
+            self.assertEqual(response.json()["result"]["blocked_count"], 1, response.text)
+            self.assertEqual(self.fixture.current().binding, before_drift)
         rebuilt = compile_testing_route(
             product=self.product,
             context=self.context,
@@ -505,6 +556,33 @@ class TestingAddressTests(unittest.TestCase):
         )
         self.assertEqual(rebuilt.aliases, route.aliases)
         self.assertFalse(rebuilt.address_only)
+
+    def test_amended_route_custody_rejects_foreign_domains_and_roles(self) -> None:
+        from control_plane.contracts.route_binding_record import RouteBindingDomain
+        from control_plane.testing_address_storage import read_testing_address_recovery_copy
+
+        self.commit()
+        binding = self.fixture.current().binding
+        assert binding is not None
+        route = self.plan.route_after
+        for domains in (
+            (
+                *binding.domains,
+                RouteBindingDomain(domain_name="foreign.example.invalid", role="alias"),
+            ),
+            (
+                RouteBindingDomain(domain_name=route.host, role="alias"),
+                RouteBindingDomain(domain_name=route.aliases[0]),
+            ),
+        ):
+            with self.subTest(domains=domains):
+                self.store.write_route_binding_record(
+                    binding.model_copy(update={"domains": domains})
+                )
+                with self.assertRaises(ValueError):
+                    published_testing_copy(self.store, product=self.product, context=self.context)
+                with self.assertRaises(ValueError):
+                    read_testing_address_recovery_copy(self.store, self.plan)
 
     def test_lost_metadata_reply_completes_from_committed_receipt(self) -> None:
         from unittest.mock import Mock

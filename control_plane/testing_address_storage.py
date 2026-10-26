@@ -42,15 +42,15 @@ ADDRESS_PLAN_ROUTE = ADDRESS_ROUTE + ":plan"
 def read_testing_address_recovery_copy(
     store: PostgresRecordStore, plan: TestingAddressPlan
 ) -> TestingServingSnapshot:
-    from control_plane.testing_publication_storage import read_snapshot, testing_binding_authority
+    from control_plane.testing_publication_storage import (
+        read_snapshot,
+        testing_binding_matches_route,
+    )
 
     current = read_snapshot(store, product=plan.product, context=plan.context)
     applied = read_testing_address(store, plan.publication_key)
-    expected_binding = (
-        plan.binding_after
-        if applied is not None and applied.state == "applied" and applied.plan == plan
-        else plan.before.binding
-    )
+    address_applied = applied is not None and applied.state == "applied" and applied.plan == plan
+    expected_binding = plan.binding_after if address_applied else plan.before.binding
     for snapshot in (current, plan.before):
         if (
             snapshot.provider.provider_id != "dokploy"
@@ -62,7 +62,12 @@ def read_testing_address_recovery_copy(
         current.target_id.target_id != plan.before.target_id.target_id
         or current.target.target_name != plan.before.target.target_name
         or current.target.project_name != plan.before.target.project_name
-        or testing_binding_authority(current.binding) != testing_binding_authority(expected_binding)
+        or expected_binding is None
+        or not testing_binding_matches_route(
+            current.binding,
+            expected_binding,
+            plan.route_after if address_applied else plan.route_before,
+        )
     ):
         raise ValueError("Protective address recovery cannot replace another copy or binding.")
     return current
