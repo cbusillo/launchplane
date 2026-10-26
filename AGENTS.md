@@ -3,6 +3,12 @@
 Treat this file as the launch checklist for each engineering session in
 `launchplane`, whichever client is operating in the repository.
 
+## What Launchplane does
+
+Launchplane is the control layer for product previews, deployments, backups, restores, releases, and merges.
+Its contract records Clients' release decisions and gates delivery on verified artifacts and runtime evidence; adoption and release readiness must be checked per product.
+Evidence: [DIRECTION.md](DIRECTION.md) and [README.md](README.md); each product owns its application code and builds.
+
 ## Start Here
 
 - Read the Director's [overall direction](https://github.com/cbusillo/direction/blob/main/DIRECTION.md),

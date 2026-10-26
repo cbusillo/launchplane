@@ -563,6 +563,44 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 )
                 self.assertFalse((self.source.parent / "preview-attempts").exists())
 
+    def test_preparation_charges_the_dump_without_testing_filestore_staging(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        budget = self.snapshot.storage_budget.model_copy(update={"staging_bytes": 2**20})
+        snapshot = self.snapshot.model_copy(update={"storage_budget": budget})
+        required = (
+            budget.database_bytes
+            + (self.source / "database.dump").stat().st_size
+            + budget.reserve_bytes
+        )
+        for available in (required - 1, required):
+            with (
+                self.subTest(available=available),
+                patch("os.statvfs", return_value=SimpleNamespace(f_bavail=available, f_frsize=1)),
+            ):
+                result = self.prepare_filestore(snapshot=snapshot, apply=False)
+                self.assertEqual(result["type"], "complete" if available == required else "failed")
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+        self.assertFalse((self.source.parent / "preview-attempts").exists())
+
+    def test_preparation_refuses_a_dump_outside_its_bounds_or_custody(self) -> None:
+        self.volumes.pop("preview-data-filestore")
+        shutil.rmtree(self.data / "filestore")
+        dump = self.source / "database.dump"
+        original = dump.read_bytes()
+        dump.write_bytes(b"x" * (self.snapshot.storage_budget.database_bytes + 1))
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False)["type"], "failed"
+        )
+        dump.write_bytes(original)
+        retained = dump.with_name("retained.dump")
+        dump.rename(retained)
+        dump.symlink_to(retained)
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False)["type"], "failed"
+        )
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
+
     def test_missing_retained_overlay_refuses_instead_of_hiding_attachments(self) -> None:
         self.volumes.pop("preview-data-filestore")
         for snapshot in (None, self.snapshot):

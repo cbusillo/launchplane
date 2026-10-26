@@ -1320,7 +1320,13 @@ The reviewed reason is retained in the immutable plan and applied receipt.
 The plan requires exact retained hostname custody in the same product/context,
 a superseded original recipient operation, complete credential-visible provider
 domain membership, and stopped recipients on the existing testing server. The
-old recipients must have automatic deploys and schedules disabled. Their dormant
+old recipients must have automatic deployment explicitly disabled and no target
+schedules. `409 testing_address_recipient_unverified` reports the observed
+automatic-deployment tri-state and target schedule count independently, without
+provider values. The shared schedule reader accepts only a complete object
+array; absent, malformed or wrapped inventories refuse rather than becoming an
+empty collection. These observations grant no retry, hostname or settlement
+authority. Their dormant
 router labels must remain strictly below the existing lane-owned priority, with
 known listeners. Foreign domains, matching foreign routers, automatic restart
 policies and incomplete observations refuse qualification. The original executor

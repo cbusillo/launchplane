@@ -3027,6 +3027,10 @@ Schemas, migrations, record decoders and restore/import paths remain intact.
 Removing the execution API does not delete or rewrite stored requests, saved
 workspaces, credentials or backups. Advisory engineering review and shared
 preview readiness/feedback continue through their existing supported routes.
+The retired runner, daemon, session launchers, reconciliation and completion
+commands are removed. `launchplane every-code review-run-once` remains the
+advisory engineering-review entrypoint; historical workspace paths and preview
+branch matching stay compatible.
 
 ## Agent Context, Authorization, and Merge Train Records
 

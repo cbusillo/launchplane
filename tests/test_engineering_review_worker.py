@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
@@ -19,6 +22,7 @@ from control_plane.contracts.engineering_review_run import (
     engineering_review_run_view,
 )
 from control_plane.engineering_review_worker import (
+    EngineeringReviewWorkerApiStore,
     _failure_summary,
     _remaining_lease_seconds,
     _verify_worktree,
@@ -71,7 +75,61 @@ class _WorkerStore:
         )
 
 
+class _ReviewClaimHandler(BaseHTTPRequestHandler):
+    assignment: EngineeringReviewRunAssignment
+    received: dict[str, object]
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+    def do_POST(self) -> None:
+        self.__class__.received = {
+            "path": self.path,
+            "authorization": self.headers.get("Authorization"),
+            "content_type": self.headers.get("Content-Type"),
+            "body": json.loads(self.rfile.read(int(self.headers["Content-Length"]))),
+        }
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(
+            json.dumps({"assignment": self.assignment.model_dump(mode="json")}).encode()
+        )
+
+
 class EngineeringReviewWorkerTests(unittest.TestCase):
+    def test_api_claim_posts_scoped_request_and_reads_assignment(self) -> None:
+        pending, credential = _pending_record()
+        claimed = claim_engineering_review_run(pending, claimed_at="2026-08-06T00:00:00Z")
+        assignment = EngineeringReviewRunAssignment(
+            run=engineering_review_run_view(claimed),
+            credential=credential,
+            worker_host=claimed.worker_host,
+            executable_path=claimed.executable_path,
+        )
+        _ReviewClaimHandler.assignment = assignment
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _ReviewClaimHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            store = EngineeringReviewWorkerApiStore(
+                service_url=f"http://127.0.0.1:{server.server_port}", worker_token="review-token"
+            )
+            request = EngineeringReviewRunClaimRequest(run_id=claimed.run_id)
+            self.assertEqual(store.claim(request), assignment)
+            self.assertEqual(
+                _ReviewClaimHandler.received,
+                {
+                    "path": "/v1/engineering-review-runs/claim",
+                    "authorization": "Bearer review-token",
+                    "content_type": "application/json",
+                    "body": request.model_dump(mode="json"),
+                },
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     def test_worktree_verification_requires_exact_clean_tree(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             worktree = Path(temporary_directory)

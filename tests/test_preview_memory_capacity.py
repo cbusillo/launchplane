@@ -1,8 +1,12 @@
 from contextlib import redirect_stdout
+import ast
+import base64
 import io
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
+import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
@@ -17,11 +21,125 @@ from control_plane.workflows.odoo_preview_runtime import (
     _resolve_or_create_compose,
     build_odoo_preview_dokploy_dry_run,
     OdooPreviewDokployDryRunRequest,
+    OdooPreviewDokployApplyRequest,
+    execute_odoo_preview_dokploy_apply,
 )
-from tests.test_odoo_preview_runtime import _endpoint_spec, _runtime_plan
+from tests.test_odoo_preview_runtime import (
+    _endpoint_spec,
+    _runtime_plan,
+    _target,
+    _environment_values,
+)
+from tests.test_preview_idle import runtime_identity
+from control_plane.contracts.runtime_identity import runtime_identity_env
 
 
 class PreviewMemoryCapacityTests(unittest.TestCase):
+    def test_awake_refresh_credits_own_services_but_cold_foreign_and_restore_starts_are_gated(
+        self,
+    ) -> None:
+        identity = runtime_identity()
+        raw_identity = runtime_identity_env(identity)["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"]
+        rows: list[dict[str, Any]] = [
+            {
+                "Id": role,
+                "Config": {
+                    "Labels": {
+                        "com.docker.compose.project": "fixture-project",
+                        "com.docker.compose.service": role,
+                    },
+                    "Env": ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + raw_identity],
+                },
+                "State": {"Running": True},
+            }
+            for role in ("web", "script-runner", "database")
+        ]
+
+        def docker(arguments: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            output = (
+                b"web\nscript-runner\ndatabase"
+                if arguments[1] == "ps"
+                else json.dumps(rows).encode()
+            )
+            return subprocess.CompletedProcess(arguments, 0, output, b"")
+
+        def remote(**kwargs: Any) -> None:
+            module = ast.parse(kwargs["program"])
+            definitions = ast.Module(body=module.body[:-2], type_ignores=[])
+            namespace: dict[str, Any] = {}
+            exec(compile(definitions, "<memory-fixture>", "exec"), namespace)
+            namespace["observe_memory_headroom"] = lambda *_: 99
+            encoded = base64.b64encode(json.dumps(kwargs["payload"]).encode()).decode()
+            output = io.StringIO()
+            with (
+                patch("sys.argv", ["fixture", encoded, "frame:"]),
+                patch("subprocess.run", side_effect=docker),
+                redirect_stdout(output),
+            ):
+                exec(
+                    compile(
+                        ast.Module(body=module.body[-2:], type_ignores=[]),
+                        "<memory-fixture>",
+                        "exec",
+                    ),
+                    namespace,
+                )
+            kwargs["receive"](json.loads(output.getvalue().removeprefix("frame:")))
+
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(target=_target()), endpoint_spec=_endpoint_spec()
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(
+            dry_run_plan=plan,
+            image_reference=identity.image_reference,
+            environment_values=_environment_values(),
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("provider", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "appName": "fixture-project",
+                    "serverId": "fixture-server",
+                    "env": "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + raw_identity,
+                },
+            ),
+            patch.object(memory_capacity, "preview_host_memory_floor", return_value=100),
+            patch.object(native_copy_stream, "_read_remote", side_effect=remote),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
+                side_effect=RuntimeError("refresh reached sync"),
+            ) as sync,
+        ):
+
+            def refresh(**kwargs: Any) -> None:
+                execute_odoo_preview_dokploy_apply(
+                    control_plane_root=Path("."),
+                    request=request,
+                    expected_runtime_identity=identity,
+                    **kwargs,
+                )
+
+            with self.assertRaisesRegex(RuntimeError, "refresh reached sync"):
+                refresh()
+            sync.reset_mock()
+            rows[0]["State"]["Running"] = False
+            with self.assertRaises(memory_capacity.PreviewMemoryCapacityRefused):
+                refresh()
+            rows[0]["State"]["Running"] = True
+            rows[0]["Config"]["Env"] = ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON=foreign"]
+            with self.assertRaises(memory_capacity.PreviewMemoryCapacityRefused):
+                refresh()
+            rows[0]["Config"]["Env"] = ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + raw_identity]
+            with self.assertRaises(memory_capacity.PreviewMemoryCapacityRefused):
+                refresh(restore_clean_snapshot=True)
+            sync.assert_not_called()
+
     def test_host_program_uses_smallest_actual_memory_budget_and_refuses_unknown(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -43,7 +161,7 @@ class PreviewMemoryCapacityTests(unittest.TestCase):
                 output = io.StringIO()
                 with (
                     patch("pathlib.Path", side_effect=lambda path: paths.get(path, Path(path))),
-                    patch("sys.argv", ["program", "{}", "frame:"]),
+                    patch("sys.argv", ["program", base64.b64encode(b"{}").decode(), "frame:"]),
                     redirect_stdout(output),
                 ):
                     exec(memory_capacity.MEMORY_CAPACITY_PROGRAM, {})

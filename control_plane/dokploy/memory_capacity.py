@@ -103,16 +103,49 @@ def observe_memory_headroom(proc_root: Path, cgroup_root: Path) -> int:
 MEMORY_CAPACITY_PROGRAM = (
     "from pathlib import Path\n"
     + inspect.getsource(observe_memory_headroom)
-    + "\nimport json, sys\n"
-    + "try:\n"
-    + "    frame = {'type': 'complete', 'result': observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup'))}\n"
-    + "except (ValueError, OSError, IndexError):\n"
-    + "    frame = {'type': 'failed'}\n"
-    + "print(sys.argv[2] + json.dumps(frame), flush=True)\n"
+    + r"""
+import base64, json, subprocess, sys
+
+def preview_is_running(preview):
+    if not preview or not preview['project'] or not preview['identity']:
+        return False
+    identifiers = subprocess.run(['docker', 'ps', '-aq', '--no-trunc', '--filter',
+        'label=com.docker.compose.project=' + preview['project']], check=True,
+        capture_output=True, timeout=30).stdout.decode().splitlines()
+    if not identifiers:
+        return False
+    rows = json.loads(subprocess.run(['docker', 'inspect', *identifiers], check=True,
+        capture_output=True, timeout=30).stdout)
+    services = {}
+    for item in rows:
+        labels = item['Config']['Labels']
+        role = labels.get('com.docker.compose.service')
+        if role not in {'web', 'script-runner', 'database'}:
+            continue
+        if labels.get('com.docker.compose.project') != preview['project'] or role in services:
+            raise ValueError('Preview memory ownership differs')
+        services[role] = item
+    return (set(services) == {'web', 'script-runner', 'database'}
+        and all(item['State']['Running'] is True for item in services.values())
+        and all('LAUNCHPLANE_RUNTIME_IDENTITY_JSON=' + preview['identity']
+            in services[role]['Config']['Env'] for role in ('web', 'script-runner')))
+
+try:
+    spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
+    if preview_is_running(spec.get('running_preview')):
+        frame = {'type': 'complete', 'running_preview': True}
+    else:
+        frame = {'type': 'complete', 'result': observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup'))}
+except (ValueError, OSError, IndexError, KeyError, TypeError, subprocess.SubprocessError):
+    frame = {'type': 'failed'}
+print(sys.argv[2] + json.dumps(frame), flush=True)
+"""
 )
 
 
-def read_host_memory_headroom(*, host: str, token: str, server_id: str) -> int:
+def read_host_memory_headroom(
+    *, host: str, token: str, server_id: str, running_preview: dict[str, str] | None = None
+) -> int | None:
     frames: list[dict[str, object]] = []
     try:
         native_copy_stream._read_remote(
@@ -120,7 +153,7 @@ def read_host_memory_headroom(*, host: str, token: str, server_id: str) -> int:
             token=token,
             server_id=server_id,
             program=MEMORY_CAPACITY_PROGRAM,
-            payload={},
+            payload={"running_preview": running_preview} if running_preview else {},
             receive=frames.append,
             timeout_seconds=60,
         )
@@ -129,6 +162,8 @@ def read_host_memory_headroom(*, host: str, token: str, server_id: str) -> int:
             "Preview start refused: host memory headroom is unavailable."
         ) from None
     if len(frames) == 1 and frames[0].get("type") == "complete":
+        if running_preview and frames[0].get("running_preview") is True:
+            return None
         headroom = frames[0].get("result")
         if type(headroom) is int and headroom >= 0:
             return headroom
@@ -153,14 +188,12 @@ def parse_preview_memory_floors(raw: object) -> dict[str, int]:
     return floors
 
 
-def require_preview_host_memory_capacity(
+def preview_host_memory_floor(
     *,
-    host: str,
-    token: str,
     server_id: str,
     database_url: str | None = None,
     record_store: RuntimeEnvironmentRecordStore | None = None,
-) -> None:
+) -> int | None:
     try:
         if record_store is None:
             selected_database = resolve_database_url(database_url)
@@ -187,17 +220,35 @@ def require_preview_host_memory_capacity(
         raise PreviewMemoryCapacityRefused(
             "Preview start refused: service-record memory policy is unavailable or invalid."
         ) from None
-    if server_id not in floors:
+    return floors.get(server_id)
+
+
+def require_preview_host_memory_capacity(
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    database_url: str | None = None,
+    record_store: RuntimeEnvironmentRecordStore | None = None,
+    running_preview: dict[str, str] | None = None,
+) -> None:
+    floor = preview_host_memory_floor(
+        server_id=server_id,
+        database_url=database_url,
+        record_store=record_store,
+    )
+    if floor is None:
         return
-    floor = floors[server_id]
     try:
-        headroom = read_host_memory_headroom(host=host, token=token, server_id=server_id)
+        headroom = read_host_memory_headroom(
+            host=host, token=token, server_id=server_id, running_preview=running_preview
+        )
     except PreviewMemoryCapacityRefused:
         raise PreviewMemoryCapacityRefused(
             f"Preview start refused on host {server_id}: floor {floor} bytes; current headroom unavailable.",
             floor=floor,
         ) from None
-    if headroom < floor:
+    if headroom is not None and headroom < floor:
         raise PreviewMemoryCapacityRefused(
             f"Preview start refused on host {server_id}: floor {floor} bytes; current headroom {headroom} bytes. Retry when headroom recovers.",
             floor=floor,
