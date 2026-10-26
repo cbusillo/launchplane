@@ -181,7 +181,7 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         row_type = LaunchplaneMergeTrainStackCollapsePlanRow
         filters: list[object] = []
         if repository:
-            filters.append(row_type.repository == repository)
+            filters.append(func.lower(row_type.repository) == repository.lower())
         if base_branch:
             filters.append(row_type.base_branch == base_branch)
         if status:
@@ -253,7 +253,7 @@ class _SessionSnapshotStore(HistoricalCompletionSnapshotStore):
         for row_type, model_type in active_rows:
             statement = select(row_type).where(
                 row_type.status == "active",
-                row_type.repository == repository,
+                func.lower(row_type.repository) == repository.strip().lower(),
                 row_type.base_branch == base_branch,
             )
             for row in self._session.scalars(statement):

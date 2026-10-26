@@ -52,7 +52,7 @@ class MergeTrainPrFeedbackRecord(BaseModel):
     def _validate_record(self) -> "MergeTrainPrFeedbackRecord":
         if not self.feedback_id.strip():
             raise ValueError("merge train PR feedback requires feedback_id")
-        self.repository = _normalize_repository(self.repository)
+        self.repository = _normalize_repository(self.repository).lower()
         self.base_branch = require_text(
             self.base_branch, "merge train PR feedback requires base_branch"
         )

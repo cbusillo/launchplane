@@ -156,7 +156,7 @@ class MergeTrainStackCollapsePlan(BaseModel):
         self.collapse_id = require_text(
             self.collapse_id, "merge train stack collapse plan requires collapse_id"
         )
-        self.repository = _normalize_repository(self.repository)
+        self.repository = _normalize_repository(self.repository).lower()
         self.base_branch = require_text(
             self.base_branch, "merge train stack collapse plan requires base_branch"
         )

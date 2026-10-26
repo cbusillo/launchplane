@@ -2267,7 +2267,7 @@ class FilesystemRecordStore:
                 MergeTrainPrFeedbackRecord,
                 "launchplane_merge_train_pr_feedback",
             )
-            if (not repository or record.repository == repository)
+            if (not repository or record.repository == repository.lower())
             and (not base_branch or record.base_branch == base_branch)
             and (pr_number is None or record.pull_request_number == pr_number)
         ]
@@ -2857,7 +2857,7 @@ class FilesystemRecordStore:
                 MergeTrainStackCollapsePlanRecord,
                 "launchplane_merge_train_stack_collapse_plans",
             )
-            if (not repository or record.plan.repository == repository)
+            if (not repository or record.plan.repository == repository.lower())
             and (not base_branch or record.plan.base_branch == base_branch)
             and (not status or record.status == status)
             and (
