@@ -121,7 +121,13 @@ class SourceMeasurementTests(unittest.TestCase):
             sum(item.st_blocks * 512 for item in before.values()),
         )
         self.assertEqual({self.filestore, *self.filestore.rglob("*")}, set(paths))
-        self.assertEqual({path: path.stat() for path in paths}, before)
+        def write_metadata(item: os.stat_result) -> tuple[int, ...]:
+            return (item.st_size, item.st_mtime_ns, item.st_ctime_ns, item.st_ino, item.st_mode)
+
+        self.assertEqual(
+            {path: write_metadata(path.stat()) for path in paths},
+            {path: write_metadata(item) for path, item in before.items()},
+        )
         database.assert_called_once()
         arguments = database.call_args.args[0]
         self.assertEqual(arguments[:6], ["sudo", "-n", "-u", "fixture_db_reader", "--", "psql"])
