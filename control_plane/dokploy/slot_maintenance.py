@@ -8,6 +8,7 @@ import json
 from typing import Any, TYPE_CHECKING
 
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooMaintenanceReceipt
+from control_plane.contracts.canonical_json import canonical_model_sha256
 from control_plane.dokploy.slot_website_settings import StartupSettings, run_slot_website_settings
 
 if TYPE_CHECKING:
@@ -56,7 +57,7 @@ def slot_run_marker(plan: OdooCutoverPlan) -> str:
 
 
 def slot_run_stamp(plan: OdooCutoverPlan) -> str:
-    return hashlib.sha256(plan.new.model_dump_json().encode()).hexdigest()
+    return canonical_model_sha256(plan.new)
 
 
 def run_planned_slot_maintenance(
@@ -68,6 +69,7 @@ def run_planned_slot_maintenance(
     workflow: str = "/volumes/scripts/run_odoo_data_workflows.py",
     configure_startup: StartupSettings | None = None,
     writers: ContainerSlotWriters | None = None,
+    maintenance_checkpoint: Callable[[OdooMaintenanceReceipt], None] | None = None,
 ) -> OdooMaintenanceReceipt:
     """Read back before repeating; a running/failed attempt remains uncertain.
 
@@ -190,6 +192,8 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
         evidence_id=digest,
     )
     if plan.website_settings is not None:
+        if maintenance_checkpoint is not None:
+            maintenance_checkpoint(receipt)
         receipt = receipt.model_copy(
             update={
                 "website_settings": run_slot_website_settings(

@@ -24,7 +24,11 @@ from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsInt
 from control_plane.prepared_public_pause import PreparedPublicPause, PublicPauseProvider
 from control_plane.prepared_public_site import verify_snapshot
 from control_plane.odoo_cutover_plan import rollback_pause_identity
-from control_plane.traffic_switch import require_serving_route, require_fresh_readiness
+from control_plane.traffic_switch import (
+    require_serving_route,
+    require_fresh_readiness,
+    require_route_authority,
+)
 
 
 class OdooCutoverStore(Protocol):
@@ -118,6 +122,20 @@ def _require_ready(
         or not 0 <= (now - readiness.observed_at).total_seconds() <= 60
     ):
         raise ValueError("private readiness identity is wrong, stale or unavailable")
+
+
+def _require_recovery_route(
+    route: OdooRouteObservation, plan: OdooCutoverPlan, slot: OdooSlot
+) -> None:
+    require_route_authority(
+        route,
+        route_id=plan.route_id,
+        host=plan.host,
+        target_url=slot.private_url,
+        slot_id=slot.slot_id,
+    )
+    if route.binding != slot.binding or route.runtime_identity not in (None, slot.runtime_identity):
+        raise ValueError("rollback traffic authority belongs to another runtime")
 
 
 def require_website_receipt(
@@ -344,7 +362,7 @@ def rollback_compatible_cutover(
     settings_checkpoint: Callable[[], None] = lambda: None,
 ) -> OdooCutoverRecord:
     record = OdooCutoverRecord.model_validate(store.load(record_id).model_dump())
-    plan = record.plan
+    plan = OdooCutoverPlan.model_validate(record.plan.model_dump())
     rollback_pause_id = rollback_pause_identity(record_id)
     if plan.compatibility.classification != "compatible":
         raise ValueError("database-changing rollback requires an authorized coherent tuple restore")
@@ -368,7 +386,7 @@ def rollback_compatible_cutover(
                 pass
             else:
                 slot = plan.old if route.slot_id == plan.old.slot_id else plan.new
-                _require_route(route, plan, slot)
+                _require_recovery_route(route, plan, slot)
             started_at = clock()
             record = record.model_copy(
                 update={
@@ -428,7 +446,7 @@ def rollback_compatible_cutover(
                 record.public_site is None
                 or provider.observed_public_copy(record_id) != record.public_site.content_digest
             ):
-                _require_route(route, plan, plan.new)
+                _require_recovery_route(route, plan, plan.new)
             _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
         route = provider.switch(plan, plan.old)
         _require_route(route, plan, plan.old)

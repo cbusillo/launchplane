@@ -5,7 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import (
+    Field,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_validator,
+)
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.artifact_release_compatibility import ReleaseDatabaseCompatibility
@@ -21,6 +27,7 @@ from control_plane.release_compatibility import classify_release_database_compat
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
+from control_plane.contracts.cutover_host import OdooCutoverHostRuntime
 
 
 class OdooSlot(FrozenRecord):
@@ -44,6 +51,9 @@ class OdooCutoverPlan(FrozenRecord):
     writers: tuple[WriterTarget, ...]
     website_settings: OdooWebsiteSettingsIntent | None = None
     production_website_settings: OdooWebsiteSettingsIntent | None = None
+    host_runtime: OdooCutoverHostRuntime | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @property
     def rollback_website_settings(self) -> OdooWebsiteSettingsIntent | None:
@@ -65,7 +75,7 @@ class OdooCutoverPlan(FrozenRecord):
         )
 
     @model_validator(mode="after")
-    def validate_release(self) -> Self:
+    def validate_release(self, info: ValidationInfo) -> Self:
         for intent, artifact in (
             (self.website_settings, self.candidate),
             (self.production_website_settings, self.production),
@@ -75,7 +85,9 @@ class OdooCutoverPlan(FrozenRecord):
                 or intent.settings.public_origin.rstrip("/") != "https://" + self.host
             ):
                 raise ValueError("website snapshot differs from its exact slot artifact/origin")
-        if self.compatibility != classify_release_database_compatibility(
+        if not (info.context or {}).get(
+            "stored_cutover"
+        ) and self.compatibility != classify_release_database_compatibility(
             production=self.production, candidate=self.candidate
         ):
             raise ValueError("cutover classification does not match verified artifact pair")
@@ -222,3 +234,11 @@ class OdooCutoverRecord(FrozenRecord):
     error: str = ""
     old_connections_drained: bool = False
     previous_slot_retained: bool = True
+
+    @field_validator("plan", mode="wrap")
+    @classmethod
+    def read_admitted_plan(
+        cls, value: object, handler: ValidatorFunctionWrapHandler
+    ) -> OdooCutoverPlan:
+        payload = value.model_dump() if isinstance(value, OdooCutoverPlan) else value
+        return OdooCutoverPlan.model_validate(payload, context={"stored_cutover": True})

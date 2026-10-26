@@ -101,6 +101,20 @@ def build_fixture_images(
         capture_output=True,
     )
     manifests = []
+    major = int(
+        docker(
+            "run",
+            "--rm",
+            "--pull=never",
+            "--network",
+            "none",
+            "--entrypoint",
+            "/venv/bin/python",
+            base_image,
+            "-c",
+            "import runpy; print(runpy.run_path('/odoo/odoo/release.py')['version_info'][0])",
+        )
+    )
     for run_id, name in enumerate(("old", "static", "database"), 1):
         build = root / name
         build.mkdir()
@@ -109,6 +123,10 @@ def build_fixture_images(
         shutil.copytree(inputs / "launchplane_settings", build / "addon/launchplane_settings")
         for path in addon.glob("*.py.in"):
             path.rename(path.with_suffix(""))
+        metadata_path = addon / "__manifest__.py"
+        metadata = ast.literal_eval(metadata_path.read_text())
+        metadata["version"] = str(major) + ".0.1.0.0"
+        metadata_path.write_text(repr(metadata))
         if name != "old":
             (addon / "static/site.css").write_text("body {font-family:sans-serif;color:#146}")
         if name == "database":

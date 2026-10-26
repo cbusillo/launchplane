@@ -1,6 +1,7 @@
 """Adapt the cutover executor to the existing promotion/deployment record path."""
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -17,6 +18,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.odoo_cutover_plan import cutover_record_id
 from control_plane.odoo_cutover_storage import DeploymentCutoverStore, DeploymentStore
+from control_plane.dokploy.cutover_execution import bind_cutover_execution
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider, execute_odoo_cutover
 from control_plane.workflows.odoo_cutover import rollback_compatible_cutover
 from control_plane.release_tuples import (
@@ -94,16 +96,17 @@ def execute_odoo_cutover_deployment(
     )
     store = DeploymentCutoverStore(record_store, deployment)
 
-    record = execute_odoo_cutover(
-        plan,
-        store,
-        provider,
-        record_id=record_id,
-        checkpoint=checkpoint,
-        settings_checkpoint=lambda: record_website_application(
-            record_store, plan, plan.website_settings, verified=False
-        ),
-    )
+    with bind_cutover_execution(plan, checkpoint):
+        record = execute_odoo_cutover(
+            plan,
+            store,
+            provider,
+            record_id=record_id,
+            checkpoint=checkpoint,
+            settings_checkpoint=lambda: record_website_application(
+                record_store, plan, plan.website_settings, verified=False
+            ),
+        )
     if record.step != "complete" or record.readiness is None or record.route is None:
         raise ValueError("cutover does not have verified completed traffic/writer evidence")
     record_website_application(record_store, plan, plan.website_settings, verified=True)
@@ -138,19 +141,21 @@ def execute_odoo_cutover_rollback_deployment(
     record_store: DeploymentStore,
     provider: OdooCutoverProvider,
     artifact_id: str,
+    checkpoint: Callable[[str], None] | None = None,
 ) -> OdooCutoverApplyResult:
     record = deployment.odoo_cutover
     if record is None or artifact_id != record.plan.production.artifact_id:
         raise ValueError("cutover rollback requires its exact retained production artifact")
     store = DeploymentCutoverStore(record_store, deployment)
-    rolled = rollback_compatible_cutover(
-        store,
-        provider,
-        record.record_id,
-        settings_checkpoint=lambda: record_website_application(
-            record_store, record.plan, record.plan.rollback_website_settings, verified=False
-        ),
-    )
+    with bind_cutover_execution(record.plan, checkpoint) if checkpoint else nullcontext():
+        rolled = rollback_compatible_cutover(
+            store,
+            provider,
+            record.record_id,
+            settings_checkpoint=lambda: record_website_application(
+                record_store, record.plan, record.plan.rollback_website_settings, verified=False
+            ),
+        )
     record_website_application(
         record_store,
         record.plan,

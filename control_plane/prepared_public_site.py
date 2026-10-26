@@ -17,6 +17,7 @@ from control_plane.contracts.prepared_public_site import (
 )
 from control_plane.prepared_public_html import PassivePublicHTML, css_references, local_reference
 from control_plane.prepared_public_assets import prepare_svg
+from control_plane.contracts.canonical_json import canonical_model_sha256
 
 CSP = (
     "default-src 'none'; script-src 'none'; connect-src 'none'; form-action 'none'; "
@@ -55,8 +56,10 @@ class PublicCapture(Protocol):
 
 
 def snapshot_digest(site: PreparedPublicSite) -> str:
-    payload = site.model_dump_json(exclude={"content_digest"}).encode()
-    return "sha256:" + hashlib.sha256(payload).hexdigest()
+    if site.content_digest and not site.content_digest.startswith("sha256:v2:"):
+        payload = site.model_dump_json(exclude={"content_digest"}).encode()
+        return "sha256:" + hashlib.sha256(payload).hexdigest()
+    return "sha256:v2:" + canonical_model_sha256(site, exclude={"content_digest"})
 
 
 def verify_snapshot(site: PreparedPublicSite) -> None:

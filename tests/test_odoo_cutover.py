@@ -302,6 +302,27 @@ class OdooCutoverTests(unittest.TestCase):
         self.assertEqual(restored.route.binding, result.plan.old.binding)
         self.assertEqual(set(self.provider.owners.values()), {"old"})
 
+    def test_unhealthy_candidate_can_switch_back_only_after_retained_private_readiness(
+        self,
+    ) -> None:
+        completed = self.run_release()
+        current_route = self.provider.current_route
+
+        def observed(plan: OdooCutoverPlan) -> OdooRouteObservation:
+            route = current_route(plan)
+            if route.slot_id == plan.new.slot_id:
+                return route.model_copy(
+                    update={"public_health": HealthcheckEvidence(status="fail")}
+                )
+            return route
+
+        with patch.object(self.provider, "current_route", side_effect=observed):
+            restored = rollback_compatible_cutover(self.store, self.provider, self.record_id)
+        self.assertEqual(restored.step, "rolled_back")
+        assert restored.route is not None
+        self.assertEqual(restored.route.binding, completed.plan.old.binding)
+        self.assertEqual(set(self.provider.owners.values()), {"old"})
+
     def test_uncertain_compatible_rollback_reads_authority_without_second_switch(self) -> None:
         self.run_release()
         self.provider.uncertain_switch = True

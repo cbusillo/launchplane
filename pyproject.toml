@@ -43,6 +43,9 @@ dev = [
 [project.scripts]
 launchplane = "control_plane.cli:main"
 
+[project.entry-points."launchplane.cutover_hosts"]
+dokploy = "control_plane.dokploy.cutover_host:DokployCutoverHost"
+
 [tool.hatch.build.targets.wheel]
 packages = ["control_plane"]
 

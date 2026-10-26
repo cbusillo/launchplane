@@ -842,6 +842,34 @@ def run_odoo_stable_operation_worker_once(
                 recovered_operation_ids=recovered_operation_ids,
                 terminal_write_committed=terminal_write_committed,
             )
+    if (
+        rollback_store is not None
+        and cutover_provider_factory is not None
+        and isinstance(record_store, PostgresRecordStore)
+    ):
+        rollback_operation = record_store.claim_odoo_cutover_rollback_reconciliation_record(
+            lease_owner=normalized_lease_owner,
+            lease_expires_at=claim_expires_at,
+            claimed_at=claim_started_at,
+            max_attempts=max_attempts,
+        )
+        if rollback_operation is not None:
+            terminal_write_committed = _execute_prod_rollback_operation(
+                record_store=rollback_store,
+                control_plane_root_path=control_plane_root_path,
+                operation=rollback_operation,
+                cutover_provider_factory=cutover_provider_factory,
+                lease_owner=normalized_lease_owner,
+                lease_seconds=lease_seconds,
+                heartbeat_seconds=heartbeat_seconds,
+            )
+            return OdooStableOperationWorkerResult(
+                status="worked",
+                operation_kind="odoo_prod_rollback",
+                operation_id=rollback_operation.operation_id,
+                recovered_operation_ids=recovered_operation_ids,
+                terminal_write_committed=terminal_write_committed,
+            )
     # Last, so a real deploy operation always wins over a plan.
     if hasattr(record_store, "claim_next_product_reconcile_request"):
         reconciled = run_product_reconcile_once(

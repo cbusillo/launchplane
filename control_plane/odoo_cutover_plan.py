@@ -117,6 +117,7 @@ def resolve_profile_cutover_plan(
             or plan.route_id != config.route_id
             or plan.host != config.host
             or plan.writers != config.writers
+            or plan.host_runtime != config.host_runtime
             or plan.old.binding.database != config.database
             or plan.old.runtime_identity.database_uuid != config.database_uuid
             or coordinates
@@ -182,4 +183,5 @@ def resolve_profile_cutover_plan(
         old=old,
         new=new,
         writers=config.writers,
+        host_runtime=config.host_runtime,
     )

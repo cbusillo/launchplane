@@ -17373,29 +17373,64 @@ class PostgresRecordStore(HumanSessionStore):
                     )
 
                     if (
-                        model_type is not OdooProdPromotionOperationRecord
+                        model_type
+                        not in {OdooProdPromotionOperationRecord, OdooProdRollbackOperationRecord}
                         or record.attempt >= max_attempts
                         or datetime.fromisoformat(claimed_at.replace("Z", "+00:00"))
                         < datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
                         + ODOO_CUTOVER_RECONCILIATION_DELAY
                     ):
                         continue
-                    cutover_id = cutover_identity(
-                        record.product, record.context, record.instance, record.request.request_id
-                    )
-                    deployment_row = session.get(
-                        LaunchplaneDeploymentRow, "deployment-cutover-" + cutover_id
-                    )
-                    if deployment_row is None:
-                        continue
-                    deployment = self._read_payload(
-                        model_type=DeploymentRecord, payload=deployment_row.payload
-                    )
-                    cutover = deployment.odoo_cutover
+                    if model_type is OdooProdPromotionOperationRecord:
+                        cutover_id = cutover_identity(
+                            record.product,
+                            record.context,
+                            record.instance,
+                            record.request.request_id,
+                        )
+                        deployment_row = session.get(
+                            LaunchplaneDeploymentRow, "deployment-cutover-" + cutover_id
+                        )
+                        if deployment_row is None:
+                            continue
+                        deployment = self._read_payload(
+                            model_type=DeploymentRecord, payload=deployment_row.payload
+                        )
+                        cutover = deployment.odoo_cutover
+                    else:
+                        deployments = [
+                            self._read_payload(model_type=DeploymentRecord, payload=item.payload)
+                            for item in session.scalars(
+                                select(LaunchplaneDeploymentRow).where(
+                                    LaunchplaneDeploymentRow.context == record.context,
+                                    LaunchplaneDeploymentRow.instance == record.instance,
+                                )
+                            ).all()
+                        ]
+                        unfinished = [
+                            item.odoo_cutover
+                            for item in deployments
+                            if item.odoo_cutover is not None
+                            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+                        ]
+                        if len(unfinished) != 1:
+                            continue
+                        cutover = unfinished[0]
+                        if (
+                            cutover.step != "rolling_back"
+                            or cutover.plan.production.artifact_id != record.target.artifact_id
+                        ):
+                            continue
+                    from control_plane.odoo_cutover_recovery import startup_recovery_pause
+
                     if (
                         cutover is None
-                        or cutover.error != "TimeoutError"
-                        or cutover.step not in {"pausing", "switching", "resuming", "draining"}
+                        or not (
+                            cutover.error == "TimeoutError"
+                            and cutover.step in {"pausing", "switching", "resuming", "draining"}
+                            or cutover.step in {"maintaining", "rolling_back"}
+                            and startup_recovery_pause(cutover) is not None
+                        )
                         or cutover.plan.new.binding.product_id != record.product
                         or cutover.plan.new.binding.environment_id != record.instance
                     ):
@@ -17762,6 +17797,23 @@ class PostgresRecordStore(HumanSessionStore):
                 row_type=LaunchplaneOdooProdPromotionOperationRow,
                 model_type=OdooProdPromotionOperationRecord,
                 operation_kind="prod_promotion",
+                lease_owner=lease_owner,
+                lease_expires_at=lease_expires_at,
+                claimed_at=claimed_at,
+                cutover_reconciliation=True,
+                max_attempts=max_attempts,
+            ),
+        )
+
+    def claim_odoo_cutover_rollback_reconciliation_record(
+        self, *, lease_owner: str, lease_expires_at: str, claimed_at: str, max_attempts: int
+    ) -> OdooProdRollbackOperationRecord | None:
+        return cast(
+            OdooProdRollbackOperationRecord | None,
+            self._claim_next_release_operation(
+                row_type=LaunchplaneOdooProdRollbackOperationRow,
+                model_type=OdooProdRollbackOperationRecord,
+                operation_kind="prod_rollback",
                 lease_owner=lease_owner,
                 lease_expires_at=lease_expires_at,
                 claimed_at=claimed_at,

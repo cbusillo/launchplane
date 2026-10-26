@@ -511,6 +511,7 @@ def execute_odoo_prod_rollback(
                 record_store=typed_record_store,
                 provider=cutover_provider,
                 artifact_id=rollback_source.artifact_id,
+                checkpoint=before_provider_effect,
             )
         else:
             profile = typed_record_store.read_product_profile_record(product)

@@ -47,7 +47,7 @@ class OdooSlotDriver:
     prepare_candidate: Callable[[OdooCutoverPlan], None]
     prepare_public: Callable[[OdooCutoverPlan], PreparedPublicSite]
     backup: Callable[[OdooCutoverPlan], OdooRecoveryTuple]
-    maintenance: Callable[[OdooCutoverPlan], OdooMaintenanceReceipt]
+    maintenance: Callable[[OdooCutoverPlan], OdooMaintenanceReceipt] | None
     readiness: Callable[[OdooCutoverPlan, OdooSlot], OdooSlotReadiness]
     observe_public: Callable[
         [OdooCutoverPlan, str], tuple[str, PublicSiteBinding, HealthcheckEvidence | None]
@@ -86,6 +86,7 @@ class DokployOdooCutoverProvider:
             or lane.database != plan.old.binding.database
             or lane.database_uuid != plan.old.runtime_identity.database_uuid
             or lane.writers != plan.writers
+            or lane.host_runtime != plan.host_runtime
             or {(slot.slot_id, slot.compose_id, slot.private_url) for slot in lane.slots}
             != {(slot.slot_id, slot.compose_id, slot.private_url) for slot in (plan.old, plan.new)}
         ):
@@ -183,6 +184,8 @@ class DokployOdooCutoverProvider:
         return self.driver.backup(plan)
 
     def maintenance(self, plan: OdooCutoverPlan) -> OdooMaintenanceReceipt:
+        if self.driver.maintenance is None:
+            raise ValueError("cutover host has not been assembled with native maintenance")
         return self.driver.maintenance(plan)
 
     def website_settings(

@@ -1,1 +1,12 @@
-<odoo><record id="version" model="ir.config_parameter"><field name="key">cutover.fixture.version</field><field name="value">one</field></record></odoo>
+<odoo>
+    <record id="version" model="ir.config_parameter"><field name="key">cutover.fixture.version</field><field name="value">one</field></record>
+    <record id="native_tick" model="ir.cron">
+        <field name="name">Isolated scheduler tick</field>
+        <field name="model_id" ref="model_cutover_fixture_guard"/>
+        <field name="state">code</field>
+        <field name="code">model._cutover_tick()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">minutes</field>
+        <field name="active" eval="False"/>
+    </record>
+</odoo>
