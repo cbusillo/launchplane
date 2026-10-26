@@ -189,6 +189,60 @@ the same context. Every call, including replay, checks current authorization.
 Testing-lane `product_retirement` authority does not authorize preview writes.
 This feature creates no grant, new caller identity or policy exception.
 
+## Unrecorded Odoo resources with retained original intent
+
+An interrupted snapshot Odoo preview can have a provider compose and original
+durable reservation without a preview lifecycle record. A new refresh leaves
+the original held when its native restore receipt, physical storage binding
+and database witness cannot prove custody. Completed operation status alone
+does not prove data ownership. Keep that original key and its retained intent.
+
+For this case, request a service-issued Odoo destroy plan for the exact existing
+preview. Submit it through the ordinary preview-apply service operation with
+`preserve_original_reservation_id` naming the original refresh reservation.
+This optional apply-envelope field does not change the issued plan or its
+fingerprint. The new destroy's retained intent includes the selector, so the
+same operation can recover after a service restart. Existing caller authority,
+executor locks, recovery grace, target ownership and provider quiescence still
+apply. Another held operation, an existing lifecycle record, known use, an only
+copy report, shared production resources or a target alias refuses admission.
+
+An older original without a clean snapshot can use its retained, scoped server
+schedule binding. If that binding is absent, the preserving operation captures
+and retains the same binding before effects. Missing or conflicting server
+evidence refuses preservation; old intents are not rewritten.
+
+The service qualifies an unserved plain preview with exclusively owned data,
+log and database volumes. Unexpected data, addon files, sessions, logs,
+additional databases, mounts or consumers remain held. It stops only that
+preview's unserved application containers under its durable provider lease.
+The existing memory floor and disk reserve remain in force. It captures a
+bounded PostgreSQL dump and full filestore archive inside the same Docker
+host, hashes both and verifies every archived attachment. It restores the dump
+into a temporary database container using the already-local database image,
+no network, ports, application keys or original volumes, and verifies the
+restored schema before publishing the retained copy. Only exclusively owned
+verification fixtures are cleaned up.
+
+Completed copies live privately under the clean-snapshot state root's
+`retained-previews/<preservation-id>` directory. The receipt binds immutable
+original intent, provider identity and physical volume creation/backing
+identities. It records archive hashes, filestore inventory and successful
+restore verification. Copies have no automatic expiry. They preserve unknown
+legacy data; this operation does not qualify that data for later disposal.
+No runtime environment, license or credential file is exported.
+
+Every subsequent destructive checkpoint and lifecycle adoption verifies the
+retained copy. Reopened applications, changed storage or changed original
+filestore block deletion. Only preservation phases with positive source and
+execution readback can resume an interrupted capture under its original key.
+Other uncertain phases retain the normal provider-observation fence. After
+provider absence, the complete copy remains verifiable without deleted source
+containers. Actual successful destroy writes the normal destroyed lifecycle;
+it never fabricates one to authorize an earlier action. The event reconciler
+can then build the still-open PR's current verified artifact from its clean
+snapshot through its ordinary fresh-preview path.
+
 ## Bounded service helper
 
 The producer's public agent/admin contract projects the operation. The bounded

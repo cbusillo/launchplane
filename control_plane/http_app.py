@@ -6899,6 +6899,25 @@ def create_launchplane_fastapi_app(
                 current_profile = lane_store.read_product_profile_record(product_profile.product)
                 if current_profile != product_profile:
                     raise DisposableLaneSafetyUnknown("The preview profile changed; plan again.")
+                if service_apply_request.preserve_original_reservation_id:
+                    from control_plane.preview_preservation import (
+                        require_preview_preservation_admission,
+                    )
+
+                    authority = require_preview_preservation_admission(
+                        store=cast(PostgresRecordStore, record_store),
+                        profile=current_profile,
+                        issued_plan=issued_plan,
+                        original_reservation_id=service_apply_request.preserve_original_reservation_id,
+                        operation_record_id=preview_apply_operation.adapter._deployment_record_id,
+                        captured_schedule_binding=preview_apply_operation.adapter.schedule_binding,
+                    )
+                    if preview_binding and authority.preservation_id != preview_binding:
+                        raise DisposableLaneSafetyUnknown(
+                            "Original preservation authority changed."
+                        )
+                    preview_binding = authority.preservation_id
+                    return
                 preview = resolve_disposable_preview(
                     lane_store,
                     current_profile,
@@ -6937,7 +6956,7 @@ def create_launchplane_fastapi_app(
                 if preview_binding and binding != preview_binding:
                     raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
                 preview_binding = binding
-            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+            except (DisposableLaneSafetyUnknown, FileNotFoundError, ValueError) as error:
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,

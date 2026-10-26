@@ -195,6 +195,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             "volumes": {"data": "preview-data", "database": "preview-db", "logs": "preview-logs"},
             "database_name": self.database,
             "snapshot": snapshot.model_dump(mode="json") if snapshot else None,
+            "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
             "copy_witness_parameter": TESTING_COPY_COMPLETION_PARAMETER,
             "apply": apply,
             "require_existing": require_existing,
@@ -530,7 +531,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.volumes.pop("preview-data-filestore")
         self.present = True
         result = self.prepare_filestore(snapshot=self.snapshot)
-        self.assertEqual(result, {"type": "complete", "declaration": None})
+        self.assertEqual(result["type"], "failed")
         self.assertEqual(
             self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
             "failed",
@@ -540,6 +541,66 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         result = self.prepare_filestore(snapshot=self.snapshot)
         self.assertEqual(result["type"], "failed")
         self.assertTrue((self.data / "filestore" / self.database / "attachment").is_file())
+
+    def test_overlay_declaration_does_not_admit_an_unknown_database(self) -> None:
+        self.present = True
+        attachment = self.data / "filestore" / self.database / "attachment"
+        original = attachment.read_bytes()
+        result = self.prepare_filestore(snapshot=self.snapshot, apply=False)
+        self.assertEqual(result["type"], "failed")
+        self.assertEqual(attachment.read_bytes(), original)
+        self.assertFalse((self.source.parent / "preview-attempts").exists())
+        self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
+
+    def test_completed_native_custody_preserves_edits_with_a_newer_snapshot(self) -> None:
+        self.run_script()
+        attachment = self.data / "filestore" / self.database / "staff-attachment"
+        attachment.write_bytes(b"staff edits after native completion")
+        newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
+        self.calls.clear()
+        result = self.prepare_filestore(snapshot=newer, apply=False)
+        self.assertEqual(result["type"], "complete")
+        self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
+        self.run_script(snapshot=newer)
+        self.assertEqual(attachment.read_bytes(), b"staff edits after native completion")
+        self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
+        self.assertFalse(any(call[:2] == ["docker", "cp"] for call in self.calls))
+
+    def test_owned_unfinished_restore_admits_and_resumes_its_pinned_source(self) -> None:
+        self.killed_during_restore = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.killed_during_restore = False
+        newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
+        self.calls.clear()
+        self.assertEqual(self.prepare_filestore(snapshot=newer, apply=False)["type"], "complete")
+        self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
+        self.run_script(snapshot=newer)
+        self.assertIn(["docker", "start", "web"], self.calls)
+        self.assertTrue(any("dropdb " in " ".join(call) for call in self.calls))
+
+    def test_receipt_alone_never_admits_changed_or_missing_native_data(self) -> None:
+        self.run_script()
+        marker = self.database_witness
+        mount = self.containers["database"]["Mounts"][0]
+        source = mount["Source"]
+        for failure in ("marker", "unreadable", "database", "binding", "container_mount"):
+            with self.subTest(failure=failure):
+                self.database_witness = "foreign-copy" if failure == "marker" else marker
+                self.witness_probe_failure = failure == "unreadable"
+                self.present = failure != "database"
+                mount["Source"] = (
+                    str(self.root / "foreign-database") if failure == "container_mount" else source
+                )
+                created = self.volume_created_at
+                if failure == "binding":
+                    self.volume_created_at += "-replacement"
+                self.calls.clear()
+                self.assertEqual(
+                    self.prepare_filestore(snapshot=self.snapshot, apply=False)["type"], "failed"
+                )
+                self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
+                self.volume_created_at = created
 
     def test_refused_preparation_never_allocates_or_pins_storage(self) -> None:
         self.volumes.pop("preview-data-filestore")

@@ -1770,6 +1770,151 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self._assert_refresh_readback_allowances((), snapshot=snapshot)
         self._assert_refresh_readback_allowances((), snapshot=snapshot, fail_preparation=True)
 
+    def test_unknown_snapshot_custody_refuses_adopted_and_resolved_targets_before_effects(
+        self,
+    ) -> None:
+        snapshot = CleanTestingSnapshot(
+            product=_runtime_plan().product,
+            context="independent-context",
+            snapshot_id="a" * 64,
+            server_id="server-nonprod",
+            database_sha256="b" * 64,
+            filestore_sha256="c" * 64,
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            storage_budget=OdooTestingDrillStorageBudget(
+                database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+            ),
+        )
+        for placeholder in (True, False):
+            with self.subTest(placeholder=placeholder):
+                plan = build_odoo_preview_dokploy_dry_run(
+                    request=OdooPreviewDokployDryRunRequest(
+                        runtime_plan=_runtime_plan(),
+                        endpoint_spec=_endpoint_spec(),
+                        environment_id="env-cm-preview",
+                        template_compose_id="compose-template",
+                    )
+                )
+                plan.clean_snapshot = snapshot
+                if not placeholder:
+                    plan.compose_ref = "existing-preview"
+                checkpoint = Mock()
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
+                        return_value={"appName": plan.compose_name, "serverId": snapshot.server_id},
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime._find_compose_id_by_environment_and_name",
+                        return_value="existing-preview",
+                    ),
+                    patch(
+                        "control_plane.preview_filestore.prepare_preview_filestore",
+                        side_effect=click.ClickException("Preserve an existing preview database"),
+                    ) as inspect,
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request"
+                    ) as mutate,
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source"
+                    ) as source,
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env"
+                    ) as environment,
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_api.trigger_deployment"
+                    ) as deploy,
+                ):
+                    result = execute_odoo_preview_dokploy_apply(
+                        control_plane_root=Path("."),
+                        restore_clean_snapshot=True,
+                        request=OdooPreviewDokployApplyRequest(
+                            dry_run_plan=plan,
+                            image_reference="ghcr.io/example/tenant@sha256:" + "a" * 64,
+                            environment_values=_environment_values(),
+                            wait_for_deploy=False,
+                            smoke_check=False,
+                        ),
+                        provider_effect_checkpoint=checkpoint,
+                    )
+                self.assertEqual(result.status, "fail")
+                self.assertFalse(inspect.call_args.kwargs["apply"])
+                for effect in (checkpoint, mutate, source, environment, deploy):
+                    effect.assert_not_called()
+
+    def test_snapshot_supersession_uses_native_custody_and_preserves_its_original_source(
+        self,
+    ) -> None:
+        snapshot = CleanTestingSnapshot(
+            product=_runtime_plan().product,
+            context="independent-context",
+            snapshot_id="a" * 64,
+            server_id="server-nonprod",
+            database_sha256="b" * 64,
+            filestore_sha256="c" * 64,
+            captured_at=datetime.now(timezone.utc).isoformat(),
+            storage_budget=OdooTestingDrillStorageBudget(
+                database_bytes=1024, filestore_bytes=1024, staging_bytes=1024, reserve_bytes=1024
+            ),
+        )
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                endpoint_spec=_endpoint_spec(),
+                environment_id="env-cm-preview",
+                template_compose_id="compose-template",
+            )
+        )
+        plan.clean_snapshot = snapshot
+        for owned in (False, True):
+            with (
+                self.subTest(owned=owned),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.invalid", "fixture"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime._original_compose_id_from_complete_inventory",
+                    return_value="existing-preview",
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime._compose_exists_by_id",
+                    return_value=True,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.list_deployments_for_target",
+                    return_value=[],
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
+                    return_value={"appName": plan.compose_name, "serverId": snapshot.server_id},
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_post_deploy.compose_data_workflow_is_quiescent",
+                    return_value=True,
+                ),
+                patch(
+                    "control_plane.preview_filestore.prepare_preview_filestore",
+                    side_effect=None if owned else click.ClickException("unknown custody"),
+                ) as inspect,
+            ):
+                result = odoo_preview_target_is_quiescent(
+                    control_plane_root=Path("."),
+                    request=OdooPreviewDokployApplyRequest(
+                        dry_run_plan=plan,
+                        image_reference="ghcr.io/example/tenant@sha256:" + "a" * 64,
+                    ),
+                    database_url=None,
+                    require_snapshot_custody=True,
+                )
+            self.assertEqual(result, owned)
+            self.assertFalse(inspect.call_args.kwargs["apply"])
+            self.assertEqual(inspect.call_args.kwargs["snapshot"], snapshot)
+
     def _assert_refresh_readback_allowances(
         self,
         allowances: tuple[DokployTargetIntegrationAllowance, ...],
