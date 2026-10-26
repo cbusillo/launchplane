@@ -936,12 +936,22 @@ def build_product_environment_config_status(
         lane_summary.provenance if lane_summary is not None else _missing_lane_provenance(lane)
     )
     runtime_settings = _runtime_config_status_items(
-        requirements=profile.expected_config.runtime_environment_keys,
+        requirements=tuple(
+            item
+            for item in profile.expected_config.runtime_environment_keys
+            if lane.instance != "preview"
+            or (item.context == lane.context and item.instance == "preview")
+        ),
         lane=lane,
         lane_summary=lane_summary,
     )
     managed_secrets = _managed_secret_config_status_items(
-        requirements=profile.expected_config.managed_secret_bindings,
+        requirements=tuple(
+            item
+            for item in profile.expected_config.managed_secret_bindings
+            if lane.instance != "preview"
+            or (item.context == lane.context and item.instance == "preview")
+        ),
         lane=lane,
         lane_summary=lane_summary,
     )
@@ -2349,7 +2359,7 @@ def _build_preview_summary(
     action_allowed: ActionAllowed,
 ) -> ProductPreviewSummary:
     if not profile.preview.enabled:
-        return ProductPreviewSummary(enabled=False)
+        return ProductPreviewSummary(enabled=False, context=profile.preview.context)
     summaries: tuple[LaunchplanePreviewSummary | PreviewRecord, ...] = ()
     list_preview_summaries = getattr(record_store, "list_preview_summaries", None)
     list_preview_records = getattr(record_store, "list_preview_records", None)

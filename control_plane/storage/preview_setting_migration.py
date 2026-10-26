@@ -2,6 +2,8 @@ from copy import deepcopy
 
 import sqlalchemy as sa
 
+from control_plane.preview_settings import validate_preview_plain_settings
+
 from control_plane.storage.site_setting_migration import _RUNTIME_ENVIRONMENTS
 
 _PROFILES = sa.table(
@@ -21,18 +23,25 @@ def migrate_preview_settings(connection: sa.Connection, *, recorded_at: str) -> 
         values = preview.get("override_env") or {}
         if not values:
             continue
-        context = str(preview.get("context") or "").strip()
+        raw_context = str(preview.get("context") or "")
+        context = raw_context.strip().lower()
+        if context != raw_context:
+            raise ValueError("Preview settings migration requires canonical contexts.")
         if not context or context in destinations:
             raise ValueError("Preview settings migration requires distinct configured contexts.")
         destinations.add(context)
+        validate_preview_plain_settings(values, context=context)
         owners = {
             other["product"]
             for other in profiles
             if context
             in {
-                *(lane.get("context") for lane in other["payload"].get("lanes", [])),
-                (other["payload"].get("preview") or {}).get("context"),
-                *other["payload"].get("historical_contexts", []),
+                str(candidate or "").strip().lower()
+                for candidate in {
+                    *(lane.get("context") for lane in other["payload"].get("lanes", [])),
+                    (other["payload"].get("preview") or {}).get("context"),
+                    *other["payload"].get("historical_contexts", []),
+                }
             }
         }
         if owners != {row["product"]}:

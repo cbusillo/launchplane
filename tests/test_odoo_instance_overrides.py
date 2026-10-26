@@ -74,7 +74,9 @@ def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Re
 
 class OdooInstanceOverrideTests(unittest.TestCase):
     def test_preview_payload_passes_through_when_no_payload_was_generated(self) -> None:
-        payload = base64.b64encode(b'{"addon_settings": [], "future-field": true}').decode()
+        payload = base64.b64encode(
+            b'{"context": "cm", "instance": "preview", "addon_settings": []}'
+        ).decode()
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
         profile = profile.model_copy(
             update={

@@ -91,6 +91,7 @@ def resolve_product_config_profile(
         record_store.list_product_profile_records(),
         context=context,
         instance="" if context_wide else instance,
+        config_scopes=True,
     ) != frozenset((product,)):
         raise ProductConfigOwnershipMismatchError(
             "Product config requires the named product to own the target alone.",

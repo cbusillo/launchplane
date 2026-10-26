@@ -289,7 +289,6 @@ class GenericWebPreviewTests(unittest.TestCase):
                 data_transport_mode="none",
                 copied_env_keys=(),
                 omitted_env_keys=(),
-                override_env_keys=(),
                 preview_url_env_keys=(),
                 preview_domain_env_keys=(),
             ),

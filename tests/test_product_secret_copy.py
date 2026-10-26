@@ -145,24 +145,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
     async def test_preview_configuration_uses_existing_http_read_and_apply_routes(self) -> None:
         from control_plane.contracts.product_profile_record import ProductSecretConfigRequirement
 
-        from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
-
-        self.store.write_runtime_key_safety_policy_record(
-            RuntimeKeySafetyPolicyRecord(
-                record_id="preview-app-policy",
-                status="active",
-                source="test",
-                updated_at="2026-10-26T00:00:00Z",
-                rules=(
-                    RuntimeSecretSafetyRule(
-                        binding_key="APP_PASSWORD",
-                        secret_class="preview",
-                        allowed_contexts=(self.profile.preview.context,),
-                        allowed_instances=("preview",),
-                    ),
-                ),
-            )
-        )
+        self.profile.preview.context = "example-preview"
         self.profile.expected_config.managed_secret_bindings = (
             ProductSecretConfigRequirement(
                 binding_key="APP_PASSWORD",

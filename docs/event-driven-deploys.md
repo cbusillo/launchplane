@@ -366,8 +366,8 @@ reservation. The webhook request never waits on a deploy.
     The first qualified cleanup has its own bounded retry budget. Reopened PRs,
     active executors and unknown provider outcomes remain protected. No
     production or whole-product retirement is authorized by this behavior.
-  - Odoo preview addon settings explicitly supplied in the product profile's
-    `preview.override_env.ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` survive generated
+  - Odoo preview addon settings explicitly supplied as
+    `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` in the managed preview scope survive generated
     website-bootstrap and import-source payloads. Generated bootstrap retains
     the preview's canonical URL, and template addon settings remain excluded.
     Only preview addon settings are carried over; other preview payload fields

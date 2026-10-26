@@ -1196,3 +1196,65 @@ class RuntimeKeySafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ManagedPreviewScopeTests(unittest.TestCase):
+    def test_exact_preview_class_does_not_authorize_template_copies(self) -> None:
+        from control_plane.runtime_key_safety import evaluate_preview_copied_runtime_key_safety
+
+        binding = _binding(binding_key="APP_PASSWORD", instance="preview").model_copy(
+            update={"declared_secret_class": "preview", "value_source": "supplied"}
+        )
+        target = RuntimeKeySafetyTarget(
+            context=binding.context, instance="preview", environment_class="preview"
+        )
+        evaluated = evaluate_runtime_key_safety(
+            target=target,
+            required_binding_keys=(binding.binding_key,),
+            secret_bindings=(binding,),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="OTHER_PASSWORD",
+                    secret_class="prod_only",
+                    allowed_contexts=("other",),
+                    allowed_instances=("prod",),
+                ),
+            ),
+        )
+        self.assertEqual(evaluated.status, "pass")
+        for slug in ("preview", "pr-42"):
+            copied = evaluate_preview_copied_runtime_key_safety(
+                template_bindings=(binding,),
+                policy_record=RuntimeKeySafetyPolicyRecord(
+                    record_id="fixture",
+                    status="active",
+                    updated_at="2026-10-26T00:00:00Z",
+                    source="test",
+                    rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="OTHER_PASSWORD",
+                            secret_class="prod_only",
+                            allowed_contexts=("other",),
+                            allowed_instances=("prod",),
+                        ),
+                    ),
+                ),
+                preview_context=binding.context,
+                preview_slug=slug,
+                copied_keys=(binding.binding_key,),
+            )
+            self.assertEqual(copied.status, "fail")
+        rejected = evaluate_runtime_key_safety(
+            target=target,
+            required_binding_keys=(binding.binding_key,),
+            secret_bindings=(binding.model_copy(update={"declared_secret_class": "prod_only"}),),
+            secret_rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="OTHER_PASSWORD",
+                    secret_class="prod_only",
+                    allowed_contexts=("other",),
+                    allowed_instances=("prod",),
+                ),
+            ),
+        )
+        self.assertEqual(rejected.status, "fail")

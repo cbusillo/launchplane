@@ -71,6 +71,11 @@ class PreviewSettingsTests(unittest.TestCase):
         from control_plane.runtime_environments import resolve_site_runtime_environment_from_store
 
         profile = LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+        from control_plane.contracts.product_profile_record import ProductRuntimeConfigRequirement
+
+        profile.expected_config.runtime_environment_keys = (
+            ProductRuntimeConfigRequirement(key="TEMPLATE_ONLY", context=profile.preview.context),
+        )
         profile.preview.override_env = {"COLOR": "preview", "EXTRA": "kept"}
         with TemporaryDirectory() as directory:
             database_url = f"sqlite+pysqlite:///{directory}/records.db"
@@ -120,3 +125,81 @@ class PreviewSettingsTests(unittest.TestCase):
                 },
             )
             self.assertTrue(config.write_availability.runtime_settings.apply.enabled)
+
+    def test_encoded_preview_credentials_are_refused_before_record_writes(self) -> None:
+        import base64
+        import json
+        from control_plane.product_config import apply_product_config_bundle, ProductConfigError
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/records.db")
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            for content in (
+                {
+                    "config_parameters": [
+                        {
+                            "key": "connector.password",
+                            "value": {"source": "literal", "value": "private-fixture"},
+                        }
+                    ]
+                },
+                {
+                    "addon_settings": [
+                        {
+                            "addon": "connector",
+                            "setting": "api_token",
+                            "value": {"source": "literal", "value": "private-fixture"},
+                        }
+                    ]
+                },
+            ):
+                encoded = base64.b64encode(
+                    json.dumps({"context": "site", "instance": "preview", **content}).encode()
+                ).decode()
+                with self.assertRaises(ProductConfigError) as refused:
+                    apply_product_config_bundle(
+                        record_store=store,
+                        payload={
+                            "product": "site",
+                            "context": "site",
+                            "instance": "preview",
+                            "runtime_env": {
+                                "env": {"ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": encoded}
+                            },
+                        },
+                        mode="apply",
+                        actor="fixture",
+                        source_label="test",
+                    )
+                self.assertNotIn("private-fixture", str(refused.exception))
+            self.assertFalse(store.list_runtime_environment_records())
+
+    def test_migration_conflict_preserves_both_sources(self) -> None:
+        import sqlalchemy as sa
+        from control_plane.storage.preview_setting_migration import migrate_preview_settings
+
+        with TemporaryDirectory() as directory:
+            database_url = f"sqlite+pysqlite:///{directory}/records.db"
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _generic_site_profile_payload()
+            )
+            profile.preview.override_env = {"COLOR": "legacy"}
+            store.write_product_profile_record(profile)
+            existing = RuntimeEnvironmentRecord(
+                scope="instance",
+                context=profile.preview.context,
+                instance="preview",
+                env={"COLOR": "managed"},
+                updated_at="2026-10-26T00:00:00Z",
+            )
+            store.write_runtime_environment_record(existing)
+            engine = sa.create_engine(database_url)
+            self.addCleanup(engine.dispose)
+            with self.assertRaises(ValueError), engine.begin() as connection:
+                migrate_preview_settings(connection, recorded_at="2026-10-26T01:00:00Z")
+            self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            self.assertEqual(store.list_runtime_environment_records(), (existing,))

@@ -713,6 +713,7 @@ from control_plane.workflows.odoo_preview_runtime import (
 )
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
+    product_config_target,
     LaunchplaneProductProfileRecord,
     ProductProfileChangedError,
     ProductExpectedConfigProfile,
@@ -1353,7 +1354,7 @@ def _local_operator_product_config_scope_refusal(
     context = product_config_request.context
     if context:
         try:
-            owners = product_context_owners(record_store)
+            owners = product_context_owners(record_store, config_scopes=True)
         except TypeError:
             return "Product profile records are unavailable to confirm the context's product."
         if not is_exclusive_product_lane_context(
@@ -16877,10 +16878,8 @@ def create_launchplane_fastapi_app(
         )
         try:
             profile = database_store.read_product_profile_record(product.strip())
-            from control_plane.contracts.product_profile_record import product_config_target
-
             lane = product_config_target(profile, environment)
-        except (FileNotFoundError, StopIteration) as error:
+        except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,
                 trace_id=trace_id,

@@ -237,6 +237,10 @@ class ProductOnboardingManifest(BaseModel):
             if not self.health_path:
                 raise ValueError("enabled product preview requires health_path")
 
+        if self.preview.override_env:
+            raise ValueError(
+                "Use runtime_environments at instance preview instead of preview.override_env."
+            )
         lane_routes = {(lane.context.strip(), lane.instance.strip()) for lane in self.lanes}
         if len(lane_routes) != len(self.lanes):
             raise ValueError("product onboarding lanes must be unique by context and instance")
@@ -306,6 +310,9 @@ class ProductOnboardingManifest(BaseModel):
             if context not in historical_contexts:
                 historical_contexts.append(context)
         self.historical_contexts = tuple(historical_contexts)
+        config_routes = set(lane_routes)
+        if self.preview.enabled and self.preview.context.strip():
+            config_routes.add((self.preview.context.strip(), "preview"))
         for record in self.runtime_environments:
             if record.scope == "global":
                 if record.context.strip() or record.instance.strip():
@@ -322,10 +329,10 @@ class ProductOnboardingManifest(BaseModel):
                 raise ValueError("context runtime environment records cannot set instance")
             if (
                 record.scope == "instance"
-                and (record.context.strip(), record.instance.strip()) not in lane_routes
+                and (record.context.strip(), record.instance.strip()) not in config_routes
             ):
                 raise ValueError(
-                    "instance runtime environment record must match a stable lane: "
+                    "instance runtime environment record must match a product configuration scope: "
                     f"{record.context}/{record.instance}"
                 )
 
@@ -336,16 +343,16 @@ class ProductOnboardingManifest(BaseModel):
                 )
             if (
                 binding.instance.strip()
-                and (binding.context.strip(), binding.instance.strip()) not in lane_routes
+                and (binding.context.strip(), binding.instance.strip()) not in config_routes
             ):
                 raise ValueError(
-                    "instance secret binding must match a stable lane: "
+                    "instance secret binding must match a product configuration scope: "
                     f"{binding.context}/{binding.instance}"
                 )
         for runtime_requirement in self.expected_config.runtime_environment_keys:
             self._validate_expected_config_route(
                 allowed_contexts=allowed_contexts,
-                lane_routes=lane_routes,
+                lane_routes=config_routes,
                 context=runtime_requirement.context,
                 instance=runtime_requirement.instance,
                 label="runtime config requirement",
@@ -353,7 +360,7 @@ class ProductOnboardingManifest(BaseModel):
         for secret_requirement in self.expected_config.managed_secret_bindings:
             self._validate_expected_config_route(
                 allowed_contexts=allowed_contexts,
-                lane_routes=lane_routes,
+                lane_routes=config_routes,
                 context=secret_requirement.context,
                 instance=secret_requirement.instance,
                 label="secret config requirement",

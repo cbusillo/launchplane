@@ -896,7 +896,7 @@ A product-config secret entry can use `copy_from` instead of `value`:
 ```
 
 The top-level product-config target is the destination lane. The source must be
-a stable lane of that same product, and the destination must be lane-exact
+a configuration scope of that same product, and the destination must be exact
 in `runtime_environment`. The source binding key is the destination binding key;
 renaming a token to bypass integration key safety is not supported. Neither a
 source product nor another secret store can be supplied. Site-shared sources
@@ -1006,30 +1006,5 @@ copied to testing by reference, as described above.
 
 ## Shared preview settings
 
-Every product with previews enabled has a configuration target named `preview`,
-in its configured preview context. It is a settings scope, not a stable lane or
-an individual PR's runtime identity. Use the existing product-config UI and
-`product-config-dry-run` / `product-config-apply` helpers with top-level
-`instance: preview`. Plain settings use an `instance` runtime-environment record;
-managed runtime secrets use `context_instance`, also with instance `preview`.
-The product workspace's **Preview settings** link opens the same runtime-setting
-and managed-secret forms used for stable environments. Expected secret bindings
-can be declared for this context and instance through the existing expected-config
-operation.
-
-Preview refreshes retain their template baseline, then overlay only the exact
-preview instance's settings and secrets. Global and context-shared secrets are
-excluded. The existing runtime key-safety policy must permit a preview secret
-before it is decrypted; production-only and testing-only classes cannot be
-copied into this scope. `copy_from` supports the preview target through the same
-product ownership, source-read authorization, version and sharing-evidence checks
-as other product configuration. Preview settings never participate in testing
-or production resolution. Changes take effect on the next preview refresh.
-
-The release migration moves existing `preview.override_env` values into the
-managed preview record and adds their preview-specific expected-key declarations.
-It removes the values from the profile. Conflicting managed values, retired keys
-or ambiguous product ownership abort the transaction, preserving both sources for
-review. Product-profile writes reject nonempty `preview.override_env`; use the
-managed product-config path for all subsequent changes. Historical profile
-snapshots remain readable. The old one-key profile editor is retired.
+See [preview runtime settings](preview-settings.md) for the managed `preview`
+scope, precedence, UI and helper usage, and migration from profile overrides.

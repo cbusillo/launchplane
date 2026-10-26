@@ -277,7 +277,6 @@ class GenericWebPreviewTransportSummary(BaseModel):
     data_transport_mode: str
     copied_env_keys: tuple[str, ...]
     omitted_env_keys: tuple[str, ...]
-    override_env_keys: tuple[str, ...]
     preview_url_env_keys: tuple[str, ...]
     preview_domain_env_keys: tuple[str, ...]
     compatibility_status: Literal["supported", "unsupported_saved_intent"] = "supported"
@@ -820,7 +819,6 @@ def _transport_summary(
         ),
         copied_env_keys=profile.preview.copied_env_keys,
         omitted_env_keys=profile.preview.omitted_env_keys,
-        override_env_keys=tuple(sorted(profile.preview.override_env)),
         preview_url_env_keys=profile.preview.preview_url_env_keys,
         preview_domain_env_keys=profile.preview.preview_domain_env_keys,
         compatibility_status=(

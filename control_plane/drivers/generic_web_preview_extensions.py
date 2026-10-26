@@ -64,7 +64,6 @@ def _successful_driver_refresh_evidence(
             data_transport_mode=profile.preview.data_transport_mode,
             copied_env_keys=profile.preview.copied_env_keys,
             omitted_env_keys=profile.preview.omitted_env_keys,
-            override_env_keys=tuple(profile.preview.override_env),
             preview_url_env_keys=profile.preview.preview_url_env_keys,
             preview_domain_env_keys=profile.preview.preview_domain_env_keys,
         ),

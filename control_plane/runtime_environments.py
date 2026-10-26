@@ -365,6 +365,12 @@ def resolve_preview_runtime_environment_from_store(
         for key, value in preview.values.items()
         if key in instance_keys or key in preview.secret_keys
     }
+    from control_plane.preview_settings import validate_preview_plain_settings
+
+    validate_preview_plain_settings(
+        {key: value for key, value in overrides.items() if key not in preview.secret_keys},
+        context=context_name,
+    )
     return SiteRuntimeEnvironment(
         values={
             key: value

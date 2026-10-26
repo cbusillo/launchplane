@@ -41,7 +41,7 @@ export function ProductWorkspaceNav({
           </AppLink>
         );
       })}
-      {product.preview.enabled ? <AppLink
+      {product.preview.context ? <AppLink
         data-active={route.kind === "product-environment" && route.environment === "preview"}
         to={productEnvironmentPath(product.product, "preview", "runtime-settings")}
       >Preview settings</AppLink> : null}

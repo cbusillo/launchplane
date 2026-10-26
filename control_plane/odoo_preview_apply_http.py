@@ -1467,7 +1467,7 @@ def _merge_preview_addon_settings(
     encoded_preview: str,
 ) -> None:
     key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
-    if not encoded_preview.strip() or environment.get(key) == encoded_preview:
+    if not encoded_preview.strip():
         return
     try:
         preview = OdooPostDeployPayload.model_validate_json(
@@ -1475,9 +1475,6 @@ def _merge_preview_addon_settings(
         )
         if not preview.addon_settings:
             return
-        generated = OdooPostDeployPayload.model_validate_json(
-            base64.b64decode(environment[key], validate=True)
-        )
         pairs = [(item.addon, item.setting) for item in preview.addon_settings]
         if len(pairs) != len(set(pairs)):
             raise ValueError("Conflicting preview addon settings")
@@ -1517,6 +1514,11 @@ def _merge_preview_addon_settings(
             for name in preview.required_container_environment_keys
         ):
             raise ValueError("Preview addon secret is not delivered")
+        if environment.get(key) == encoded_preview:
+            return
+        generated = OdooPostDeployPayload.model_validate_json(
+            base64.b64decode(environment[key], validate=True)
+        )
     except (ValueError, binascii.Error):
         raise click.ClickException("Invalid preview addon settings payload.") from None
     merged = generated.model_copy(update={"addon_settings": preview.addon_settings})

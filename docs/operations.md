@@ -5746,7 +5746,7 @@ The release migration target is now `b8f2c4d6e0a7`, immediately after the
 non-runtime profile archive. It moves profile preview overrides into each
 product's existing runtime-environment records at instance `preview`, and removes
 the old profile values atomically. Existing testing and production records stay
-unchanged. See [shared preview settings](secrets.md#shared-preview-settings) for
+unchanged. See [shared preview settings](preview-settings.md) for
 configuration and conflict handling.
 
 The held delivery-table drop remains held. Release migration joins only branches

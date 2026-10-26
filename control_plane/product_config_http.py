@@ -656,7 +656,11 @@ def _product_config_secret_input(
             requirement.binding_key, extra_markers=integration_key_markers
         )
     ):
-        secret_class = "preview" if lane.instance == "preview" else "testing"
+        secret_class = (
+            "preview"
+            if runtime_key_safety_environment_class(lane.instance) == "preview"
+            else "testing"
+        )
     return ProductConfigSecretInput(
         scope="context_instance",
         context=lane.context,
