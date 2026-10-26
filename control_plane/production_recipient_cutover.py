@@ -493,6 +493,10 @@ WRITER_LIBRARY = (
 import base64,fcntl,hashlib,json,os,re,subprocess,sys,uuid
 from pathlib import Path
 WRITER_CUSTODY_ROOT=Path('/var/lib/launchplane/recipient-writers')
+def writer_identity_binding(value: object) -> dict[str, object] | None:
+    if not isinstance(value,dict):
+        return None
+    return {key:item for key,item in value.items() if key!='deployed_at'}
 def coordinate_writer(spec, *, base=None):
     base=base or WRITER_CUSTODY_ROOT
     if any(not re.fullmatch(r'[A-Za-z0-9_-]+',spec[key]) for key in ('project','service')) or not re.fullmatch(r'[a-f0-9]{64}',spec['binding']):
@@ -566,7 +570,7 @@ def _coordinate_writer(spec, *, base, owner_path):
         expected_identity=spec.get('expected_identity')
         environment=dict(item.split('=',1) for item in row.get('Config',{}).get('Env',[]) if '=' in item)
         observed=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
-        if not isinstance(expected_identity,dict) or observed!=expected_identity:
+        if not isinstance(expected_identity,dict) or writer_identity_binding(observed)!=writer_identity_binding(expected_identity):
             if not (spec.get('owned_replacement') and observed is None and row.get('Config',{}).get('Image')==spec['image']):
                 raise ValueError('writer runtime identity changed')
     expected={'id':ids[0],'image':row['Image'],'project':spec['project'],'service':spec['service']}
