@@ -40,7 +40,7 @@ for (const state of cases) {
       if (state === "delivery-warning") {
         const incident = structuredClone(product.environments.find((lane: { environment: string }) => lane.environment === "prod").health_monitoring.open_incidents[0]);
         lane.environment = "prod";
-        Object.assign(incident, { severity: "warning", check_kind: "provider", check_name: "production-delivery-example", failure_code: "production_delivery_failed" });
+        Object.assign(incident, { severity: "warning", check_kind: "provider", failure_layer: "provider", check_name: "production-delivery-example", failure_code: "production_delivery_failed", summary: "A production delivery failed." });
         lane.health_monitoring.open_incidents = [incident];
       }
       if (state === "failed") check.status = "fail";
@@ -110,8 +110,7 @@ for (const state of cases) {
     await expect(railLink.locator(".product-trust-dots")).toHaveAttribute("aria-label", new RegExp(fixtures.testingDescription.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     await expect(dot.locator("svg")).toBeAttached();
     if (state === "delivery-warning") {
-      await expect(signal).toContainText("current production release is healthy");
-      await expect(dot).toHaveAttribute("title", /production delivery failed/);
+      await expect(page.locator(".evidence-warning")).toHaveCount(0);
       await expect(page.getByRole("link", { name: "Inspect incident", exact: true })).toHaveAttribute("href", new RegExp(`/prod#incident-history$`));
     }
     // State symbols must remain perceptible against the actual rail in both themes.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, publicObservationGap } from "../src/product-environment-signal.ts";
+import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, operationalWarningReasons, publicObservationGap } from "../src/product-environment-signal.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 Object.defineProperty(globalThis, "window", { configurable: true, value: { location: { search: "" } } });
@@ -40,11 +40,16 @@ test("failed production delivery warns only while the running release is verifie
     const lane = environment();
     lane.environment = "prod";
     const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
-    Object.assign(incident, { severity: "warning", check_kind: "provider", failure_code });
+    Object.assign(incident, { severity: "warning", check_kind: "provider", failure_layer: "provider", failure_code });
     lane.health_monitoring.open_incidents = [incident];
     assert.equal(environmentOperationalTone(lane), "warning");
     assert.deepEqual(operationalAttentionReasons(lane), []);
     assert.equal(lane.health_monitoring.open_incidents[0], incident);
+    const critical = { ...incident, severity: "critical", failure_code: "monitor_run_missed" };
+    lane.health_monitoring.open_incidents.push(critical);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    lane.health_monitoring.open_incidents.pop();
     lane.health_monitoring.checks[0].status = "fail";
     assert.equal(environmentOperationalTone(lane), "danger");
     lane.health_monitoring.checks[0].status = "pass";

@@ -125,15 +125,15 @@ function readable(value: string | null | undefined): string {
 }
 
 function productionDeliveryWarning(environment: ProductEnvironmentSummary, incident: ProductIncidentSummary): boolean {
-  return environment.environment === "prod" && incident.check_kind === "provider" &&
-    incident.severity === "warning" &&
-    ["production_delivery_failed", "deploy_fence_held"].includes(incident.failure_code);
+  return environment.environment === "prod" && incident.failure_layer === "provider" &&
+    incident.severity === "warning";
 }
 
 export function operationalWarningReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
   if (!environment || environmentRuntimeTone(environment, now) !== "verified") return [];
-  return environment.health_monitoring.open_incidents
-    .filter(incident => productionDeliveryWarning(environment, incident))
+  const incidents = environment.health_monitoring.open_incidents;
+  if (incidents.some(incident => !productionDeliveryWarning(environment, incident))) return [];
+  return incidents
     .map(incident => `${readable(incident.failure_code)}; the current production release is healthy`);
 }
 

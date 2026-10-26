@@ -453,7 +453,8 @@ function ProductWorkspace({
     environments.length === 0 ||
     environments.some(
       (environment) =>
-        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)),
+        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)) &&
+        !operationalWarningReasons(environment).length,
     );
 
   useEffect(() => {
@@ -539,6 +540,7 @@ function ProductWorkspace({
           label="Production"
           state={production?.trust_state ?? "missing"}
           value={signalHeadline(production)}
+          detail={operationalWarningReasons(production).length ? "Current release is healthy" : undefined}
         />
         <SignalTile
           label="Previews"
@@ -1276,12 +1278,12 @@ function recordedPublicObservation(environment: ProductEnvironmentSummary): stri
 }
 
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
-  const warnings = operationalWarningReasons(environment);
-  if (warnings.length) return warnings.join(" · ");
   // No summary, current or retained, may stand as the headline of a red lane.
   if (environmentOperationalTone(environment) === "danger") {
     return "Needs attention";
   }
+  const warnings = operationalWarningReasons(environment);
+  if (warnings.length) return warnings.join(" · ");
   const retained = recordedPublicObservation(environment);
   if (retained) {
     return retained;
@@ -1308,7 +1310,8 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
-    return environment ? operationalWarningReasons(environment)[0] ?? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
+    if (operationalWarningReasons(environment).length) return "Delivery warning";
+    return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {
     return "Evidence missing";
