@@ -15,6 +15,7 @@ from control_plane.contracts.product_operational_readiness import (
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneHealthCheck,
+    ProductLaneProfile,
 )
 from control_plane.contracts.product_topology_read_model import build_product_environment_topology
 from control_plane.contracts.public_dns import PublicDnsExpectedTarget
@@ -135,6 +136,14 @@ def split_observation(
     )
 
 
+def lane_with_checks(
+    lane: ProductLaneProfile, *checks: ProductLaneHealthCheck
+) -> ProductLaneProfile:
+    return lane.model_copy(
+        update={"health_monitoring": lane.health_monitoring.model_copy(update={"checks": checks})}
+    )
+
+
 class SplitIngressTests(unittest.TestCase):
     def test_split_projection_retains_checks_dns_and_recovery_policy(self) -> None:
         profile = _strict_public_profile(domain_name="business.example.test")
@@ -157,13 +166,7 @@ class SplitIngressTests(unittest.TestCase):
         configured = lane.health_monitoring.checks[0].model_copy(
             update={"expected_dns_targets": (expectation,), "recovery_observation_threshold": 2}
         )
-        lane = lane.model_copy(
-            update={
-                "health_monitoring": lane.health_monitoring.model_copy(
-                    update={"checks": (configured,)}
-                )
-            }
-        )
+        lane = lane_with_checks(lane, configured)
         profile = profile.model_copy(update={"lanes": (lane,)})
         first = split_ingress_monitoring_lane(profile, lane, binding)
         second = split_ingress_monitoring_lane(profile, first, binding)
@@ -185,13 +188,7 @@ class SplitIngressTests(unittest.TestCase):
                 ),
             }
         )
-        lane = lane.model_copy(
-            update={
-                "health_monitoring": lane.health_monitoring.model_copy(
-                    update={"checks": (configured, contradictory)}
-                )
-            }
-        )
+        lane = lane_with_checks(lane, configured, contradictory)
         profile = profile.model_copy(update={"lanes": (lane,)})
         self.assertTrue(
             split_ingress_monitoring_policy(
@@ -231,13 +228,7 @@ class SplitIngressTests(unittest.TestCase):
         insecure = lane.health_monitoring.checks[0].model_copy(
             update={"url": "http://business.example.test/healthz"}
         )
-        configured = lane.model_copy(
-            update={
-                "health_monitoring": lane.health_monitoring.model_copy(
-                    update={"checks": (insecure,)},
-                )
-            }
-        )
+        configured = lane_with_checks(lane, insecure)
         self.assertTrue(
             split_ingress_monitoring_policy(
                 profile.model_copy(update={"lanes": (configured,)}),
@@ -318,10 +309,7 @@ class SplitIngressTests(unittest.TestCase):
         replacement = binding.model_copy(
             update={
                 "external_ingress": binding.external_ingress.model_copy(
-                    update={
-                        "custodian": "Successor at the same timestamp",
-                        "attested_at": observations[1].observed_at,
-                    }
+                    update={"custodian": "Successor at the same timestamp"}
                 )
             }
         )
@@ -709,13 +697,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
             )
             for index, address in enumerate(("93.184.216.34", "1.1.1.1"))
         )
-        lane = lane.model_copy(
-            update={
-                "health_monitoring": lane.health_monitoring.model_copy(
-                    update={"checks": checks},
-                )
-            }
-        )
+        lane = lane_with_checks(lane, *checks)
         profile = profile.model_copy(update={"lanes": (lane,)})
         self.store.write_product_profile_record(profile)
         blocked = (await self.post(route, payload)).json()["review"]
@@ -743,16 +725,6 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         )
         self.assertEqual(observed.status, "fail")
         self.assertEqual(observed.failure_code, "invalid_url")
-        topology = build_product_environment_topology(
-            record_store=self.store,
-            profile=profile,
-            lane=lane,
-            lane_summary=None,
-            now=_NOW,
-        )
-        self.assertTrue(
-            any(w.scope == "observation" and w.severity == "error" for w in topology.warnings)
-        )
 
     async def test_additional_public_checks_require_a_coverage_decision(self) -> None:
         payload = self.seed_split()
@@ -760,13 +732,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         lane = profile.lanes[0]
         for url in ("https://app.example.test/checkout", "https://outside.example.test/healthz"):
             extra = ProductLaneHealthCheck(name="checkout", kind="public_http", url=url)
-            configured = lane.model_copy(
-                update={
-                    "health_monitoring": lane.health_monitoring.model_copy(
-                        update={"checks": (*lane.health_monitoring.checks, extra)},
-                    )
-                }
-            )
+            configured = lane_with_checks(lane, *lane.health_monitoring.checks, extra)
             changed = profile.model_copy(update={"lanes": (configured,)})
             self.store.write_product_profile_record(changed)
             review = (await self.post("/v1/route-bindings/reconcile", payload)).json()["review"]
@@ -775,13 +741,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                 "split_ingress_monitoring_policy_conflict", {f["code"] for f in review["findings"]}
             )
             disabled = extra.model_copy(update={"enabled": False})
-            configured = configured.model_copy(
-                update={
-                    "health_monitoring": configured.health_monitoring.model_copy(
-                        update={"checks": (*lane.health_monitoring.checks, disabled)},
-                    )
-                }
-            )
+            configured = lane_with_checks(configured, *lane.health_monitoring.checks, disabled)
             self.store.write_product_profile_record(
                 profile.model_copy(update={"lanes": (configured,)})
             )

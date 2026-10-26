@@ -115,12 +115,15 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   const recovering = apply.state.requiresIdempotencyContinuity;
   const busy = readback === "pending" || [plan.state.phase, apply.state.phase].some(phase => phase === "queued" || phase === "submitting");
   const locked = !admin || busy || recovering || otherActive;
+  function loadCustody(custody: ExternalIngress | undefined) {
+    setExternalDomains(custody?.domains.join(", ") ?? "");
+    setCustodian(custody?.custodian ?? "");
+    setEvidenceUrl(custody?.evidence_url ?? "");
+  }
   useEffect(() => {
     if (kind !== "binding" || recovering || custodyDirty) return;
-    setExternalDomains(recordedExternal?.domains.join(", ") ?? "");
-    setCustodian(recordedExternal?.custodian ?? "");
-    setEvidenceUrl(recordedExternal?.evidence_url ?? "");
-  }, [recordedCustody, recovering, custodyDirty]);
+    loadCustody(recordedExternal);
+  }, [recordedCustody]);
   useEffect(() => { setActive(busy); }, [busy]);
   useEffect(() => {
     revision.current += 1;
@@ -143,6 +146,8 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     if (!apply.abandon()) return;
     setEarlierRequest(unverified);
     revision.current += 1;
+    if (pending) setCustodyDirty(true);
+    else { loadCustody(recordedExternal); setCustodyDirty(false); }
     setReview(null); setConfirmed(false); setPending(null); setAccepted(null); setReadback("idle"); setMessage("");
     try { sessionStorage.removeItem(storageKey); } catch { /* Local release does not promise durable browser storage cleanup. */ }
   }
@@ -169,6 +174,8 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     setPending(request);
     const response = await apply.run(request);
     if (!response) return;
+    const receipt = verifyRepairReceipt(response, scope, kind, request);
+    if (receipt.operation === "reconcile-route-binding") loadCustody(receipt.proposed_record?.external_ingress ?? undefined);
     setReview(null); setPending(null); setConfirmed(false); setCustodyDirty(false);
     try { sessionStorage.removeItem(storageKey); } catch { /* Settled state never recovers a leftover request. */ }
     // The verified receipt settles this apply. Later readback cannot make it uncertain again.
@@ -186,7 +193,8 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
       if (!readResponse) throw new Error("Record readback unavailable. The original receipt still proves completion.");
       const current = checkedRepairReview(readResponse, scope, kind);
       if (current.applied) throw new Error("The readback was not an inert review.");
-      if (repairReadbackMatches(verifyRepairReceipt(response, scope, kind, request), current)) {
+      if (current.operation === "reconcile-route-binding") loadCustody(current.current_record?.external_ingress ?? undefined);
+      if (repairReadbackMatches(receipt, current)) {
         setReadback("verified");
         setMessage("Route record saved and current record readback verified. Website health has not been checked.");
       } else {
