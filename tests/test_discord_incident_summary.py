@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
@@ -113,9 +114,12 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
             )
 
     def drain(self, time: str) -> None:
+        self.drain_at(f"2026-10-25T{time}Z")
+
+    def drain_at(self, now: str) -> None:
         for _ in range(100):
             result = direct_outbox.DirectNotificationOutboxTests._work(
-                self.store, self.drivers, f"2026-10-25T{time}Z"
+                self.store, self.drivers, now
             )
             if result.status == "idle":
                 return
@@ -310,8 +314,11 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
 
         self.drivers.discord_sender = refuse
         budget = self.store.list_outbox_delivery_records()[0].max_attempts
+        started_at = datetime(2026, 10, 25, 12, 5, tzinfo=timezone.utc)
         for index in range(budget + 1):
-            self.drain(f"{12 + index:02d}:05:00")
+            self.drain_at(
+                (started_at + timedelta(minutes=5 * index)).isoformat().replace("+00:00", "Z")
+            )
         self.assertEqual(len(calls), budget)
         rows = self.store.list_outbox_delivery_records()
         failed = [value for value in rows if value.state == "failed"]
@@ -416,7 +423,13 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
             for record, owner in ((new, "new"), (old, "old")):
                 result = self.store.mark_outbox_delivery_provider_started(
                     record=record.model_copy(
-                        update={"payload": {**record.payload, "summary_states": [[owner, "state"]]}}
+                        update={
+                            "payload": {
+                                **record.payload,
+                                "summary_states": [[owner, "state"]],
+                                "webhook_reference": owner,
+                            }
+                        }
                     ),
                     lease_owner=owner,
                     provider_operation_key=owner,

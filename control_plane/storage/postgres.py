@@ -8400,7 +8400,7 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneOutboxDeliveryRow,
             filters=filters,
             order_by=(
-                LaunchplaneOutboxDeliveryRow.created_at.desc()
+                LaunchplaneOutboxDeliveryRow.updated_at.desc()
                 if newest_first
                 else LaunchplaneOutboxDeliveryRow.created_at.asc(),
                 LaunchplaneOutboxDeliveryRow.delivery_id.desc()

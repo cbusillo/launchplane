@@ -1448,32 +1448,92 @@ class RealPostgresDiscordSummaryTests(discord_summary_tests.DiscordIncidentSumma
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
 
-    def test_incident_enqueue_serializes_with_claim_and_provider_markers(self) -> None:
-        from psycopg.errors import LockNotAvailable
-        from sqlalchemy.exc import OperationalError
-        from control_plane import service_deploy_drain
+    def test_racing_late_probe_is_in_current_or_next_summary(self) -> None:
+        from control_plane.workflows.public_ingress_monitor import _store_monitor_observation
 
-        original_lock = service_deploy_drain.lock
+        self.observe("first-lane")
+        late = self.store.list_public_ingress_observation_records()[0].model_copy(
+            update={
+                "record_id": "late-probe",
+                "instance": "late-lane",
+                "observed_at": "2026-10-25T12:01:00Z",
+                "incident_id": "",
+                "incident_event_id": "",
+            }
+        )
+        staged = threading.Event()
+        resume = threading.Event()
+        delivered = threading.Event()
+        source_threads: list[int] = []
+        original_dedupe = self.store._lock_outbox_dedupe_keys
 
-        def bounded_lock(store: Any, session: Any) -> None:
-            session.execute(text("SET LOCAL lock_timeout = '250ms'"))
-            original_lock(store, session)
+        def dedupe(session: Any, *, dedupe_keys: tuple[str, ...]) -> None:
+            original_dedupe(session, dedupe_keys=dedupe_keys)
+            if threading.get_ident() in source_threads:
+                staged.set()
+                if not resume.wait(10):
+                    raise AssertionError("Late probe was never released")
 
-        with self.store._session_factory() as held:
-            original_lock(self.store, held)
-            with (
-                patch.object(service_deploy_drain, "lock", side_effect=bounded_lock),
-                ThreadPoolExecutor(max_workers=1) as executor,
-            ):
-                future = executor.submit(self.observe, "late-probe")
-                with self.assertRaises(OperationalError) as caught:
-                    future.result(timeout=10)
-                self.assertIsInstance(caught.exception.orig, LockNotAvailable)
-            held.rollback()
-        self.assertEqual(self.store.list_public_ingress_incident_records(), ())
-        self.observe("late-probe")
-        self.drain("12:05:00")
-        self.assertEqual(len(self.sent), 1)
+        def record_late() -> None:
+            source_threads.append(threading.get_ident())
+            _store_monitor_observation(
+                record_store=self.store,
+                record=late,
+                incident_eligible=True,
+                expected_profile_sha256="",
+                recovery_observation_threshold=1,
+                notify=True,
+                notification_drivers=self.drivers,
+            )
+
+        def clock(_session: Any) -> str:
+            return (
+                "2026-10-25T12:04:59Z"
+                if threading.get_ident() in source_threads
+                else "2026-10-25T12:05:00Z"
+            )
+
+        def send(_url: str, payload: dict[str, object]) -> None:
+            self.sent.append(payload)
+            delivered.set()
+
+        self.drivers.discord_sender = send
+        with (
+            patch.object(self.store, "_lock_outbox_dedupe_keys", side_effect=dedupe),
+            patch.object(self.store, "_database_mutation_timestamp", side_effect=clock),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            transition = executor.submit(record_late)
+            worker = None
+            try:
+                self.assertTrue(staged.wait(10))
+                worker = executor.submit(self.drain, "12:05:00")
+                deadline = time.monotonic() + 10
+                while not delivered.is_set():
+                    with self.store._session_factory() as witness:
+                        waiting = witness.scalar(
+                            text(
+                                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock')"
+                            )
+                        )
+                    if waiting:
+                        break
+                    if time.monotonic() >= deadline:
+                        self.fail("Race reached neither delivery nor database contention")
+                    delivered.wait(0.01)
+            finally:
+                resume.set()
+            transition.result(timeout=10)
+            if worker is not None:
+                worker.result(timeout=10)
+        self.drain("12:10:00")
+        self.assertTrue(any("late-lane" in str(payload) for payload in self.sent))
+        self.assertTrue(
+            all(
+                value.status == "open"
+                for value in self.store.list_public_ingress_incident_records()
+            )
+        )
 
 
 @unittest.skipUnless(

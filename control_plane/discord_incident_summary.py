@@ -69,10 +69,10 @@ def summary_states(incidents: tuple[PublicIngressIncidentRecord, ...]) -> list[l
 def summary_covers(previous: OutboxDeliveryRecord | None, current: OutboxDeliveryRecord) -> bool:
     if previous is None:
         return False
-    if previous.payload.get("webhook_reference") != current.payload.get("webhook_reference"):
-        return False
     if int(str(previous.payload["send_window"])) >= int(str(current.payload["send_window"])):
         return True
+    if previous.payload.get("webhook_reference") != current.payload.get("webhook_reference"):
+        return False
     states = current.payload.get("summary_states")
     covered = previous.payload.get("summary_states")
     return (

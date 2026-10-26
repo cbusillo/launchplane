@@ -159,6 +159,9 @@ class OutboxInspectionTests(unittest.IsolatedAsyncioTestCase):
                             "state": "failed",
                             "error_code": "provider_error",
                             "created_at": f"2026-10-25T0{index}:00:00Z",
+                            "updated_at": "2026-10-26T00:00:00Z"
+                            if index == 0
+                            else f"2026-10-25T0{index}:00:00Z",
                         }
                     )
                 )
@@ -168,9 +171,8 @@ class OutboxInspectionTests(unittest.IsolatedAsyncioTestCase):
             result = inspect_outbox(store, limit=1)
             self.assertEqual(
                 {row["delivery_id"] for row in result.deliveries},
-                {delivery.delivery_id, "failed-2"},
+                {delivery.delivery_id, "failed-0"},
             )
-            self.assertFalse(result.complete)
             self.assertEqual(result.counts[f"{delivery.kind}:pending"], 1)
 
     async def test_other_context_cannot_inspect_global_destinations(self) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 import socket
 import unittest
 from unittest.mock import patch
@@ -33,10 +34,13 @@ class _DiscordConnection(_FakeConnection):
 
 class DiscordNotificationTransportTests(unittest.TestCase):
     def test_only_dns_and_preconnect_failures_are_proven_not_sent(self) -> None:
-        for stage in ("dns", "connect", "response"):
+        for stage in ("dns", "deadline", "connect", "response"):
             with self.subTest(stage=stage):
                 connection = _DiscordConnection(stage)
                 with (
+                    patch.object(outbound_http, "monotonic", side_effect=(0.0, 16.0))
+                    if stage == "deadline"
+                    else nullcontext(),
                     patch.object(notifications, "_public_http_connection", return_value=connection),
                     patch.object(
                         outbound_http,
@@ -53,5 +57,5 @@ class DiscordNotificationTransportTests(unittest.TestCase):
                             "https://discord.com/api/webhooks/test/test", {"content": "test"}
                         )
                 self.assertEqual(len(connection.requests), int(stage == "response"))
-                if stage != "dns":
+                if stage not in {"dns", "deadline"}:
                     self.assertTrue(connection.closed)
