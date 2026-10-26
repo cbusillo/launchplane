@@ -37,11 +37,7 @@ from control_plane.odoo_testing_native_source import (
     remove_completed_native_capture_cache,
     verify_native_capture_files,
 )
-from control_plane.odoo_testing_restore import (
-    generation_binding,
-    NATIVE_TESTING_FILES_PROGRAM,
-    FRESH_TESTING_RESTORE_HOST_PROGRAM,
-)
+from control_plane.odoo_testing_restore import generation_binding, NATIVE_TESTING_FILES_PROGRAM
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_replacement_bootstrap import (
     TestingReplacementBootstrapRequest,
@@ -95,17 +91,6 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
-    def test_canonical_settings_program_passes_the_bounded_transport(self) -> None:
-        frames: list[dict[str, object]] = []
-        transport._read_program(
-            Connection(),
-            program=FRESH_TESTING_RESTORE_HOST_PROGRAM,
-            payload={},
-            timeout_seconds=5,
-            receive=frames.append,
-        )
-        self.assertEqual(frames, [{"type": "complete", "probe": True}])
-
     def test_container_field_diagnostics_are_closed_and_never_change_failure_authority(
         self,
     ) -> None:

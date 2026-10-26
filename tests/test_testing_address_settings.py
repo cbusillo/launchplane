@@ -13,14 +13,19 @@ from typing import Any
 from unittest.mock import patch
 
 from control_plane import testing_address_settings as settings
-from control_plane.testing_address_settings import canonical_address_payload
+from control_plane.testing_address_settings import (
+    canonical_address_payload,
+    canonical_settings_frame,
+)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_address_settings import TestingAddressSettingsPlan
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
+from control_plane.dokploy import native_copy_stream as transport
 from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
 from tests import test_testing_address as address_tests
 from tests import test_odoo_testing_restore as restore_tests
+from tests.test_odoo_testing_native_source import Connection
 from control_plane.testing_address_settings_program import CANONICAL_ADDRESS_DATABASE_READ
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_RESTORE_HOST_PROGRAM,
@@ -177,6 +182,32 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
             "env": api.serialize_dokploy_env_text(self.environment),
             "composeType": "docker-compose",
         }
+
+    def test_canonical_program_and_payload_pass_the_bounded_transport(self) -> None:
+        expected = {"type": "complete", "website_id": self.intent.website_id}
+
+        def send(**kwargs: Any) -> None:
+            transport._read_program(
+                Connection(expected),
+                program=kwargs["program"],
+                payload=kwargs["payload"],
+                timeout_seconds=5,
+                receive=kwargs["receive"],
+            )
+
+        with patch.object(settings, "run_managed_server_program", side_effect=send):
+            for mode in ("inspect", "gate", "readback", "observe"):
+                with self.subTest(mode=mode):
+                    observed = canonical_settings_frame(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        plan=self.address.plan,
+                        publication=self.address.publication,
+                        settings=self.intent,
+                        provider=self.provider(),
+                        mode=mode,
+                    )
+                    self.assertEqual(observed, expected)
 
     def lose_reply(self, phase: str) -> None:
         if self.lost == phase:
