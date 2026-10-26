@@ -6894,6 +6894,7 @@ def create_launchplane_fastapi_app(
                         issued_plan=issued_plan,
                         original_reservation_id=service_apply_request.preserve_original_reservation_id,
                         operation_record_id=preview_apply_operation.adapter._deployment_record_id,
+                        captured_schedule_binding=preview_apply_operation.adapter.schedule_binding,
                     )
                     if preview_binding and authority.preservation_id != preview_binding:
                         raise DisposableLaneSafetyUnknown(

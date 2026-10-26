@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch
 from control_plane._preview_preservation_program import PREVIEW_PRESERVATION_PROGRAM
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.contracts.idempotency_record import complete_launchplane_mutation_reservation
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
@@ -575,6 +576,274 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         )
         result = self.store.complete_mutation_reservation(completion=completion)
         self.assertEqual(result.status, "completed")
+
+    def no_snapshot_original(self, binding: dict[str, object] | None) -> None:
+        request = OdooPreviewApplyEnvelope.model_validate(
+            self.store.read_original_mutation_intent(self.original)["apply_request"]
+        )
+        request.apply.dry_run_plan.clean_snapshot = None
+        self.complete_original()
+        issued = _issued_plan(request)
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=request,
+            issued_plan=issued,
+            reservation_scope="no-snapshot",
+            idempotency_key=issued.plan_provenance.plan_id if issued.plan_provenance else "",
+            request_fingerprint="no-snapshot",
+            trace_id="no-snapshot",
+        )
+        operation.adapter.schedule_binding = binding
+        reserved = self.store.reserve_mutation(
+            scope=operation.reservation_scope,
+            route_path=operation.route_path,
+            idempotency_key=operation.idempotency_key,
+            request_fingerprint=operation.request_fingerprint,
+            lease_owner="no-snapshot",
+            reconciliation_key=operation.adapter.reconciliation_key(),
+            provider_target_key=operation.adapter.target_key(),
+            original_intent=operation.adapter.original_intent(),
+        ).record
+        assert reserved is not None
+        self.original = reserved
+        self.destroy.preserve_original_reservation_id = reserved.record_id
+
+    def server_binding(self, server: str = "fixture-server") -> dict[str, object]:
+        from control_plane.dokploy.post_deploy import _build_dokploy_data_workflow_schedule_app_name
+
+        return {
+            "schedule_type": "server",
+            "lookup_id": server,
+            "app_name": _build_dokploy_data_workflow_schedule_app_name(
+                context_name=self.profile.product, instance_name=self.issued.preview_slug
+            ),
+        }
+
+    def test_no_snapshot_original_uses_its_retained_server_without_changing_intent(self) -> None:
+        binding = self.server_binding()
+        self.no_snapshot_original(binding)
+        retained = self.store.read_original_mutation_intent(self.original)
+        self.assertEqual(self.authority().server_id, binding["lookup_id"])
+        self.assertEqual(self.store.read_original_mutation_intent(self.original), retained)
+
+    def test_no_snapshot_original_uses_captured_then_persisted_preserving_binding(self) -> None:
+        self.no_snapshot_original(None)
+        self.complete_original()
+        binding = self.server_binding()
+        execute = Mock(return_value={"status": "fail", "provider_effect_attempted": True})
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="new-preservation",
+            idempotency_key=self.issued.plan_provenance.plan_id
+            if self.issued.plan_provenance
+            else "",
+            request_fingerprint="new-preservation",
+            trace_id="new-preservation",
+            execute_apply=execute,
+        )
+        with patch.object(
+            operation.adapter,
+            "capture_schedule_binding",
+            side_effect=lambda: setattr(operation.adapter, "schedule_binding", binding),
+        ):
+            result = operation.run(self.store)
+        self.assertEqual(result.status, "reconcile_required")
+        execute.assert_called_once()
+        assert result.record is not None
+        authority = read_preview_preservation_authority(
+            store=self.store,
+            profile=self.profile,
+            issued_plan=self.issued,
+            original_reservation_id=self.original.record_id,
+            operation_record_id=result.record.record_id,
+        )
+        self.assertEqual(authority.server_id, binding["lookup_id"])
+        self.assertEqual(
+            self.store.read_original_mutation_intent(result.record)["schedule_binding"], binding
+        )
+
+    def test_missing_server_proof_cannot_create_a_preserving_operation(self) -> None:
+        self.no_snapshot_original(None)
+        self.complete_original()
+        for binding in (
+            None,
+            {**self.server_binding(), "schedule_type": "dokploy-server"},
+            {**self.server_binding(), "app_name": "another-preview"},
+        ):
+            with self.subTest(binding=binding):
+                execute = Mock()
+                operation = prepare_odoo_preview_apply_operation(
+                    control_plane_root=self.root,
+                    record_store=self.store,
+                    profile=self.profile,
+                    apply_request=self.destroy,
+                    issued_plan=self.issued,
+                    reservation_scope="missing-server",
+                    idempotency_key="missing-server",
+                    request_fingerprint="missing-server",
+                    trace_id="missing-server",
+                    execute_apply=execute,
+                )
+                with (
+                    patch.object(
+                        operation.adapter,
+                        "capture_schedule_binding",
+                        side_effect=lambda: setattr(operation.adapter, "schedule_binding", binding),
+                    ),
+                    patch("control_plane.preview_preservation.run_preview_preservation") as copy,
+                    self.assertRaises(ValueError),
+                ):
+                    operation.run(self.store)
+                execute.assert_not_called()
+                copy.assert_not_called()
+                self.assertIsNone(
+                    self.store.read_idempotency_record_by_id(
+                        operation.adapter._deployment_record_id
+                    )
+                )
+
+    def test_conflicting_server_proof_refuses_preservation(self) -> None:
+        self.no_snapshot_original(self.server_binding())
+        execute = Mock()
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="conflicting-server",
+            idempotency_key="conflicting-server",
+            request_fingerprint="conflicting-server",
+            trace_id="conflicting-server",
+            execute_apply=execute,
+        )
+        with (
+            patch.object(
+                operation.adapter,
+                "capture_schedule_binding",
+                side_effect=lambda: setattr(
+                    operation.adapter, "schedule_binding", self.server_binding("another-server")
+                ),
+            ),
+            patch("control_plane.preview_preservation.run_preview_preservation") as copy,
+            self.assertRaisesRegex(ValueError, "server"),
+        ):
+            operation.run(self.store)
+        execute.assert_not_called()
+        copy.assert_not_called()
+        self.assertIsNone(
+            self.store.read_idempotency_record_by_id(operation.adapter._deployment_record_id)
+        )
+
+    def test_uncertain_compose_destroy_adopts_only_same_key_verified_absence_and_archive(
+        self,
+    ) -> None:
+        self.complete_original()
+
+        def interrupted(**kwargs: Any) -> dict[str, object]:
+            kwargs["provider_effect_checkpoint"]("compose_destroy")
+            return {"status": "fail", "provider_effect_attempted": True}
+
+        execute = Mock(side_effect=interrupted)
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="uncertain-delete",
+            idempotency_key=self.issued.plan_provenance.plan_id
+            if self.issued.plan_provenance
+            else "",
+            request_fingerprint="uncertain-delete",
+            trace_id="uncertain-delete",
+            execute_apply=execute,
+        )
+        with (
+            patch.object(operation.adapter, "capture_schedule_binding"),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._compose_exists_by_id",
+                return_value=True,
+            ) as exists,
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._destroyed_preview_absence_verified",
+                return_value=False,
+            ) as absent,
+            patch("control_plane.preview_preservation.run_preview_preservation") as archive,
+        ):
+            first = operation.run(self.store)
+            self.assertEqual(first.status, "reconcile_required")
+            assert first.record is not None
+            unknown = operation.run(self.store)
+            self.assertEqual(unknown.status, "reconcile_required")
+            self.assertEqual(unknown.record, first.record)
+            archive.assert_not_called()
+            execute.assert_called_once()
+            exists.return_value = False
+            still_unknown = operation.run(self.store)
+            self.assertEqual(still_unknown.status, "reconcile_required")
+            archive.assert_not_called()
+            absent.return_value = True
+            archive.side_effect = ValueError("archive changed")
+            with self.assertRaisesRegex(ValueError, "archive changed"):
+                operation.run(self.store)
+            held = self.store.read_idempotency_record_by_id(first.record.record_id)
+            assert held is not None
+            self.assertEqual(
+                held.state,
+                "reconcile_required",
+            )
+            archive.side_effect = None
+            recovered = operation.run(self.store)
+            self.assertEqual(recovered.status, "adopted")
+            self.assertEqual(archive.call_args.kwargs["mode"], "verify")
+            assert recovered.record is not None
+            self.assertEqual(recovered.record.record_id, first.record.record_id)
+            execute.assert_called_once()
+
+    def test_same_slug_target_disagreement_refuses_before_reservation_or_copy(self) -> None:
+        self.complete_original()
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context=self.issued.context,
+                instance=self.issued.preview_slug,
+                target_id="different-compose",
+                updated_at=self.original.updated_at,
+            )
+        )
+        execute = Mock()
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="target-mismatch",
+            idempotency_key="target-mismatch",
+            request_fingerprint="target-mismatch",
+            trace_id="target-mismatch",
+            execute_apply=execute,
+        )
+        with (
+            patch("control_plane.preview_preservation.run_preview_preservation") as copy,
+            self.assertRaises(ValueError),
+        ):
+            operation.run(self.store)
+        execute.assert_not_called()
+        copy.assert_not_called()
+        self.assertIsNone(
+            self.store.read_idempotency_record_by_id(operation.adapter._deployment_record_id)
+        )
 
     def test_active_original_blocks_destruction_without_blocking_custody_reads(self) -> None:
         self.assertEqual(self.authority().original_reservation_id, self.original.record_id)

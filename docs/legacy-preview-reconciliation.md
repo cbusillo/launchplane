@@ -207,6 +207,11 @@ executor locks, recovery grace, target ownership and provider quiescence still
 apply. Another held operation, an existing lifecycle record, known use, an only
 copy report, shared production resources or a target alias refuses admission.
 
+An older original without a clean snapshot can use its retained, scoped server
+schedule binding. If that binding is absent, the preserving operation captures
+and retains the same binding before effects. Missing or conflicting server
+evidence refuses preservation; old intents are not rewritten.
+
 The service qualifies an unserved plain preview with exclusively owned data,
 log and database volumes. Unexpected data, addon files, sessions, logs,
 additional databases, mounts or consumers remain held. It stops only that

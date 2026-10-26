@@ -23,6 +23,7 @@ from control_plane.odoo_preview_apply_execution import (
 )
 from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyEnvelope,
+    OdooPreviewPlanProvenanceError,
     ODOO_PREVIEW_APPLY_ROUTE,
 )
 from control_plane.preview_reservation_recovery import (
@@ -1164,7 +1165,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
                 return_value="retained-compose",
             ),
-            self.assertRaisesRegex(ValueError, "preservation does not match"),
+            self.assertRaises(OdooPreviewPlanProvenanceError),
         ):
             operation.run(self.store)
         execute.assert_not_called()

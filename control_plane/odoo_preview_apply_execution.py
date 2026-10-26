@@ -498,6 +498,7 @@ class OdooPreviewApplyOperation:
                 issued_plan=self.adapter._issued_plan,
                 original_reservation_id=reference,
                 operation_record_id=self.adapter._deployment_record_id,
+                captured_schedule_binding=self.adapter.schedule_binding,
             )
         except ValueError as error:
             raise OdooPreviewPlanProvenanceError(

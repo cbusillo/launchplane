@@ -50,6 +50,8 @@ def read_preview_preservation_authority(
     profile: LaunchplaneProductProfileRecord,
     issued_plan: OdooPreviewApplyInputsResult,
     original_reservation_id: str,
+    operation_record_id: str = "",
+    captured_schedule_binding: dict[str, object] | None = None,
 ) -> PreviewPreservationAuthority:
     from control_plane.preview_reservation_recovery import original_preview_intent
 
@@ -64,7 +66,6 @@ def read_preview_preservation_authority(
     if (
         issued_plan.operation != "destroy"
         or old.operation != "refresh"
-        or snapshot is None
         or issued_plan.product != profile.product
         or issued_plan.repository != profile.repository
         or issued_plan.context != profile.preview.context
@@ -103,8 +104,66 @@ def read_preview_preservation_authority(
         pull_request_number=issued_plan.plan_request.pr_number,
         compose_id=target.compose_ref,
         compose_name=target.compose_name,
-        server_id=snapshot.server_id,
+        server_id=snapshot.server_id
+        if snapshot is not None
+        else _preservation_execution_server(
+            store=store,
+            profile=profile,
+            issued_plan=issued_plan,
+            original_reservation_id=original_reservation_id,
+            operation_record_id=operation_record_id,
+            captured_schedule_binding=captured_schedule_binding,
+        ),
     )
+
+
+def _preservation_execution_server(
+    *,
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    original_reservation_id: str,
+    operation_record_id: str,
+    captured_schedule_binding: dict[str, object] | None,
+) -> str:
+    from control_plane.dokploy.post_deploy import (
+        ComposeDataWorkflowBinding,
+        _build_dokploy_data_workflow_schedule_app_name,
+    )
+    from control_plane.preview_reservation_recovery import original_preview_intent
+
+    original = store.read_idempotency_record_by_id(original_reservation_id)
+    if original is None:
+        raise ValueError("Original preview preservation server is unavailable.")
+    bindings: list[object] = [store.read_original_mutation_intent(original).get("schedule_binding")]
+    operation = (
+        store.read_idempotency_record_by_id(operation_record_id) if operation_record_id else None
+    )
+    if operation is not None:
+        retained = original_preview_intent(operation, profile=profile, store=store)
+        if (
+            retained.issued_plan != issued_plan
+            or retained.apply_request.preserve_original_reservation_id != original_reservation_id
+        ):
+            raise ValueError("The preserving operation server binding changed.")
+        bindings.append(store.read_original_mutation_intent(operation).get("schedule_binding"))
+    else:
+        bindings.append(captured_schedule_binding)
+    expected_app = _build_dokploy_data_workflow_schedule_app_name(
+        context_name=profile.product,
+        instance_name=issued_plan.preview_slug,
+    )
+    servers: set[str] = set()
+    for value in bindings:
+        if value is None:
+            continue
+        binding = ComposeDataWorkflowBinding.model_validate(value)
+        if binding.schedule_type != "server" or binding.app_name != expected_app:
+            raise ValueError("Original preview preservation server binding is unavailable.")
+        servers.add(binding.lookup_id)
+    if len(servers) != 1:
+        raise ValueError("Original preview preservation server is missing or conflicting.")
+    return servers.pop()
 
 
 def require_preview_preservation_admission(
@@ -114,6 +173,7 @@ def require_preview_preservation_admission(
     issued_plan: OdooPreviewApplyInputsResult,
     original_reservation_id: str,
     operation_record_id: str,
+    captured_schedule_binding: dict[str, object] | None = None,
 ) -> PreviewPreservationAuthority:
     from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
     from control_plane.workflows.odoo_preview_runtime import ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS
@@ -123,6 +183,8 @@ def require_preview_preservation_admission(
         profile=profile,
         issued_plan=issued_plan,
         original_reservation_id=original_reservation_id,
+        operation_record_id=operation_record_id,
+        captured_schedule_binding=captured_schedule_binding,
     )
     original = store.read_idempotency_record_by_id(original_reservation_id)
     if original is None:
@@ -171,6 +233,11 @@ def require_preview_preservation_admission(
     ):
         raise ValueError("Original preview preservation has shared context ownership.")
     for target_id in store.list_dokploy_target_id_records():
+        if (target_id.context, target_id.instance) == (
+            issued_plan.context,
+            issued_plan.preview_slug,
+        ) and target_id.target_id != target.compose_ref:
+            raise ValueError("Original preview preservation target record changed.")
         if target_id.target_id == target.compose_ref and (
             target_id.context,
             target_id.instance,
@@ -257,6 +324,7 @@ def run_preview_preservation(
         profile=profile,
         issued_plan=issued_plan,
         original_reservation_id=original_reservation_id,
+        operation_record_id=operation_record_id,
     )
     current_source = read_preview_preservation_source(
         authority=authority, control_plane_root=control_plane_root, database_url=store.database_url
