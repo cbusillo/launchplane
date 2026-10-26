@@ -239,6 +239,29 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.case.advance()
         self.recovery_step = "rollback"
 
+    def assert_worker_adopts_original(self, result_key: str) -> None:
+        self.interrupt_completion()
+        self.application_transport()
+        original = self.reservation()
+        effects = list(self.provider.deployed_artifacts)
+        with patch(
+            "control_plane.service_deploy_drain.read_status",
+            return_value={"admission_paused": True},
+        ):
+            self.case.advance()
+        settled = self.reservation()
+        self.assertEqual(settled.state, "completed")
+        self.assertEqual(settled.record_id, original.record_id)
+        self.assertEqual(settled.response_payload["result"][result_key], "pass")
+        self.assertEqual(self.provider.deployed_artifacts, effects)
+
+    def test_release_worker_adopts_promotion_without_redeploy(self) -> None:
+        self.assert_worker_adopts_original("promotion_status")
+
+    def test_release_worker_adopts_drill_without_redeploy(self) -> None:
+        self.prepare_drill()
+        self.assert_worker_adopts_original("rollback_status")
+
     def test_current_testing_hold_keeps_original_observation_adoption_and_replay_available(
         self,
     ) -> None:

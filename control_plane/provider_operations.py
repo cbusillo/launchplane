@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 import hashlib
+import logging
 from threading import Event, Lock, Thread
 from typing import Callable, Literal, NamedTuple, Protocol, TypedDict, runtime_checkable
 from pydantic import BaseModel
@@ -743,8 +744,21 @@ def _apply_acquired(
             reservation=current_reservation,
             reconciliation_key=reconciliation_key,
         )
-    except ProviderMutationUnknownError:
+    except ProviderMutationUnknownError as error:
         current_reservation, _ = heartbeat.stop()
+        cause = error.__cause__
+        cause_type = (
+            type(cause).__name__
+            if type(cause) in {ValueError, RuntimeError, OSError, TimeoutError, FileNotFoundError}
+            else "unclassified"
+        )
+        logging.getLogger(__name__).warning(
+            "Provider outcome unverified operation=%s trace=%s phase=%s cause_type=%s",
+            current_reservation.record_id,
+            response_trace_id,
+            current_reservation.provider_effect_phase,
+            cause_type,
+        )
         return _mark_reconcile_required(
             store=store,
             reservation=current_reservation,

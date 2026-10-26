@@ -1018,6 +1018,23 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             self.assertEqual(getattr(stored, "state"), "reconcile_required")
             self.assertEqual(getattr(stored, "reconciliation_key"), _RECONCILIATION_KEY)
 
+    def test_unknown_outcome_diagnostic_retains_cause_type_without_exception_text(self) -> None:
+        with TemporaryDirectory() as directory:
+            fixture = _StoreFixture(directory)
+            self.addCleanup(fixture.store.close)
+            cause = ValueError("synthetic-private-provider-payload")
+            error = ProviderMutationUnknownError("synthetic-private-wrapper")
+            error.__cause__ = cause
+            with self.assertLogs("control_plane.provider_operations", level="WARNING") as logs:
+                result = fixture.run(_FakeAdapter(apply_error=error))
+            assert result.record is not None
+            recorded = "\n".join(logs.output)
+            self.assertIn(result.record.record_id, recorded)
+            self.assertIn(type(cause).__name__, recorded)
+            self.assertNotIn(str(cause), recorded)
+            self.assertNotIn(str(error), recorded)
+            self.assertEqual(result.record.state, "reconcile_required")
+
     def test_cancellation_leaves_running_reservation_intact(self) -> None:
         with TemporaryDirectory() as directory:
             fixture = _StoreFixture(directory)

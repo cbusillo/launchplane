@@ -78,7 +78,7 @@ from control_plane.contracts.odoo_target_replacement_failures import (
 )
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from control_plane.client_release import (
-    StandingReleaseReviewBackoff,
+    ClientReleaseBackoff,
     advance_client_releases,
     client_release_grant_allows,
 )
@@ -967,7 +967,7 @@ def run_odoo_stable_operation_worker_loop(
     invitation_thread: Thread | None = None
     last_invitation_advance_at: float | None = None
     config_scan_thread: Thread | None = None
-    standing_review_backoff = StandingReleaseReviewBackoff()
+    release_backoff = ClientReleaseBackoff()
     invitation_backoff = ReleaseInvitationBackoff()
     rehearsal_resume_thread: Thread | None = None
     last_rehearsal_resume_at: float | None = None
@@ -989,7 +989,7 @@ def run_odoo_stable_operation_worker_loop(
                     store=record_store,
                     control_plane_root=control_plane_root_path,
                     stop_event=worker_stop_event,
-                    standing_review_backoff=standing_review_backoff,
+                    release_backoff=release_backoff,
                 )
             except Exception:
                 logging.exception("Client release advance failed.")
