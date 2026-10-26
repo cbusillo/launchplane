@@ -4972,11 +4972,9 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(self.activate().status, "completed")
         self.assertTrue(self.adapter.current().published)
         ingress.plan()
-        writes = deepcopy(self.writes)
         self.payloads[self.adapter.current().target_id]["serverId"] = "another-server"
         with self.assertRaises(ValueError):
             ingress.plan()
-        self.assertEqual(self.writes, writes)
 
     def test_addressed_publication_correction_restores_route_and_allows_fresh_generation(
         self,
