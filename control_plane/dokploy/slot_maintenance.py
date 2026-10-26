@@ -87,7 +87,7 @@ def run_planned_slot_maintenance(
     # This script does not import Odoo or load a registry. It owns a durable
     # attempt marker before the child, and exposes only its receipt/guard ID.
     program = """
-import hashlib, json, os, subprocess, sys
+import hashlib, json, os, subprocess, sys, tempfile
 from pathlib import Path
 request = json.loads(sys.stdin.read())
 directory = Path(request['directory'])
@@ -130,12 +130,24 @@ if not attempt.exists():
         states=dict(cursor.fetchall())
     graph={module['name']:set(module['depends']) for module in request['payload']['candidate_manifest']['release_compatibility']['modules']}
     expected=resolve_plan(request['payload'],database=request['payload']['database'],image=request['payload']['release']['candidate_image'],states=states,graph=graph)
-    plan_file.write_text(payload)
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix='.plan-')
+    try:
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(payload)
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, plan_file)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
     descriptor = os.open(attempt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, 'w') as stream:
         stream.write('started')
         stream.flush()
         os.fsync(stream.fileno())
+    for parent in (directory, *directory.parents):
+        descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(descriptor)
+        finally: os.close(descriptor)
+        if parent.is_mount(): break
     environment = dict(os.environ, ODOO_RELEASE_MODULE_PLAN_FILE=str(plan_file),
         ODOO_RELEASE_IMAGE=request['payload']['release']['candidate_image'],
         ODOO_RELEASE_MAINTENANCE_RECEIPT_FILE=str(receipt), ODOO_MAX_CRON_THREADS='0')

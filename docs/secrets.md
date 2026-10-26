@@ -252,7 +252,8 @@ secret, private-key input or process-wide trust change. The receiver's CA bundle
 and real issuer/key provisioning remain the custodian's reviewed steps.
 
 The [testing local-consumer path](testing-local-consumer.md) delivers one exact
-testing bridge binding through a human-reviewed recipient-encrypted envelope.
+testing bridge binding through a reviewed recipient-encrypted envelope issued by
+an administrator or an agent with existing exact-testing-lane authority.
 It exposes no plaintext read and creates no client service credential or grant.
 The local receiver verifies current custody and actual testing-server
 authentication before creating a separate private token file.

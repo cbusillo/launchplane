@@ -28457,7 +28457,8 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=LocalConsumerDependencies(
             common=owner_review_route_dependencies,
-            read_human_mutation_identity=read_github_human_browser_mutation_identity,
+            read_mutation_identity=read_browser_mutation_identity,
+            public_origin=human_session_manager.public_origin if human_session_manager else None,
         ),
     )
     register_owner_secret_input_routes(

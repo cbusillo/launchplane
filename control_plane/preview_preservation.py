@@ -25,6 +25,47 @@ PREVIEW_PRESERVATION_PHASES = frozenset(
 )
 
 
+def is_retained_preservation_retry(
+    *,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    issued_plan: OdooPreviewApplyInputsResult,
+    request: object,
+    operation_record_id: str,
+    reservation: object,
+) -> bool:
+    from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+    from control_plane.odoo_preview_apply_http import (
+        ODOO_PREVIEW_APPLY_ROUTE,
+        OdooPreviewApplyEnvelope,
+    )
+    from control_plane.preview_reservation_recovery import original_preview_intent
+
+    if (
+        not isinstance(store, PostgresRecordStore)
+        or not isinstance(request, OdooPreviewApplyEnvelope)
+        or not request.preserve_original_reservation_id
+        or not isinstance(reservation, LaunchplaneIdempotencyRecord)
+        or reservation.record_id != operation_record_id
+        or reservation.route_path != ODOO_PREVIEW_APPLY_ROUTE
+        or reservation.state != "running"
+        or reservation.attempt <= 1
+        or reservation.provider_effect_phase not in PREVIEW_PRESERVATION_PHASES
+    ):
+        return False
+    current = store.read_idempotency_record_by_id(operation_record_id)
+    heartbeat_fields = {"updated_at", "lease_expires_at"}
+    if current is None or current.model_dump(exclude=heartbeat_fields) != reservation.model_dump(
+        exclude=heartbeat_fields
+    ):
+        return False
+    retained = original_preview_intent(reservation, profile=profile, store=store)
+    normalized = request.model_copy(
+        update={"apply": request.apply.model_copy(update={"environment_values": {}})}
+    )
+    return retained.issued_plan == issued_plan and retained.apply_request == normalized
+
+
 class PreviewPreservationAuthority(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -313,7 +354,10 @@ def run_preview_preservation(
     effect_checkpoint: Callable[[str], None] | None = None,
     mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> dict[str, object]:
-    from control_plane._preview_preservation_program import PREVIEW_PRESERVATION_PROGRAM
+    from control_plane._preview_preservation_program import (
+        PREVIEW_PRESERVATION_CLEANUP_SECONDS,
+        PREVIEW_PRESERVATION_PROGRAM,
+    )
     from control_plane.clean_testing_snapshot import snapshot_storage_budget
     from control_plane.dokploy.memory_capacity import preview_host_memory_floor
     from control_plane.dokploy.native_copy_stream import _read_remote
@@ -396,7 +440,7 @@ def run_preview_preservation(
             "timeout_seconds": timeout_seconds,
         },
         receive=frames.append,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=timeout_seconds + 2 * PREVIEW_PRESERVATION_CLEANUP_SECONDS,
         dispatch_guard=dispatch,
     )
     check()

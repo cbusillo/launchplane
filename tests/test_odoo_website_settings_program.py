@@ -12,6 +12,7 @@ import types
 import unittest
 from contextlib import redirect_stdout
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock, patch
 
 from control_plane._odoo_website_settings_program import (
@@ -51,28 +52,57 @@ class NativeWebsite:
 class NativeEnvironment:
     registry = {"website"}
 
-    def __init__(self) -> None:
+    def __init__(self, *, typed_parameters: bool = False) -> None:
         self.site = NativeWebsite()
         self.cr = SimpleNamespace(commit=Mock())
         self.parameter = "0"
-        self.parameters = SimpleNamespace(
-            set_param=self.set_parameter, get_param=lambda key: self.parameter
+        self.parameters = (
+            SimpleNamespace(set_str=self.set_parameter, get_str=self.get_string_parameter)
+            if typed_parameters
+            else SimpleNamespace(set_param=self.set_parameter, get_param=self.get_parameter)
         )
         self.parameters.sudo = lambda: self.parameters
         self.websites = SimpleNamespace(
             browse=lambda record_id: self.site, search=lambda domain: [self.site]
         )
         self.websites.sudo = lambda: self.websites
+        self.module_states = {"website": "installed"}
+        self.modules = SimpleNamespace(search=self.find_module)
+        self.modules.sudo = lambda: self.modules
+
+    def get_parameter(self, key: str, default: str | bool = False) -> str | bool:
+        return self.parameter or default
+
+    def get_string_parameter(self, key: str, default: str = "") -> str:
+        return self.parameter
+
+    def find_module(self, domain: list[tuple[str, str, Any]], *, limit: int = 1) -> list[str]:
+        for name, state in self.module_states.items():
+            values = {"name": name, "state": state}
+            if all(
+                values[field] == expected if operator == "=" else values[field] in expected
+                for field, operator, expected in domain
+            ):
+                return [name]
+        return []
 
     def set_parameter(self, key: str, value: str) -> None:
         self.parameter = value
 
     def __getitem__(self, model: str) -> object:
-        return self.websites if model == "website" else self.parameters
+        return {
+            "website": self.websites,
+            "ir.config_parameter": self.parameters,
+            "ir.module.module": self.modules,
+        }[model]
 
 
 def run_legacy_shell(
-    env: NativeEnvironment, *, instance: str = "prod", output: io.StringIO | None = None
+    env: NativeEnvironment,
+    *,
+    instance: str = "prod",
+    output: io.StringIO | None = None,
+    with_payload: bool = True,
 ) -> str:
     startup = types.ModuleType("run_odoo_startup")
     startup._load_settings = lambda arguments: arguments  # type: ignore[attr-defined]
@@ -85,7 +115,7 @@ def run_legacy_shell(
     payload = OdooPostDeployPayload(
         context="example-site", instance="prod", website_settings=intent().settings
     )
-    encoded = base64.b64encode(payload.to_wire_json_bytes()).decode()
+    encoded = base64.b64encode(payload.to_wire_json_bytes()).decode() if with_payload else ""
     output = output if output is not None else io.StringIO()
     with (
         patch.dict(sys.modules, {"run_odoo_startup": startup, "odoo_website_settings": None}),
@@ -99,6 +129,26 @@ def run_legacy_shell(
 
 
 class GeneratedWebsiteConsumerTests(unittest.TestCase):
+    def test_native20_parameter_api_applies_the_accepted_payload(self) -> None:
+        env = NativeEnvironment(typed_parameters=True)
+        output = run_legacy_shell(env)
+        self.assertEqual(env.site.google_analytics_key, intent().settings.google_analytics_key)
+        self.assertEqual(env.parameter, "1")
+        env.cr.commit.assert_called_once()
+        self.assertIn("website_settings_sha256=" + intent().settings.digest, output)
+
+    def test_native20_base_website_skips_optional_payload_and_refuses_explicit_settings(
+        self,
+    ) -> None:
+        env = NativeEnvironment(typed_parameters=True)
+        env.module_states = {}
+        env.parameter = "1"
+        run_legacy_shell(env, instance="testing", with_payload=False)
+        self.assertEqual(env.parameter, "1")
+        self.assertEqual(env.site.google_analytics_key, "G-COPIED")
+        with self.assertRaises(RuntimeError):
+            run_legacy_shell(env)
+
     def test_immutable_native_artifacts_and_generated_consumer_agree(self) -> None:
         root = Path(__file__).parent / "fixtures/website-settings"
         records = json.loads((root / "artifacts.json").read_text())
@@ -132,12 +182,16 @@ class GeneratedWebsiteConsumerTests(unittest.TestCase):
         )
 
     def test_nonproduction_old_runtime_clears_the_copied_native_values(self) -> None:
-        env = NativeEnvironment()
-        env.parameter = "1"
-        run_legacy_shell(env, instance="testing")
-        self.assertFalse(env.site.google_analytics_key)
-        self.assertEqual(env.parameter, "0")
-        env.cr.commit.assert_called_once()
+        for typed in (False, True):
+            for state in ("installed", "to upgrade", "to remove"):
+                with self.subTest(typed=typed, state=state):
+                    env = NativeEnvironment(typed_parameters=typed)
+                    env.parameter = "1"
+                    env.module_states["website"] = state
+                    run_legacy_shell(env, instance="testing")
+                    self.assertFalse(env.site.google_analytics_key)
+                    self.assertEqual(env.parameter, "0")
+                    env.cr.commit.assert_called_once()
 
     def test_commit_failure_cannot_emit_a_success_digest(self) -> None:
         env = NativeEnvironment()

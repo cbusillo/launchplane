@@ -173,7 +173,7 @@ def evaluate_merge_readiness_from_live_evidence(
         head_check_reuse=(
             candidate_record.candidate.head_check_reuse
             if candidate_record is not None
-            and structural_candidate_status == "exact"
+            and structural_candidate_status in {"exact", "recorded_rolling"}
             and candidate_record.candidate.candidate_sha == target.expected_effect_sha
             and candidate_record.candidate.candidate_tree_sha == target.pull_request_tree_sha
             else None

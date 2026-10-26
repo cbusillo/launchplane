@@ -51,6 +51,7 @@ from control_plane.provider_operations import (
     ProviderObservation,
     ProviderObservationOutcome,
     ProviderOperationLease,
+    ProviderEvidenceLease,
     ProviderTargetSupersession,
     provider_operation_response_payload,
     provider_operation_title,
@@ -388,6 +389,12 @@ class OdooPreviewProviderMutationAdapter:
                 provider_lease_check=lease.assert_current,
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
+                **(
+                    {"recovery_reservation": lease.evidence_reservation()}
+                    if self._apply_request.preserve_original_reservation_id
+                    and isinstance(lease, ProviderEvidenceLease)
+                    else {}
+                ),
                 **(
                     {"qualify_existing_preview": True, "provider_mutation_guard": mutation_guard}
                     if self._qualify_existing_preview

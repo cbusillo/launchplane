@@ -8,6 +8,11 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     build_merge_train_batch_landing_plan,
 )
+from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
+from control_plane.contracts.merge_train_structural_provenance import (
+    MergeTrainStackCollapseRootProof,
+    MergeTrainStructuralProvenance,
+)
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
 from control_plane.merge_train import MergeTrainDryRunSnapshot, build_merge_train_dry_run_result
@@ -78,6 +83,14 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
     def test_live_guard_admits_the_reused_tree_with_fresh_source_checks_and_rejects_loss(
         self,
     ) -> None:
+        self._assert_live_reuse(has_stack_collapse=False)
+
+    def test_collapsed_root_reuses_fresh_head_checks_without_repeating_an_admission_block(
+        self,
+    ) -> None:
+        self._assert_live_reuse(has_stack_collapse=True)
+
+    def _assert_live_reuse(self, *, has_stack_collapse: bool) -> None:
         policy = build_test_merge_train_policy_record(repository=REPOSITORY)
         candidate_record, landing_record, controller, _ = _guard_records(
             policy_sha256=policy.policy_sha256,
@@ -89,6 +102,77 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
         )
         transport = _AdmissionTransport()
         client = GitHubMergeTrainClient(transport=transport)
+        collapse_record = None
+        if has_stack_collapse:
+            collapse_record = MergeTrainStackCollapsePlanRecord.model_validate(
+                {
+                    "record_id": "collapse-record",
+                    "source": "test",
+                    "updated_at": candidate_record.updated_at,
+                    "plan": {
+                        "collapse_id": "collapse-plan",
+                        "repository": REPOSITORY,
+                        "base_branch": "main",
+                        "root_pull_request_number": 2022,
+                        "root_initial_head_sha": "original-root",
+                        "root_head_ref": "feature/root",
+                        "policy_key": candidate_record.candidate.policy_key,
+                        "policy_sha256": policy.policy_sha256,
+                        "status": "ready_for_train",
+                        "entries": [
+                            {
+                                "pull_request_number": 2022,
+                                "position": 1,
+                                "head_sha": "original-root",
+                                "head_ref": "feature/root",
+                                "base_ref": "main",
+                            },
+                            {
+                                "pull_request_number": 2023,
+                                "position": 2,
+                                "head_sha": "child-head",
+                                "head_ref": "feature/child",
+                                "base_ref": "feature/root",
+                            },
+                        ],
+                        "mutations": [
+                            {
+                                "child_pull_request_number": 2023,
+                                "parent_pull_request_number": 2022,
+                                "child_head_sha": "child-head",
+                                "expected_parent_head_sha": "original-root",
+                                "parent_head_ref": "feature/root",
+                                "status": "mutated",
+                                "merge_commit_sha": HEAD_SHA,
+                            }
+                        ],
+                        "created_at": candidate_record.updated_at,
+                        "updated_at": candidate_record.updated_at,
+                    },
+                }
+            )
+            root_proof = MergeTrainStackCollapseRootProof(
+                collapse_record_id=collapse_record.record_id,
+                collapse_id=collapse_record.plan.collapse_id,
+                root_pull_request_number=collapse_record.plan.root_pull_request_number,
+                original_root_head_sha=collapse_record.plan.root_initial_head_sha,
+                collapsed_root_head_sha=HEAD_SHA,
+                collapsed_root_tree_sha=candidate_record.candidate.candidate_tree_sha,
+            )
+            provenance = candidate_record.candidate.structural_provenance
+            assert provenance is not None
+            provenance = MergeTrainStructuralProvenance.model_validate(
+                provenance.model_dump(exclude={"provenance_sha256", "candidate_sha256"})
+                | {"stack_collapse_root": root_proof}
+            )
+            candidate_record = candidate_record.model_copy(
+                update={
+                    "candidate": MergeTrainBatchCandidate.model_validate(
+                        candidate_record.candidate.model_dump(exclude={"candidate_sha256"})
+                        | {"stack_collapse_root": root_proof, "structural_provenance": provenance}
+                    )
+                }
+            )
         reuse = client.read_head_check_reuse(candidate=candidate_record.candidate)
         assert reuse is not None
         candidate = MergeTrainBatchCandidate.model_validate(
@@ -191,6 +275,7 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
                 candidate_record=candidate_record,
                 landing_plan_record=landing_record,
                 controller_state=controller,
+                stack_collapse_record=collapse_record,
                 trace_id="reuse-test",
                 admission_time_provider=lambda: "2026-08-11T03:01:00Z",
             )
@@ -226,16 +311,28 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
                         for path in transport.native_paths
                     )
                 )
+                if has_stack_collapse:
+                    self.assertEqual(proposal.record.structural_result.status, "recorded_rolling")
+                    guard.stack_collapse_record = None
+                    with self.assertRaises(MergeAdmissionDeniedError) as unproven:
+                        guard.build_proposal(**facts)
+                    assert unproven.exception.structural_result is not None
+                    self.assertIn(
+                        "structural_stack_root_unproven",
+                        unproven.exception.structural_result.reason_codes,
+                    )
+                    guard.stack_collapse_record = collapse_record
                 transport.check_conclusion = "failure"
                 with self.assertRaises(MergeAdmissionDeniedError) as denied:
                     guard.build_proposal(**facts)
                 self.assertEqual(denied.exception.reason_code, "head_check_reuse_unavailable")
-                self.assertTrue(
+                self.assertEqual(
                     _lineage_change_retires_landing(
                         reason_code=denied.exception.reason_code,
                         landing_record=landing_record,
-                        has_stack_collapse=False,
-                    )
+                        has_stack_collapse=has_stack_collapse,
+                    ),
+                    not has_stack_collapse,
                 )
                 transport.check_conclusion = "success"
                 admission = guard.admit(**facts)

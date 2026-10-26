@@ -31,6 +31,15 @@ def operation_cutover(
         deployment = store.read_deployment_record("deployment-cutover-" + identity)
     except FileNotFoundError:
         return None
+    return deployment_operation_cutover(deployment, operation)
+
+
+def deployment_operation_cutover(
+    deployment: DeploymentRecord, operation: OdooProdPromotionOperationRecord
+) -> OdooCutoverRecord | None:
+    identity = cutover_identity(
+        operation.product, operation.context, operation.instance, operation.request.request_id
+    )
     record = deployment.odoo_cutover
     if record is None:
         return None
