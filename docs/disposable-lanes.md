@@ -78,7 +78,8 @@ the artifact from current deployment inventory. The provider's pending runtime
 identity must agree with the completed inventory apart from its completion time;
 provider image inputs retain the Compose deploy writer's artifact value.
 It then reads the registered host through the existing private transport. The
-fixed program checks every extant container, including stopped containers, actual
+fixed program checks every extant container, including stopped containers, and
+current/previous Swarm service declarations even without tasks. It checks actual
 mounts and bound ports, current image/environment inputs and allocation-labeled
 local volume backing. Testing credential values are compared with production's
 provider inputs and other containers' actual environments. The complete inspected
@@ -94,9 +95,12 @@ resource facts with the existing expiration and binding. It leaves occupancy
 UNKNOWN and preserves recorded use, needed-copy and shared-resource protections.
 Missing custody, unsupported mounts, changed inputs or incomplete physical reads
 supply no positive resource fact. Provider authorization refusals remain denials.
-Before its first provider effect, a standing Compose testing deployment repeats
-the same read and compares it with the collected proof. Drift refuses forward
-work. Existing original-operation fences and release qualification remain
+Immediately before its first provider-effect checkpoint, a standing Compose
+testing deployment repeats the same read outside the heartbeat mutex and global
+authority lock. The existing locked checkpoint then compares the captured
+record authority and qualification and rechecks use, needed-copy protection and
+expiry. It performs no provider or host read under that lock. Recovery executes
+this synchronous path in the worker pool. Drift refuses forward work. Existing original-operation fences and release qualification remain
 independent; collection does not retry a failed key or start a release.
 
 The Odoo generation collector can qualify current resources and copy custody

@@ -81,6 +81,15 @@ class RetainedComposeInspectionTests(unittest.TestCase):
                     }
                 ],
             }
+        self.images = {
+            row["Image"]: {
+                "Id": row["Image"],
+                "RepoDigests": [row["Config"]["Image"]],
+                "Config": {"Env": []},
+            }
+            for row in self.rows.values()
+        }
+        self.swarm_services: dict[str, Any] = {}
         for row in self.rows.values():
             row["NetworkSettings"] = {"Ports": deepcopy(row["HostConfig"]["PortBindings"])}
         self.calls: list[tuple[str, ...]] = []
@@ -88,6 +97,12 @@ class RetainedComposeInspectionTests(unittest.TestCase):
     def docker(self, *arguments: str) -> str:
         if arguments == ("info", "--format", "{{json .DockerRootDir}}"):
             return json.dumps(str(self.root))
+        if arguments == ("info", "--format", "{{json .Swarm.LocalNodeState}}"):
+            return json.dumps("active" if self.swarm_services else "inactive")
+        if arguments == ("service", "ls", "-q", "--no-trunc"):
+            return "\n".join(self.swarm_services)
+        if arguments[:2] == ("service", "inspect"):
+            return json.dumps([self.swarm_services[arguments[2]]])
         self.calls.append(arguments)
         if arguments == ("ps", "-aq", "--no-trunc"):
             return "\n".join(self.rows)
@@ -96,16 +111,7 @@ class RetainedComposeInspectionTests(unittest.TestCase):
         if arguments[:2] == ("volume", "inspect"):
             return json.dumps([self.volumes[arguments[2]]])
         if arguments[:2] == ("image", "inspect"):
-            row = next(row for row in self.rows.values() if row["Image"] == arguments[2])
-            return json.dumps(
-                [
-                    {
-                        "Id": row["Image"],
-                        "RepoDigests": [row["Config"]["Image"]],
-                        "Config": {"Env": []},
-                    }
-                ]
-            )
+            return json.dumps([self.images[arguments[2]]])
         raise AssertionError(arguments)
 
     def test_populated_retained_storage_is_qualified_without_writes(self) -> None:
@@ -206,6 +212,40 @@ class RetainedComposeInspectionTests(unittest.TestCase):
                 "Source": "",
             }
         )
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+
+    def test_foreign_dynamic_and_range_ports_use_actual_publication(self) -> None:
+        foreign = deepcopy(next(iter(self.rows.values())))
+        foreign["Id"] = "f" * 64
+        foreign["Config"]["Labels"] = {"com.docker.compose.project": "unrelated"}
+        foreign["Config"]["Env"] = []
+        foreign["Mounts"] = []
+        foreign["HostConfig"]["PortBindings"] = {"80/tcp": [{"HostIp": "", "HostPort": ""}]}
+        foreign["NetworkSettings"]["Ports"] = {
+            "80/tcp": [{"HostIp": "0.0.0.0", "HostPort": "19000"}]
+        }
+        self.rows[foreign["Id"]] = foreign
+        self.assertTrue(inspect_retained_compose(self.spec, self.docker))
+        foreign["NetworkSettings"]["Ports"]["80/tcp"][0]["HostPort"] = str(self.spec["ports"][0])
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+        foreign["NetworkSettings"]["Ports"] = {}
+        foreign["HostConfig"]["PortBindings"]["80/tcp"][0]["HostPort"] = "8000-8010"
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+
+    def test_scaled_down_swarm_current_and_previous_mounts_still_protect_testing(self) -> None:
+        template: dict[str, Any] = {"TaskTemplate": {"ContainerSpec": {"Mounts": [], "Env": []}}}
+        self.swarm_services["service-fixture"] = {
+            "ID": "service-fixture",
+            "Spec": deepcopy(template),
+        }
+        self.assertTrue(inspect_retained_compose(self.spec, self.docker))
+        self.swarm_services["service-fixture"]["PreviousSpec"] = deepcopy(template)
+        self.swarm_services["service-fixture"]["PreviousSpec"]["TaskTemplate"]["ContainerSpec"][
+            "Mounts"
+        ] = [{"Type": "volume", "Source": next(iter(self.volumes)), "Target": "/data"}]
         with self.assertRaises(ValueError):
             inspect_retained_compose(self.spec, self.docker)
 
@@ -310,12 +350,27 @@ class ComposeResourceFixture:
                 "State": {"Running": True},
             }
 
+        self.images = {
+            row["Image"]: {
+                "Id": row["Image"],
+                "RepoDigests": [row["Config"]["Image"]],
+                "Config": {"Env": []},
+            }
+            for row in self.rows.values()
+        }
+        self.swarm_services: dict[str, Any] = {}
         for row in self.rows.values():
             row["NetworkSettings"] = {"Ports": deepcopy(row["HostConfig"]["PortBindings"])}
 
     def docker(self, *arguments: str) -> str:
         if arguments == ("info", "--format", "{{json .DockerRootDir}}"):
             return json.dumps(str(self.root))
+        if arguments == ("info", "--format", "{{json .Swarm.LocalNodeState}}"):
+            return json.dumps("active" if self.swarm_services else "inactive")
+        if arguments == ("service", "ls", "-q", "--no-trunc"):
+            return "\n".join(self.swarm_services)
+        if arguments[:2] == ("service", "inspect"):
+            return json.dumps([self.swarm_services[arguments[2]]])
         if arguments == ("ps", "-aq", "--no-trunc"):
             return "\n".join(self.rows)
         if arguments[0] == "inspect":
@@ -323,16 +378,7 @@ class ComposeResourceFixture:
         if arguments[:2] == ("volume", "inspect"):
             return json.dumps([self.volumes[arguments[2]]])
         if arguments[:2] == ("image", "inspect"):
-            row = next(row for row in self.rows.values() if row["Image"] == arguments[2])
-            return json.dumps(
-                [
-                    {
-                        "Id": row["Image"],
-                        "RepoDigests": [row["Config"]["Image"]],
-                        "Config": {"Env": []},
-                    }
-                ]
-            )
+            return json.dumps([self.images[arguments[2]]])
         raise AssertionError(arguments)
 
     def read(self, **arguments: Any) -> None:

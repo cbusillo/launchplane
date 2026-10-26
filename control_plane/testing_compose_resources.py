@@ -19,6 +19,7 @@ from control_plane.testing_activation import (
     rendered_source,
     runtime_values,
     shared_read_only_binding,
+    configuration_digest,
 )
 from control_plane.disposable_lanes import resolve_disposable_observation_binding
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -43,6 +44,17 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
         ):
             raise ValueError("Incomplete container inventory")
         return sorted(values)
+
+    def published_ports(value: object) -> set[int]:
+        if value == "":
+            return set()
+        parts = str(value).split("-")
+        if len(parts) not in {1, 2} or any(not part.isdecimal() for part in parts):
+            raise ValueError("Port publication unavailable")
+        first, last = int(parts[0]), int(parts[-1])
+        if not 1 <= first <= last <= 65535:
+            raise ValueError("Port publication unavailable")
+        return set(range(first, last + 1))
 
     containers = identifiers()
 
@@ -139,11 +151,27 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
         bindings = host["PortBindings"] or {}
         if not isinstance(bindings, dict):
             raise ValueError("Port inventory unavailable")
-        current_ports = [
-            int(binding["HostPort"]) for entries in bindings.values() for binding in entries or []
-        ]
+        current_ports = set().union(
+            *(
+                published_ports(binding["HostPort"])
+                for entries in bindings.values()
+                for binding in entries or []
+            )
+        )
         if not belongs:
-            if set(current_ports) & set(spec["ports"]):
+            effective = row["NetworkSettings"]["Ports"]
+            if effective is None and row["State"].get("Running"):
+                raise ValueError("Effective foreign publication unavailable")
+            if effective is not None and not isinstance(effective, dict):
+                raise ValueError("Effective foreign publication unavailable")
+            effective_ports = set().union(
+                *(
+                    published_ports(entry["HostPort"])
+                    for entries in (effective or {}).values()
+                    for entry in entries or []
+                )
+            )
+            if (current_ports | effective_ports) & set(spec["ports"]):
                 raise ValueError("Testing listener shared outside recipient")
             continue
         projects.add(project)
@@ -215,8 +243,8 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
         if (
             len(expected_tmpfs) != len(tmpfs)
             or (host.get("Tmpfs") or {}) != expected_tmpfs
-            or {mount.get("Destination") for mount in memory_mounts} != set(expected_tmpfs)
-            or len(memory_mounts) != len(expected_tmpfs)
+            or not {mount.get("Destination") for mount in memory_mounts} <= set(expected_tmpfs)
+            or len({mount.get("Destination") for mount in memory_mounts}) != len(memory_mounts)
             or len(volume_mounts) + len(memory_mounts) != len(mounts)
             or {
                 (mount.get("Name"), mount.get("Destination"), mount.get("RW"))
@@ -261,6 +289,73 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
                 raise ValueError("Effective listener changed")
         ports.update(current_ports)
         owned[service_name] = row
+    swarm = read("info", "--format", "{{json .Swarm.LocalNodeState}}")
+    if swarm not in {"active", "inactive"}:
+        raise ValueError("Service inventory unavailable")
+    service_ids = (
+        sorted(docker("service", "ls", "-q", "--no-trunc").splitlines())
+        if swarm == "active"
+        else []
+    )
+    if len(service_ids) > 10000 or len(set(service_ids)) != len(service_ids):
+        raise ValueError("Service inventory incomplete")
+    service_rows = {}
+    for identifier in service_ids:
+        service_row = read("service", "inspect", identifier)[0]
+        if service_row["ID"] != identifier:
+            raise ValueError("Service identity changed")
+        service_rows[identifier] = service_row
+        for template in (service_row["Spec"], service_row.get("PreviousSpec")):
+            if template is None:
+                continue
+            container_spec = template["TaskTemplate"]["ContainerSpec"]
+            for entry in container_spec.get("Env") or []:
+                value = entry.split("=", 1)[1]
+                if value and any(
+                    hmac.compare_digest(value.encode(), credential.encode())
+                    for credential in credentials
+                ):
+                    raise ValueError("Testing credential shared with a service")
+            for mount in container_spec.get("Mounts") or []:
+                source = mount.get("Source")
+                if mount.get("Type") == "volume":
+                    driver = (mount.get("VolumeOptions") or {}).get("DriverConfig")
+                    if (
+                        source in volumes
+                        or driver is not None
+                        and (
+                            driver.get("Name") != "local" or driver.get("Options") not in (None, {})
+                        )
+                    ):
+                        raise ValueError("Service storage isolation unavailable")
+                elif mount.get("Type") == "bind":
+                    backing = Path(source).resolve(strict=True)
+                    if not Path(source).is_absolute() or any(
+                        backing == path or backing in path.parents or path in backing.parents
+                        for path in paths
+                    ):
+                        raise ValueError("Service overlaps testing storage")
+                elif mount.get("Type") != "tmpfs":
+                    raise ValueError("Service mount inventory unavailable")
+            for entry in (template.get("EndpointSpec") or {}).get("Ports") or []:
+                if entry.get("PublishedPort", 0) and published_ports(entry["PublishedPort"]) & set(
+                    spec["ports"]
+                ):
+                    raise ValueError("Service shares testing listener")
+        for entry in (service_row.get("Endpoint") or {}).get("Ports") or []:
+            if entry.get("PublishedPort", 0) and published_ports(entry["PublishedPort"]) & set(
+                spec["ports"]
+            ):
+                raise ValueError("Service shares effective testing listener")
+    if (
+        read("info", "--format", "{{json .Swarm.LocalNodeState}}") != swarm
+        or (
+            swarm == "active"
+            and sorted(docker("service", "ls", "-q", "--no-trunc").splitlines()) != service_ids
+        )
+        or any(read("service", "inspect", key)[0] != row for key, row in service_rows.items())
+    ):
+        raise ValueError("Service inventory changed")
     if set(owned) != set(services) or len(projects) != 1 or ports != set(spec["ports"]):
         raise ValueError("Incomplete retained Compose recipient")
     if (
@@ -275,6 +370,48 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
             {"containers": owned, "volumes": volumes, "images": images}, sort_keys=True
         ).encode()
     ).hexdigest()
+
+
+def compose_custody_sha256(
+    store: PostgresRecordStore, *, root: Path, product: str, context: str
+) -> str:
+    binding = resolve_disposable_observation_binding(
+        store, product=product, context=context, instance="testing"
+    )
+    record = activation_record(store, product, context)
+    if record is None or not record.published or not record.qualified_at:
+        raise ValueError("Retained Compose custody unavailable")
+    adapter = TestingActivationAdapter(
+        root, store, product, record.request, record.actor, record.scope, "testing-custody-read"
+    )
+    adapter.require_unchanged(record)
+    resources, preparation_id = preparation_resources(store, product, record.request, record.scope)
+    if preparation_id != record.preparation_record_id:
+        raise ValueError("Retained preparation changed")
+    inventory = store.read_environment_inventory(context_name=context, instance_name="testing")
+    deployment = store.read_deployment_record(inventory.deployment_record_id)
+    production = [
+        store.read_provider_target_record(
+            context_name=lane.context, instance_name=lane.instance
+        ).model_dump(mode="json")
+        for lane in binding.profile.lanes
+        if lane.instance == "prod"
+    ]
+    return canonical_json_sha256(
+        {
+            "binding": binding.binding_sha256,
+            "activation": record.model_dump(mode="json"),
+            "configuration": configuration_digest(
+                store, product, context, version=record.configuration_version
+            ),
+            "authority": [row.model_dump(mode="json") for row in adapter.bindings()],
+            "resources": resources.binding_sha256,
+            "preparation": preparation_id,
+            "inventory": inventory.model_dump(mode="json"),
+            "deployment": deployment.model_dump(mode="json"),
+            "production": production,
+        }
+    )
 
 
 def collect_compose_resource_facts(
@@ -340,6 +477,20 @@ def _collect_compose_resource_facts(
         or deployment.artifact_identity.artifact_id != inventory.runtime_identity.artifact_id
         or deployment.deployed_target is None
         or deployment.deployed_target.target_id != record.target_id
+        or (
+            inventory.runtime_identity.product,
+            inventory.runtime_identity.context,
+            inventory.runtime_identity.instance,
+            inventory.runtime_identity.deployment_record_id,
+            inventory.runtime_identity.source_git_ref,
+        )
+        != (product, context, "testing", inventory.deployment_record_id, inventory.source_git_ref)
+        or (deployment.context, deployment.instance, deployment.source_git_ref)
+        != (context, "testing", inventory.source_git_ref)
+        or deployment.deployed_target
+        != store.read_provider_target_record(
+            context_name=context, instance_name="testing"
+        ).to_deployed_target_reference()
     ):
         raise ValueError("Current testing artifact unavailable")
     host, token = source.read_dokploy_config(
