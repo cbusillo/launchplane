@@ -78,6 +78,14 @@ an admin-owned manifest that cannot use the conventional path. Direct local
 CLI mutation remains break-glass bootstrap or repair behavior and requires
 `--allow-direct-db-mutation`; it is not an onboarding alternative.
 
+Reapplying an advanced manifest updates its declared settings while preserving
+existing service-owned state, including the Client, live classification,
+release acceptance and [recorded release request](release-review.md). Image
+scanning policy is retained. Lane and preview state is carried over only for
+the same recorded route; a different lane context does not inherit the old
+lane's cutover or extension authority. Use each bounded service operation to
+change settings the manifest does not own.
+
 If live proof finds that an existing preview wildcard ingress route needs a
 Launchplane-managed repair, `Generic Web Preview Authorization` can temporarily
 include the scoped `Ingress Route Dry Run` and `Ingress Route Apply` workflow

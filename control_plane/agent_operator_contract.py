@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
 from control_plane.client_release_backup_continuation import BACKUP_CONTINUATION_ROUTE
 from control_plane.http_routes.discussion_topics import ROUTE as DISCUSSION_TOPICS_ROUTE
@@ -105,6 +106,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        RELEASE_REQUEST_ROUTE,
+        "Record a Director request or agreed finish-line release decision and deliver its Client invitation without accepting or deploying.",
+        ("service_api", "browser"),
+        ("request",),
+        "body",
+        ("checklist_digest", "decision_reference"),
+    ),
     OperationSpec(
         "POST",
         BACKUP_CONTINUATION_ROUTE,

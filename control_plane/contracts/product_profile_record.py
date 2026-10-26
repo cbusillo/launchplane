@@ -17,6 +17,7 @@ from control_plane.contracts.product_health_monitoring_migration import (
 )
 from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
 from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthPolicy
+from control_plane.contracts.release_request import ReleaseRequestDecisionRecord
 from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 from control_plane.contracts.snapshot_protocol import (
     LaneInstance,
@@ -759,6 +760,11 @@ class LaunchplaneProductProfileRecord(BaseModel):
     release_on_acceptance: ReleaseOnAcceptance = Field(
         default="held",
         exclude_if=lambda value: value == "held",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    release_request: ReleaseRequestDecisionRecord | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     product: str

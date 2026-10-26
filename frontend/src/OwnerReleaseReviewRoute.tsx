@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
-import { openUrgentReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
+import { requestReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem, OdooWebsiteSettings } from "./generated/openapi.ts";
 import { groupReleaseItems, untestedReason } from "./release-review-model";
@@ -127,8 +127,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const [reason, setReason] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
   const [hotfixReason, setHotfixReason] = useState("");
-  const [urgentReason, setUrgentReason] = useState("");
-  const [urgentSent, setUrgentSent] = useState(false);
+  const [requestReason, setRequestReason] = useState("");
+  const [requestSent, setRequestSent] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [recorded, setRecorded] = useState(false);
@@ -142,8 +142,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     setReason("");
     setOverrideReason("");
     setHotfixReason("");
-    setUrgentReason("");
-    setUrgentSent(false);
+    setRequestReason("");
+    setRequestSent(false);
     setRecorded(false);
     setRefreshFailed(false);
     const request = fixtureMode
@@ -204,12 +204,12 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     if (!response?.review.checklist || busy) return;
     setBusy(true);
     setError("");
-    setUrgentSent(false);
+    setRequestSent(false);
     try {
       if (!fixtureMode) {
-        setResponse(await openUrgentReleaseReview({ product, checklist_digest: response.review.checklist_digest, reason: urgentReason }));
+        setResponse(await requestReleaseReview({ product, checklist_digest: response.review.checklist_digest, reason: requestReason }));
       }
-      setUrgentSent(true);
+      setRequestSent(true);
     } catch {
       setError("The release review could not be confirmed. Reload this page before trying again; a request may already be open.");
     } finally {
@@ -318,12 +318,12 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && hasChanges && !activeHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
         <h3>Ask {client} to review this release now</h3>
-        <p>Ask {client} to review when you decide this release is needed. Include your reason in plain words; nothing goes live until {client} accepts it. If {client} was already asked about this release, the existing request and its reason stay unchanged.</p>
-        <label><span>Why this release cannot wait</span><textarea value={urgentReason} maxLength={1000} disabled={busy} onChange={event => setUrgentReason(event.target.value)} /></label>
+        <p>Ask {client} to review when you decide this release is needed. Include your reason in plain words; nothing goes live until {client} accepts it. If this review is unchanged, the existing request and its reason stay unchanged.</p>
+        <label><span>Why this release is needed</span><textarea value={requestReason} maxLength={1000} disabled={busy} onChange={event => setRequestReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
-          <button className="button" type="button" disabled={busy || incomplete || !urgentReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
+          <button className="button" type="button" disabled={busy || incomplete || !requestReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
         </div>
-        {urgentSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
+        {requestSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
       </section> : null}
       {checklist && !noNewRelease && response.can_override && !activeHotfix ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
         <h3>Admin Approval Override</h3>
