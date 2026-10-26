@@ -28441,7 +28441,7 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=LocalConsumerDependencies(
             common=owner_review_route_dependencies,
-            read_human_mutation_identity=read_github_human_browser_mutation_identity,
+            read_mutation_identity=read_browser_mutation_identity,
         ),
     )
     register_owner_secret_input_routes(

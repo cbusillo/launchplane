@@ -1,5 +1,3 @@
-"""Service custody: one human-reviewed encrypted delivery, never a secret read API."""
-
 import base64
 import os
 import time

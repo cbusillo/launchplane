@@ -3,13 +3,13 @@ from pathlib import Path
 
 import click
 
-from control_plane.local_consumer import prepare_consumer, receive_consumer
+from control_plane.local_consumer import deliver_consumer, prepare_consumer, receive_consumer
 from control_plane.local_consumer_contract import digest
 
 
 @click.group("local-consumer")
 def local_consumer() -> None:
-    """Owner-run testing bridge delivery. Never prints credential values."""
+    pass
 
 
 @local_consumer.command("prepare")
@@ -27,7 +27,6 @@ def prepare(
     endpoint_key: str,
     server_url: str,
 ) -> None:
-    """Create a new private destination and a non-secret recipient request."""
     try:
         request = prepare_consumer(
             directory=directory,
@@ -52,11 +51,27 @@ def prepare(
     )
 
 
+@local_consumer.command("deliver")
+@click.option("--directory", type=click.Path(path_type=Path), required=True)
+@click.option("--bearer-token-env", default="LAUNCHPLANE_SERVICE_TOKEN", show_default=True)
+@click.option("--reviewed-plan-digest", default="")
+def deliver(directory: Path, bearer_token_env: str, reviewed_plan_digest: str) -> None:
+    try:
+        result = deliver_consumer(
+            directory, bearer_token_env=bearer_token_env, reviewed_plan_digest=reviewed_plan_digest
+        )
+    except Exception:
+        raise click.ClickException(
+            "Delivery incomplete. Verify existing exact-testing-lane authority and the original "
+            "review. Keep the original directory and retry only the same request."
+        ) from None
+    click.echo(json.dumps(result))
+
+
 @local_consumer.command("receive")
 @click.option("--directory", type=click.Path(path_type=Path), required=True)
 @click.option("--package-file", type=click.Path(path_type=Path), required=True)
 def receive(directory: Path, package_file: Path) -> None:
-    """Verify and install an encrypted delivery; retry only the original package."""
     try:
         result = receive_consumer(directory, package_file)
     except Exception:

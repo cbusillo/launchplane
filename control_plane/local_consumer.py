@@ -1,5 +1,3 @@
-"""Owner-run local receiver. Real values stay inside this process and private files."""
-
 import asyncio
 import base64
 import fcntl
@@ -23,7 +21,10 @@ from websockets.asyncio.client import connect
 
 from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
 from control_plane.local_consumer_contract import (
+    DELIVERY_ROUTE,
     VERIFY_ROUTE,
+    ConsumerDeliveryEnvelope,
+    ConsumerDeliveryResponse,
     ConsumerPackage,
     ConsumerRequest,
     ConsumerVerificationResponse,
@@ -140,6 +141,61 @@ def prepare_consumer(
 
 def _ca_bundle() -> str:
     return os.environ.get("SSL_CERT_FILE") or requests.utils.DEFAULT_CA_BUNDLE_PATH
+
+
+def deliver_consumer(
+    directory: Path, *, bearer_token_env: str, reviewed_plan_digest: str = ""
+) -> dict[str, str]:
+    directory = _directory(directory)
+    request = ConsumerRequest.model_validate_json(_private_file(directory / "request.json"))
+    if request.directory != str(directory):
+        raise ValueError("The original directory changed.")
+    token = os.environ.get(bearer_token_env, "").strip()
+    if not token:
+        raise ValueError("The existing agent authentication is unavailable.")
+    envelope = ConsumerDeliveryEnvelope(
+        request=request,
+        mode="apply" if reviewed_plan_digest else "dry-run",
+        reviewed_plan_digest=reviewed_plan_digest,
+    )
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            request.service_origin + DELIVERY_ROUTE,
+            json=envelope.model_dump(mode="json"),
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+            allow_redirects=False,
+            verify=_ca_bundle(),
+        )
+        if response.status_code != 200 or len(response.content) > 65536:
+            raise ValueError("The service could not deliver this testing credential.")
+        result = ConsumerDeliveryResponse.model_validate(response.json())
+    if result.request_fingerprint != digest(request) or not result.ready_to_deliver:
+        raise ValueError("The original testing destination or credential is not ready.")
+    if not reviewed_plan_digest:
+        if not result.plan_digest or not result.version_id or result.package is not None:
+            raise ValueError("The testing delivery review is incomplete.")
+        return {
+            "fingerprint": result.request_fingerprint,
+            "plan_digest": result.plan_digest,
+            "version_id": result.version_id,
+        }
+    package = result.package
+    if (
+        package is None
+        or package.request != request
+        or package.plan.request_fingerprint != digest(request)
+        or digest(package.plan) != reviewed_plan_digest
+        or result.plan_digest != reviewed_plan_digest
+        or package.plan.version_id != result.version_id
+    ):
+        raise ValueError("The delivery does not match the original reviewed destination.")
+    package.plan.require_fresh()
+    package_file = directory / "package.json"
+    with _locked(directory):
+        _write_once(package_file, canonical(package))
+    return {"version_id": result.version_id, "package_file": str(package_file)}
 
 
 def _verify_service(package: ConsumerPackage) -> None:
