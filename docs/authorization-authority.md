@@ -115,6 +115,18 @@ restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+Route-binding reconcile admits the Director's existing `local_operator` transport
+to refresh evidence on an exclusively owned declared lane, including production,
+without granting `route_binding.apply`. The request must name the current record
+digest. The server must derive a ready refresh or unchanged plan from its source
+records, with no findings and identical route, target, domains, ingress and TLS
+authority. Creating a binding, replacing admin-owned authority and accepting
+an external-authority handoff still require the existing explicit authority.
+The transaction rechecks all five source records, lane ownership and current
+binding before writing the observation and its idempotency receipt atomically.
+It changes no provider state, credentials, release or access policy. Other
+callers and terminal mutation restrictions retain their existing checks.
+
 Repository inventory apply also inherits that standing permission, for tracked
 and retired records alike. A record identifies one immutable GitHub repository;
 it cannot install the Delivery App, widen its installed permissions, grant
