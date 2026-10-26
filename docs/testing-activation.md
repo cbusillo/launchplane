@@ -381,6 +381,29 @@ with this completed activation's plan digest and the unchanged interlock's
 actual purpose. The same caller must still own the hold. No application
 activation step itself clears the hold or marks the old original terminal.
 
+## Continuing an already-serving application
+
+The original Director agent can lift its own `isolation_staging` hold on an
+already-serving testing application through the ordinary reviewed testing-hold
+API. This clears only the hold: it deploys nothing and requests no reconciliation.
+It requires the original completed application and local-volume allocation,
+unchanged custody, a successful current inventory/deployment bound to that exact
+recipient and immutable image, private hostname ownership and no active or
+unknown effects on the recipient. Staff holds, protected data, shared resources,
+foreign ownership and production lanes remain refused.
+
+Apply checks the provider's completed Docker-source deployment and original
+placement, then runs the fixed read-only host inspection. The serving variant
+requires positively local Swarm coverage, the original local volume backing,
+the expected single-replica image/deployment and no foreign container or service
+using its storage. It preserves the volume's contents. Missing or changing
+evidence keeps the hold. Execution locks, repeated authority checks and atomic
+hold/receipt publication also cover this variant. Original reservations and
+unresolved activations remain unchanged; this continuation never settles them.
+After a qualified lift, resume the original blocked operation through its own
+supported recovery path and original key. Hold clearance proves neither runtime
+configuration delivery nor a subsequent deployment or release.
+
 ## Legacy Compose continuation
 
 The authenticated Director agent uses `scripts/activate-generic-web-testing.py`

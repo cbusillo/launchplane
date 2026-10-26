@@ -11,6 +11,7 @@ import click
 from uuid import uuid4
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.application_state_volume_errors import StateVolumeRefusal
 from control_plane.dokploy import api, source
 from control_plane.dokploy.fresh_application import match_application_volume_mount
@@ -291,7 +292,9 @@ class ApplicationStateVolumeAdapter:
             raise ValueError("Original application allocation was not completed and adopted.")
         return adapter
 
-    def qualify_testing_continuation(self, *, inspect_provider: bool) -> str:
+    def qualify_testing_continuation(
+        self, *, inspect_provider: bool, serving_deployment: DeploymentRecord | None = None
+    ) -> str:
         """Verify the adopted allocation; history alone never attests its current state."""
         from control_plane.application_state_volume_retention import require_state_volume_owner
 
@@ -311,9 +314,16 @@ class ApplicationStateVolumeAdapter:
             from control_plane.dokploy.fresh_application import require_fresh_application_runtime
 
             live = self._live(data["application"], data["environment"], data["app_name"])
-            require_fresh_application_runtime(
-                live, environment_id=data["environment"], project_id=data["project"]
-            )
+            if serving_deployment is None:
+                require_fresh_application_runtime(
+                    live, environment_id=data["environment"], project_id=data["project"]
+                )
+            else:
+                from control_plane.application_serving_hold import (
+                    require_serving_application_provider,
+                )
+
+                require_serving_application_provider(self, live, serving_deployment)
             target = self.store.read_dokploy_target_record(
                 context_name=self.request.context, instance_name="testing"
             )
