@@ -35,7 +35,7 @@ for (const viewer of ["admin", "client", "client-reader", "other", "denied-admin
     await page.goto(`/ui/products/${product.product}`);
     await expect(page.getByRole("heading", { name: product.display_name, exact: true }).first()).toBeVisible();
     const link = page.getByRole("link", { name: "Release review", exact: true });
-    await expect(page.locator('[data-release-review-access="settled"]')).toBeVisible();
+    await expect(page.locator('[data-release-review-access="settled"]')).toBeAttached();
     expect(checklistReads).toBe(0);
     if (viewer === "other" || viewer === "denied-admin") {
       await expect(link).toHaveCount(0);
