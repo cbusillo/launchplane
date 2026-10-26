@@ -17446,6 +17446,12 @@ class PostgresRecordStore(HumanSessionStore):
                         from control_plane.odoo_cutover_recovery import deployment_operation_cutover
 
                         cutover = deployment_operation_cutover(deployment, record)
+                        if cutover is None:
+                            logging.getLogger(__name__).warning(
+                                "Skipping mismatched cutover promotion provenance for operation %r.",
+                                record.operation_id[:160],
+                            )
+                            continue
                     else:
                         from control_plane.odoo_cutover_recovery import rollback_operation_cutover
 

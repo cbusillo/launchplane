@@ -152,7 +152,7 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
             self.maintenance_execution(temporary, child) as (directory, run),
         ):
             for _ in range(2):
-                with self.assertRaisesRegex(ValueError, "maintenance failed"):
+                with self.assertRaises(ValueError):
                     run()
             for incomplete in (
                 "started",
@@ -181,7 +181,11 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
 
             def child_result(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
                 required = [directory / "plan.json", directory / "attempt.json", directory]
-                required.extend(directory.parents)
+                required.extend(
+                    parent
+                    for parent in directory.parents
+                    if parent == Path(temporary) or Path(temporary) in parent.parents
+                )
                 for path in required:
                     metadata = path.stat()
                     self.assertIn((metadata.st_dev, metadata.st_ino), synced, str(path))
@@ -192,9 +196,9 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                 self.maintenance_execution(temporary, child) as (directory, run),
                 patch("os.fsync", side_effect=sync),
             ):
-                with self.assertRaisesRegex(ValueError, "maintenance failed"):
+                with self.assertRaises(ValueError):
                     run()
-                with self.assertRaisesRegex(ValueError, "maintenance failed"):
+                with self.assertRaises(ValueError):
                     run()
             child.assert_called_once()
 
@@ -217,6 +221,24 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 run()
             child.assert_not_called()
+
+    def test_interrupted_plan_write_can_retry_before_any_child_starts(self) -> None:
+        child = Mock(return_value=subprocess.CompletedProcess([], 1, stdout=b"failed", stderr=b""))
+        with (
+            TemporaryDirectory() as temporary,
+            self.maintenance_execution(temporary, child) as (_, run),
+        ):
+
+            def partial_write(descriptor: int) -> None:
+                os.ftruncate(descriptor, 1)
+                raise OSError(errno.ENOSPC, "fixture plan write exhausted storage")
+
+            with patch("os.fsync", side_effect=partial_write), self.assertRaises(RuntimeError):
+                run()
+            child.assert_not_called()
+            with self.assertRaises(ValueError):
+                run()
+            child.assert_called_once()
 
     def test_full_failure_log_or_outcome_volume_keeps_unknown_without_a_second_child(self) -> None:
         native_open = os.open

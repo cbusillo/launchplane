@@ -496,8 +496,9 @@ live lane. Parent #3268 still waits for its exact accepted real-release event.
 
 Canonical maintenance seals a failed outcome in its existing exclusive attempt
 marker only after the child exits unsuccessfully and its log is durable. Before
-dispatch, the native plan and exclusive attempt file are synced along with their
-directory and ancestor entries. A persistence interruption refuses the child; a
+dispatch, the native plan is published atomically and synced with the exclusive
+attempt file and their directory entries up to the data mount. An interrupted
+plan write can retry while no attempt exists. A persistence interruption refuses the child; a
 retained started attempt cannot dispatch another one. A full log or outcome
 volume leaves the original attempt UNKNOWN even after space becomes available. The
 outcome binds the immutable plan digest. Reading that outcome ends automatic
