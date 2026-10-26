@@ -158,6 +158,14 @@ class TestingAddressTests(unittest.TestCase):
             )
 
     def test_canonical_amendment_preserves_copy_and_original_receipts(self) -> None:
+        legacy_payload = self.plan.model_dump(mode="json")
+        legacy_payload.pop("retained_automation", None)
+        self.assertEqual(TestingAddressPlan.model_validate(legacy_payload).digest, self.plan.digest)
+        for automation in ({"foreign-target": True}, {"retained-target": "true"}):
+            with self.subTest(automation=automation), self.assertRaises(ValueError):
+                TestingAddressPlan.model_validate(
+                    {**legacy_payload, "retained_automation": automation}
+                )
         save_address_plan(self.store, self.plan)
         self.assertEqual(read_address_plan(self.store, self.plan.digest), self.plan)
         original = self.fixture.current()
@@ -534,6 +542,8 @@ class TestingAddressTests(unittest.TestCase):
         self.unrelated_inventory_churning = False
 
         def provider_check() -> None:
+            if getattr(self, "retained_auto_deploy", False):
+                raise ValueError("The retained recipient can still deploy automatically")
             if self.unrelated_inventory_churning:
                 raise ValueError("An unrelated preview prevented a provider membership snapshot")
 
@@ -562,6 +572,139 @@ class TestingAddressTests(unittest.TestCase):
                 )
 
         return native, run
+
+    def retained_recipient_execution(
+        self, *, lost_reply_applies: bool
+    ) -> tuple[
+        transport_tests.TestingRouteTransportTests,
+        Callable[[bool], DurableProviderOperationResult],
+        Any,
+    ]:
+        from control_plane import testing_address_preparation as preparation
+        from control_plane.dokploy import api, source, post_deploy
+        from control_plane.testing_address_qualification import AddressDomainInventory
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        native, run = self.native_address_execution()
+        self.retained_auto_deploy = True
+        self.lose_retained_reply = True
+        self.plan = self.plan.model_copy(update={"retained_automation": {"retained-target": True}})
+
+        def inventory(**_kwargs: Any) -> AddressDomainInventory:
+            return AddressDomainInventory(
+                self.plan.domain_inventory_sha256,
+                self.plan.retained_projects,
+                {"retained-target": self.retained_auto_deploy},
+            )
+
+        def update(**kwargs: Any) -> None:
+            self.assertEqual(kwargs["path"], "/api/compose.update")
+            self.assertEqual(
+                kwargs["payload"], {"composeId": "retained-target", "autoDeploy": False}
+            )
+            if lost_reply_applies:
+                self.retained_auto_deploy = False
+            if self.lose_retained_reply:
+                raise NativeSourceUnavailable("The provider update reply was lost")
+
+        self.enterContext(
+            patch.object(preparation, "inspect_address_domains", side_effect=inventory)
+        )
+        self.enterContext(
+            patch.object(
+                source,
+                "read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture"),
+            )
+        )
+        send = self.enterContext(patch.object(api, "dokploy_request", side_effect=update))
+        self.enterContext(patch.object(api, "list_deployments_for_target", return_value=[]))
+        self.enterContext(
+            patch.object(post_deploy, "compose_data_workflow_is_quiescent", return_value=True)
+        )
+        return native, run, send
+
+    def test_retained_preparation_disables_only_reviewed_recipient_before_route_publication(
+        self,
+    ) -> None:
+        native, run, send = self.retained_recipient_execution(lost_reply_applies=True)
+        self.lose_retained_reply = False
+        result = run(False)
+        self.assertEqual(result.status, "completed")
+        send.assert_called_once()
+        self.assertFalse(self.retained_auto_deploy)
+        self.assertIn("publish_v2", native.remote_modes)
+
+    def test_retained_preparation_recovers_lost_reply_without_another_update(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        native, run, send = self.retained_recipient_execution(lost_reply_applies=True)
+        original = self.fixture.current()
+        with self.assertRaises(NativeSourceUnavailable):
+            run(False)
+        self.assertEqual(self.fixture.current(), original)
+        self.assertNotIn("publish_v2", native.remote_modes)
+        result = run(False)
+        self.assertEqual(result.status, "completed")
+        send.assert_called_once()
+        self.assertFalse(self.retained_auto_deploy)
+        self.assertEqual(
+            effective_testing_route(self.store, self.publication), self.plan.route_after
+        )
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(
+                self.operation.operation_id
+            ),
+            self.operation,
+        )
+
+    def test_unsettled_retained_preparation_cannot_retry_or_finish_cancellation(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        native, run, send = self.retained_recipient_execution(lost_reply_applies=False)
+        for cancel in (False, False, True):
+            with self.assertRaises(NativeSourceUnavailable):
+                run(cancel)
+        send.assert_called_once()
+        self.assertNotIn("publish_v2", native.remote_modes)
+        self.retained_auto_deploy = False
+        result = run(True)
+        payload = result.response_payload["result"]
+        assert isinstance(payload, dict)
+        self.assertTrue(payload["cancelled"])
+        send.assert_called_once()
+        self.assertFalse(self.retained_auto_deploy)
+        self.assertNotIn("publish_v2", native.remote_modes)
+
+    def test_recipient_preparation_refuses_active_or_shared_targets_before_dispatch(self) -> None:
+        from types import SimpleNamespace
+        from control_plane.dokploy import api, post_deploy
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        native, run, send = self.retained_recipient_execution(lost_reply_applies=True)
+        original = self.fixture.current()
+        guards = (
+            patch.object(
+                self.store,
+                "list_physical_provider_target_records",
+                return_value=[SimpleNamespace(provider_id="dokploy", target_id="retained-target")],
+            ),
+            patch.object(
+                api,
+                "list_deployments_for_target",
+                return_value=[{"deploymentId": "active-job", "status": "running"}],
+            ),
+            patch.object(post_deploy, "compose_data_workflow_is_quiescent", return_value=False),
+        )
+        for guard in guards:
+            with guard, self.assertRaises(ValueError):
+                run(False)
+        native.containers["retired"]["State"]["Status"] = "running"
+        with self.assertRaises(NativeSourceUnavailable):
+            run(False)
+        send.assert_not_called()
+        self.assertNotIn("publish_v2", native.remote_modes)
+        self.assertEqual(self.fixture.current(), original)
 
     def test_lost_route_reply_recovers_original_attempt_before_canonical_publication(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
@@ -851,6 +994,11 @@ class TestingAddressRecipientTests(unittest.TestCase):
             page.inventory_digest = "unrelated-preview-membership"
             page.projects[0].name = "Renamed unrelated project metadata"
             self.assertEqual(qualification.qualify_address_domains(**arguments), (digest, projects))
+            payloads["retained"]["autoDeploy"] = True
+            preparation = qualification.inspect_address_domains(**arguments)
+            self.assertEqual(preparation.digest, digest)
+            self.assertEqual(preparation.projects, projects)
+            self.assertEqual(preparation.automation, {"retained": True})
             for flag, rows, expected_state in (
                 (True, (), "enabled"),
                 (None, ({"scheduleId": "job"},), "unknown"),
@@ -867,6 +1015,9 @@ class TestingAddressRecipientTests(unittest.TestCase):
                     schedules.assert_called_once()
                     self.assertEqual(caught.exception.auto_deploy, expected_state)
                     self.assertEqual(caught.exception.schedule_count, len(rows))
+                    if flag is not True or rows:
+                        with self.assertRaises(qualification.TestingAddressRecipientUnverified):
+                            qualification.inspect_address_domains(**arguments)
             payloads["retained"]["autoDeploy"] = False
             schedules.return_value = ()
             payloads["foreign"]["domains"] = [{"domainId": "foreign-domain", "host": hostname}]

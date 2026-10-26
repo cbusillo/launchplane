@@ -1309,8 +1309,9 @@ allocation or generation that actually reserves the requested hostname. These
 may be different operations. Production is outside this operation.
 
 Use `mode: dry-run` first. The service saves an immutable private plan and returns
-its `plan_sha256`, current target ID, new canonical hostname and retained original
-hostname. Review that result, then send the same request with `mode: apply`,
+its `plan_sha256`, current target ID, new canonical hostname, retained original
+hostname and `disable_retained_automatic_deployment` target IDs. Review that result,
+then send the same request with `mode: apply`,
 `reviewed_plan_sha256`, and one stable `Idempotency-Key`. `mode: readback` uses the
 same reviewed hash. The installed Launchplane service helper's transport supplies
 the existing credential; no provider credential, caller-supplied topology or new
@@ -1320,8 +1321,14 @@ The reviewed reason is retained in the immutable plan and applied receipt.
 The plan requires exact retained hostname custody in the same product/context,
 a superseded original recipient operation, complete credential-visible provider
 domain membership, and stopped recipients on the existing testing server. The
-old recipients must have automatic deployment explicitly disabled and no target
-schedules. `409 testing_address_recipient_unverified` reports the observed
+old recipients must have known automatic-deployment flags and no target
+schedules. Enabled flags are bound into the reviewed plan; apply disables only
+those exact unbound retained recipients before route publication. Every recipient
+must have automatic deployment explicitly disabled before the route writer runs.
+Active lane aliases, incomplete or nonterminal deployment histories and unresolved
+data workflows refuse preparation. This changes only the automatic-deployment
+flag, without deploying, stopping, deleting or releasing the retained copy.
+`409 testing_address_recipient_unverified` reports the observed
 automatic-deployment tri-state and target schedule count independently, without
 provider values. The shared schedule reader accepts only a complete object
 array; absent, malformed or wrapped inventories refuse rather than becoming an
@@ -1335,6 +1342,11 @@ The retained recipient facts form the comparison digest. Unrelated provider
 membership is not part of that digest. A full census runs immediately before
 each actual route dispatch, including retries of an unsent or busy writer.
 A continuing original that only observes its recorded writer needs no new census.
+Recipient preparation has durable per-target receipts under the original address
+plan. A lost update reply requires observation under that same key; an enabled or
+unknown flag never authorizes a blind repeat. Cancellation settles any original
+preparation first and leaves automatic deployment disabled. Legacy saved plans
+keep their original digest and never acquire an unreviewed preparation step.
 The bounded census runs in the worker; dispatch rechecks its lease and physical
 fence afterward. Matching
 applied or dormant TCP routers also refuse qualification because

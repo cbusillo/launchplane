@@ -65,6 +65,7 @@ def cancel_testing_address(
     adapter: TestingAddressAdapter, lease: ProviderOperationLease
 ) -> ProviderMutationOutcome:
     from control_plane.testing_address import ADDRESS_EFFECT_ROUTE
+    from control_plane.testing_address_preparation import prepare_address_recipients
 
     assert isinstance(lease, ProviderEvidenceLease)
     if settled_testing_address(adapter.store, adapter.plan) is not None:
@@ -77,6 +78,7 @@ def cancel_testing_address(
         read_testing_address_recovery_copy(adapter.store, adapter.plan)
 
     guard()
+    prepare_address_recipients(adapter, lease, settle_only=True)
     original = adapter.store.read_idempotency_record(
         scope=ADDRESS_SCOPE, route_path=ADDRESS_EFFECT_ROUTE, idempotency_key=adapter.plan.digest
     )
