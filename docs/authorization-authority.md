@@ -424,8 +424,9 @@ Odoo preview apply uses the same source-owned Director identity boundary as
 [testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
 including preview destruction. It requires the caller's exact service-issued
 plan and an existing uniquely owned preview. Stable lanes cannot be substituted
-for a preview. The frozen plan must name the discovered compose and cannot alias
-a recorded stable target. Completed same-key replay and read-only outcome
+for a preview. The frozen plan must name the discovered compose, or create the
+replacement of an owned destroyed preview without a recorded target binding.
+It cannot alias a recorded stable target. Completed same-key replay and read-only outcome
 reconciliation remain available after qualification expires or lifecycle changes.
 Scoped callers retain their explicit policy rules and inherit no Director authority.
 Source-read permission for an import credential remains separate from execution.
@@ -440,8 +441,10 @@ only; they cannot admit runtime sync or another preview mutation. Unknown facts 
 observations retain their separate service-collector requirement. Same-key
 observation and lifecycle finalization remain available after evidence expires.
 A unique service preview is required. A fresh issued refresh plan can rebuild
-an owned destroyed preview whose provider target still exists, retaining its
-history until the new generation passes. The issued plan must postdate the
+an owned destroyed preview, retaining its history until the new generation
+passes. An existing target keeps its physical resource qualification. A newly
+created recipient uses the native creation and storage-isolation path; the
+same ownership and protection checkpoint still runs before every effect. The issued plan must postdate the
 recorded teardown authority; unknown teardown
 authority and stale plans still refuse. Other disposable-lane operations do not
 gain permission from destroyed history. A staff hold or recorded `in_use`, `only_copy` or shared
