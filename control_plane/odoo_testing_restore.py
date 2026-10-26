@@ -472,9 +472,6 @@ def build_fresh_testing_restore_script(
     return render_fresh_testing_restore_spec(spec)
 
 
-# Native capture is a separate bounded literal, so reserving this many script
-# bytes before capture/delivery bounds the exact final script independently of
-# how the rest of the input compresses.
 NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES = 1024
 
 
@@ -496,7 +493,7 @@ def render_fresh_testing_restore_spec(spec: dict[str, object]) -> str:
                 "filestore",
             )
         }
-        if len(repr(capture).encode()) > NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES:
+        if len(json.dumps(capture, sort_keys=True).encode()) > NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES:
             from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 
             raise ScheduleMaterializationTooLarge()

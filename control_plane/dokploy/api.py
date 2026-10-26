@@ -1973,6 +1973,9 @@ def validate_dokploy_schedule_script(schedule_payload: JsonObject) -> int:
         from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 
         raise ScheduleMaterializationTooLarge()
+    from control_plane.dokploy.host_package import validate_bootstrap_scripts
+
+    validate_bootstrap_scripts(schedule_payload)
     return materialization_bytes
 
 
@@ -1987,16 +1990,6 @@ def upsert_dokploy_schedule(
     schedule_payload: JsonObject,
 ) -> JsonObject:
     validate_dokploy_schedule_script(schedule_payload)
-    from control_plane.dokploy.host_package import ensure_schedule_host_package
-
-    ensure_schedule_host_package(
-        host=host,
-        token=token,
-        target_id=target_id,
-        schedule_type=schedule_type,
-        app_name=app_name,
-        payload=schedule_payload,
-    )
     existing_schedule = find_matching_dokploy_schedule(
         host=host,
         token=token,

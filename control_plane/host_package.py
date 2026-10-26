@@ -6,7 +6,15 @@ import io
 import json
 from pathlib import Path
 import shlex
+import re
 import zipfile
+
+from control_plane.host_package_runtime import program_version, HOST_PACKAGE_VERSION_MARKER
+
+HOST_PACKAGE_CHUNK_BYTES = 24 * 1024
+HOST_SCHEDULE_HEADER = "#!/usr/bin/env bash\nset -euo pipefail\n"
+HOST_PACKAGE_PATH_PREFIX = "$HOME/.local/state/launchplane-host/"
+HOST_INPUT_DELIMITER = "LP_HOST_INPUT"
 
 
 @dataclass(frozen=True)
@@ -102,18 +110,99 @@ def host_command(action: str, spec: dict[str, object], *, prefix: str = "") -> s
     package = host_package()
     if action not in package.actions:
         raise ValueError("Unknown packaged host action")
-    encoded = base64.b64encode(
-        json.dumps(compact_host_input(spec), sort_keys=True).encode()
-    ).decode()
-    path = '"$HOME/.local/state/launchplane-host/' + package.version + '.pyz"'
-    arguments = [action, "--input", encoded]
+    compact = compact_host_input(spec)
+    path = '"' + HOST_PACKAGE_PATH_PREFIX + package.version + '.pyz"'
+    arguments = [
+        action,
+        "--program-version",
+        program_version(action, compact, package.programs),
+        "--input",
+        "-",
+    ]
     if prefix:
         arguments.extend(["--prefix", prefix])
     return "python3 " + path + " " + shlex.join(arguments)
 
 
 def host_schedule(action: str, spec: dict[str, object]) -> str:
-    return "#!/usr/bin/env bash\nset -euo pipefail\nexec " + host_command(action, spec) + "\n"
+    return (
+        HOST_SCHEDULE_HEADER
+        + "exec "
+        + host_command(action, spec)
+        + " <<'"
+        + HOST_INPUT_DELIMITER
+        + "'\n"
+        + json.dumps(compact_host_input(spec), sort_keys=True)
+        + "\n"
+        + HOST_INPUT_DELIMITER
+        + "\n"
+    )
+
+
+@dataclass(frozen=True)
+class HostInvocation:
+    package_version: str
+    action: str
+    program_version: str
+    spec: dict[str, object]
+
+
+def host_invocation(script: object) -> HostInvocation | None:
+    if not isinstance(script, str) or not script.startswith(HOST_SCHEDULE_HEADER):
+        return None
+    command, separator, tail = script[len(HOST_SCHEDULE_HEADER) :].partition(
+        " <<'" + HOST_INPUT_DELIMITER + "'\n"
+    )
+    ending = "\n" + HOST_INPUT_DELIMITER + "\n"
+    if not separator or not tail.endswith(ending):
+        return None
+    try:
+        arguments = shlex.split(command)
+        if (
+            len(arguments) != 8
+            or arguments[:2] != ["exec", "python3"]
+            or arguments[4] != "--program-version"
+            or arguments[6:] != ["--input", "-"]
+        ):
+            return None
+        path = re.fullmatch(
+            re.escape(HOST_PACKAGE_PATH_PREFIX) + r"([a-f0-9]{64})\.pyz", arguments[2]
+        )
+        if path is None or not re.fullmatch(r"[a-f0-9]{64}", arguments[5]):
+            return None
+        spec = json.loads(tail[: -len(ending)])
+        if not isinstance(spec, dict):
+            return None
+    except (ValueError, TypeError):
+        return None
+    return HostInvocation(path.group(1), arguments[3], arguments[5], spec)
+
+
+def host_schedules_match(observed: object, expected: str) -> bool:
+    if observed == expected:
+        return True
+    current = host_invocation(expected)
+    if current is None:
+        return False
+    previous = host_invocation(observed)
+    if previous is not None:
+        return (previous.action, previous.program_version, previous.spec) == (
+            current.action,
+            current.program_version,
+            current.spec,
+        )
+    if current.action != "resources":
+        return False
+    encoded = base64.b64encode(json.dumps(current.spec, sort_keys=True).encode()).decode()
+    legacy = (
+        HOST_SCHEDULE_HEADER
+        + "python3 - "
+        + encoded
+        + " <<'LP_TESTING_RESOURCES'\n"
+        + host_package().programs["resources"]
+        + "\nLP_TESTING_RESOURCES\n"
+    )
+    return observed == legacy
 
 
 def main() -> None:
@@ -125,7 +214,7 @@ def main() -> None:
     package = host_package()
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_bytes(package.content)
-    print("launchplane_host_version=" + package.version)
+    print(HOST_PACKAGE_VERSION_MARKER + "=" + package.version)
 
 
 if __name__ == "__main__":

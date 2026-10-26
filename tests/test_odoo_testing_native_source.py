@@ -476,6 +476,40 @@ class NativeSourceTransportTests(unittest.TestCase):
     def test_long_private_payload_is_read_after_loader_disables_tty_echo_and_canonical_mode(
         self,
     ) -> None:
+        payload: dict[str, object] = {"fixture": "private-fixture" * 5000}
+        program = "import sys,json,base64; value=json.loads(base64.b64decode(sys.argv[1])); print(sys.argv[2]+json.dumps({'type':'complete','length':len(value['fixture'])}),flush=True)"
+        program = repr("fixture program" * 20000) + "\n" + program
+        frames, raw, sent = self.terminal_program(program, payload)
+        self.assertEqual(frames, [{"type": "complete", "length": len(str(payload["fixture"]))}])
+        private = json.loads(next(message for message in sent if message.startswith("{")))[
+            "payload"
+        ]
+        self.assertNotIn(private[:512].encode(), raw)
+
+    @unittest.skipUnless(os.name == "posix", "The registered terminal transport uses a POSIX tty")
+    def test_packaged_source_loads_in_memory_and_dispatch_guard_runs_once(self) -> None:
+        calls = []
+
+        def guard(send: Callable[[], None]) -> None:
+            calls.append("dispatch")
+            send()
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}):
+            with self.assertRaises(transport.NativeProgramFailed):
+                self.terminal_program(
+                    transport.NATIVE_ODOO_SOURCE_READ_PROGRAM,
+                    {"source": {}, "mode": "probe"},
+                    guard,
+                )
+            self.assertFalse(list(Path(directory).iterdir()))
+        self.assertEqual(calls, ["dispatch"])
+
+    def terminal_program(
+        self,
+        program: str,
+        payload: dict[str, object],
+        dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+    ) -> tuple[list[dict[str, object]], bytes, list[str]]:
         import pty
 
         master, slave = pty.openpty()
@@ -505,9 +539,6 @@ class NativeSourceTransportTests(unittest.TestCase):
                     data = data[os.write(master, data) :]
 
         frames: list[dict[str, object]] = []
-        payload: dict[str, object] = {"fixture": "private-fixture" * 5000}
-        program = "import sys,json,base64; value=json.loads(base64.b64decode(sys.argv[1])); print(sys.argv[2]+json.dumps({'type':'complete','length':len(value['fixture'])}),flush=True)"
-        program = repr("fixture program" * 20000) + "\n" + program
         try:
             transport._read_program(
                 Terminal(),
@@ -515,13 +546,10 @@ class NativeSourceTransportTests(unittest.TestCase):
                 payload=payload,
                 timeout_seconds=10,
                 receive=frames.append,
+                dispatch_guard=dispatch_guard,
             )
             child.wait(timeout=5)
-            self.assertEqual(frames, [{"type": "complete", "length": len(str(payload["fixture"]))}])
-            private = json.loads(next(message for message in sent if message.startswith("{")))[
-                "payload"
-            ]
-            self.assertNotIn(private[:512].encode(), raw)
+            return frames, bytes(raw), sent
         finally:
             if child.poll() is None:
                 child.kill()
@@ -571,10 +599,7 @@ class NativeSourceTransportTests(unittest.TestCase):
         connect.return_value.__enter__ = Mock(return_value=connection)
         connect.return_value.__exit__ = Mock(return_value=False)
         frames: list[dict[str, object]] = []
-        with (
-            patch.object(transport, "connect", connect),
-            patch("control_plane.dokploy.host_package.ensure_host_package"),
-        ):
+        with patch.object(transport, "connect", connect):
             transport.read_native_source(
                 host="https://provider.invalid",
                 token="private-fixture",

@@ -10,6 +10,9 @@ import sys
 import tempfile
 
 
+HOST_PACKAGE_INSTALLED_MARKER = "launchplane_host_installed"
+
+
 def private_directory(path: Path) -> None:
     path.mkdir(mode=0o700, exist_ok=True)
     metadata = path.lstat()
@@ -47,11 +50,12 @@ def install(spec: dict[str, object]) -> dict[str, object]:
     root = home / ".local/state/launchplane-host"
     destination = root / (version + ".pyz")
     if destination.exists() or destination.is_symlink():
-        if hashlib.sha256(regular_bytes(destination, 4 * 1024 * 1024)).hexdigest() != version:
-            raise ValueError("Installed host package differs")
-        return {"type": "complete", "installed": True, "version": version}
+        if hashlib.sha256(regular_bytes(destination, 4 * 1024 * 1024)).hexdigest() == version:
+            return {"type": "complete", "installed": True, "version": version}
     if spec["mode"] == "inspect":
         return {"type": "complete", "installed": False, "version": version}
+    if spec["mode"] == "require":
+        raise ValueError("Required host package version is unavailable")
     staging = root / version
     private_directory(staging)
     descriptor = os.open(
@@ -61,32 +65,43 @@ def install(spec: dict[str, object]) -> dict[str, object]:
         if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
             raise ValueError("Host package lock is not a regular file")
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if (
+            destination.exists()
+            and hashlib.sha256(regular_bytes(destination, 4 * 1024 * 1024)).hexdigest() == version
+        ):
+            return {"type": "complete", "installed": True, "version": version}
         if spec["mode"] == "chunk":
-            index = spec["index"]
-            if type(index) is not int or not 0 <= index < 128:
-                raise ValueError("Invalid host package chunk")
             encoded = spec["content"]
             if not isinstance(encoded, str):
                 raise ValueError("Invalid host package chunk")
             content = base64.b64decode(encoded, validate=True)
             if not 0 < len(content) <= 48 * 1024:
                 raise ValueError("Invalid host package chunk")
-            path = staging / str(index)
+            path = staging / hashlib.sha256(content).hexdigest()
             if path.exists() or path.is_symlink():
                 if regular_bytes(path, 48 * 1024) != content:
-                    raise ValueError("Host package chunk differs")
+                    publish_bytes(path, content)
             else:
                 publish_bytes(path, content)
             return {"type": "complete", "installed": False, "version": version}
         if spec["mode"] != "commit":
             raise ValueError("Invalid host package installation mode")
-        count = spec["count"]
-        if type(count) is not int or not 0 < count <= 128:
+        chunks = spec["chunks"]
+        if (
+            not isinstance(chunks, list)
+            or not 0 < len(chunks) <= 128
+            or not all(
+                isinstance(item, str) and re.fullmatch(r"[a-f0-9]{64}", item) for item in chunks
+            )
+        ):
             raise ValueError("Invalid host package chunk count")
-        content = b"".join(regular_bytes(staging / str(index), 48 * 1024) for index in range(count))
+        content = b"".join(regular_bytes(staging / item, 48 * 1024) for item in chunks)
         if len(content) > 4 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != version:
             raise ValueError("Host package integrity failed")
         publish_bytes(destination, content)
+        for chunk in staging.iterdir():
+            if re.fullmatch(r"[a-f0-9]{64}", chunk.name):
+                chunk.unlink(missing_ok=True)
     return {"type": "complete", "installed": True, "version": version}
 
 
@@ -107,10 +122,18 @@ def main() -> None:
     prefix = sys.argv[2]
     try:
         result = install(spec)
-    except (OSError, ValueError, KeyError, TypeError):
-        print(prefix + json.dumps({"type": "failed"}), flush=True)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        reason = str(error) if isinstance(error, ValueError) else type(error).__name__
+        sites = []
+        trace = error.__traceback__
+        while trace is not None:
+            if trace.tb_frame.f_code.co_filename == install.__code__.co_filename:
+                sites.append(trace.tb_lineno)
+            trace = trace.tb_next
+        print(prefix + json.dumps({"type": "failed", "reason": reason, "sites": sites}), flush=True)
         raise SystemExit(1) from None
     print(prefix + json.dumps(result), flush=True)
+    print(HOST_PACKAGE_INSTALLED_MARKER + "=" + str(result["installed"]).lower(), flush=True)
 
 
 if __name__ == "__main__":

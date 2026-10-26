@@ -253,17 +253,27 @@ def _read_program(
         prompt = connection.recv(timeout=_remaining(deadline))
         prompt_text = prompt.decode() if isinstance(prompt, bytes) else prompt
     loader = (
-        "import base64,json,os,runpy,sys,termios,zlib; a=termios.tcgetattr(0);"
+        "import base64,json,sys,termios; a=termios.tcgetattr(0);"
         "a[3]&=~(termios.ECHO|termios.ICANON|termios.IEXTEN);"
         "a[0]&=~(termios.ICRNL|termios.IXON);a[6][termios.VMIN]=1;a[6][termios.VTIME]=0;"
         "termios.tcsetattr(0,termios.TCSANOW,a);print('\\n'+sys.argv[1]+'\\n',flush=True);"
         "line=sys.stdin.readline(262145);"
         "assert line.endswith('\\n') and len(line)<=262144;v=json.loads(line);"
-        "sys.argv=([os.path.expanduser(v['package']),v['action'],'--input',v['payload'],'--prefix',sys.argv[2]]"
+        "exec(base64.b64decode(v['loader'],validate=True))"
+    )
+    dispatcher = (
+        "import hashlib,io,zipfile,zlib;"
+        "chunks=v.get('archive_chunks',0);assert type(chunks) is int and 0<=chunks<=128;"
+        "archive=b''.join(base64.b64decode(sys.stdin.readline(65538).rstrip('\\n'),validate=True) for _ in range(chunks));"
+        "assert 'action' not in v or hashlib.sha256(archive).hexdigest()==v['archive_sha256'];"
+        "sys.argv=(['launchplane-host',v['action'],'--input','-','--prefix',sys.argv[2]]"
         " if 'action' in v else [sys.argv[0],v['payload'],sys.argv[2]]);"
-        "runpy.run_path(sys.argv[0],run_name='__main__') if 'action' in v"
+        "sys.stdin=io.StringIO(base64.b64decode(v['payload']).decode()) if 'action' in v else sys.stdin;"
+        "exec(compile(zipfile.ZipFile(io.BytesIO(archive)).read('__main__.py'),'<launchplane-host>','exec'),"
+        "{'__name__':'__main__','HOST_PACKAGE_CONTENT':archive}) if 'action' in v"
         " else exec(zlib.decompress(base64.b64decode(v['program'],validate=True)))"
     )
+    encoded_dispatcher = base64.b64encode(dispatcher.encode()).decode()
     # Replace the interactive shell before sending any private payload. The
     # loader itself disables canonical input/echo and then proves readiness;
     # shell readline can otherwise reset tty settings and truncate long input.
@@ -275,7 +285,11 @@ def _read_program(
     for line in lines:
         if line == ready:
             break
-    from control_plane.host_package import compact_host_input, host_package
+    from control_plane.host_package import (
+        compact_host_input,
+        host_package,
+        HOST_PACKAGE_CHUNK_BYTES,
+    )
 
     package = host_package()
     action = next(
@@ -291,18 +305,31 @@ def _read_program(
         raise NativeSourceUnavailable("The fixed remote read exceeds the transport argument bound.")
 
     def dispatch() -> None:
-        message = (
-            json.dumps(
-                {
-                    "action": action,
-                    "package": "~/.local/state/launchplane-host/" + package.version + ".pyz",
-                    "payload": encoded,
-                }
-                if action is not None
-                else {"program": encoded_program, "payload": encoded}
+        if action is None:
+            message = (
+                json.dumps(
+                    {"loader": encoded_dispatcher, "program": encoded_program, "payload": encoded}
+                )
+                + "\n"
             )
-            + "\n"
-        )
+        else:
+            chunks = [
+                package.content[offset : offset + HOST_PACKAGE_CHUNK_BYTES]
+                for offset in range(0, len(package.content), HOST_PACKAGE_CHUNK_BYTES)
+            ]
+            message = (
+                json.dumps(
+                    {
+                        "loader": encoded_dispatcher,
+                        "action": action,
+                        "archive_sha256": package.version,
+                        "archive_chunks": len(chunks),
+                        "payload": encoded,
+                    }
+                )
+                + "\n"
+            )
+            message += "".join(base64.b64encode(chunk).decode() + "\n" for chunk in chunks)
         if abort_send is None:
             connection.send(message)
             return
@@ -524,18 +551,6 @@ def run_managed_server_program(
     logger = logging.Logger("launchplane-private-source", level=logging.CRITICAL + 1)
     logger.disabled = True
     logger.propagate = False
-    from control_plane.host_package import host_package
-    from control_plane.dokploy.host_package import ensure_host_package
-
-    package = host_package()
-    if any(package.programs[member] == program for member in package.actions.values()):
-        ensure_host_package(
-            host=host,
-            token=token,
-            server_id=server_id,
-            package=package,
-            dispatch_guard=dispatch_guard,
-        )
     try:
         # The sync client performs one handshake. It does not reconnect or follow
         # redirects; no proxy, cookie or alternate credential is selected.
