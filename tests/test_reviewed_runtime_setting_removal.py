@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.runtime_setting_removal import RuntimeSettingRemovalRequest, REVIEW_ROUTE, ROUTE
 from control_plane.service_auth import (
     GitHubHumanIdentity,
@@ -326,6 +327,50 @@ class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(applied.status_code, 200, applied.text)
                 self.assertTrue(applied.json()["result"]["applied"])
                 self.assertNotIn("private-value", applied.text)
+
+    async def test_stale_apply_reports_rolled_back_attempt_and_allows_fresh_review(self) -> None:
+        sessions, _ = _human_session_manager()
+        with _database_app(policy(), human_session_manager=sessions) as (store, _, app):
+            store.write_runtime_environment_record(runtime())
+            async with lifespan_client(app) as client:
+                dry = await client.post(
+                    ROUTE,
+                    json=request().model_dump(mode="json"),
+                    headers=_browser_headers(sessions, admin())[0],
+                )
+                plan = dry.json()["result"]
+                changed = runtime(env={"KEEP": "changed-survivor"})
+                store.write_runtime_environment_record(changed)
+                body = request(
+                    mode="apply",
+                    review_id=plan["review_id"],
+                    reviewed_plan_sha256=plan["plan_sha256"],
+                )
+                rejected = await client.post(
+                    ROUTE,
+                    json=body.model_dump(mode="json"),
+                    headers={
+                        **_browser_headers(sessions, admin())[0],
+                        "Idempotency-Key": "stale-attempt",
+                    },
+                )
+                self.assertEqual(rejected.status_code, 409, rejected.text)
+                self.assertEqual(rejected.json()["error"]["code"], "runtime_setting_removal_stale")
+                self.assertEqual(store.list_runtime_environment_records(), (changed,))
+                self.assertIsNone(
+                    store.read_idempotency_record(
+                        scope=idempotency_scope(admin()),
+                        route_path=ROUTE,
+                        idempotency_key="stale-attempt",
+                    )
+                )
+                fresh = await client.post(
+                    ROUTE,
+                    json=request(keys=["KEEP"]).model_dump(mode="json"),
+                    headers=_browser_headers(sessions, admin())[0],
+                )
+                self.assertEqual(fresh.status_code, 200, fresh.text)
+                self.assertFalse(fresh.json()["result"]["applied"])
 
 
 class RuntimeRemovalPostgresScenarios:

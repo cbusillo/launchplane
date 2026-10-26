@@ -7,16 +7,46 @@ from fastapi import Depends, Header, Response
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
-from control_plane.runtime_setting_removal import ROUTE, RuntimeSettingRemovalRequest
+from control_plane.runtime_setting_removal import (
+    ROUTE,
+    RuntimeSettingRemovalRequest,
+    RuntimeSettingRemovalStale,
+)
 from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
+
+
+class RuntimeSettingRemovalPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    product: str
+    scope: str
+    context: str
+    instance: str
+    removed_keys: list[str]
+    record_sha256: str
+    updated_at: str
+    surviving_keys: list[str]
+    unprintable_survivor_count: int
+    surviving_value_count: int
+    retirement_intent_count: int
+    record_deleted: bool
+    requires_compatible_readers_and_rollback: bool
+    authority_sha256: str
+    plan_sha256: str
+    review_id: str
+    applied: bool
+    applied_at: str | None = None
+    audit_review_id: str | None = None
+    readback_matches: bool | None = None
+    current_record_present: bool | None = None
+    replayed: bool | None = None
 
 
 class RuntimeSettingRemovalResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     status: str = "ok"
     trace_id: str
-    result: dict[str, object]
+    result: RuntimeSettingRemovalPlan
 
 
 def register_runtime_setting_removal_routes(
@@ -55,6 +85,13 @@ def register_runtime_setting_removal_routes(
                 code="authorization_denied",
                 message="Identity cannot remove or review these settings.",
             ) from None
+        except RuntimeSettingRemovalStale:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code="runtime_setting_removal_stale",
+                message="This removal did not commit because its reviewed state changed. Review the current record again.",
+            ) from None
         except (ValueError, FileNotFoundError):
             raise dependencies.http_error(
                 status_code=409,
@@ -62,13 +99,16 @@ def register_runtime_setting_removal_routes(
                 code="runtime_setting_removal_unverified",
                 message="Refresh the exact review or read the original removal receipt; no retry under a new key.",
             ) from None
-        return RuntimeSettingRemovalResponse(trace_id=trace, result=result)
+        return RuntimeSettingRemovalResponse(
+            trace_id=trace, result=RuntimeSettingRemovalPlan.model_validate(result)
+        )
 
     app.add_api_route(
         ROUTE,
         removal,
         methods=["POST"],
         response_model=RuntimeSettingRemovalResponse,
+        response_model_exclude_none=True,
         operation_id="runtime_setting_removal",
         summary="Review, remove and read back exact stored plain-setting keys",
         responses={

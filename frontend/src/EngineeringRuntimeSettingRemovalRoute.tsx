@@ -5,7 +5,7 @@ import type { BrowserOperationOptions } from "./browser-operation";
 import { LaunchplaneApiError, removeRuntimeSettings } from "./api";
 import { EngineeringRouteFrame } from "./EngineeringRouteUi";
 import { InlineFormError, OperationNotice } from "./ProductConfigForms";
-import { productConfigOperationFailure } from "./product-config-operation";
+import { productConfigFailureCertainty, productConfigOperationFailure } from "./product-config-operation";
 import { recoverRemovalRequest, type RemovalResponse } from "./runtime-setting-removal";
 import { useBrowserOperationController } from "./use-browser-operation";
 import type { RuntimeSettingRemovalRequest } from "./generated/openapi.ts";
@@ -41,8 +41,9 @@ function RemovalForm({ actorId }: { actorId: number }) {
       return response;
     },
     failureFor: productConfigOperationFailure,
-    failureCertainty: (failure: unknown, dispatched: boolean): "definitive" | "uncertain" =>
-      !dispatched || (failure instanceof LaunchplaneApiError && failure.statusCode < 500) ? "definitive" : "uncertain",
+    failureCertainty: (failure: unknown, dispatched: boolean): "definitive" | "uncertain" | "settled" =>
+      failure instanceof LaunchplaneApiError && failure.code === "runtime_setting_removal_stale"
+        ? "settled" : productConfigFailureCertainty(failure, dispatched),
   };
   const planOperation = useBrowserOperationController({ ...operationOptions, scope: `${scope}:plan`, readOnly: true });
   const applyOperation = useBrowserOperationController({ ...operationOptions, scope: `${scope}:apply` });
@@ -53,8 +54,7 @@ function RemovalForm({ actorId }: { actorId: number }) {
   const busy = [planOperation, applyOperation, readOperation].some(operation => ["queued", "submitting"].includes(operation.state.phase));
   const uncertain = applyOperation.state.requiresIdempotencyContinuity;
   const committed = Boolean(completion || (saved && recordedCompletion));
-  const needsReadback = committed && !readback?.result.readback_matches;
-  const locked = busy || uncertain || needsReadback;
+  const locked = busy || uncertain;
   const canPlan = Boolean(draft.product.trim() && draft.reason.trim() && keysText.trim() &&
     (draft.scope === "global" || draft.context?.trim()) && (draft.scope !== "instance" || draft.instance?.trim()));
 
@@ -65,9 +65,11 @@ function RemovalForm({ actorId }: { actorId: number }) {
 
   async function preview() {
     if (locked || !canPlan) return;
-    applyOperation.reset(); setSaved(null);
-    sessionStorage.removeItem(storageKey);
-    sessionStorage.removeItem(`${storageKey}:committed`); setRecordedCompletion(false);
+    try {
+      sessionStorage.removeItem(storageKey);
+      sessionStorage.removeItem(`${storageKey}:committed`);
+    } catch { setError("Recovery storage is unavailable. Nothing was sent; enable session storage before reviewing."); return; }
+    applyOperation.reset(); setSaved(null); setRecordedCompletion(false);
     setError(""); setReview(null); setConfirmed(false); setCompletion(null); setReadback(null);
     const request: RuntimeSettingRemovalRequest = { ...draft, mode: "dry-run", review_id: "", reviewed_plan_sha256: "",
       keys: keysText.split(/[\s,]+/).filter(Boolean) };
@@ -131,11 +133,11 @@ function RemovalForm({ actorId }: { actorId: number }) {
     </div> : null}
     {uncertain ? <p role="alert">Apply outcome is uncertain. The original request and operation key are retained. Retry only that same Apply; no new review or edit is allowed.
       {!saved ? " The retained request is unavailable. Keep the operation key and resolve the original request before continuing." : ""}</p> : null}
-    {committed ? <p role="status">Removal committed. {readback?.result.readback_matches ? "Current stored record matches the reviewed removal." : "Current readback is unverified. Check again before another change."}</p> : null}
+    {committed ? <p role="status">Removal committed. {readback?.result.readback_matches ? "Current stored record matches the reviewed removal." : "Current readback is unverified. Check again or review the current record before another removal."}</p> : null}
     <div className="product-config-actions">
       <button type="button" className="button" disabled={locked || !canPlan} onClick={() => void preview()}>Review removal</button>
-      <button type="button" className="button button-primary" disabled={busy || needsReadback || (uncertain ? !saved : !plan || !confirmed)} onClick={() => void apply()}>{uncertain ? "Retry original removal" : "Remove reviewed settings"}</button>
-      {committed && saved ? <button type="button" className="button" disabled={busy} onClick={() => void checkReadback(saved)}>Check current record</button> : null}
+      <button type="button" className="button button-primary" disabled={busy || (uncertain ? !saved : !plan || !confirmed)} onClick={() => void apply()}>{uncertain ? "Retry original removal" : "Remove reviewed settings"}</button>
+      {saved && (committed || uncertain) ? <button type="button" className="button" disabled={busy} onClick={() => void checkReadback(saved)}>Check current record</button> : null}
     </div>
   </section>;
 }

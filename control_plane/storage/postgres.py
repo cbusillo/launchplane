@@ -31841,6 +31841,7 @@ class PostgresRecordStore(HumanSessionStore):
         from control_plane.runtime_setting_removal import (
             ROUTE,
             REVIEW_ROUTE,
+            RuntimeSettingRemovalStale,
             removal_plan,
             request_fingerprint,
         )
@@ -32028,7 +32029,7 @@ class PostgresRecordStore(HumanSessionStore):
             # and re-read every precondition in that case, never reuse a stale row.
             self._lock_active_authz_policy(session)
             if self._locked_active_authz_policy_record(session) != active:
-                raise ValueError("Policy changed during removal.")
+                raise RuntimeSettingRemovalStale("Policy changed during removal.")
             self._lock_product_authority_bundle_write(session)
             session.expire_all()
             current_row = session.scalar(
@@ -32040,18 +32041,19 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             if current_row is None:
-                raise ValueError("Reviewed runtime record disappeared.")
+                raise RuntimeSettingRemovalStale("Reviewed runtime record disappeared.")
             current = RuntimeEnvironmentRecord.model_validate(current_row.payload)
-            if (
-                removal_plan(
+            try:
+                current_plan = removal_plan(
                     current,
                     request,
                     authority_sha256=authority_sha256,
                     private_nonce=str(review.response_payload["private_nonce"]),
                 )
-                != plan
-            ):
-                raise ValueError("Reviewed runtime record or authority changed.")
+            except ValueError as error:
+                raise RuntimeSettingRemovalStale(str(error)) from None
+            if current_plan != plan:
+                raise RuntimeSettingRemovalStale("Reviewed runtime record or authority changed.")
             replacement = None
             if not plan["record_deleted"]:
                 replacement = RuntimeEnvironmentRecord.model_validate(

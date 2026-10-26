@@ -103,3 +103,7 @@ def removal_plan(
     }
     digest = request_fingerprint({"intent": request.intent(), "plan": plan})
     return {**plan, "plan_sha256": digest, "review_id": "runtime-removal-" + digest}
+
+
+class RuntimeSettingRemovalStale(ValueError):
+    pass

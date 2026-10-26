@@ -64,7 +64,11 @@ returns the original result; it does not reapply. `mode: readback` uses the
 same review binding and compares fresh stored survivors/absence and retirement
 intent, returning `readback_matches`; false means drift or incomplete removal,
 not success. The commit receipt identifies historical completion; readback is
-the separate current-state proof.
+the separate current-state proof. A 409 `runtime_setting_removal_stale` means
+this exact attempt acquired its reservation but refused changed state before
+writing, and the transaction rolled back. The browser may settle that attempt
+and request a fresh review. The generic `runtime_setting_removal_unverified`
+response does not prove that outcome and preserves uncertain-request continuity.
 
 Rollback custody stays inside the service's private database in the saved
 review's original record. The preview preimage is not an HTTP response and has
@@ -170,8 +174,11 @@ CSRF protection and one retained operation key. The original request stays in th
 browser tab's session storage for same-request recovery after a lost reply or
 reload. An uncertain outcome locks edits and new reviews; **Retry original removal**
 reuses the request and key. Missing recovery storage blocks submission. A stale
-first attempt requires a fresh review; a stale retry after an uncertain response
-keeps the original operation locked. A committed removal is followed by an
-independent readback. An unavailable or mismatched readback stays unverified and
-blocks a new change until **Check current record** matches, including after reload.
+attempt that is proven rolled back requires a fresh review, including after
+an uncertain reply. An unverified reservation keeps the original operation locked.
+A committed removal is followed by an independent readback. An unavailable or
+mismatched readback stays unverified. **Check current record**
+can repeat that read, including while an Apply is uncertain. After a confirmed
+commit, a fresh review can inspect the current record even if another writer
+has changed it; the historical receipt does not promise current agreement.
 Runtime sync, deployment and production acceptance remain separate operations.

@@ -16,8 +16,8 @@ async function setup(page: Page, outcome = "ok", admin = true) {
     requests.push({ body, key });
     const applies = requests.filter(request => request.body.mode === "apply");
     if (body.mode === "apply" && applies.length === 1 && outcome.startsWith("uncertain")) { await route.abort("failed"); return; }
-    if (body.mode === "apply" && (outcome === "stale" || outcome === "uncertain-stale")) {
-      await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "runtime_setting_removal_unverified", message: "Refresh the exact review or read the original removal receipt." } } }); return;
+    if (body.mode === "apply" && (outcome === "stale" || outcome === "uncertain-stale" || outcome === "uncertain-pending")) {
+      await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: outcome === "uncertain-pending" ? "runtime_setting_removal_unverified" : "runtime_setting_removal_stale", message: "Refresh the exact review or read the original removal receipt." } } }); return;
     }
     const digest = "a".repeat(64);
     await route.fulfill({ json: { status: "ok", trace_id: body.mode, result: {
@@ -70,7 +70,7 @@ test("stored removal reviews exact scope, invalidates edits, applies and reads b
   expect(errors).toEqual([]);
 });
 
-for (const outcome of ["uncertain", "uncertain-stale"]) {
+for (const outcome of ["uncertain", "uncertain-stale", "uncertain-pending"]) {
   test(`original request and key survive reload after ${outcome}`, async ({ page }) => {
     const { requests } = await setup(page, outcome);
     await page.goto("/ui/engineering/runtime-setting-removal");
@@ -84,7 +84,14 @@ for (const outcome of ["uncertain", "uncertain-stale"]) {
     if (outcome === "uncertain") await expect(page.getByRole("status")).toContainText("Current stored record matches");
     else {
       await waitForState(() => requests.filter(request => request.body.mode === "apply").length).toBe(2);
-      await expect(page.getByLabel("Product", { exact: true })).toBeDisabled();
+      if (outcome === "uncertain-stale") {
+        await expect(page.getByLabel("Product", { exact: true })).toBeEnabled();
+        await expect(page.getByRole("button", { name: "Review removal", exact: true })).toBeEnabled();
+      } else {
+        await expect(page.getByLabel("Product", { exact: true })).toBeDisabled();
+        await page.getByRole("button", { name: "Check current record" }).click();
+        await expect(page.getByLabel("Product", { exact: true })).toBeDisabled();
+      }
     }
     const applies = requests.filter(request => request.body.mode === "apply");
     expect(applies).toHaveLength(2);
@@ -99,33 +106,47 @@ test("stale review, mismatched response and absent admin authority cannot procee
   await page.getByRole("button", { name: "Remove reviewed settings" }).click();
   await expect(page.getByRole("button", { name: "Review removal", exact: true })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Remove reviewed settings" })).toBeDisabled();
-  await setup(page, "mismatch");
+  const mismatch = await setup(page, "mismatch");
   await page.reload();
   await review(page);
   await expect(page.getByRole("button", { name: "Remove reviewed settings" })).toBeDisabled();
   await expect(page.getByRole("checkbox")).toHaveCount(0);
-  await setup(page, "ok", false);
+  const nonadmin = await setup(page, "ok", false);
   await page.reload();
   await expect(page.getByRole("button", { name: "Review removal", exact: true })).toHaveCount(0);
   expect(requests.filter(request => request.body.mode === "apply")).toHaveLength(1);
+  expect(mismatch.requests.filter(request => request.body.mode === "apply")).toHaveLength(0);
+  expect(nonadmin.requests).toHaveLength(0);
 });
 
-test("readback mismatch stays visible and locked across reload", async ({ page }) => {
+test("committed removal with later drift can review current state after reload", async ({ page }) => {
   await setup(page, "readback-mismatch");
   await page.goto("/ui/engineering/runtime-setting-removal");
   await review(page); await confirm(page);
   await page.getByRole("button", { name: "Remove reviewed settings" }).click();
   await expect(page.getByRole("status")).toContainText("Current readback is unverified");
   await page.reload();
-  await expect(page.getByRole("button", { name: "Review removal", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Review removal", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Check current record" }).click();
   await expect(page.getByRole("status")).toContainText("Current readback is unverified");
+  await page.getByRole("button", { name: "Review removal", exact: true }).click();
+  await expect(page.getByRole("checkbox")).toHaveCount(1);
 });
 
-test("retirement-only record requires explicit reader and rollback qualification", async ({ page }) => {
+test("retirement-only review discloses reader and rollback qualification before confirmation", async ({ page }) => {
   await setup(page, "retirement-only");
   await page.goto("/ui/engineering/runtime-setting-removal");
   await review(page);
   await expect(page.getByRole("alert")).toContainText("compatible readers to every consumer");
   await expect(page.getByRole("button", { name: "Remove reviewed settings" })).toBeDisabled();
+});
+
+
+test("unavailable recovery storage explains the block without sending removal", async ({ page }) => {
+  const { requests } = await setup(page);
+  await page.addInitScript(() => Object.defineProperty(window, "sessionStorage", { get() { throw new DOMException("Unavailable", "SecurityError"); } }));
+  await page.goto("/ui/engineering/runtime-setting-removal");
+  await review(page);
+  await expect(page.getByRole("alert")).toContainText("Recovery storage is unavailable");
+  expect(requests).toHaveLength(0);
 });
