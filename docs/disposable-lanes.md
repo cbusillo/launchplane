@@ -1433,7 +1433,11 @@ That observer can prove an absent gate without requiring web HTTP readiness;
 web may correctly be waiting for that gate. Positive absence permits the same
 convergent gate write under its original key. An incomplete observation remains
 UNKNOWN. Integration qualification runs during planning and again before route
-or environment effects, as well as at the gate. The operation never invokes module
+or environment effects, as well as at the gate. The gate writer atomically
+replaces its marker in the qualified data directory, preserving read access even
+when a retained marker belongs to another user. It never changes the runner user
+or the retained marker's ownership or permissions in place.
+The operation never invokes module
 updates, data restoration, user normalization or API-key provisioning. Before
 recreating, the existing private readiness probe verifies current local
 credentials without a login or credential write. No secret or other provider
