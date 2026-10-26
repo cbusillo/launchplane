@@ -223,9 +223,11 @@ class RecordFailure(BaseModel):
 
 # What each generic-web promotion failure code means, in Launchplane's words.
 PROMOTION_FAILURE_DESCRIPTIONS: dict[str, str] = {
-    "recipient_cutover_failed": "The prepared recipient failed its cutover qualification.",
-    "recipient_runtime_failed": "The recipient's running resources or writer identity did not match the reviewed preparation.",
-    "recipient_publication_failed": "Publishing the recipient's reviewed production binding failed.",
+    "recipient_cutover_unverified": "Launchplane could not complete the prepared recipient's cutover qualification.",
+    "recipient_deploy_unverified": "Launchplane could not verify the recipient deployment or replacement writer resume.",
+    "recipient_health_unverified": "The recipient's health, readiness or exact runtime identity did not pass qualification.",
+    "recipient_runtime_unverified": "Launchplane could not verify the recipient's running resources or writer identity.",
+    "recipient_publication_unverified": "Launchplane could not verify publication of the recipient's reviewed production binding.",
     "source_health_failed": (
         "The source lane's health check did not pass, so the promotion stopped before deploying."
     ),

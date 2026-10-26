@@ -1095,7 +1095,7 @@ class RecipientCutoverAdapter:
             lease.checkpoint_effect("rollback_" + phase)
 
         pending: PromotionRecord | None = None
-        failure_code = "recipient_cutover_failed"
+        failure_code = "recipient_cutover_unverified"
         try:
             if not isinstance(lease, ProviderEvidenceLease):
                 raise ValueError("Cutover requires an evidence-bound execution lease.")
@@ -1236,7 +1236,6 @@ class RecipientCutoverAdapter:
                         }
                     )
 
-            failure_code = "destination_deploy_failed"
             if repromote:
                 writer_action(
                     self.root,
@@ -1247,6 +1246,7 @@ class RecipientCutoverAdapter:
                     binding=writer_binding,
                 )
                 old_paused = True
+                failure_code = "recipient_deploy_unverified"
                 writer_action(
                     self.root,
                     record,
@@ -1259,6 +1259,7 @@ class RecipientCutoverAdapter:
                 )
                 terminal_deployment = True
             elif record.execution.get("trigger_requested_at"):
+                failure_code = "recipient_deploy_unverified"
                 outcome = self.terminal_deployment(deployment_id)
                 if outcome is None:
                     raise ValueError("The original deployment is absent, pending or ambiguous.")
@@ -1284,6 +1285,7 @@ class RecipientCutoverAdapter:
                     binding=writer_binding,
                 )
                 old_paused = True
+                failure_code = "recipient_deploy_unverified"
                 execute_dokploy_artifact_deploy(
                     host=host,
                     token=token,
@@ -1313,28 +1315,32 @@ class RecipientCutoverAdapter:
                     effect_started=lambda: None,
                 )
                 terminal_deployment = True
-            failure_code = "destination_health_failed"
-            health = _verify_health_evidence_with_identity(
-                HealthcheckEvidence(
-                    status="pending",
-                    urls=tuple(
-                        {
+            failure_code = "recipient_health_unverified"
+            health = HealthcheckEvidence(
+                status="pending",
+                urls=tuple(
+                    dict.fromkeys(
+                        (
                             *record.activation["request"]["health_urls"].values(),
                             record.activation["request"]["readiness_url"],
-                        }
-                    ),
-                    timeout_seconds=record.retained_target.healthcheck_timeout_seconds or 120,
+                        )
+                    )
                 ),
-                expected_runtime_identity=identity,
+                timeout_seconds=record.retained_target.healthcheck_timeout_seconds or 120,
             )
-            if health.status != "pass" or health.runtime_identity_status != "match":
-                raise ValueError(
-                    "The replacement did not complete bootstrap with exact runtime identity."
+            for url in health.urls:
+                verified = _verify_health_evidence_with_identity(
+                    health.model_copy(update={"urls": (url,)}), expected_runtime_identity=identity
                 )
-            failure_code = "recipient_runtime_failed"
+                if verified.status != "pass" or verified.runtime_identity_status != "match":
+                    raise ValueError(
+                        "The replacement did not complete bootstrap with exact runtime identity."
+                    )
+                health = verified.model_copy(update={"urls": health.urls})
+            failure_code = "recipient_runtime_unverified"
             writer_action(self.root, record, old=False, action="inspect", checkpoint=checkpoint)
             self.verify_runtime(record, checkpoint)
-            failure_code = "recipient_publication_failed"
+            failure_code = "recipient_publication_unverified"
             checkpoint("publish_recipient_authority")
             publication = self.publication(
                 record, identity, health, deployment_id, authority=baseline

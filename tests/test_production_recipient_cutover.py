@@ -474,6 +474,23 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertEqual(current.phase, "rolled_back")
         self.fixture.assert_old_preserved()
 
+    def test_passing_health_cannot_publish_without_passing_readiness(self) -> None:
+        def health(
+            evidence: HealthcheckEvidence, *, expected_runtime_identity: Any
+        ) -> HealthcheckEvidence:
+            if evidence.urls == (self.request.readiness_url,):
+                return HealthcheckEvidence(status="fail", urls=evidence.urls)
+            return self.health(evidence, expected_runtime_identity=expected_runtime_identity)
+
+        with patch(
+            "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
+            side_effect=health,
+        ):
+            result = self.run_release()
+        self.assertEqual(result.response_payload["result"]["promotion_status"], "fail")
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
+
     def test_unreachable_health_route_refuses_intent_and_writer_dispatch(self) -> None:
         with patch(
             "control_plane.production_recipient_cutover._ValidatedAddressConnector",
@@ -551,7 +568,7 @@ class RecipientCutoverTests(unittest.TestCase):
         promotion = self.store.read_promotion_record(failure.record_id)
         from control_plane.contracts.promotion_record import promotion_failure
 
-        self.assertEqual(promotion.failure, promotion_failure("destination_health_failed"))
+        self.assertEqual(promotion.failure, promotion_failure("recipient_health_unverified"))
         assert promotion.failure is not None
         self.assertEqual(failure.reason, promotion.failure.description)
         self.assertNotIn("sensitive", json.dumps(result.response_payload) + str(logged.output))

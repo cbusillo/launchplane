@@ -388,6 +388,8 @@ listener's connection refusal proves only a responding host or rejecting hop; ti
 other connection failures refuse the intent before writer dispatch. Use a
 destination address reachable from the API and release workers. This does not
 start the application or replace the later HTTP and exact-identity checks.
+The worker checks every health URL and readiness URL independently; a passing
+health response cannot stand in for readiness.
 Before execution, a fresh reviewed intent can replace an expired destination capture;
 every earlier intent stays in custody history. Once execution begins its admitted
 intent stays fixed, and recovery does not expire the already-admitted destination
@@ -452,8 +454,11 @@ survive. Any changed owned row refuses the whole inverse; no shared guest is
 restored and no data volume is deleted. Backup history receives a new inverse
 revision rather than being rewritten. The release worker and reviewed recovery
 path retain both recipients when a deploy or writer outcome remains uncertain.
-Recipient failures retain a fixed stage-specific reason on the promotion record
-and the release read, including after native rollback or lost-reply recovery.
+Terminal rollback results expose a fixed stage-specific qualification reason
+from the promotion record through the release read, including lost-reply recovery.
+For unresolved outcomes, the reason names the unverified stage; the operation
+and custody state still determine certainty. Pre-dispatch refusals retain their
+existing fixed refusal message.
 Safe cause-site logs carry the original trace without provider or exception text.
 The worker inverse checks release authority before dispatching its replacement
 writer pause. After that pause is dispatched, the running operation finishes its
