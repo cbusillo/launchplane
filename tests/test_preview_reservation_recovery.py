@@ -1,5 +1,4 @@
 import asyncio
-from control_plane.contracts.secret_record import SecretRecord
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -1258,14 +1257,14 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             operation.idempotency_key,
         )
 
-    def test_scheduled_monitor_alerts_for_legacy_preview_without_original_intent(self) -> None:
+    def test_scheduled_monitor_records_legacy_preview_warning_without_discord(self) -> None:
         self.remove_original_intent()
-        self.assert_scheduled_preview_alert(recover=False)
+        self.assert_scheduled_preview_warning(recover=False)
 
     def test_scheduled_monitor_resolves_preview_incident_after_supported_settlement(self) -> None:
-        self.assert_scheduled_preview_alert(recover=True)
+        self.assert_scheduled_preview_warning(recover=True)
 
-    def assert_scheduled_preview_alert(self, *, recover: bool) -> None:
+    def assert_scheduled_preview_warning(self, *, recover: bool) -> None:
         from control_plane.contracts.public_ingress_monitoring import (
             PublicIngressNotificationDestination,
             PublicIngressNotificationPolicyRecord,
@@ -1279,17 +1278,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             destination_id="existing-discord",
             kind="discord",
             discord_webhook_secret="existing-channel",
-        )
-        self.store.write_secret_record(
-            SecretRecord(
-                secret_id="existing-channel",
-                scope="global",
-                integration="discord",
-                name="monitor",
-                current_version_id="test-version",
-                created_at=self.reservation.created_at,
-                updated_at=self.reservation.updated_at,
-            )
         )
         self.store.write_public_ingress_notification_policy_record(
             PublicIngressNotificationPolicyRecord(
@@ -1325,21 +1313,9 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         queued = self.store.list_outbox_delivery_records(
             states=("pending",), kind="public_ingress_notification"
         )
-        self.assertTrue(queued)
-        delivery = deliver_public_ingress_notification_outbox_delivery(
-            record=queued[0],
-            drivers=drivers,
-            record_store=self.store,
-            mark_provider_started=lambda _record, _key, _provider: None,
-        )
-        self.assertEqual(delivery.state, "delivered")
-        self.assertTrue(posts)
-        for private in (
-            self.reservation.scope,
-            self.reservation.idempotency_key,
-            self.reservation.reconciliation_key,
-        ):
-            self.assertNotIn(private, json.dumps(posts))
+        self.assertEqual(incidents[0].severity, "warning")
+        self.assertFalse(queued)
+        self.assertFalse(posts)
         if not recover:
             self.assertEqual(
                 held_preview_reservations(self.store, product=self.profile.product),
@@ -1356,6 +1332,19 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             self.assertTrue(scheduler.run_once())
         self.assertFalse(self.store.list_public_ingress_incident_records(status="open"))
         self.assertTrue(self.store.list_public_ingress_incident_records(status="resolved"))
+        self.assertFalse(posts)
+        for record in self.store.list_outbox_delivery_records(kind="public_ingress_notification"):
+            delivery = deliver_public_ingress_notification_outbox_delivery(
+                record=record,
+                drivers=drivers,
+                record_store=self.store,
+                mark_provider_started=lambda _record, _key, _provider: self.fail(
+                    "Warning resolution attempted delivery"
+                ),
+            )
+            self.assertEqual(delivery.state, "delivered")
+            self.assertFalse(delivery.provider_operation_key)
+        self.assertFalse(posts)
 
     @patch.dict(
         "os.environ",
