@@ -10,6 +10,7 @@ from control_plane.product_review_withdrawal import (
     ReviewWithdrawalRequest,
     ReviewWithdrawalService,
     ReviewWithdrawalRefused,
+    ReviewWithdrawalRefusalReason,
     ReviewWithdrawalUnsettled,
     ReviewWithdrawalChange,
     ReviewWithdrawalNotDispatched,
@@ -117,8 +118,11 @@ class ReviewWithdrawalTests(unittest.TestCase):
                     record.model_dump() | {"decision": outcome, "reason": "Client decided"}
                 )
                 self.store.write_product_review_decision_record(record)
-                with self.assertRaises(ReviewWithdrawalRefused):
+                with self.assertRaises(ReviewWithdrawalRefused) as caught:
                     self.apply()
+                self.assertIs(
+                    caught.exception.reason, ReviewWithdrawalRefusalReason.CLIENT_DECISION_EXISTS
+                )
                 self.assertEqual(self.source.deletes, 0)
                 self.assertFalse(self.source.comments)
 
@@ -166,10 +170,21 @@ class ReviewWithdrawalTests(unittest.TestCase):
         with self.assertRaises(ReviewWithdrawalRefused):
             self.service.run(self.request, key="", trace="new-plan")
 
+    def test_unlabeled_dry_run_exposes_a_bounded_refusal_without_dispatch(self) -> None:
+        self.source.labels.discard(REVIEW_LABEL)
+        with self.assertRaises(ReviewWithdrawalRefused) as caught:
+            self.service.run(self.request, key="", trace="plan")
+        self.assertIs(
+            caught.exception.reason, ReviewWithdrawalRefusalReason.NO_PENDING_LABELED_REQUEST
+        )
+        self.assertEqual(self.source.deletes, 0)
+        self.assertFalse(self.source.comments)
+
     def test_changed_head_and_missing_decision_citation_refuse(self) -> None:
         self.source.head = "b" * 40
-        with self.assertRaises(ReviewWithdrawalRefused):
+        with self.assertRaises(ReviewWithdrawalRefused) as caught:
             self.apply()
+        self.assertIs(caught.exception.reason, ReviewWithdrawalRefusalReason.HEAD_CHANGED)
         with self.assertRaises(ValueError):
             ReviewWithdrawalRequest.model_validate(
                 self.request.model_dump() | {"director_decision_url": ""}
@@ -491,6 +506,18 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(result.status_code, 202, result.text)
                 self.assertTrue(result.json()["result"]["applied"])
+                unlabeled = await request(
+                    app, "POST", "/v1/product-review/withdrawal", payload=payload
+                )
+                self.assertEqual(unlabeled.status_code, 409, unlabeled.text)
+                self.assertEqual(
+                    unlabeled.json()["detail"]["code"], "product_review_withdrawal_refused"
+                )
+                self.assertEqual(
+                    unlabeled.json()["detail"]["reason"],
+                    ReviewWithdrawalRefusalReason.NO_PENDING_LABELED_REQUEST.value,
+                )
+                self.assertEqual(source.deletes, 1)
                 with patch(
                     "control_plane.http_routes.product_review_withdrawal.ReviewWithdrawalService.run",
                     side_effect=ReviewWithdrawalUnsettled("Outcome is unsettled"),

@@ -317,6 +317,15 @@ not a Client decision or an authorization grant. Apply requires the reviewed
 plan digest and an original idempotency key. The helper binds saved dry-run
 evidence and follows apply with service readback.
 
+Permanent pre-dispatch eligibility refusals retain HTTP 409 and
+`product_review_withdrawal_refused`. The optional `error.reason` uses the finite
+`ReviewWithdrawalRefusalReason` vocabulary in `product_review_withdrawal.py`;
+`no_pending_labeled_request` means there is no labeled request to withdraw.
+The supported helper projects only known reasons with bounded advice. Older
+consumers and services without reasons retain the generic refusal. Stale plans,
+unsettled delivery and recovery keep their separate codes and original-key
+handling; a refusal reason never authorizes another attempt or label removal.
+
 The service serializes with Client decision saves and refuses withdrawal if
 any Client decision for this product already names the current head. It
 removes only the product's configured review label, confirms the removal,
