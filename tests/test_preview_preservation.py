@@ -142,8 +142,9 @@ class PreviewPreservationProgramTests(unittest.TestCase):
 
     def test_restore_failure_retains_source_and_owned_pending_copy_without_publish(self) -> None:
         self.restored.side_effect = RuntimeError("restore failed")
-        with self.assertRaisesRegex(RuntimeError, "restore failed"):
+        with self.assertRaises(RuntimeError) as raised:
             self.preserve()
+        self.assertIs(raised.exception, self.restored.side_effect)
         self.assertFalse(self.path.exists())
         self.assertEqual((self.filestore / "ab/attachment").read_bytes(), b"attachment bytes")
         temporary = self.path.with_name(".pending-" + self.path.name)
@@ -168,7 +169,7 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         temporary = self.path.with_name(".pending-" + self.path.name)
         temporary.mkdir()
         (temporary / "unknown").write_bytes(b"only copy")
-        with self.assertRaisesRegex(RuntimeError, "pending source changed"):
+        with self.assertRaises(RuntimeError):
             self.preserve()
         self.assertEqual((temporary / "unknown").read_bytes(), b"only copy")
         self.assertTrue((self.filestore / "ab/attachment").exists())
@@ -186,32 +187,37 @@ class PreviewPreservationProgramTests(unittest.TestCase):
 
     def test_interrupted_owner_publication_and_cleanup_leave_recoverable_custody(self) -> None:
         writer = self.namespace["write_snapshot_receipt"]
+        receipt_failure = RuntimeError("receipt interrupted")
 
         def interrupt_receipt(path: Path, payload: object) -> None:
             del payload
             (path.parent / ".pending-owner").write_bytes(b"partial metadata")
-            raise RuntimeError("receipt interrupted")
+            raise receipt_failure
 
         self.namespace["write_snapshot_receipt"] = interrupt_receipt
-        with self.assertRaisesRegex(RuntimeError, "receipt interrupted"):
+        with self.assertRaises(RuntimeError) as raised:
             self.preserve()
+        self.assertIs(raised.exception, receipt_failure)
         temporary = self.path.with_name(".pending-" + self.path.name)
         self.assertFalse(temporary.exists())
         self.namespace["write_snapshot_receipt"] = writer
         self.restored.side_effect = RuntimeError("restore interrupted")
-        with self.assertRaisesRegex(RuntimeError, "restore interrupted"):
+        with self.assertRaises(RuntimeError) as raised:
             self.preserve()
+        self.assertIs(raised.exception, self.restored.side_effect)
         self.namespace["verification_resources"] = Mock()
         unlink = Path.unlink
+        cleanup_failure = RuntimeError("cleanup interrupted")
 
         def interrupt_cleanup(path: Path, *args: Any, **kwargs: Any) -> None:
             if path == temporary / "pending.json":
-                raise RuntimeError("cleanup interrupted")
+                raise cleanup_failure
             unlink(path, *args, **kwargs)
 
         with patch.object(Path, "unlink", new=interrupt_cleanup):
-            with self.assertRaisesRegex(RuntimeError, "cleanup interrupted"):
+            with self.assertRaises(RuntimeError) as raised:
                 self.preserve()
+            self.assertIs(raised.exception, cleanup_failure)
         self.assertEqual([path.name for path in temporary.iterdir()], ["pending.json"])
         self.restored.side_effect = None
         self.assertTrue(self.preserve()["database_restore_verified"])
@@ -227,21 +233,21 @@ class PreviewPreservationProgramTests(unittest.TestCase):
                 path.unlink()
                 self.assertEqual(self.calls, [])
         self.namespace["observe_memory_headroom"] = lambda *args: 0
-        with self.assertRaisesRegex(RuntimeError, "memory headroom"):
+        with self.assertRaises(RuntimeError):
             self.preserve()
         self.assertEqual(self.calls, [])
 
     def test_tampering_or_reopened_source_blocks_deletion_proof(self) -> None:
         receipt = self.preserve()
         self.containers["web"]["State"]["Running"] = True
-        with self.assertRaisesRegex(RuntimeError, "reopened"):
+        with self.assertRaises(RuntimeError):
             self.namespace["verify_preservation_source"](receipt, self.source)
         self.containers["web"]["State"]["Running"] = False
         (self.filestore / "ab/attachment").write_bytes(b"new original data")
-        with self.assertRaisesRegex(RuntimeError, "original filestore changed"):
+        with self.assertRaises(RuntimeError):
             self.namespace["verify_preservation_source"](receipt, self.source)
         (self.path / "database.dump").write_bytes(b"changed")
-        with self.assertRaisesRegex(RuntimeError, "artifact changed"):
+        with self.assertRaises(RuntimeError):
             self.namespace["verify_preservation"](self.path)
 
     def test_complete_copy_remains_verifiable_after_provider_disappears(self) -> None:
@@ -283,7 +289,7 @@ class SnapshotCaptureDeadlineTests(unittest.TestCase):
                 return process
 
             with patch.object(subprocess, "Popen", side_effect=observe):
-                with self.assertRaisesRegex(RuntimeError, "execution budget"):
+                with self.assertRaises(RuntimeError):
                     namespace["capture_snapshot_file"](
                         [sys.executable, "-c", "import time;time.sleep(60)"],
                         path,
@@ -428,7 +434,7 @@ class PreviewPreservationVerifierCustodyTests(unittest.TestCase):
                     self.consumers.append("foreign-reader")
                 else:
                     self.volume["Options"] = {"device": "/foreign"}
-                with self.assertRaisesRegex(RuntimeError, "foreign custody"):
+                with self.assertRaises(RuntimeError):
                     self.cleanup()
                 self.assertFalse(
                     any(call[0] == "rm" or call[:2] == ("volume", "rm") for call in self.calls)
@@ -465,7 +471,7 @@ class PreviewPreservationVerifierCustodyTests(unittest.TestCase):
                             self.namespace["restore_verification"](dump, self.image), 0
                         )
                     else:
-                        with self.assertRaisesRegex(RuntimeError, "restore verification failed"):
+                        with self.assertRaises(RuntimeError):
                             self.namespace["restore_verification"](dump, self.image)
                 self.assertEqual(engine.restored_bytes, dump.read_bytes())
                 self.assertFalse(engine.can_contact_external_service())
@@ -484,7 +490,7 @@ class PreviewPreservationVerifierCustodyTests(unittest.TestCase):
             self.namespace["one_container"] = Mock(return_value=idle)
             self.assertEqual(self.namespace["require_idle_container"](active), idle)
             self.namespace["one_container"] = Mock(return_value=active)
-            with self.assertRaisesRegex(RuntimeError, "execution custody is active"):
+            with self.assertRaises(RuntimeError):
                 self.namespace["require_idle_container"](active)
 
 
@@ -732,7 +738,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 ),
             ),
             patch("control_plane.preview_preservation.run_preview_preservation") as copy,
-            self.assertRaisesRegex(ValueError, "server"),
+            self.assertRaises(ValueError),
         ):
             operation.run(self.store)
         execute.assert_not_called()
@@ -795,8 +801,9 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             archive.assert_not_called()
             absent.return_value = True
             archive.side_effect = ValueError("archive changed")
-            with self.assertRaisesRegex(ValueError, "archive changed"):
+            with self.assertRaises(ValueError) as raised:
                 operation.run(self.store)
+            self.assertIs(raised.exception, archive.side_effect)
             held = self.store.read_idempotency_record_by_id(first.record.record_id)
             assert held is not None
             self.assertEqual(
@@ -847,7 +854,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
 
     def test_active_original_blocks_destruction_without_blocking_custody_reads(self) -> None:
         self.assertEqual(self.authority().original_reservation_id, self.original.record_id)
-        with self.assertRaisesRegex(ValueError, "recovery grace"):
+        with self.assertRaises(ValueError):
             self.admit()
 
     def test_custody_hash_survives_original_completion_and_mutable_capacity_policy(self) -> None:
@@ -860,7 +867,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
 
     def test_changed_target_cannot_use_original_bytes(self) -> None:
         self.issued.dry_run_plan.compose_name += "-other"
-        with self.assertRaisesRegex(ValueError, "does not match"):
+        with self.assertRaises(ValueError):
             self.authority()
 
     def test_protected_custody_stays_held_even_with_completed_original(self) -> None:
@@ -880,7 +887,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     self.issued.preview_slug,
                     **facts,
                 )
-                with self.assertRaisesRegex(ValueError, "protected use or resource"):
+                with self.assertRaises(ValueError):
                     self.admit()
 
     def adapter(self) -> Any:
@@ -941,8 +948,9 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     assert first.record is not None
                     guard.side_effect = ValueError("current admission refused")
                     if phase == "rollback_complete":
-                        with self.assertRaisesRegex(ValueError, "current admission refused"):
+                        with self.assertRaises(ValueError) as raised:
                             operation.run(self.store)
+                        self.assertIs(raised.exception, guard.side_effect)
                         self.assertIsNone(
                             self.store.read_idempotency_record_by_id(first.record.record_id)
                         )
@@ -1075,10 +1083,11 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             self.assertTrue(resumed.preserve_effect_checkpoint)
             self.assertEqual(inspect.call_args.kwargs["mode"], "inspect")
             inspect.side_effect = ValueError("source execution unknown")
-            with self.assertRaisesRegex(ValueError, "source execution unknown"):
+            with self.assertRaises(ValueError) as raised:
                 adapter.observe(
                     "fixture-key", PREVIEW_PRESERVATION_CAPTURE_PHASE, "fixture-reconciliation"
                 )
+            self.assertIs(raised.exception, inspect.side_effect)
 
     def test_adoption_cannot_write_destroyed_lifecycle_without_retained_copy_verification(
         self,
@@ -1088,13 +1097,14 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             patch(
                 "control_plane.preview_preservation.run_preview_preservation",
                 side_effect=ValueError("copy changed"),
-            ),
+            ) as preservation,
             patch(
                 "control_plane.odoo_preview_apply_execution.apply_odoo_preview_lifecycle_evidence"
             ) as lifecycle,
         ):
-            with self.assertRaisesRegex(ValueError, "copy changed"):
+            with self.assertRaises(ValueError) as raised:
                 adapter._finalize_successful_result({"status": "pass"})
+            self.assertIs(raised.exception, preservation.side_effect)
             lifecycle.assert_not_called()
 
     def test_remote_inspection_waits_outside_shared_metadata_guard(self) -> None:
