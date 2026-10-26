@@ -1,7 +1,7 @@
 """Reconciliation retains an existing decision's admitted step and original key."""
 
 import hashlib
-from types import SimpleNamespace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -41,6 +41,7 @@ from control_plane.provider_operations import (
     ProviderMutationOutcome,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.storage.postgres import LaunchplaneVeriReelProdBackupGateOperationRow
 from control_plane.integration_allowances import canonical_sha256
 
 
@@ -126,6 +127,25 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
     ) -> tuple[LaunchplaneProductProfileRecord, LaunchplaneIdempotencyRecord]:
         f = self.fixture
         profile, _testing = self.qualified_testing_source()
+        backup = next(
+            operation
+            for operation in f.store.list_verireel_prod_backup_gate_operation_records()
+            if operation.backup_record_id == f.old_backup
+        )
+        admitted = backup.model_copy(
+            update={
+                "operation_id": releases.client_release_step_operation_id(
+                    profile=profile,
+                    decision=self.decision,
+                    step=releases.ClientReleaseStep("backup", 1),
+                )
+            }
+        )
+        with f.store._session_factory() as session, session.begin():
+            row = session.get(LaunchplaneVeriReelProdBackupGateOperationRow, backup.operation_id)
+            assert row is not None
+            row.operation_id = admitted.operation_id
+            row.payload = admitted.model_dump(mode="json")
         request = releases.client_release_promotion_request(profile, self.decision, f.old_backup)
         reserved = f.store.reserve_mutation(
             scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
@@ -168,23 +188,20 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self, *, paused: bool = False, backoff: releases.ClientReleaseBackoff | None = None
     ) -> tuple[str, ...]:
         f = self.fixture
-        original_status = releases._step_status
+        from control_plane.service_deploy_drain import prepare, read_status
 
-        def status(store: Any, current: Any, decision: Any, step: Any) -> Any:
-            if step.kind == "backup" and step.attempt == 1:
-                return "pass", SimpleNamespace(backup_record_id=f.old_backup)
-            return original_status(store, current, decision, step)
-
-        with (
-            patch("control_plane.client_release._step_status", side_effect=status),
-            patch(
-                "control_plane.service_deploy_drain.read_status",
-                return_value={"admission_paused": paused},
-            ),
-        ):
-            return releases.advance_client_releases(
-                store=f.store, control_plane_root=f.fixture.root, release_backoff=backoff
+        if paused and not read_status(f.store).get("admission_paused"):
+            prepare(
+                f.store,
+                request_fingerprint="fixture-service-replacement",
+                target_type="compose",
+                target_id="fixture-control-plane",
+                image_reference=f.record.image_reference,
+                deployment_marker="fixture-replacement",
             )
+        return releases.advance_client_releases(
+            store=f.store, control_plane_root=f.fixture.root, release_backoff=backoff
+        )
 
     def test_release_worker_adopts_fenced_failure_while_draining_without_writer_effect(
         self,
@@ -204,6 +221,13 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self.assertEqual(f.actions, [])
         self.assertEqual(f.deploys, 0)
         self.assertTrue(f.old_running)
+        from control_plane.service_deploy_drain import read_status
+
+        drain = read_status(f.store)
+        self.assertTrue(drain["admission_paused"])
+        blockers = drain["running_operation_ids"]
+        assert isinstance(blockers, (tuple, list))
+        self.assertNotIn(held.record_id, blockers)
 
     def test_unknown_recipient_is_observed_on_bounded_cadence_without_retry(self) -> None:
         f = self.fixture
@@ -273,10 +297,14 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
                     provider_effect_performed=False,
                 ),
             ) as apply,
-            patch.object(f.store, "_database_mutation_timestamp", return_value=future),
+            patch.object(f.store, "_database_mutation_timestamp", return_value=future) as clock,
         ):
             self.advance_interrupted(paused=True)
             apply.assert_not_called()
+            clock.return_value = (
+                parse_launchplane_mutation_timestamp(future, field_name="now")
+                + timedelta(minutes=3)
+            ).isoformat()
             self.advance_interrupted()
         apply.assert_called_once()
         settled = f.store.read_idempotency_record(
@@ -287,6 +315,91 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self.assertEqual(settled.idempotency_key, held.idempotency_key)
         self.assertEqual(settled.attempt, held.attempt + 1)
         self.assertEqual(settled.state, "completed")
+
+    def test_original_retry_still_refuses_unqualified_testing_before_writer_effect(self) -> None:
+        from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+
+        f = self.fixture
+        profile, held = self.interrupted_recipient()
+        context = next(lane.context for lane in profile.lanes if lane.instance == "testing")
+        inventory = f.store.read_environment_inventory(
+            context_name=context, instance_name="testing"
+        )
+        testing = f.store.read_deployment_record(inventory.deployment_record_id)
+        f.store.write_deployment_record(
+            testing.model_copy(
+                update={
+                    "post_deploy_update": PostDeployUpdateEvidence(attempted=True, status="fail")
+                }
+            )
+        )
+        future = (
+            parse_launchplane_mutation_timestamp(
+                held.lease_expires_at, field_name="lease_expires_at"
+            )
+            + timedelta(seconds=1)
+        ).isoformat()
+        with (
+            patch(
+                "control_plane.client_release._require_qualified_generic_web_release_source",
+                wraps=releases._require_qualified_generic_web_release_source,
+            ) as source,
+            patch.object(
+                RecipientCutoverAdapter,
+                "observe",
+                return_value=ProviderObservation("absent", retry_safe=True),
+            ),
+            patch.object(f.store, "_database_mutation_timestamp", return_value=future),
+        ):
+            self.assertEqual(self.advance_interrupted(), ())
+        source.assert_called()
+        self.assertEqual(f.actions, [])
+        self.assertEqual(f.deploys, 0)
+
+    def test_original_retry_still_requires_fresh_backup_before_writer_effect(self) -> None:
+        from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+        from control_plane.workflows.production_promotion_backup import (
+            require_production_promotion_backup,
+        )
+
+        f = self.fixture
+        _profile, held = self.interrupted_recipient()
+        backup = next(
+            operation
+            for operation in f.store.list_verireel_prod_backup_gate_operation_records()
+            if operation.backup_record_id == f.old_backup
+        )
+        assert backup.binding is not None
+        expired = datetime.now(UTC) + timedelta(
+            seconds=backup.binding.policy.fast_snapshot.max_evidence_age_seconds + 1
+        )
+        future = (
+            parse_launchplane_mutation_timestamp(
+                held.lease_expires_at, field_name="lease_expires_at"
+            )
+            + timedelta(seconds=1)
+        ).isoformat()
+        with (
+            patch.object(
+                RecipientCutoverAdapter,
+                "observe",
+                return_value=ProviderObservation("absent", retry_safe=True),
+            ),
+            patch.object(f.store, "_database_mutation_timestamp", return_value=future),
+            patch("control_plane.client_release._require_current_release"),
+            patch(
+                "control_plane.workflows.production_promotion_backup.datetime", wraps=datetime
+            ) as clock,
+            patch(
+                "control_plane.production_recipient_cutover.require_production_promotion_backup",
+                wraps=require_production_promotion_backup,
+            ) as gate,
+        ):
+            clock.now.return_value = expired
+            self.advance_interrupted()
+        gate.assert_called()
+        self.assertEqual(f.actions, [])
+        self.assertEqual(f.deploys, 0)
 
     def test_saved_review_resumes_only_the_existing_operation(self) -> None:
         self.reserve()

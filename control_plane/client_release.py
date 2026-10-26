@@ -721,7 +721,7 @@ def _release_step_failure(
     elif status == "reconciliation_required":
         message = (
             message
-            or "Launchplane is reconciling the original provider outcome. Unproved outcomes remain held."
+            or "The original provider outcome is not verified. This release is held for reconciliation."
         )
     return ClientReleaseFailureView(
         code=safe_operation_error_code(code) or status,

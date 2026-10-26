@@ -456,12 +456,8 @@ original decision, kind and attempt. Planning returns the existing original
 idempotency key; apply takes it from the saved review rather than minting a key. It cannot invent a
 step or bypass acceptance, backup gates, leases or terminal provider evidence.
 
-The accepted-release worker performs the same original-step reconciliation
-without a caller promotion grant. It can adopt a terminal failed/no-writer-effect
-receipt even while the service drains. Unknown effects stay held; a forward
-continuation needs positive absent/retry-safe evidence and every existing gate.
-A permanently fenced pause cannot run again. Manual reviewed recovery stays
-available under its existing authority; it is not an agent-access workaround.
+See [accepted-release reconciliation](release-review.md#interrupted-provider-operations)
+for worker-owned original-step recovery and the self-deploy drain boundary.
 
 ## Retained original-key continuation
 
