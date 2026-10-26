@@ -217,6 +217,7 @@ from control_plane.storage.privileged_operation_worker_probe import (
 from control_plane.storage.postgres import (
     Base,
     DbOnlyMutationRequest,
+    LaunchplaneEveryCodeWorkRequestRow,
     LaunchplaneIdempotencyRow,
     LaunchplaneProductProfileRow,
     LaunchplaneTenantRepositoryClassificationRow,
@@ -2369,6 +2370,14 @@ class PostgresRecordStoreTests(unittest.TestCase):
             alembic_command.upgrade(config, "head")
             store = PostgresRecordStore(database_url=database_url)
             migrated = store.read_every_code_work_request_record(legacy_record.request_id)
+            with store._session_factory() as session:
+                row = session.get(LaunchplaneEveryCodeWorkRequestRow, legacy_record.request_id)
+                assert row is not None
+                lease_fields = ("lease_expires_at", "fencing_token", "attempt")
+                self.assertEqual(
+                    {name: getattr(migrated, name) for name in lease_fields},
+                    {name: getattr(row, name) for name in lease_fields},
+                )
             store.close()
 
         migrated_payload = migrated.model_dump(mode="json")

@@ -22943,23 +22943,6 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return record
 
-    @classmethod
-    def _feedback_resume_intent_row(
-        cls, record: EveryCodeFeedbackResumeIntentRecord
-    ) -> LaunchplaneEveryCodeFeedbackResumeIntentRow:
-        return LaunchplaneEveryCodeFeedbackResumeIntentRow(
-            intent_id=record.intent_id,
-            request_id=record.request_id,
-            acceptance_id=record.acceptance_id,
-            expected_lifecycle_id=record.expected_lifecycle_id,
-            expected_fencing_token=record.expected_fencing_token,
-            intent_digest=record.intent_digest,
-            issued_at=record.issued_at,
-            eligible_until=record.eligible_until,
-            status="pending",
-            payload=cls._payload_dict(record),
-        )
-
     def _write_every_code_feedback_resume_intent_fixture_record(
         self, record: EveryCodeFeedbackResumeIntentRecord
     ) -> None:

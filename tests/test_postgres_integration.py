@@ -938,20 +938,6 @@ def _idempotency_record(
     )
 
 
-def _every_code_work_request() -> EveryCodeWorkRequestRecord:
-    return EveryCodeWorkRequestRecord(
-        request_id="every-code-cbusillo-code-1693-test",
-        source="manual",
-        state="queued",
-        repository="cbusillo/code",
-        issue_number=1693,
-        issue_url="https://github.com/cbusillo/code/issues/1693",
-        trigger_label="every-code",
-        queued_at="2026-07-13T09:00:00Z",
-        updated_at="2026-07-13T09:00:00Z",
-    )
-
-
 def _mutation_reservation(
     *,
     lease_owner: str,
