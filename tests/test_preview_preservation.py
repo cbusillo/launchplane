@@ -1242,6 +1242,94 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 )
             self.assertIs(raised.exception, inspect.side_effect)
 
+    def test_expired_preserving_destroy_resumes_only_its_revalidated_original(self) -> None:
+        from control_plane import odoo_preview_apply_http as preview_http
+        from control_plane.preview_preservation import PREVIEW_PRESERVATION_CAPTURE_PHASE
+
+        self.complete_original()
+        assert self.issued.plan_provenance is not None
+        attempts = 0
+
+        def execute(**kwargs: Any) -> dict[str, object]:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                kwargs["provider_effect_checkpoint"](PREVIEW_PRESERVATION_CAPTURE_PHASE)
+                return {"status": "fail", "provider_effect_attempted": True}
+            return preview_http.execute_odoo_preview_apply_result(**kwargs)
+
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="expired-preservation",
+            idempotency_key=self.issued.plan_provenance.plan_id,
+            request_fingerprint="expired-preservation",
+            trace_id="expired-preservation",
+            execute_apply=execute,
+            observe_apply=Mock(return_value=("unknown", None, False)),
+        )
+        reached_capture = RuntimeError("revalidated capture reached")
+        with (
+            patch.object(operation.adapter, "capture_schedule_binding"),
+            patch("control_plane.preview_preservation.run_preview_preservation"),
+            patch.object(preview_http, "datetime", wraps=datetime) as clock,
+            patch.object(
+                preview_http, "_build_odoo_preview_apply_inputs", return_value=self.issued
+            ) as rebuild,
+            patch.object(
+                preview_http, "_odoo_preview_service_environment", side_effect=reached_capture
+            ) as environment,
+        ):
+            first = operation.run(self.store)
+            self.assertEqual(first.status, "reconcile_required")
+            assert first.record is not None
+            clock.now.return_value = self.issued.plan_provenance.expires_at + timedelta(seconds=1)
+            with self.assertRaises(RuntimeError) as raised:
+                operation.run(self.store)
+            self.assertIs(raised.exception, reached_capture)
+            rebuild.assert_called_once()
+            retained = self.store.read_idempotency_record_by_id(first.record.record_id)
+            assert retained is not None
+            self.assertEqual(retained.idempotency_key, first.record.idempotency_key)
+            self.assertGreater(retained.attempt, first.record.attempt)
+            environment.reset_mock()
+            rebuild.return_value = self.issued.model_copy(
+                update={
+                    "dry_run_plan": self.issued.dry_run_plan.model_copy(
+                        update={"compose_ref": "changed-target"}
+                    )
+                }
+            )
+            self.assertEqual(operation.run(self.store).status, "reconcile_required")
+            environment.assert_not_called()
+            with self.assertRaises(preview_http.OdooPreviewPlanProvenanceError):
+                preview_http.refresh_odoo_preview_issued_plan(
+                    control_plane_root=self.root,
+                    record_store=self.store,
+                    profile=self.profile,
+                    request=self.destroy,
+                    issued_plan=self.issued,
+                    database_url=self.store.database_url,
+                )
+            for unqualified in (None, first.record, self.original):
+                with (
+                    self.subTest(unqualified=unqualified),
+                    self.assertRaises(preview_http.OdooPreviewPlanProvenanceError),
+                ):
+                    preview_http.execute_odoo_preview_apply_result(
+                        control_plane_root_path=self.root,
+                        record_store=self.store,
+                        profile=self.profile,
+                        request=self.destroy,
+                        issued_plan=self.issued,
+                        database_url=self.store.database_url,
+                        deployment_record_id=first.record.record_id,
+                        recovery_reservation=unqualified,
+                    )
+
     def test_adoption_cannot_write_destroyed_lifecycle_without_retained_copy_verification(
         self,
     ) -> None:

@@ -207,6 +207,13 @@ executor locks, recovery grace, target ownership and provider quiescence still
 apply. Another held operation, an existing lifecycle record, known use, an only
 copy report, shared production resources or a target alias refuses admission.
 
+The original operation can outlive its issued plan's expiry. Only a
+framework-qualified retry of that exact preserving destroy, with its current
+lease, retained intent and preservation-phase checkpoint, may continue after
+expiry. It still rebuilds and compares current plan authority and rechecks
+preservation custody before effects. A fresh expired plan or another operation
+cannot use that continuation; retain the original key.
+
 An older original without a clean snapshot can use its retained, scoped server
 schedule binding. If that binding is absent, the preserving operation captures
 and retains the same binding before effects. Missing or conflicting server
