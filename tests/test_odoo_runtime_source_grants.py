@@ -113,18 +113,29 @@ class RuntimeSourceTests(PrerequisiteFixture):
         self.assertTrue(all(item.grants == "unknown" for item in self.consume().sources))
         self.assertEqual(self.probes, [])
 
-    def test_binding_tls_password_payload_and_runtime_drift_remain_unknown(self) -> None:
-        for kind in ("managed_password", "delivered_password", "disabled_tls", "payload_mismatch"):
+    def test_managed_password_must_match_agreeing_applied_and_delivered_values(self) -> None:
+        for prefix in SOURCE_PREFIXES.values():
+            key = prefix + ".password"
+            self.values[key] = "different-value"
+            self.env[config_parameter_secret_env_key(key)] = "different-value"
+        modes: tuple[Literal["grants", "preview"], ...] = ("grants", "preview")
+        for mode in modes:
+            with self.subTest(mode=mode):
+                self.probes.clear()
+                result = self.consume(mode)
+                self.assertEqual(result.runtime, "verified")
+                self.assertTrue(all(item.grants == "unknown" for item in result.sources))
+                self.assertTrue(all(not item.parameters for item in result.sources))
+                self.assertEqual(self.probes, [])
+
+    def test_applied_password_tls_and_payload_disagreement_remain_unknown(self) -> None:
+        for kind in ("delivered_password", "disabled_tls", "payload_mismatch"):
             with self.subTest(kind=kind):
                 self.probes.clear()
                 self.set_overrides({"fishbowl.db": "inventory"})
                 self.values.pop("fishbowl.ssl_verify", None)
                 self.env[config_parameter_secret_env_key("fishbowl.password")] = PRIVATE
-                if kind == "managed_password":
-                    self.env[config_parameter_secret_env_key("fishbowl.password")] = (
-                        "different-value"
-                    )
-                elif kind == "delivered_password":
+                if kind == "delivered_password":
                     self.values["fishbowl.password"] = "different-value"
                 elif kind == "disabled_tls":
                     self.values["fishbowl.ssl_verify"] = "false"
