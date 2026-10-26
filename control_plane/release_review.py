@@ -12,7 +12,7 @@ from urllib.parse import quote, unquote
 
 import click
 
-from control_plane.client_test_notes import owner_test_notes
+from control_plane.client_test_notes import change_client_review, owner_test_notes
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
@@ -155,9 +155,14 @@ def _read_release_github(*, path: str, token: str, product: str, trace_id: str) 
 class PullRequestNotes(NamedTuple):
     title: str
     client_test_notes: str
+    client_test_notes_error: str
 
 
-UNREAD_PULL_REQUEST_NOTES = PullRequestNotes(title="", client_test_notes="")
+UNREAD_PULL_REQUEST_NOTES = PullRequestNotes(
+    title="",
+    client_test_notes="",
+    client_test_notes_error="The test notes could not be loaded. Refresh the review.",
+)
 
 
 def read_pull_request_notes(
@@ -193,8 +198,21 @@ def read_pull_request_notes(
         return UNREAD_PULL_REQUEST_NOTES
     if not isinstance(pull, dict) or not isinstance(pull.get("title"), str):
         return UNREAD_PULL_REQUEST_NOTES
+    labels = pull.get("labels", [])
+    if not isinstance(labels, list) or any(
+        not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels
+    ):
+        return UNREAD_PULL_REQUEST_NOTES
+    body = str(pull.get("body") or "")
+    intent = change_client_review(
+        body=body,
+        labels=tuple(label["name"] for label in labels),
+        review_label=profile.owner.review_label,
+    )
     return PullRequestNotes(
-        title=pull["title"], client_test_notes=owner_test_notes(str(pull.get("body") or ""))
+        title=pull["title"],
+        client_test_notes=owner_test_notes(body),
+        client_test_notes_error=intent.error,
     )
 
 

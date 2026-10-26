@@ -31,7 +31,6 @@ from control_plane.product_review import (
 from control_plane.release_review import UNREAD_PULL_REQUEST_NOTES, PullRequestNotes
 from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
 from control_plane.product_review_feedback import validate_owner_feedback_decision
-from control_plane.client_test_notes import client_test_notes
 
 
 PRODUCT_REVIEW_ROUTE = "/v1/product-review"
@@ -203,7 +202,7 @@ def register_product_review_routes(
             ),
             pull_request_title=notes.title,
             client_test_notes=notes.client_test_notes,
-            client_test_notes_error=client_test_notes(notes.client_test_notes).error,
+            client_test_notes_error=notes.client_test_notes_error,
             preview_url=preview.preview_url,
             head_sha=preview.head_sha,
             preview_generation_id=preview.generation_id,
@@ -324,7 +323,7 @@ def register_product_review_routes(
                 message=_NO_PREVIEW_REASON,
             )
         notes = dependencies.read_pull_request_notes(profile, envelope.pull_request, trace_id)
-        notes_error = client_test_notes(notes.client_test_notes).error
+        notes_error = notes.client_test_notes_error
         if envelope.decision == "accepted" and notes_error:
             raise common.http_error(
                 status_code=409,

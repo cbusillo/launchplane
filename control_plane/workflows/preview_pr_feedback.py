@@ -231,7 +231,6 @@ def pull_request_client_review(
         ClientTestNotesRequired,
         change_client_review,
         open_client_questions,
-        owner_test_notes,
     )
     from control_plane.client_release_repositories import recorded_train_candidate
 
@@ -271,7 +270,7 @@ def pull_request_client_review(
         base_branch=str(base.get("ref") or "") if isinstance(base, dict) else "",
     ):
         return False
-    if intent.error and not open_client_questions(owner_test_notes(str(payload.get("body") or ""))):
+    if intent.error and not open_client_questions(str(payload.get("body") or "")):
         raise ClientTestNotesRequired(intent.error)
     return intent.review_required
 

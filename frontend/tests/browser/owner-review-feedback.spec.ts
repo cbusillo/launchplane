@@ -53,6 +53,8 @@ test("a saved decision with pending delivery keeps the reason available to retry
   await expect(page.getByLabel("Recorded decision")).toContainText("Your decision is saved, but delivery to the agent is pending.");
   await expect(page.getByRole("textbox")).toHaveValue(reason);
   await expect(page.getByLabel("Recorded decision").locator("blockquote")).toHaveText(reason);
+  await page.getByRole("button", { name: "Retry delivery", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect(page.getByLabel("Recorded decision")).toHaveCount(1);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

@@ -2527,7 +2527,7 @@ export function productReviewForFixture(
     client_test_notes_error: {
       "missing-notes": "Client test notes are missing.",
       "notes-unavailable": "Client test notes are missing.",
-      "open-questions": "Answer the open Client questions before accepting this change.",
+      "open-questions": "Some Client facts are unanswered.",
     }[scenario] ?? "",
     preview_url: previewUrl,
     head_sha: previewUrl ? "a".repeat(40) : "",

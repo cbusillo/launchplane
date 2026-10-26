@@ -217,8 +217,11 @@ function OwnerPreviewReviewRoute({
           review={review}
           onDecided={(decided) => setReview((current) => ({
             ...decided,
-            pull_request_title: current?.pull_request_title ?? "",
-            client_test_notes: current?.client_test_notes ?? "",
+            ...(decided.pull_request_title ? {} : {
+              pull_request_title: current?.pull_request_title ?? "",
+              client_test_notes: current?.client_test_notes ?? "",
+              client_test_notes_error: current?.client_test_notes_error ?? decided.client_test_notes_error,
+            }),
           }))}
           onRefresh={() => loadReview()}
         />
@@ -366,7 +369,7 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
     setFailure("");
     try {
       const response = fixtureMode
-        ? { ...review, latest_decision: { ...decision, feedback_requested: true, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
+        ? { ...review, pull_request_title: "", client_test_notes: "", client_test_notes_error: "Notes were not included in this response.", latest_decision: { ...decision, feedback_requested: true, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
         : await retryProductReviewFeedback({
             repository: review.repository,
             pull_request: review.pull_request_number,

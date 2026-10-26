@@ -13,6 +13,7 @@ from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_review_status import OwnerReviewStatusPublisher
 from control_plane.release_review import PullRequestNotes
+from control_plane.client_test_notes import client_test_notes
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -161,7 +162,9 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.store = FilesystemRecordStore(state_dir=Path(temporary_directory.name))
         self.publisher = Mock(spec=OwnerReviewStatusPublisher)
         self.pull_request_notes = PullRequestNotes(
-            title="Update the repair price", client_test_notes="Check the repair price."
+            title="Update the repair price",
+            client_test_notes="Check the repair price.",
+            client_test_notes_error="",
         )
         self.session_manager = HumanSessionManager(
             config=_github_oauth_config(),
@@ -331,7 +334,9 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_owner_reviews_preview_and_decision_becomes_latest(self) -> None:
         self._write_product()
         self.pull_request_notes = PullRequestNotes(
-            title="Show the repair price", client_test_notes="Open the price list."
+            title="Show the repair price",
+            client_test_notes="Open the price list.",
+            client_test_notes_error="",
         )
         app = self._app()
         owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
@@ -371,7 +376,9 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(notes=notes):
                 self.pull_request_notes = PullRequestNotes(
-                    title="Contact page", client_test_notes=notes
+                    title="Contact page",
+                    client_test_notes=notes,
+                    client_test_notes_error=client_test_notes(notes).error,
                 )
                 read = await self._get(app, owner)
                 self.assertTrue(read.json()["client_test_notes_error"])
@@ -390,6 +397,7 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.pull_request_notes = PullRequestNotes(
             title="Contact page",
             client_test_notes=f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n",
+            client_test_notes_error="",
         )
         read = await self._get(app, owner)
         self.assertFalse(read.json()["client_test_notes_error"])

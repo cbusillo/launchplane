@@ -27,11 +27,7 @@ def change_client_review(
     director_standing: bool = False,
 ) -> ClientTestNotes:
     override = review_label.strip().casefold() in {label.casefold() for label in labels}
-    if (
-        pure_dependency_update
-        and not override
-        and not open_client_questions(owner_test_notes(body))
-    ):
+    if pure_dependency_update and not override and not open_client_questions(body):
         return ClientTestNotes(False)
     intent = body_client_test_notes(body, review_override=override)
     if director_standing and not override:

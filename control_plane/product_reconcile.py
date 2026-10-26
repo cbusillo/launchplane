@@ -52,7 +52,6 @@ from control_plane.client_test_notes import (
     ClientTestNotes,
     change_client_review,
     open_client_questions,
-    owner_test_notes,
 )
 from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
@@ -2184,7 +2183,7 @@ def _plan_preview_target(
     if (
         profile.owner.is_set
         and intent.error
-        and not open_client_questions(owner_test_notes(str(pull_request.get("body") or "")))
+        and not open_client_questions(str(pull_request.get("body") or ""))
     ):
         plan.update(
             action="wait", reason="client_test_notes_required", detail=intent.error, held=False

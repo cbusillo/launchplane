@@ -7889,16 +7889,12 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
         self.github.add_run(50, PR_HEAD, event="pull_request")
-        self.github.pull_request["body"] = "## Client test notes\nTry the changed price list."
+        self.github.pull_request["body"] = (
+            f"## Client test notes\nTry the changed price list.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the business address?"
+        )
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["action"], "apply")
-        self.assertIn("@site-owner", self.comment_body())
-        self.github.pull_request["body"] = str(self.github.pull_request["body"]) + (
-            f"\n### {OPEN_CLIENT_QUESTIONS}\n- What is the business address?"
-        )
-        self.request("preview", 5)
-        self.assertNotEqual(self.reconcile()["reason"], "client_test_notes_required")
         self.assertIn("@site-owner", self.comment_body())
         calls_before_refusal = tuple(self.owner_review_status_calls)
         self.github.pull_request["body"] = "## Client test notes\n<!-- fill me in -->"
