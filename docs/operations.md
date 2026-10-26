@@ -2128,8 +2128,8 @@ needed for scheduled recovery.
 
 Real delivery failures, mixed or uncertain histories, missing/stale/failed checks,
 unverified identity and concurrent incident changes stay open. Scheduled rechecks
-and explicit reconciliation share the delivery monitor's lane lock. New refusal
-requests retain their normal nonblocking evidence write. Changed product authority
+use the delivery monitor's lane lock. New refusal requests retain their normal
+nonblocking evidence write. Changed product authority
 also blocks persistence. Rechecks select only incidents whose full retained history contains refusals.
 Their history stays unchanged without a repeated failure appended on each pass.
 Mixed histories keep the normal failure observations and reminders. The latest
@@ -2143,18 +2143,6 @@ deployment. Reconciliation sends no recovery notification; the normal outbox
 worker skips queued failure notices for resolved refusals before resolving a
 destination, while interrupted sends retain an unknown outcome. Source deployment
 makes this behavior available; ordinary scheduled checks must still prove recovery.
-
-The existing admin API remains available for explicit caller-retirement evidence:
-`POST /v1/products/public-ingress-monitor/run-once`, authorized by
-`public_ingress_monitor.run_once`, with an `Idempotency-Key` and optional
-`refused_production_requests`. Each entry has `incident_id`, `caller_retired: true`,
-`caller_retired_at` (timezone-aware), and `caller_retirement_evidence`. This separate
-path verifies fresh passing health after attested retirement, current runtime
-identity, full refusal-only history and no subsequent refusal. It reports
-`refused_production_requests_resolved`, or 409
-`refused_request_reconciliation_blocked` for a blocked entry; earlier entries may
-already have resolved. Read back before retrying. Replays already marked
-`request_refused` are harmless; another resolved outcome cannot be reclassified.
 
 Exact replays of an unresolved candidate retain its original reason and trace and
 reuse the incident/outbox. A different failure stage updates that incident, and
