@@ -1121,6 +1121,37 @@ def _require_standing_release_available(store: PostgresRecordStore, product: str
         raise ClientReleaseNotReady("standing_release_inverse_outstanding")
 
 
+def _stopped_standing_release_can_restart(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    run: ClientReleaseRunView | None,
+) -> bool:
+    if run is None or run.state != "stopped":
+        return False
+    stopped = tuple(step for step in run.steps if step.status in _STOPPED_STATUSES)
+    if any(step.status != "fail" or step.failure is None for step in stopped):
+        return False
+    lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+    inventory = store.read_environment_inventory(context_name=lane.context, instance_name="testing")
+    deployment = store.read_deployment_record(inventory.deployment_record_id)
+    qualified_at = parse_launchplane_mutation_timestamp(
+        deployment.deploy.finished_at, field_name="testing_deployment_finished_at"
+    )
+    if qualified_at <= parse_launchplane_mutation_timestamp(
+        decision.decided_at, field_name="release_decided_at"
+    ):
+        return False
+    return all(
+        step.failure is not None
+        and qualified_at
+        > parse_launchplane_mutation_timestamp(
+            step.failure.recorded_at, field_name="release_failure_recorded_at"
+        )
+        for step in stopped
+    )
+
+
 def _record_standing_acceptance(
     store: PostgresRecordStore,
     control_plane_root: Path,
@@ -1202,7 +1233,7 @@ def _record_standing_acceptance(
     expected_record_id = f"release-review-standing-{record_key}"
     if existing is not None and existing.release_issue_url and existing.release_start:
         run = read_client_release_run(store=store, profile=profile, decision=existing)
-        if run is None or run.state != "stopped":
+        if not _stopped_standing_release_can_restart(store, profile, existing, run):
             return
     if existing is not None and not existing.release_issue_url:
         decision = existing

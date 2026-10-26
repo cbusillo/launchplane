@@ -646,7 +646,13 @@ publication. An already published winner needs no further source-control lookup.
 Missing notes, missing lane identities or a Client, a held or prelaunch product,
 and a request for changes or admin override on that checklist start nothing.
 After a stopped release, a ready candidate receives a fresh standing acceptance,
-including when its checklist is unchanged. The fresh decision publishes its own
+including when its checklist is unchanged, once its normal testing deployment
+has qualified it again after the failure. Run the supported testing deployment
+for the same artifact after fixing the failed prerequisite; no new Accept click
+is needed. A persistent failure waits for another passing testing deployment
+instead of creating releases on each worker tick. An explicit step cancellation
+does not automatically start a replacement release of that checklist.
+The fresh decision publishes its own
 release record and starts with a new verified backup; it never replays or changes
 the failed release's operations. Outstanding provider effects and rollback
 reconciliation still block a new release. No agent receives a promotion grant
