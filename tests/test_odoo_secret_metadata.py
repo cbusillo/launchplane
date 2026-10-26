@@ -347,7 +347,7 @@ class OdooSecretMetadataTests(unittest.TestCase):
         self.assertEqual(repaired.sharing_reason, source.sharing_reason)
 
     def test_cli_selector_refuses_missing_lane_and_blank_binding_id(self) -> None:
-        store, _, destination, _, _ = self.fixture()
+        store, _, destination, _, record = self.fixture()
         assert isinstance(store, PostgresRecordStore)
         command = [
             "odoo-overrides",
@@ -359,6 +359,8 @@ class OdooSecretMetadataTests(unittest.TestCase):
             "--instance",
             "testing",
             "--repair-metadata-from-relabel-history",
+            "--apply",
+            "--allow-direct-db-mutation",
             "--repair-binding-id",
         ]
         before = (
@@ -366,9 +368,11 @@ class OdooSecretMetadataTests(unittest.TestCase):
             store.list_secret_records(limit=None),
             store.list_odoo_instance_override_records(),
         )
-        for binding_id in (destination.binding_id, " "):
-            with self.subTest(binding_id=binding_id):
-                refused = CliRunner().invoke(main, [*command, binding_id])
+        for context, binding_id in (("missing", destination.binding_id), (record.context, " ")):
+            with self.subTest(context=context, binding_id=binding_id):
+                scoped = list(command)
+                scoped[scoped.index("--context") + 1] = context
+                refused = CliRunner().invoke(main, [*scoped, binding_id])
                 self.assertNotEqual(refused.exit_code, 0)
                 self.assertNotEqual(refused.exit_code, 2)
                 self.assertEqual(
