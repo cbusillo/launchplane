@@ -16,6 +16,11 @@ from control_plane.contracts.odoo_prod_rollback_operation import (
 )
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.odoo_cutover_recovery import (
+    operation_aborted,
+    operation_cutover,
+    abort_reconciliation_eligible,
+)
 
 RECOVERY_SOURCE_KEY = "recovery_promotion_operation_id"
 PRODUCTION_WRITE_KEY = "production_write_started"
@@ -72,11 +77,35 @@ def odoo_release_wrote_production(operation: object) -> bool:
     )
 
 
+def odoo_cutover_abort_allows(
+    store: PostgresRecordStore, operation: OdooProdPromotionOperationRecord
+) -> bool:
+    from control_plane.client_release import _client_release_authority
+
+    record = operation_cutover(store, operation)
+    if (
+        record is None
+        or not abort_reconciliation_eligible(record)
+        or not odoo_release_wrote_production(operation)
+    ):
+        return False
+    covered = _client_release_authority(store, operation.authorization, recovering=True)
+    if covered is None:
+        return False
+    profile, decision = covered
+    return (
+        profile.driver_id == "odoo"
+        and operation.idempotency_scope == "client-release"
+        and operation.request.expected_artifact_id == decision.checklist.candidate.artifact_id
+    )
+
+
 def build_odoo_release_recovery(
     store: PostgresRecordStore, source: OdooProdPromotionOperationRecord
 ) -> OdooProdRollbackOperationRecord | None:
     if (
         source.status != "fail"
+        or operation_aborted(store, source)
         or source.authorization.grant not in RELEASE_DECISION_GRANTS
         or source.idempotency_scope != "client-release"
         or not odoo_release_wrote_production(source)

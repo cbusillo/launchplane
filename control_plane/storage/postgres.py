@@ -17433,11 +17433,11 @@ class PostgresRecordStore(HumanSessionStore):
                             model_type is not OdooProdPromotionOperationRecord
                             or cutover is None
                             or not abort_reconciliation_eligible(cutover)
-                            or record.attempt < max_attempts
-                            and cutover.step != "aborted"
                         ):
                             continue
                     elif record.attempt >= max_attempts:
+                        continue
+                    elif cutover is not None and backup_recovery_eligible(cutover):
                         continue
                     if (
                         cutover is None
@@ -17446,7 +17446,6 @@ class PostgresRecordStore(HumanSessionStore):
                             and cutover.step in {"pausing", "switching", "resuming", "draining"}
                             or cutover.step in {"maintaining", "rolling_back"}
                             and startup_recovery_pause(cutover) is not None
-                            or backup_recovery_eligible(cutover)
                             or cutover_abort_only
                             and abort_reconciliation_eligible(cutover)
                         )
@@ -17637,7 +17636,14 @@ class PostgresRecordStore(HumanSessionStore):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
                 affected_operation_ids.append(record.operation_id)
                 released_lease = {"lease_owner": "", "lease_expires_at": "", "heartbeat_at": ""}
-                if record.phase in safe_phases and record.attempt < max_attempts:
+                from control_plane.odoo_release_recovery import odoo_release_wrote_production
+
+                safe_to_retry = (
+                    record.phase in safe_phases
+                    and all(checkpoint.phase in safe_phases for checkpoint in record.checkpoints)
+                    and not odoo_release_wrote_production(record)
+                )
+                if safe_to_retry and record.attempt < max_attempts:
                     recovered_record = record.model_copy(
                         update={
                             **released_lease,
@@ -17652,7 +17658,7 @@ class PostgresRecordStore(HumanSessionStore):
                             "updated_at": now,
                         }
                     )
-                elif record.phase in safe_phases:
+                elif safe_to_retry:
                     recovered_record = record.model_copy(
                         update={
                             **released_lease,
@@ -17893,11 +17899,14 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
         recovery = build_odoo_release_recovery(self, record)
+        from control_plane.odoo_cutover_recovery import operation_aborted
+
         if (
             record.status == "fail"
             and record.authorization.grant in RELEASE_DECISION_GRANTS
             and odoo_release_wrote_production(record)
             and recovery is None
+            and not operation_aborted(self, record)
         ):
             record = record.model_copy(
                 update={

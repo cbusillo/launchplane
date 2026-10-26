@@ -23,6 +23,7 @@ class NativeWriterObserverTests(unittest.TestCase):
             for native, address in (
                 ("10.0.0.2/32", "10.0.0.2"),
                 ("2001:db8::2/128", "2001:db8::2"),
+                ("::ffff:a00:2/128", "10.0.0.2"),
             ):
                 with self.subTest(native=native):
                     observer = NativeWriterObserver(

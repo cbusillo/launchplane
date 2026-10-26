@@ -40,13 +40,14 @@ allocation_started=False
 cleaned=False
 failure=None
 result=None
+class RestoreCommandFailed(RuntimeError): pass
 def remaining():
     value=deadline-time.monotonic()
     if value<=0: raise TimeoutError('isolated restore work deadline expired')
     return value
 def run(argv,**kwargs):
     response=subprocess.run(['docker',*argv],capture_output=True,timeout=remaining(),**kwargs)
-    if response.returncode: raise RuntimeError('isolated backup restore probe failed')
+    if response.returncode: raise RestoreCommandFailed('isolated backup restore probe failed')
     return response.stdout
 def pipe(source_command,destination):
     source=subprocess.Popen(['docker',*source_command],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
@@ -103,6 +104,10 @@ finally:
         cleaned=inventory.returncode==0 and not inventory.stdout.strip()
     elif container is None:
         cleaned=not allocation_started
+        if allocation_started and isinstance(failure,RestoreCommandFailed):
+            ids=docker_read(['ps','-a','--no-trunc','--filter','label=launchplane.cutover-restore='+spec['record'],'--format','{{.ID}}']).strip()
+            if ids: cleaned=restore_outcome()=={'status':'failed','terminated':True}
+            else: cleaned=True
 if failure is not None:
     if cleaned: print(json.dumps(seal_receipt('completed',result={'status':'failed','terminated':True})['result']))
     else: raise failure

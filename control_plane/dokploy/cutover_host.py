@@ -94,6 +94,7 @@ from control_plane.odoo_cutover_recovery import (
     DefiniteBackupFailure,
     backup_recovery_eligible,
     abort_reconciliation_eligible,
+    publication_recovery_pause,
 )
 from control_plane.prepared_public_site import prepare_public_site, verify_snapshot
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupVerificationEvidence
@@ -151,11 +152,27 @@ print(json.dumps({'release':spec['release']} if 'release' in spec else {'ready_b
 
 
 BACKUP_MANIFEST_PROGRAM = r"""
-import json,sys
+import json,os,sys,tempfile
 from pathlib import Path
 spec=json.load(sys.stdin); path=Path(spec['directory']); claim=path.with_name(path.name+'.attempt.json')
 if path.is_symlink() or claim.is_symlink() or path.resolve()!=path: raise ValueError('backup path differs')
-if (path/'manifest.json').is_file() and claim.is_file():
+if 'cancel_absent' in spec and not claim.exists() and (not path.exists() or path.is_dir() and not any(path.iterdir())):
+    claim.parent.mkdir(parents=True,exist_ok=True)
+    descriptor,temporary=tempfile.mkstemp(dir=claim.parent,prefix='.capture-cancel-')
+    try:
+        with os.fdopen(descriptor,'w') as handle:
+            os.fchmod(handle.fileno(),0o600);json.dump({**spec['cancel_absent'],'cancelled':True},handle);handle.flush();os.fsync(handle.fileno())
+        try: os.link(temporary,claim)
+        except FileExistsError: pass
+        descriptor=os.open(claim.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try: os.fsync(descriptor)
+        finally: os.close(descriptor)
+    finally: os.unlink(temporary)
+if claim.is_file() and json.loads(claim.read_text()).get('cancelled') is True:
+    binding=json.loads(claim.read_text())
+    if set(binding)!={'record_id','nonce','cancelled'}: raise ValueError('cancelled capture claim differs')
+    print(json.dumps({'state':'failed','claim':{key:binding[key] for key in ('record_id','nonce')}}))
+elif (path/'manifest.json').is_file() and claim.is_file():
     print(json.dumps({'state':'captured','manifest':json.loads((path/'manifest.json').read_text()),'claim':json.loads(claim.read_text())}))
 elif path.with_name(path.name+'.failed.json').is_file():
     failure=path.with_name(path.name+'.failed.json')
@@ -476,7 +493,13 @@ class BoundOdooCutoverHost:
         self.state.verify_execution(require_existing=self.record() is not None)
         record = self.record()
         self.prepared_server(
-            require_running=not (record is not None and abort_reconciliation_eligible(record))
+            require_running=not (
+                record is not None
+                and (
+                    abort_reconciliation_eligible(record)
+                    or publication_recovery_pause(record) is not None
+                )
+            )
         )
         for slot in (plan.old, plan.new):
             current = self.payload(slot)
@@ -771,13 +794,12 @@ class BoundOdooCutoverHost:
 
     def owns_prepared(self, pause_id: str) -> bool:
         record = self.record()
-        if (
-            record is None
-            or record.pause is None
-            or record.public_site is None
-            or not backup_recovery_eligible(record)
-            or record.pause.pause_id != pause_id
-        ):
+        if record is None or record.public_site is None:
+            return False
+        pause = (
+            record.pause if backup_recovery_eligible(record) else publication_recovery_pause(record)
+        )
+        if pause is None or pause.pause_id != pause_id:
             return False
         directory = self.prepared_store()
         return (
@@ -1154,7 +1176,8 @@ class BoundOdooCutoverHost:
             or verification.database_dump_sha256 != capture.database_dump_sha256
             or verification.filestore_archive_sha256 != capture.filestore_archive_sha256
         ):
-            raise ValueError("coherent tuple integrity/restore-read verification failed")
+            self.cancel_backup_restore(plan)
+            raise DefiniteBackupFailure("coherent tuple integrity/restore-read verification failed")
         restored = verify_disposable_database_restore(
             self.transport,
             image=self.runtime.restore_image,
@@ -1214,13 +1237,22 @@ class BoundOdooCutoverHost:
             raise ValueError("backup cancellation lacks its original pre-maintenance operation")
         backup_id = cutover_record_id(plan) + "-online"
         binding = self.state.authority("backup")
+        if binding is None:
+            binding = self.state.authority(
+                "backup",
+                {
+                    "record_id": backup_id,
+                    "nonce": secrets.token_hex(32),
+                    "verification_nonce": secrets.token_hex(32),
+                },
+            )
         if binding is None or binding.get("record_id") != backup_id:
             raise ValueError("backup cancellation lacks its original capture intent")
         directory = (
             self.runtime.backup_root.rstrip("/") + "/" + plan.old.binding.database + "/" + backup_id
         )
         manifest = json.loads(
-            self.transport.read(
+            self.transport(
                 (
                     "docker",
                     "exec",
@@ -1230,7 +1262,12 @@ class BoundOdooCutoverHost:
                     "-c",
                     BACKUP_MANIFEST_PROGRAM,
                 ),
-                json.dumps({"directory": directory}),
+                json.dumps(
+                    {
+                        "directory": directory,
+                        "cancel_absent": {"record_id": backup_id, "nonce": binding["nonce"]},
+                    }
+                ),
             )
         )
         if manifest.get("claim") != {"record_id": backup_id, "nonce": binding["nonce"]}:

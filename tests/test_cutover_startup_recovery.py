@@ -12,7 +12,7 @@ from control_plane.contracts.prepared_public_site import PublicPauseRecord, Writ
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.dokploy.slot_maintenance import maintenance_payload, payload_digest
 from control_plane.odoo_cutover_plan import cutover_identity
-from control_plane.odoo_cutover_recovery import startup_recovery_pause
+from control_plane.odoo_cutover_recovery import startup_recovery_pause, publication_recovery_pause
 from control_plane.prepared_public_site import prepare_public_site
 from tests.test_odoo_cutover import IsolatedCutoverProvider
 from tests.test_odoo_cutover_website_settings import snapshot
@@ -104,6 +104,15 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                     pause=None if rollback else pause,
                 )
                 self.assertEqual(startup_recovery_pause(progress), pause)
+                for step in (
+                    ("rolling_back",)
+                    if rollback
+                    else ("maintaining", "verifying", "switching", "resuming")
+                ):
+                    self.assertEqual(
+                        publication_recovery_pause(progress.model_copy(update={"step": step})),
+                        pause,
+                    )
                 held = operation.model_copy(
                     update={
                         "status": "reconciliation_required",
@@ -158,6 +167,7 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                     ),
                 ):
                     self.assertIsNone(startup_recovery_pause(invalid))
+                    self.assertIsNone(publication_recovery_pause(invalid))
                     store.write_deployment_record(
                         deployment.model_copy(update={"odoo_cutover": invalid})
                     )

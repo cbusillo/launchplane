@@ -230,9 +230,7 @@ class DokployOdooCutoverProvider:
         observed = self.route.observed_target()
         if observed == self.driver.lane.prepared_origin or observed not in expected:
             if observed != self.driver.lane.prepared_origin or not any(
-                self.observed_public_copy(pause_id)
-                or slot == plan.old
-                and self.owns_prepared_pause(pause_id)
+                self.observed_public_copy(pause_id) or self.owns_prepared_pause(pause_id)
                 for pause_id in (self.pause_id, rollback_pause_identity(self.pause_id))
             ):
                 raise ValueError("unknown route is not a verified prepared public copy")

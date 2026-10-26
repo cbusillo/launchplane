@@ -470,7 +470,9 @@ must match that runner. Read-only old-slot readiness verifies the database UUID,
 credential boundary, required modules and absence of pending module work before
 any public pause. Native PostgreSQL and Docker addresses are normalized before
 attributing database sessions to physical writers. Web warming requires zero cron threads and the supported
-`base,web` server-wide topology. Installed `queue_job`, queue configuration or
+core `base,rpc,web` server-wide modules and the Launchplane runtime health module.
+The inventory comes from Odoo's parsed effective configuration, including artifact
+defaults, and every loaded module's manifest is checked. Installed `queue_job`, queue configuration or
 module `post_load` hooks remain unsupported; distinct cron jobs alone cannot
 prove that an HTTP queue or integration runner is fenced. Qualify a different
 executor topology before admitting it rather than aliasing it to a cron role.
@@ -489,6 +491,10 @@ container runs without network access, owns its anonymous volume and enforces
 its own maximum lifetime. Docker removes it and the volume on exit, including
 when the coordinator dies. Cleanup uses the returned container ID, never a
 reusable name. A timeout or lost reply cannot attest definite termination.
+Only the process that atomically creates restore intent may allocate. Cancelling
+an unused restore seals that same intent as cancelled, fencing delayed callers.
+A synchronously rejected allocation becomes definite only after native absence
+readback; an unknown allocation remains held even after its nominal deadline.
 
 A native capture writes a failure witness only after its synchronous work ends
 unsuccessfully and only if that process created the original nonce claim. A
@@ -498,7 +504,8 @@ pre-maintenance failures may enter `aborting` under the original operation,
 lease and plan. The original pause and complete drain must still agree; readiness
 of the old slot precedes the switch and writer handoff. Recovery may leave an
 unhealthy prepared server only when the original active pointer, verified bundle,
-and exact applied route prove ownership. Fresh publication still requires health.
+and exact applied route prove ownership. The same authority permits forward and
+rollback recovery with a verified maintenance receipt. Fresh publication still requires health.
 A lost switch reply can resume from the exact old route. A resumed or completed
 old-slot handoff never runs readiness that would stop its writers again.
 An unpaused compatible abort verifies the
@@ -507,14 +514,28 @@ records failure with the old service restored, and is terminal for deployment,
 worker and unfinished-operation readers. Started or orphaned capture, uncertain
 allocation, a foreign pause, maintenance dispatch or lost authority keeps
 the recovery hold. Normal continuation retains the existing attempt budget,
-delay and queue ordering. Once that budget is exhausted, a narrowly eligible
-original pre-maintenance operation can acquire an uncharged abort-only lease.
+delay and queue ordering. A narrowly eligible original pre-maintenance operation
+continues only through an uncharged abort-only lease, including after its normal
+attempt budget is exhausted. Recovery never waits for the budget to run out.
 That path cannot capture, allocate a restore, maintain a database, replace a
 target or deploy a candidate. It retains authorization, lease checks and lane
 serialization, and a refusal cannot refund an attempt or turn the hold into
 pending work. Restoring the unchanged old service does not await a new release
 window. If `aborted` was saved before the worker lost its terminal write, the
 same path verifies the old route and finishes only the failure audit.
+Expired-lease recovery reads the complete checkpoint history and production-write
+evidence, including worker death before the first dispatch of a reclaimed lease.
+Normal phase replay remains supported. A terminal `aborted` cutover completes
+the Client release as failed without creating another rollback operation. Its
+original admitted decision and recovery pin authorize only the inverse, so
+newer testing work or a forward-release hold cannot strand it; changed ownership,
+revoked Director authority or foreign production identity still refuse recovery.
+
+Before aborting an absent capture, the host atomically seals its native claim as
+cancelled, preventing delayed original dispatch from capturing later. Archive
+verification failure cancels or fences the original restore before becoming a
+definite failure. A live or unknown native capture, foreign tuple or unknown
+allocation still retains the original operation for reconciliation.
 
 The host prunes filesystem bundles after a successful executor return while
 holding the original lane authority. It retains applied prepared publication

@@ -9,6 +9,7 @@ from control_plane.contracts.prepared_public_site import WriterTarget
 from control_plane.dokploy.slot_maintenance import ContainerCommand
 from control_plane.dokploy.slot_compose import slot_startup_command
 
+SUPPORTED_SERVER_WIDE_MODULES = frozenset({"base", "rpc", "web", "launchplane_runtime_health"})
 
 CRON_CAPABILITY_PROGRAM = r"""
 import hashlib,json,os,sys
@@ -46,8 +47,12 @@ with tempfile.TemporaryDirectory() as directory:
     parser.read(settings.config_path)
     options=dict(parser['options'])
     if int(options.get('max_cron_threads','-1'))!=0: raise ValueError('web warming would start cron writers')
-    server_wide={name.strip() for name in options.get('server_wide_modules','base,web').split(',') if name.strip()}
-    if not server_wide <= {'base','web'}: raise ValueError('web-hosted executors lack isolated cutover support')
+    import odoo
+    from odoo.tools import config
+    from odoo.modules.module import initialize_sys_path
+    config.parse_config(['-c',settings.config_path])
+    server_wide=set(config['server_wide_modules'])
+    if not server_wide <= set(spec['supported_server_wide']): raise ValueError('web-hosted executors lack isolated cutover support')
     if parser.has_section('queue_job') or os.environ.get('ODOO_QUEUE_JOB_CHANNELS') or os.environ.get('QUEUE_JOB_CHANNELS'):
         raise ValueError('HTTP-dependent queue executors are unsupported')
     with psycopg2.connect(host=settings.database_host,port=settings.database_port,dbname=settings.database_name,user=settings.database_user,password=settings.database_password,connect_timeout=10) as connection, connection.cursor() as cursor:
@@ -56,10 +61,6 @@ with tempfile.TemporaryDirectory() as directory:
         cursor.execute("SELECT name FROM ir_module_module WHERE state IN ('installed','to install','to upgrade','to remove')")
         modules={row[0] for row in cursor.fetchall()} | set(spec['planned_modules']) | server_wide
     if 'queue_job' in modules: raise ValueError('installed HTTP-dependent queue executor is unsupported')
-    import odoo
-    from odoo.tools import config
-    from odoo.modules.module import initialize_sys_path
-    config.parse_config(['-c',settings.config_path])
     initialize_sys_path()
     roots=[Path(path) for path in odoo.addons.__path__]
     manifests={}
@@ -138,6 +139,7 @@ class NativeCronWriterCapabilities:
                         "environment": environment,
                         "database": slot.binding.database,
                         "database_uuid": slot.runtime_identity.database_uuid,
+                        "supported_server_wide": sorted(SUPPORTED_SERVER_WIDE_MODULES),
                         "planned_modules": list(self.plan.compatibility.install_modules)
                         if slot == self.plan.new
                         else [],
@@ -152,7 +154,7 @@ class NativeCronWriterCapabilities:
             or not isinstance(observed.get("modules"), list)
             or not observed["modules"]
             or not isinstance(observed.get("server_wide"), list)
-            or not set(observed["server_wide"]) <= {"base", "web"}
+            or not set(observed["server_wide"]) <= SUPPORTED_SERVER_WIDE_MODULES
             or not isinstance(observed.get("executor_sha256"), str)
             or len(observed["executor_sha256"]) != hashlib.sha256().digest_size * 2
         ):

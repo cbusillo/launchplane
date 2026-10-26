@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -8,6 +8,11 @@ from unittest.mock import patch
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.contracts.odoo_prod_promotion_operation import (
+    OdooProdPromotionCheckpoint,
+    ODOO_PROD_PROMOTION_SAFE_RETRY_PHASES,
+)
+from control_plane.odoo_release_recovery import PRODUCTION_WRITE_KEY
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.dokploy.cutover_execution import require_cutover_execution
 from control_plane.odoo_cutover_plan import cutover_identity
@@ -31,19 +36,31 @@ from tests.test_odoo_prod_promotion_operation import (
 
 class CutoverWorkerAbortTests(unittest.TestCase):
     def test_worker_reclaims_original_backup_and_checks_lease_before_abort_effects(self) -> None:
-        for changing, expired, exhausted in (
-            (False, False, False),
-            (True, False, False),
-            (True, True, False),
-            (True, False, True),
+        for changing, expired, exhausted, client, initial in (
+            (False, False, False, False, False),
+            (True, False, False, False, False),
+            (True, True, False, False, False),
+            (True, False, True, False, False),
+            (True, False, False, True, True),
+            (True, False, False, True, False),
+            (True, False, True, True, False),
         ):
             with (
                 self.subTest(changing=changing, expired=expired, exhausted=exhausted),
                 TemporaryDirectory() as temporary,
             ):
-                store = _store(temporary)
-                self.addCleanup(store.close)
-                operation = _operation()
+                if client:
+                    from tests.test_client_release import ClientReleaseTests
+
+                    release_fixture = ClientReleaseTests()
+                    release_fixture.setUp()
+                    self.addCleanup(release_fixture.doCleanups)
+                    store = release_fixture.store
+                    _, operation = release_fixture.queued_promotion()
+                else:
+                    store = _store(temporary)
+                    self.addCleanup(store.close)
+                    operation = _operation()
                 provider = IsolatedCutoverProvider(
                     Path(temporary) / "site", database_changing=changing
                 )
@@ -116,11 +133,65 @@ class CutoverWorkerAbortTests(unittest.TestCase):
                         "attempt": DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS if exhausted else 1,
                         "error_code": "operation_reconciliation_required",
                         "error_message": "Native completion lost.",
+                        "updated_at": "2026-09-30T00:00:00Z",
+                        "checkpoints": (
+                            *operation.checkpoints,
+                            OdooProdPromotionCheckpoint(
+                                phase="promotion_started",
+                                recorded_at=operation.created_at,
+                                evidence={PRODUCTION_WRITE_KEY: "true"},
+                            ),
+                        ),
                     }
                 )
-                store.create_odoo_prod_promotion_operation_record_if_no_active_lane(held)
+                if client:
+                    store.write_odoo_prod_promotion_operation_record(held)
+                    if not initial:
+                        release_fixture.switch("held")
+                        testing = store.read_release_tuple_record(
+                            context_name=operation.context, channel_name="testing"
+                        )
+                        store.write_release_tuple_record(
+                            testing.model_copy(update={"artifact_id": "newer-testing"})
+                        )
+                        from control_plane.odoo_release_recovery import odoo_cutover_abort_allows
+
+                        self.assertTrue(odoo_cutover_abort_allows(store, held))
+                        profile = store.read_product_profile_record(operation.product)
+                        store.write_product_profile_record(
+                            profile.model_copy(
+                                update={
+                                    "owner": profile.owner.model_copy(update={"github_id": "999"})
+                                }
+                            )
+                        )
+                        self.assertFalse(odoo_cutover_abort_allows(store, held))
+                        store.write_product_profile_record(profile)
+                else:
+                    store.create_odoo_prod_promotion_operation_record_if_no_active_lane(held)
                 before = cutover_store.load(identity)
-                if exhausted:
+                claim_time = datetime.now(UTC)
+                claimed = store.claim_odoo_cutover_reconciliation_record(
+                    lease_owner="interrupted-before-dispatch",
+                    claimed_at=claim_time.isoformat(),
+                    lease_expires_at=(claim_time + timedelta(seconds=1)).isoformat(),
+                    max_attempts=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+                    abort_only=True,
+                )
+                assert claimed is not None
+                store.recover_expired_odoo_prod_promotion_operation_records(
+                    now=(claim_time + timedelta(seconds=2)).isoformat(),
+                    safe_phases=ODOO_PROD_PROMOTION_SAFE_RETRY_PHASES,
+                    max_attempts=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+                )
+                interrupted = store.read_odoo_prod_promotion_operation_record(
+                    operation.operation_id
+                )
+                self.assertEqual(interrupted.status, "reconciliation_required")
+                for checkpoint in held.checkpoints:
+                    self.assertIn(checkpoint, interrupted.checkpoints)
+                store.write_odoo_prod_promotion_operation_record(held)
+                if exhausted and not client:
                     narrowed = _ADMINISTRATOR_POLICY.model_copy(update={"github_humans": ()})
                     with (
                         patch(
@@ -200,20 +271,42 @@ class CutoverWorkerAbortTests(unittest.TestCase):
                         }
                     )
 
+                cancel_original = provider.cancel_backup_restore
+
+                def cancel(current: OdooCutoverPlan) -> None:
+                    cancel_original(current)
+                    if expired:
+                        leased = store.read_odoo_prod_promotion_operation_record(
+                            operation.operation_id
+                        )
+                        store.write_odoo_prod_promotion_operation_record(
+                            leased.model_copy(
+                                update={
+                                    "lease_expires_at": datetime(2000, 1, 1, tzinfo=UTC).isoformat()
+                                }
+                            )
+                        )
+                        require_cutover_execution(plan)
+
+                if initial:
+                    store.write_odoo_prod_promotion_operation_record(
+                        held.model_copy(update={"status": "pending"})
+                    )
+
                 with (
                     patch(
                         "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_promotion_run",
                         side_effect=AssertionError("abort-only cannot start another promotion")
-                        if exhausted
+                        if not initial
                         else run,
                     ),
                     patch.object(
-                        provider, "cancel_backup_restore", wraps=provider.cancel_backup_restore
+                        provider, "cancel_backup_restore", side_effect=cancel
                     ) as cancellation,
                     patch.object(
                         provider, "backup", side_effect=AssertionError("abort-only cannot capture")
                     )
-                    if exhausted
+                    if not initial
                     else patch.object(provider, "backup", wraps=provider.backup),
                 ):
                     result = run_odoo_stable_operation_worker_once(
@@ -224,7 +317,7 @@ class CutoverWorkerAbortTests(unittest.TestCase):
                     )
                 self.assertEqual(result.operation_id, operation.operation_id)
                 after = cutover_store.load(identity)
-                self.assertEqual(after.step, "aborting" if expired else "aborted")
+                self.assertEqual(after.step, "backing_up" if expired else "aborted")
                 self.assertEqual(provider.maintenance_count, 0)
                 self.assertEqual(after.plan, before.plan)
                 latest = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
@@ -263,3 +356,10 @@ class CutoverWorkerAbortTests(unittest.TestCase):
                 else:
                     self.assertEqual(latest.status, "fail")
                     self.assertEqual(provider.target, plan.old)
+                    self.assertEqual(store.list_odoo_prod_rollback_operation_records(), ())
+                    with store.odoo_synchronous_lane_reservation(
+                        product=operation.product,
+                        context=operation.context,
+                        instance=operation.instance,
+                    ) as owner:
+                        self.assertIsNone(owner)

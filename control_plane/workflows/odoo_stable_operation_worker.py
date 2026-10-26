@@ -1823,6 +1823,28 @@ def _execute_prod_promotion_operation(
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     abort_only: bool = False,
 ) -> bool:
+    def recovering_abort() -> bool:
+        from control_plane.odoo_cutover_recovery import (
+            operation_cutover,
+            abort_reconciliation_eligible,
+        )
+
+        record = operation_cutover(cast(Any, record_store), operation)
+        return (
+            record is not None
+            and abort_reconciliation_eligible(record)
+            and (abort_only or record.step in {"aborting", "aborted"})
+        )
+
+    def release_authority(authorization: DurableOperationAuthorization) -> bool:
+        from control_plane.odoo_release_recovery import odoo_cutover_abort_allows
+
+        return (
+            odoo_cutover_abort_allows(cast(Any, record_store), operation)
+            if recovering_abort()
+            else client_release_grant_allows(record_store, authorization)
+        )
+
     def retain_denied_cutover_hold() -> bool:
         known_write = odoo_release_wrote_production(operation)
         if cutover_provider_factory is None:
@@ -1862,7 +1884,7 @@ def _execute_prod_promotion_operation(
         def before_effect(effect_name: str) -> None:
             nonlocal started
             if (
-                not abort_only
+                not recovering_abort()
                 and not started
                 and operation.authorization.grant in RELEASE_DECISION_GRANTS
             ):
@@ -2014,9 +2036,7 @@ def _execute_prod_promotion_operation(
             record=record, lease_owner=lease_owner
         ),
         policy_record_reader=lambda: read_active_authz_policy_record(record_store),
-        client_release_grant_allows=lambda authorization: client_release_grant_allows(
-            record_store, authorization
-        ),
+        client_release_grant_allows=release_authority,
         # Authority is read again just before the deploy first writes to the provider,
         # so a hold or newer decision during plan preparation still stops it.
         boundary_effects=frozenset(

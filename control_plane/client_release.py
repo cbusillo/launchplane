@@ -460,7 +460,7 @@ def live_temporary_hotfix(
 
 
 def _covering_decision(
-    store: object, product: str, *, decision_record_id: str = ""
+    store: object, product: str, *, decision_record_id: str = "", recovering: bool = False
 ) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
     """The product and its newest decision, when that decision still starts a release."""
 
@@ -476,7 +476,18 @@ def _covering_decision(
         or not profile.owner.github_id
     ):
         return None
-    latest = record_store.list_release_review_decision_records(product=product, limit=1)
+    latest: tuple[ReleaseReviewDecisionRecord, ...]
+    if recovering and decision_record_id:
+        try:
+            latest = (
+                record_store.read_release_review_decision_record(
+                    product=product, record_id=decision_record_id
+                ),
+            )
+        except FileNotFoundError:
+            return None
+    else:
+        latest = record_store.list_release_review_decision_records(product=product, limit=1)
     if not latest:
         return None
     decision = latest[0]
@@ -504,11 +515,13 @@ def _covering_decision(
         return profile, decision
     if (
         decision.decision != "accepted"
-        or profile.release_on_acceptance == "held"
+        or not recovering
+        and profile.release_on_acceptance == "held"
         or decision.actor_github_id != profile.owner.github_id
         or (
             decision.acceptance_source == "director_standing"
             and profile.release_on_acceptance != "director_standing"
+            and not recovering
         )
     ):
         return None
@@ -527,6 +540,8 @@ def accepted_release_can_start(store: object, decision: ReleaseReviewDecisionRec
 def _client_release_authority(
     store: object,
     authorization: DurableOperationAuthorization,
+    *,
+    recovering: bool = False,
 ) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
     """Read the covering authority and its production boundary independently of testing."""
 
@@ -536,6 +551,7 @@ def _client_release_authority(
         store,
         authorization.product,
         decision_record_id=authorization.release_decision_record_id,
+        recovering=recovering,
     )
     if covered is None:
         return None

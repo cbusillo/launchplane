@@ -1,10 +1,54 @@
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
 from control_plane.contracts.prepared_public_site import PublicPauseRecord
 from control_plane.prepared_public_site import verify_snapshot
+from control_plane.odoo_cutover_storage import DeploymentStore
+from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionOperationRecord
+from control_plane.odoo_cutover_plan import cutover_identity
 
 
 class DefiniteBackupFailure(ValueError):
     pass
+
+
+def operation_cutover(
+    store: DeploymentStore, operation: OdooProdPromotionOperationRecord
+) -> OdooCutoverRecord | None:
+    identity = cutover_identity(
+        operation.product, operation.context, operation.instance, operation.request.request_id
+    )
+    try:
+        deployment = store.read_deployment_record("deployment-cutover-" + identity)
+    except FileNotFoundError:
+        return None
+    record = deployment.odoo_cutover
+    if record is None:
+        return None
+    plan = record.plan
+    return (
+        record
+        if (
+            record.record_id,
+            plan.new.binding.product_id,
+            plan.new.runtime_identity.context,
+            plan.new.binding.environment_id,
+            plan.release_id,
+            plan.new.runtime_identity.deployment_record_id,
+        )
+        == (
+            identity,
+            operation.product,
+            operation.context,
+            operation.instance,
+            operation.request.request_id,
+            deployment.record_id,
+        )
+        else None
+    )
+
+
+def operation_aborted(store: DeploymentStore, operation: OdooProdPromotionOperationRecord) -> bool:
+    record = operation_cutover(store, operation)
+    return record is not None and record.step == "aborted" and abort_reconciliation_eligible(record)
 
 
 def backup_recovery_eligible(record: OdooCutoverRecord) -> bool:
@@ -115,3 +159,9 @@ def startup_recovery_pause(record: OdooCutoverRecord) -> PublicPauseRecord | Non
     except ValueError:
         return None
     return pause
+
+
+def publication_recovery_pause(record: OdooCutoverRecord) -> PublicPauseRecord | None:
+    if record.step in {"maintaining", "verifying", "switching", "resuming"}:
+        return startup_recovery_pause(record.model_copy(update={"step": "maintaining"}))
+    return startup_recovery_pause(record)

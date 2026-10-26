@@ -6,9 +6,12 @@ from typing import Any, cast
 import unittest
 from unittest.mock import Mock, patch
 import json
+import io
+import os
+from contextlib import redirect_stdout
 
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
-from control_plane.dokploy.cutover_host import BoundOdooCutoverHost
+from control_plane.dokploy.cutover_host import BoundOdooCutoverHost, BACKUP_MANIFEST_PROGRAM
 from control_plane.dokploy.post_deploy import DEFAULT_ODOO_BACKUP_ROOT
 from control_plane.odoo_cutover_plan import cutover_record_id
 from tests.support.prepared_public_fixture import WebsiteFixture
@@ -77,6 +80,7 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
             BoundOdooCutoverHost,
             SimpleNamespace(
                 guard=Mock(),
+                plan=self.plan,
                 record=lambda: record,
                 store=store,
                 state=SimpleNamespace(authority=authority),
@@ -102,6 +106,7 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
                 side_effect=[self.binding["nonce"], self.binding["verification_nonce"]],
             )
         )
+
         self.enterContext(
             patch(
                 "control_plane.dokploy.cutover_host.verify_disposable_database_restore",
@@ -127,6 +132,41 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
             )
         )
 
+    def test_absent_capture_cancellation_atomically_fences_late_original_dispatch(self) -> None:
+        for had_intent in (False, True):
+            with self.subTest(had_intent=had_intent), TemporaryDirectory() as temporary:
+                self.bindings.clear()
+                if had_intent:
+                    self.bindings["backup"] = self.binding
+                self.host.runtime.backup_root = str(Path(temporary).resolve())
+
+                def native(argv: tuple[str, ...], stdin: str | None) -> str:
+                    output = io.StringIO()
+                    with patch("sys.stdin", io.StringIO(stdin or "")), redirect_stdout(output):
+                        exec(BACKUP_MANIFEST_PROGRAM, {})
+                    return output.getvalue()
+
+                self.transport.side_effect = native
+                with patch(
+                    "control_plane.dokploy.cutover_host.secrets.token_hex",
+                    side_effect=[self.binding["nonce"], self.binding["verification_nonce"]],
+                ):
+                    BoundOdooCutoverHost.cancel_backup_restore(self.host, self.plan)
+                binding = self.bindings["backup"]
+                directory = (
+                    Path(self.host.runtime.backup_root)
+                    / self.plan.old.binding.database
+                    / self.backup_id
+                )
+                claim = directory.with_name(directory.name + ".attempt.json")
+                with self.assertRaises(FileExistsError):
+                    os.open(claim, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                self.assertEqual(
+                    json.loads(claim.read_text()),
+                    {"record_id": self.backup_id, "nonce": binding["nonce"], "cancelled": True},
+                )
+                BoundOdooCutoverHost.cancel_backup_restore(self.host, self.plan)
+
     def test_denial_before_capture_dispatch_keeps_the_same_intent_replayable(self) -> None:
         self.transport.side_effect = [
             RuntimeError("original guard denied before send"),
@@ -141,6 +181,28 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
         self.assertEqual(recovered.logical_record_id, self.backup_id)
         self.assertEqual(self.bindings["backup"], self.binding)
         self.assertEqual(self.extract.call_count, 1)
+
+    def test_failed_archive_verification_cancels_before_becoming_abortable(self) -> None:
+        from control_plane.odoo_cutover_recovery import DefiniteBackupFailure
+
+        failed = {
+            **_passing_verification_evidence(),
+            "verification_status": "fail",
+            "failure_code": "artifact_hash_mismatch",
+            "verification_nonce": self.binding["verification_nonce"],
+            "backup_record_id": self.backup_id,
+            "database_name": self.plan.old.binding.database,
+        }
+        with (
+            patch(
+                "control_plane.dokploy.cutover_host.post_deploy.extract_odoo_backup_verification_result",
+                return_value=failed,
+            ),
+            patch.object(self.host, "cancel_backup_restore", create=True) as cancel,
+            self.assertRaises(DefiniteBackupFailure),
+        ):
+            BoundOdooCutoverHost.backup(self.host, self.plan)
+        cancel.assert_called_once_with(self.plan)
 
     def test_uncertain_or_foreign_capture_is_never_dispatched_again(self) -> None:
         for state in ("uncertain", "foreign-nonce", "missing-intent"):

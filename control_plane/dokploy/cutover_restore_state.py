@@ -24,7 +24,9 @@ def seal_receipt(kind,**values):
         with os.fdopen(descriptor,'w') as stream:
             os.fchmod(stream.fileno(),0o600);json.dump(value,stream,sort_keys=True);stream.flush();os.fsync(stream.fileno())
         try: os.link(temporary,path)
-        except FileExistsError: return read_receipt(kind)
+        except FileExistsError:
+            if kind=='intent': raise RuntimeError('original restore intent is already claimed')
+            return read_receipt(kind)
         descriptor=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
         try: os.fsync(descriptor)
         finally: os.close(descriptor)
@@ -59,7 +61,9 @@ def restore_outcome():
         if allocation['container']!=container: raise ValueError('restore allocation receipt differs')
         subprocess.run(['docker','rm','-f','-v',container],capture_output=True,timeout=min(30,spec['timeout_seconds']))
     elif allocation is None:
-        if intent is not None: raise RuntimeError('original restore allocation remains uncertain')
+        if intent is not None:
+            if intent.get('cancelled') is True: return seal_receipt('completed',result={'status':'failed','terminated':True})['result']
+            raise RuntimeError('original restore allocation remains uncertain')
         return None
     container=allocation['container']
     if not re.fullmatch('[0-9a-f]{64}',container): raise ValueError('original restore allocation witness is malformed')
@@ -72,7 +76,9 @@ RESTORE_CANCEL_PROGRAM = (
     RESTORE_STATE_PROGRAM
     + r"""
 outcome=restore_outcome()
-if outcome is None: raise RuntimeError('original restore has no owned allocation or terminal witness')
+if outcome is None:
+    seal_receipt('intent',cancelled=True)
+    seal_receipt('completed',result={'status':'failed','terminated':True})
 print(json.dumps({'cancelled':True}))
 """
 )

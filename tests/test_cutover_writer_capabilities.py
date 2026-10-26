@@ -7,7 +7,10 @@ from unittest.mock import Mock
 
 from control_plane.contracts.cutover_host import OdooCronWriterBinding
 from control_plane.dokploy.slot_compose import slot_startup_command
-from control_plane.dokploy.cutover_writer_capabilities import NativeCronWriterCapabilities
+from control_plane.dokploy.cutover_writer_capabilities import (
+    NativeCronWriterCapabilities,
+    SUPPORTED_SERVER_WIDE_MODULES,
+)
 from tests.support.prepared_public_fixture import WebsiteFixture
 from tests.test_odoo_cutover import release_plan
 
@@ -81,7 +84,7 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
             root = Path(temporary)
             manifests = root / "addons"
             manifests.mkdir()
-            for module in ("base", "web", "queue_job"):
+            for module in ("base", "rpc", "web", "queue_job"):
                 (manifests / module).mkdir()
                 (manifests / module / "__manifest__.py").write_text("{}")
             query = MagicMock()
@@ -131,14 +134,15 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
                     "planned_modules": [],
                     "environment": {"ODOO_MAX_CRON_THREADS": "0"},
                     "image": self.plan.old.image,
+                    "supported_server_wide": sorted(SUPPORTED_SERVER_WIDE_MODULES),
                 }
             )
+            effective = MagicMock()
+            effective.__getitem__.return_value = ["base", "rpc", "web"]
             modules = {
                 "psycopg2": SimpleNamespace(connect=lambda **kwargs: connection),
                 "odoo": SimpleNamespace(addons=SimpleNamespace(__path__=[str(manifests)])),
-                "odoo.tools": SimpleNamespace(
-                    config=SimpleNamespace(parse_config=lambda args: None)
-                ),
+                "odoo.tools": SimpleNamespace(config=effective),
                 "odoo.modules.module": SimpleNamespace(initialize_sys_path=lambda: None),
             }
             original_path = list(sys.path)

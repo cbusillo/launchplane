@@ -1,5 +1,6 @@
 from contextlib import redirect_stdout
 import io
+import os
 import json
 import subprocess
 import hashlib
@@ -13,6 +14,7 @@ from control_plane.dokploy.cutover_restore_probe import (
     RESTORE_PROBE_PROGRAM,
     RESTORE_PREFLIGHT_PROGRAM,
 )
+from control_plane.dokploy.cutover_restore_state import RESTORE_CANCEL_PROGRAM
 
 
 class CutoverRestoreProbeTests(unittest.TestCase):
@@ -78,7 +80,7 @@ class CutoverRestoreProbeTests(unittest.TestCase):
         self.container = "e" * 64
         self.clock = 0.0
 
-    def run_probe(self, *, failure: str = "") -> dict[str, Any]:
+    def run_probe(self, *, failure: str = "", cancel: bool = False) -> dict[str, Any]:
         request = {**self.request, "record": str(self.request["record"]) + failure}
         binding = {
             key: request[key]
@@ -140,6 +142,8 @@ class CutoverRestoreProbeTests(unittest.TestCase):
                 ).encode()
             elif argv[1] == "run":
                 output = self.container.encode()
+                if failure == "allocation":
+                    status = 1
             elif "pg_database_size" in argv[-1]:
                 output = b"100000"
             elif "df" in argv:
@@ -185,7 +189,7 @@ class CutoverRestoreProbeTests(unittest.TestCase):
             redirect_stdout(output),
         ):
             try:
-                exec(RESTORE_PROBE_PROGRAM, {})
+                exec(RESTORE_CANCEL_PROGRAM if cancel else RESTORE_PROBE_PROGRAM, {})
             except SystemExit as ended:
                 self.assertEqual(ended.code, 0)
         return json.loads(output.getvalue())  # type: ignore[no-any-return]
@@ -241,6 +245,50 @@ class CutoverRestoreProbeTests(unittest.TestCase):
         self.request["capture_nonce"] = "e" * 64
         with self.assertRaises(ValueError):
             self.run_probe()
+
+    def test_lost_intent_claim_cannot_allocate_after_original_completion(self) -> None:
+        original = os.link
+        raced = False
+
+        def finish_original(source: str, destination: Path) -> None:
+            nonlocal raced
+            if str(destination).endswith("-restore-intent.json") and not raced:
+                raced = True
+                intent = json.loads(Path(source).read_text())
+                original(source, destination)
+                destination.with_name(
+                    str(self.request["record"]) + "-restore-completed.json"
+                ).write_text(
+                    json.dumps(
+                        {
+                            "request": intent["request"],
+                            "result": {"status": "failed", "terminated": True},
+                        }
+                    )
+                )
+                raise FileExistsError()
+            original(source, destination)
+
+        with patch("os.link", side_effect=finish_original), self.assertRaises(RuntimeError):
+            self.run_probe()
+        self.assertFalse(any(argv[1] == "run" for argv, _ in self.commands))
+        self.commands.clear()
+        self.assertEqual(self.run_probe(), {"status": "failed", "terminated": True})
+        self.assertEqual(self.commands, [])
+
+    def test_cancellation_seals_unused_restore_and_prevents_later_allocation(self) -> None:
+        self.assertEqual(self.run_probe(cancel=True), {"cancelled": True})
+        self.commands.clear()
+        self.assertEqual(self.run_probe(), {"status": "failed", "terminated": True})
+        self.assertEqual(self.commands, [])
+
+    def test_rejected_allocation_is_definite_after_native_absence_readback(self) -> None:
+        self.assertEqual(
+            self.run_probe(failure="allocation"), {"status": "failed", "terminated": True}
+        )
+        self.commands.clear()
+        self.assertEqual(self.run_probe(failure="allocation", cancel=True), {"cancelled": True})
+        self.assertEqual(self.commands, [])
 
 
 class NativeRestoreLifetimeTests(unittest.TestCase):
