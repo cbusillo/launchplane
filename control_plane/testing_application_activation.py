@@ -85,7 +85,10 @@ def undispatched_application_recipient(
 
 
 def unstarted_application_recipient(
-    record: TestingActivationRecord, reservation: LaunchplaneIdempotencyRecord
+    record: TestingActivationRecord,
+    reservation: LaunchplaneIdempotencyRecord,
+    *,
+    allow_unanswered_mount: bool = False,
 ) -> bool:
     specification = record.request.application
     readiness = record.application_readiness
@@ -99,6 +102,12 @@ def unstarted_application_recipient(
             readiness is not None
             and (readiness.route is not None or readiness.private_health is not None)
         )
+    ):
+        return False
+    if (
+        record.phase == "create_application_mount"
+        and record.state_recipient.get("mount_verified") != "true"
+        and not allow_unanswered_mount
     ):
         return False
     return record.phase in {
@@ -2071,11 +2080,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             require_fresh_application_runtime(
                 live, environment_id=record.environment_id, project_id=record.project_id
             )
-            if live.get("autoDeploy") is not False and (
-                live.get("sourceType") not in {"github", "git"}
-                or live.get("branch")
-                or live.get("customGitBranch")
-            ):
+            if live.get("autoDeploy") is not False and live.get("sourceType") not in {
+                "github",
+                "git",
+            }:
                 raise TestingActivationRefusal("Automatic candidate execution is unverified.")
 
     def require_terminal_candidate(
@@ -2128,8 +2136,6 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
     def candidate_refusal_ready(self, record: TestingActivationRecord) -> bool:
         """Only a deliberate positive refusal may abandon an original candidate."""
-        if self.request.mode == "refuse":
-            self.require_refusable_mount(record)
         if record.published:
             return False
         self.require_recovery_unused(record)
@@ -2233,7 +2239,11 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 check()
                 self.require_recovery_unused(current)
                 readiness = current.application_readiness
-                unstarted = unstarted_application_recipient(current, lease.evidence_reservation())
+                unstarted = unstarted_application_recipient(
+                    current,
+                    lease.evidence_reservation(),
+                    allow_unanswered_mount=self.request.mode == "refuse",
+                )
                 if readiness is None and not unstarted:
                     return None
                 if readiness is not None and readiness.route is not None:
@@ -2242,7 +2252,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     self.restore_application_route(current, lease, check)
                 else:
                     if unstarted:
-                        if current.phase != "refusing_private_candidate":
+                        if (
+                            self.request.mode == "refuse"
+                            and current.phase != "refusing_private_candidate"
+                        ):
                             current = self.save(current, phase="refusing_private_candidate")
                         self.require_unstarted_candidate(current)
                     else:

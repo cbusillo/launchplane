@@ -3388,6 +3388,19 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(self.activate().status, "in_progress")
         self.assertEqual((self.writes, self.adapter.current()), before)
 
+    def test_plain_authority_changed_apply_cannot_abandon_an_unanswered_mount(self) -> None:
+        self.interrupt_unanswered_mount()
+        record = self.adapter.current()
+        self.correct_runtime()
+        for status in ("idle", "running"):
+            with self.subTest(status=status):
+                self.payloads[record.target_id]["applicationStatus"] = status
+                writes = deepcopy(self.writes)
+                self.assertEqual(self.activate().status, "reconcile_required")
+                self.assertEqual(self.adapter.current().phase, "create_application_mount")
+                self.assertIsNone(self.adapter.current().failure)
+                self.assertEqual(self.writes, writes)
+
     def test_lost_negative_completion_adopts_the_refusal_without_forward_work(self) -> None:
         self.interrupt_unanswered_mount()
         self.request.mode = "refuse"

@@ -301,7 +301,8 @@ Guards and the current-lease effect checkpoint precede the durable may-dispatch
 phase and actual dispatch. An admitted unanswered create, mount or deploy remains
 unknown even when a later readonly inspection changes the latest checkpoint.
 Absolute configuration writes can replay only against the positively owned,
-unused recipient. Unsettled create or host-program outcomes remain unknown. A stable
+unused recipient. Unsettled create, mount or host-program outcomes remain unknown
+under ordinary forward continuation. A stable
 original task/container with the expected image, environment and state may prove
 a failed task, HTTP error or health-identity mismatch. Empty task inventory,
 startup pending, transport failures and unreadable responses prove no failure.

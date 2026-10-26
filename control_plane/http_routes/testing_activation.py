@@ -183,7 +183,7 @@ def register_testing_activation_routes(
                     original = record_store.read_testing_application_activation_operation(
                         product, body.context, scope, body.preparation_key
                     )
-                    if body.application is None or original is None:
+                    if original is None:
                         raise TestingActivationRefusal(
                             "Refusal requires the original application operation."
                         )

@@ -13984,7 +13984,9 @@ class PostgresRecordStore(HumanSessionStore):
                     self._provider_evidence_context, "reservation_reader", None
                 )
                 unstarted = original_reader is not None and unstarted_application_recipient(
-                    before, self.require_current_provider_execution(session, original_reader())
+                    before,
+                    self.require_current_provider_execution(session, original_reader()),
+                    allow_unanswered_mount=record.phase == "refusing_private_candidate",
                 )
             if restoring and (
                 record.request.application is None
