@@ -5,6 +5,9 @@ import io
 import json
 import os
 import subprocess
+import signal
+import sys
+import time
 import tarfile
 import unittest
 from contextlib import redirect_stdout
@@ -22,6 +25,84 @@ from control_plane.dokploy.post_deploy import _build_dokploy_odoo_backup_verific
 
 
 class OnlineBackupTests(unittest.TestCase):
+    def test_native_dump_child_retains_capture_lock_after_coordinator_death(self) -> None:
+        from control_plane.dokploy.cutover_host import BACKUP_MANIFEST_PROGRAM
+
+        marker = self.root / "dump-child.json"
+        environment = {**self.environment, "CUTOVER_CAPTURE_CLAIM": "1"}
+        harness = r"""
+import json,subprocess,sys,tempfile
+spec=json.loads(sys.argv[1]);tempfile.tempdir=spec['scratch']
+from tests.test_odoo_online_backup import OnlineBackupTests
+fixture=OnlineBackupTests();fixture.setUp();fixture.environment.update(spec['environment'])
+real_run=subprocess.run
+def dump(command,**kwargs):
+    if command[0]=='pg_dump':
+        code="import json,os,sys,time;from pathlib import Path;Path(sys.argv[1]).write_text(json.dumps({'pid':os.getpid()}));time.sleep(60)"
+        return real_run([sys.executable,'-c',code,spec['marker']],**kwargs)
+    return fixture.dump(command,**kwargs)
+fixture.capture(dump)
+"""
+        coordinator = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                harness,
+                json.dumps(
+                    {"scratch": str(self.root), "environment": environment, "marker": str(marker)}
+                ),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(lambda: coordinator.kill() if coordinator.poll() is None else None)
+        deadline = time.monotonic() + 10
+        while not marker.exists() and coordinator.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(
+            marker.exists(),
+            coordinator.stderr.read()
+            if coordinator.poll() is not None and coordinator.stderr
+            else "dump child did not start",
+        )
+        child = json.loads(marker.read_text())["pid"]
+
+        def kill_child() -> None:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        self.addCleanup(kill_child)
+
+        def observe() -> dict[str, object]:
+            result = subprocess.run(
+                [sys.executable, "-c", BACKUP_MANIFEST_PROGRAM],
+                input=json.dumps({"directory": str(self.destination)}),
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            )
+            return cast(dict[str, object], json.loads(result.stdout))
+
+        self.assertEqual(observe()["state"], "uncertain")
+        coordinator.kill()
+        coordinator.communicate(timeout=5)
+        self.assertEqual(observe()["state"], "uncertain")
+        kill_child()
+        deadline = time.monotonic() + 5
+        result = observe()
+        while result["state"] != "failed" and time.monotonic() < deadline:
+            time.sleep(0.05)
+            result = observe()
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(
+            result["claim"],
+            {"record_id": environment["BACKUP_RECORD_ID"], "nonce": environment["BACKUP_NONCE"]},
+        )
+
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -144,6 +225,31 @@ class OnlineBackupTests(unittest.TestCase):
         self.assertEqual(self.output.getvalue(), "")
         self.assertFalse(list(self.destination.glob(".filestore-snapshot-*")))
 
+    def test_capture_claim_blocks_a_second_dispatch_even_before_any_dump_bytes(self) -> None:
+        self.environment["CUTOVER_CAPTURE_CLAIM"] = "1"
+        self.psycopg.connect.side_effect = RuntimeError("database unavailable")
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            self.capture()
+        claim = self.destination.with_name(self.destination.name + ".attempt.json")
+        self.assertEqual(
+            json.loads(claim.read_text()),
+            {
+                "record_id": self.environment["BACKUP_RECORD_ID"],
+                "nonce": self.environment["BACKUP_NONCE"],
+                "lock_inherited": True,
+            },
+        )
+        self.assertFalse(tuple(self.destination.iterdir()))
+        self.psycopg.connect.reset_mock()
+        with self.assertRaises(FileExistsError):
+            self.capture()
+        self.psycopg.connect.assert_not_called()
+
+    def test_manifest_preserves_the_capture_nonce(self) -> None:
+        self.capture()
+        manifest = json.loads((self.destination / "manifest.json").read_text())
+        self.assertEqual(manifest["backup_nonce"], self.environment["BACKUP_NONCE"])
+
     def test_missing_or_corrupt_committed_attachment_blocks_capture(self) -> None:
         self.source.write_bytes(b"wrong bytes")
         with self.assertRaisesRegex(RuntimeError, "integrity"):
@@ -202,3 +308,21 @@ class OnlineBackupTests(unittest.TestCase):
                 OdooProdBackupCaptureEvidence.model_validate(
                     {k: v for k, v in evidence.items() if k != field}
                 )
+
+    def test_rejected_duplicate_cannot_mark_a_live_native_capture_as_failed(self) -> None:
+        self.environment["CUTOVER_CAPTURE_CLAIM"] = "1"
+        claim = self.destination.with_name(self.destination.name + ".attempt.json")
+        claim.write_text(
+            json.dumps(
+                {
+                    "record_id": self.environment["BACKUP_RECORD_ID"],
+                    "nonce": self.environment["BACKUP_NONCE"],
+                }
+            )
+        )
+        with self.assertRaises(FileExistsError):
+            self.capture()
+        self.psycopg.connect.assert_not_called()
+        self.assertFalse(
+            self.destination.with_name(self.destination.name + ".failed.json").exists()
+        )

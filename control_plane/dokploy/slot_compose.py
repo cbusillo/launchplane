@@ -8,6 +8,10 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy.slot_maintenance import slot_run_marker, slot_run_stamp
 
 
+def slot_startup_command() -> str:
+    return "/venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
+
+
 def held_slot_command(plan: OdooCutoverPlan, command: str) -> str:
     marker, stamp = slot_run_marker(plan), slot_run_stamp(plan)
     return (
@@ -47,7 +51,7 @@ def render_odoo_app_slot_compose(
     """
     if not data_volume or not private_network:
         raise ValueError("candidate requires explicit authoritative volume/network records")
-    startup = "/venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
+    startup = slot_startup_command()
     web = held_slot_command(plan, startup)
     scheduler = held_slot_command(
         plan,
@@ -76,13 +80,13 @@ def render_odoo_app_slot_compose(
     return json.dumps(
         {
             "services": {
-                "web": {**base, "command": web.replace("$", "$$")},
+                "web": {**base, "command": [web.replace("$", "$$")]},
                 "scheduler": {
                     **base,
                     "environment": {**environment, "ODOO_MAX_CRON_THREADS": "1"},
-                    "command": scheduler.replace("$", "$$"),
+                    "command": [scheduler.replace("$", "$$")],
                 },
-                "script-runner": {**base, "command": "exec sleep infinity"},
+                "script-runner": {**base, "command": ["exec sleep infinity"]},
             },
             "volumes": {"data": {"external": True, "name": data_volume}},
             "networks": {"private": {"external": True, "name": private_network}},

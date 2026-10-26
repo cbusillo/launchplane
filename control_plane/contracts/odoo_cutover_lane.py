@@ -3,6 +3,7 @@
 from typing import Self
 from pydantic import Field, model_validator
 from control_plane.contracts.prepared_public_site import FrozenRecord, WriterTarget
+from control_plane.contracts.cutover_host import OdooCutoverHostRuntime
 
 
 class OdooSlotCoordinates(FrozenRecord):
@@ -19,6 +20,9 @@ class OdooCutoverLane(FrozenRecord):
     prepared_origin: str = Field(min_length=1)
     slots: tuple[OdooSlotCoordinates, OdooSlotCoordinates]
     writers: tuple[WriterTarget, ...]
+    host_runtime: OdooCutoverHostRuntime | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def distinct_slots(self) -> Self:

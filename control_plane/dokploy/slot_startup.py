@@ -241,7 +241,9 @@ class DokploySlotStartup:
         )
         self.writers.targets = refreshed
 
-    def _projects(self, plan: OdooCutoverPlan, *, fenced: bool) -> tuple[_Project, ...]:
+    def _projects(
+        self, plan: OdooCutoverPlan, *, fenced: bool, slots: tuple[OdooSlot, ...] | None = None
+    ) -> tuple[_Project, ...]:
         if self.writers.plan != plan:
             raise ValueError("startup writer inventory belongs to another release")
         saved = read_authority(plan, self.authority_directory, self.execute)
@@ -251,7 +253,7 @@ class DokploySlotStartup:
         }:
             raise ValueError("durable Compose authority omits a release slot")
         projects = []
-        for slot in (plan.old, plan.new):
+        for slot in slots if slots is not None else (plan.old, plan.new):
             target = api.fetch_dokploy_target_payload(
                 host=self.host, token=self.token, target_type="compose", target_id=slot.compose_id
             )
@@ -435,6 +437,35 @@ class DokploySlotStartup:
 
     def preflight(self, plan: OdooCutoverPlan) -> None:
         projects = self._projects(plan, fenced=False)
+        self._preflight_projects(plan, projects)
+
+    def preflight_candidate(self, plan: OdooCutoverPlan, compose_definition: str) -> None:
+        projects = self._projects(plan, fenced=False, slots=(plan.old,))
+        self._preflight_projects(plan, projects)
+        candidate = json.loads(compose_definition)
+        if set(candidate["services"]) != {"web", "scheduler", "script-runner"}:
+            raise ValueError("candidate differs from the shipped web/scheduler topology")
+        for definition in candidate["services"].values():
+            if (
+                definition.get("image") != plan.new.image
+                or definition.get("env_file") != [".env"]
+                or ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY in definition.get("environment", {})
+            ):
+                raise ValueError("candidate startup cannot consume its durable environment")
+        target = api.fetch_dokploy_target_payload(
+            host=self.host, token=self.token, target_type="compose", target_id=plan.new.compose_id
+        )
+        for intent in (plan.website_settings, plan.rollback_website_settings):
+            if intent is not None:
+                merge_provider_startup_environment(
+                    str(target.get("env") or ""),
+                    intent.settings.model_dump(mode="json"),
+                    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+                    WEBSITE_INDEXING_PARAMETER,
+                    compose_type=str(target.get("composeType") or "docker-compose"),
+                )
+
+    def _preflight_projects(self, plan: OdooCutoverPlan, projects: tuple[_Project, ...]) -> None:
         for intent in (plan.website_settings, plan.rollback_website_settings):
             if intent is None:
                 continue

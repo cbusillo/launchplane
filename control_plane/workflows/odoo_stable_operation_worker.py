@@ -39,6 +39,7 @@ from control_plane.contracts.odoo_prod_backup_restore_operation import (
     odoo_prod_backup_restore_operation_is_verification_replay_claim,
 )
 from control_plane.contracts.odoo_prod_promotion_operation import (
+    DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS as DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     ODOO_PROD_PROMOTION_SAFE_RETRY_PHASES,
     OdooProdPromotionOperationPhase,
     OdooProdPromotionOperationRecord,
@@ -83,12 +84,18 @@ from control_plane.client_release import (
     client_release_grant_allows,
 )
 from control_plane.odoo_business_hours import BusinessHoursHeld, require_release_window
+from control_plane.odoo_cutover_recovery import (
+    CutoverEntryRefusedError,
+    cutover_reconciliation_uses_budget,
+    operation_cutover,
+)
 from control_plane.odoo_release_recovery import (
     PRODUCTION_WRITE_KEY,
     odoo_release_wrote_production,
     odoo_release_recovery_source,
     odoo_release_recovery_allows,
     require_odoo_release_recovery_pin,
+    odoo_rollback_continuation_allows,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_replacement_recovery import (
@@ -164,7 +171,6 @@ DEFAULT_ODOO_STABLE_WORKER_POLL_SECONDS = 10
 # re-reads the release from GitHub, so it is slower than the operation poll.
 CLIENT_RELEASE_ADVANCE_SECONDS = 30
 DEFAULT_ODOO_STABLE_WORKER_ERROR_BACKOFF_SECONDS = 30
-DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS = 3
 DEFAULT_ODOO_STABLE_WORKER_MAX_CONSECUTIVE_ERRORS = 5
 SAFE_BOOTSTRAP_RETRY_PHASES = ("created",)
 SAFE_TARGET_REPLACEMENT_RETRY_PHASES = ("created",)
@@ -834,11 +840,41 @@ def run_odoo_stable_operation_worker_once(
                 lease_owner=normalized_lease_owner,
                 lease_seconds=lease_seconds,
                 heartbeat_seconds=heartbeat_seconds,
+                reconciling=True,
             )
             return OdooStableOperationWorkerResult(
                 status="worked",
                 operation_kind="odoo_prod_promotion",
                 operation_id=promotion_operation.operation_id,
+                recovered_operation_ids=recovered_operation_ids,
+                terminal_write_committed=terminal_write_committed,
+            )
+    if (
+        rollback_store is not None
+        and cutover_provider_factory is not None
+        and isinstance(record_store, PostgresRecordStore)
+    ):
+        rollback_operation = record_store.claim_odoo_cutover_rollback_reconciliation_record(
+            lease_owner=normalized_lease_owner,
+            lease_expires_at=claim_expires_at,
+            claimed_at=claim_started_at,
+            max_attempts=max_attempts,
+        )
+        if rollback_operation is not None:
+            terminal_write_committed = _execute_prod_rollback_operation(
+                record_store=rollback_store,
+                control_plane_root_path=control_plane_root_path,
+                operation=rollback_operation,
+                cutover_provider_factory=cutover_provider_factory,
+                lease_owner=normalized_lease_owner,
+                lease_seconds=lease_seconds,
+                heartbeat_seconds=heartbeat_seconds,
+                reconciling=True,
+            )
+            return OdooStableOperationWorkerResult(
+                status="worked",
+                operation_kind="odoo_prod_rollback",
+                operation_id=rollback_operation.operation_id,
                 recovered_operation_ids=recovered_operation_ids,
                 terminal_write_committed=terminal_write_committed,
             )
@@ -1618,17 +1654,12 @@ def _run_release_operation(
     policy_record_reader: Callable[[], LaunchplaneAuthzPolicyRecord],
     client_release_grant_allows: Callable[[DurableOperationAuthorization], bool],
     boundary_effects: frozenset[str],
-    run: Callable[[Callable[[str], None], Callable[[str], None]], Any],
+    run: Callable[[Callable[[str], None], Callable[[str], None], Callable[[], None]], Any],
     terminal: Callable[[Any, Any], Any],
     retain_denied_hold: Callable[[], bool] = lambda: False,
+    reconciling: bool = False,
+    attempt_charged: bool = True,
 ) -> bool:
-    """Lease, heartbeat, authority checks, and the terminal write for a queued release.
-
-    Authority is checked when the worker starts, before the first provider effect,
-    and again before each ``boundary_effects`` effect even after an earlier one, so a
-    revocation during the backup stops the deploy. Once the deploy began it finishes.
-    """
-
     stop_event = Event()
     heartbeat_lost_event = Event()
     heartbeat_thread = Thread(
@@ -1650,6 +1681,9 @@ def _run_release_operation(
     )
 
     def checkpoint_phase(phase: str) -> None:
+        if reconciling:
+            dispatch_guard()
+            return
         if heartbeat_lost_event.is_set():
             raise RuntimeError(f"{label} lost its lease before a checkpoint.")
         if record_phase(phase, {}) is None:
@@ -1667,6 +1701,20 @@ def _run_release_operation(
             if record_phase(production_write_phase, {PRODUCTION_WRITE_KEY: "true"}) is None:
                 heartbeat_lost_event.set()
                 raise RuntimeError(f"{label} could not record its first production write.")
+
+    def dispatch_guard() -> None:
+        current = read_current()
+        if (
+            heartbeat_lost_event.is_set()
+            or current.status != "running"
+            or current.lease_owner != lease_owner
+            or not current.lease_expires_at
+            or datetime.fromisoformat(current.lease_expires_at.replace("Z", "+00:00"))
+            <= datetime.now(timezone.utc)
+        ):
+            heartbeat_lost_event.set()
+            raise RuntimeError(f"{label} lost its original lease before dispatch.")
+        authorization_guard.recheck_provider_effect("odoo_cutover_dispatch")
 
     def failed(error_message: str, error_code: str = "") -> Any:
         finished_at = _utc_now_timestamp()
@@ -1692,9 +1740,7 @@ def _run_release_operation(
                 "lease_expires_at": "",
                 "heartbeat_at": "",
                 "result": None,
-                # An authority refusal ran no recovery effects. Preserve the
-                # budget for actual provider attempts after authority returns.
-                "attempt": max(operation.attempt - 1, 0),
+                "attempt": max(operation.attempt - int(attempt_charged), 0),
                 "error_code": error.code,
                 "error_message": "Unfinished cutover recovery was denied; retain the lane hold without effects.",
             }
@@ -1702,36 +1748,51 @@ def _run_release_operation(
 
     try:
         authorization_guard.authorize_execution()
-        result = run(checkpoint_phase, checkpoint_provider_effect)
+        result = run(checkpoint_phase, checkpoint_provider_effect, dispatch_guard)
         if authorization_guard.denial_error is not None:
             raise authorization_guard.denial_error
     except DurableOperationAuthorizationDeniedError as error:
         logging.warning("%s operation %s was denied: %s", label, operation.operation_id, error)
-        if retain_denied_hold():
+        if reconciling or retain_denied_hold():
             terminal_operation = denied_hold(error)
         else:
             terminal_operation = failed(str(error), error.code)
     except BusinessHoursHeld as error:
-        terminal_operation = _retry_source_order_read(read_current()).model_copy(
+        terminal_operation = (
+            read_current().model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "finished_at": "",
+                }
+            )
+            if reconciling
+            else _retry_source_order_read(read_current())
+        ).model_copy(
             update={
                 "error_code": "business_hours_held",
                 "error_message": str(error),
-                "attempt": max(operation.attempt - 1, 0),
+                "attempt": max(operation.attempt - int(attempt_charged), 0),
             }
         )
     except Exception as error:
         logging.exception(
             "%s operation %s failed before producing a result.", label, operation.operation_id
         )
-        if authorization_guard.denial_error is not None and retain_denied_hold():
+        if isinstance(error, CutoverEntryRefusedError):
+            terminal_operation = failed(str(error), error.code)
+        elif authorization_guard.denial_error is not None and (reconciling or retain_denied_hold()):
             terminal_operation = denied_hold(authorization_guard.denial_error)
         elif (
-            isinstance(error, LaneMovementRefused)
+            not reconciling
+            and isinstance(error, LaneMovementRefused)
             and error.code == "source_order_unavailable"
             and not odoo_release_wrote_production(read_current())
         ):
             terminal_operation = _retry_source_order_read(read_current())
-        elif odoo_release_wrote_production(read_current()):
+        elif reconciling or odoo_release_wrote_production(read_current()):
             terminal_operation = read_current().model_copy(
                 update={
                     "status": "reconciliation_required",
@@ -1768,11 +1829,22 @@ def _execute_prod_promotion_operation(
     lease_seconds: int,
     heartbeat_seconds: int,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
+    reconciling: bool = False,
 ) -> bool:
+    def release_authority(authorization: DurableOperationAuthorization) -> bool:
+        from control_plane.odoo_release_recovery import odoo_release_continuation_allows
+
+        current = record_store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+
+        return (
+            odoo_release_continuation_allows(cast(Any, record_store), current)
+            if odoo_release_wrote_production(current)
+            and operation_cutover(cast(Any, record_store), current) is not None
+            else client_release_grant_allows(record_store, authorization)
+        )
+
     def retain_denied_cutover_hold() -> bool:
         known_write = odoo_release_wrote_production(operation)
-        if cutover_provider_factory is None:
-            return False
         if not known_write:
             known_write = odoo_release_wrote_production(
                 record_store.read_odoo_prod_promotion_operation_record(operation.operation_id)
@@ -1791,23 +1863,32 @@ def _execute_prod_promotion_operation(
                     operation.request.request_id,
                 )
             )
+        except FileNotFoundError:
+            return False
         except Exception:
-            # A failed read after the known effect cannot establish completion.
+            logging.warning(
+                "Original cutover state is unavailable for %s; retain its hold.",
+                operation.operation_id,
+            )
             return True
-        return deployment.odoo_cutover is not None and deployment.odoo_cutover.step not in {
-            "complete",
-            "rolled_back",
-        }
+        return deployment.odoo_cutover is not None
 
     def run(
         checkpoint_phase: Callable[[str], None],
         checkpoint_provider_effect: Callable[[str], None],
+        dispatch_guard: Callable[[], None],
     ) -> OdooProdPromotionRunResult:
         started = False
 
         def before_effect(effect_name: str) -> None:
             nonlocal started
-            if not started and operation.authorization.grant in RELEASE_DECISION_GRANTS:
+            if (
+                not odoo_release_wrote_production(
+                    record_store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+                )
+                and not started
+                and operation.authorization.grant in RELEASE_DECISION_GRANTS
+            ):
                 if not isinstance(record_store, PostgresRecordStore):
                     raise ValueError("Scheduled releases require durable storage.")
                 profile = record_store.read_product_profile_record(operation.product)
@@ -1831,6 +1912,85 @@ def _execute_prod_promotion_operation(
             checkpoint_provider_effect(effect_name)
             started = True
 
+        from control_plane.odoo_cutover_recovery import abort_reconciliation_eligible
+
+        recovery_record = (
+            operation_cutover(cast(Any, record_store), operation) if reconciling else None
+        )
+        if reconciling and recovery_record is None:
+            raise ValueError("continuation lost its original admitted cutover")
+        if recovery_record is not None and recovery_record.step == "complete":
+            from control_plane.workflows.odoo_prod_promotion import (
+                complete_odoo_cutover_promotion_audit,
+                OdooProdPromotionStore,
+            )
+
+            if cutover_provider_factory is None:
+                raise ValueError("completion audit requires its original provider")
+            result = complete_odoo_cutover_promotion_audit(
+                store=cast(OdooProdPromotionStore, record_store),
+                plan=recovery_record.plan,
+                provider=cutover_provider_factory(recovery_record.plan),
+                dispatch_guard=dispatch_guard,
+            )
+            return OdooProdPromotionRunResult.model_validate(
+                {
+                    **result.model_dump(),
+                    "request_id": operation.request.request_id,
+                    "input_status": "ready",
+                    "run_status": "pass",
+                    "backup_status": "pass",
+                    "source_git_ref": recovery_record.plan.candidate.source_commit,
+                    "image_repository": recovery_record.plan.candidate.image.repository,
+                    "image_digest": recovery_record.plan.candidate.image.digest,
+                }
+            )
+        if recovery_record is not None and abort_reconciliation_eligible(recovery_record):
+            from control_plane.odoo_cutover_storage import DeploymentStore
+            from control_plane.workflows.odoo_cutover_deployment import (
+                execute_odoo_cutover_deployment,
+            )
+
+            if cutover_provider_factory is None:
+                raise ValueError("continuation requires its installed original provider")
+            plan = recovery_record.plan
+            deployment = record_store.read_deployment_record(
+                plan.new.runtime_identity.deployment_record_id
+            )
+            applied = execute_odoo_cutover_deployment(
+                plan=plan,
+                record_store=cast(DeploymentStore, record_store),
+                provider=cutover_provider_factory(plan),
+                context=operation.context,
+                instance=operation.instance,
+                checkpoint=before_effect,
+                abort_only=True,
+                dispatch_guard=dispatch_guard,
+            )
+            finished = record_store.read_deployment_record(deployment.record_id).odoo_cutover
+            if finished is None or finished.step != "aborted":
+                raise RuntimeError("abort-only continuation retains its unfinished lane hold")
+            return OdooProdPromotionRunResult(
+                context=operation.context,
+                from_instance=operation.request.from_instance,
+                to_instance=operation.instance,
+                request_id=operation.request.request_id,
+                run_status="fail",
+                input_status="ready",
+                promotion_status="fail",
+                deployment_status="fail",
+                deployment_record_id=deployment.record_id,
+                error_message=applied.error_message,
+            )
+
+        operation_now = record_store.read_odoo_prod_promotion_operation_record(
+            operation.operation_id
+        )
+        admitted = (
+            operation_cutover(cast(Any, record_store), operation_now)
+            if odoo_release_wrote_production(operation_now)
+            else None
+        )
         return execute_odoo_prod_promotion_run(
             control_plane_root=control_plane_root_path,
             state_dir=control_plane_root_path / "state",
@@ -1839,6 +1999,8 @@ def _execute_prod_promotion_operation(
             request=operation.request,
             phase_checkpoint=checkpoint_phase,
             provider_effect_checkpoint=before_effect,
+            cutover_dispatch_guard=dispatch_guard,
+            continuation_plan=admitted.plan if admitted is not None else None,
             hold_uncertain_effects=True,
             cutover_provider_factory=cutover_provider_factory,
             release_decision=record_store.read_release_review_decision_record(
@@ -1861,6 +2023,14 @@ def _execute_prod_promotion_operation(
             error_code="" if passed else f"promotion_{result.run_status}",
             error_message=result.error_message or "Odoo prod promotion failed.",
         )
+
+    if reconciling:
+        original_cutover = operation_cutover(cast(Any, record_store), operation)
+        if original_cutover is None:
+            raise ValueError("native reconciliation lost its original cutover")
+        attempt_charged = cutover_reconciliation_uses_budget(original_cutover)
+    else:
+        attempt_charged = True
 
     return _run_release_operation(
         label="Odoo prod promotion",
@@ -1892,9 +2062,7 @@ def _execute_prod_promotion_operation(
             record=record, lease_owner=lease_owner
         ),
         policy_record_reader=lambda: read_active_authz_policy_record(record_store),
-        client_release_grant_allows=lambda authorization: client_release_grant_allows(
-            record_store, authorization
-        ),
+        client_release_grant_allows=release_authority,
         # Authority is read again just before the deploy first writes to the provider,
         # so a hold or newer decision during plan preparation still stops it.
         boundary_effects=frozenset(
@@ -1907,6 +2075,8 @@ def _execute_prod_promotion_operation(
         run=run,
         terminal=terminal,
         retain_denied_hold=retain_denied_cutover_hold,
+        reconciling=reconciling,
+        attempt_charged=attempt_charged,
     )
 
 
@@ -1919,10 +2089,39 @@ def _execute_prod_rollback_operation(
     lease_seconds: int,
     heartbeat_seconds: int,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
+    reconciling: bool = False,
 ) -> bool:
+    from control_plane.odoo_cutover_recovery import rollback_operation_cutover
+
+    def native_cutover() -> bool:
+        current = record_store.read_odoo_prod_rollback_operation_record(operation.operation_id)
+        return rollback_operation_cutover(cast(Any, record_store), current) is not None
+
+    def retain_denied_native_hold() -> bool:
+        current = record_store.read_odoo_prod_rollback_operation_record(operation.operation_id)
+        if not odoo_release_recovery_source(current) and not odoo_release_wrote_production(current):
+            return False
+        try:
+            return native_cutover()
+        except Exception:
+            logging.warning(
+                "Original inverse cutover state is unavailable for %s; retain its hold.",
+                operation.operation_id,
+            )
+            return True
+
+    def release_authority(authorization: DurableOperationAuthorization) -> bool:
+        current = record_store.read_odoo_prod_rollback_operation_record(operation.operation_id)
+        if odoo_release_recovery_source(current):
+            return odoo_release_recovery_allows(record_store, current)
+        if odoo_release_wrote_production(current) and native_cutover():
+            return odoo_rollback_continuation_allows(record_store, current)
+        return client_release_grant_allows(record_store, authorization)
+
     def run(
         checkpoint_phase: Callable[[str], None],
         checkpoint_provider_effect: Callable[[str], None],
+        dispatch_guard: Callable[[], None],
     ) -> OdooProdRollbackResult:
         checkpoint_phase("validated")
         started = False
@@ -1942,6 +2141,8 @@ def _execute_prod_rollback_operation(
             request=operation.request,
             target=operation.target,
             provider_effect_checkpoint=before_effect,
+            cutover_dispatch_guard=dispatch_guard,
+            cutover_reconciliation=reconciling,
             hold_uncertain_effects=True,
             cutover_provider_factory=cutover_provider_factory,
             release_decision=record_store.read_release_review_decision_record(
@@ -1993,14 +2194,13 @@ def _execute_prod_rollback_operation(
             record=record, lease_owner=lease_owner
         ),
         policy_record_reader=lambda: read_active_authz_policy_record(record_store),
-        client_release_grant_allows=lambda authorization: (
-            client_release_grant_allows(record_store, authorization)
-            if not odoo_release_recovery_source(operation)
-            else odoo_release_recovery_allows(record_store, operation)
-        ),
+        client_release_grant_allows=release_authority,
         boundary_effects=frozenset(),
         run=run,
         terminal=terminal,
+        retain_denied_hold=retain_denied_native_hold,
+        reconciling=reconciling,
+        attempt_charged=not reconciling,
     )
 
 

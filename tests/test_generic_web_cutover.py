@@ -602,6 +602,10 @@ class WebCutoverDeploymentTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             store, intent, _ = self.seed(Path(folder), "compose")
             with (
+                patch(
+                    "control_plane.dokploy.service_cutover.installed_cutover_host",
+                    side_effect=ValueError("host is unavailable"),
+                ),
                 patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
                 patch.object(DokployGenericWebDeployProvider, "execute_artifact_deploy") as inplace,
             ):

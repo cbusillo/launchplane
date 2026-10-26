@@ -109,6 +109,23 @@ def observe_dokploy_mutations(observer: MutationObserver) -> Iterator[None]:
         _mutation_observer.reset(context_token)
 
 
+@contextmanager
+def guard_dokploy_mutations(check: Callable[[], None]) -> Iterator[None]:
+    previous = _mutation_observer.get()
+
+    def observe(
+        host: str, path: str, payload: JsonObject, send: Callable[[], JsonValue]
+    ) -> JsonValue:
+        def guarded_send() -> JsonValue:
+            check()
+            return send()
+
+        return previous(host, path, payload, guarded_send) if previous else guarded_send()
+
+    with observe_dokploy_mutations(observe):
+        yield
+
+
 type DeploymentHistoryState = Literal["present", "no_history", "unknown"]
 
 
