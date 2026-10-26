@@ -110,7 +110,7 @@ def main() -> int:
             print(json.dumps(public))
             return 0
         assert draft is not None
-        if args.mode in {"apply", "readback"}:
+        if args.mode == "apply" or (args.mode == "readback" and args.idempotency_key.strip()):
             if evidence is None:
                 raise ValueError("This readback requires its original saved review.")
             saved = json.loads(evidence.read_text())

@@ -52,7 +52,7 @@ def inspect_settings(
     raw = transport["request_launchplane_read"](
         service_url=settings["service_url"], path=path, settings=settings, query={}, timeout=30
     )
-    response = RuntimeSettingsResponse.model_validate(raw)
+    response = RuntimeSettingsResponse.model_validate(raw, extra="ignore")
     if (response.context, response.instance) != (args.context, args.instance):
         raise ValueError("Runtime inventory scope mismatch.")
     records = []
@@ -163,7 +163,8 @@ def inspect_policy(
                 settings=settings,
                 body=request.model_dump(mode="json"),
                 timeout=30,
-            )
+            ),
+            extra="ignore",
         )
         expected = request.policy_record_id, request.policy_revision, request.policy_sha256
         if (

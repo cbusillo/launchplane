@@ -111,6 +111,25 @@ class NeverStartedRehearsalRetirementTests(unittest.TestCase):
                     with patch.object(type(operation), "host") as inspection:
                         with self.assertRaises(RehearsalRefused):
                             operation.plan()
+                        held = store.list_held_provider_target_reservations()[0]
+                        retried = store.retry_reconciled_mutation(
+                            reservation=held,
+                            lease_owner="lost-executor",
+                            preserve_effect_checkpoint=True,
+                        )
+                        assert retried.record is not None
+                        expired_at = datetime.fromisoformat(
+                            retried.record.lease_expires_at.replace("Z", "+00:00")
+                        ) + timedelta(seconds=1)
+                        with (
+                            patch.object(
+                                store,
+                                "_database_mutation_timestamp",
+                                return_value=expired_at.isoformat(),
+                            ),
+                            self.assertRaises(RehearsalRefused),
+                        ):
+                            operation.plan()
                         inspection.assert_not_called()
                     self.assertEqual(
                         store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared
@@ -1474,9 +1493,11 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         for forbidden in (
             "execute.started",
             "execute.json",
+            "capture.json",
             "capture.pending",
             "raw-source",
-            source,
+            "simulate-final.started",
+            *self.fixture.host["database_names"](self.spec).values(),
         ):
             with self.subTest(forbidden=forbidden):
                 path = self.root / forbidden
@@ -2000,6 +2021,31 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.assertFalse(result["disposed"])
         self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertEqual(operation.original(scenario.prepared).state, "reconcile_required")
+
+        import shutil
+
+        original = operation.original(scenario.prepared)
+        (self.root / "execute.started").unlink()
+        shutil.rmtree(self.root / "raw-source")
+        source = self.fixture.host["database_names"](self.spec)["source"]
+        for container in self.fixture.fixture.containers.values():
+            container["Config"]["Env"] = [
+                "ODOO_DB_NAME=" + source if value.startswith("ODOO_DB_NAME=") else value
+                for value in container["Config"]["Env"]
+            ]
+        spec = {**copy.deepcopy(self.spec), "program": rehearsal_host_program()}
+        with (
+            patch("control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec", return_value=spec),
+            patch.object(operation.adapter, "run_script", side_effect=scheduler),
+            patch.object(
+                operation,
+                "original",
+                return_value=original.model_copy(update={"state": "completed"}),
+            ),
+        ):
+            unused = operation.host("dry-run", lambda: None)
+        self.assertTrue(unused["qualified"])
+        self.assertFalse(unused["disposed"])
 
     def test_host_refuses_unreviewed_inventory_without_deleting_custody(self) -> None:
         plan = self.fixture.run_host(self.spec)
@@ -2532,7 +2578,7 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         **payload,
                         "action": "execute",
                         "mode": "readback",
-                        "reviewed_plan_sha256": "",
+                        "reviewed_plan_sha256": prepared.binding_sha256,
                     },
                     headers=headers,
                 )
@@ -2578,7 +2624,7 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(routed["idempotency_key"], headers["Idempotency-Key"])
                 self.assertNotEqual(routed["adapter"].target_key(), fixture.identifier)
             calls = host.call_count
-            payload.update(mode="readback", reviewed_plan_sha256="")
+            payload.update(mode="readback")
             readback = await request(fixture.app, "POST", route, payload=payload, headers=headers)
             self.assertEqual(readback.status_code, 202, readback.text)
             self.assertEqual(readback.json()["result"]["state"], "retired")

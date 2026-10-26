@@ -4387,6 +4387,35 @@ class RehearsalHostSafetyTests(unittest.TestCase):
 
 
 class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_keyed_readback_requires_the_original_review_before_observation(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from tests.support.http import request
+
+        app = self.read_only_app()
+        with patch.object(OdooRehearsalAdapter, "host") as host:
+            for action in (
+                "prepare",
+                "execute",
+                "simulate-final",
+                "verify",
+                "retire",
+                "retire-incomplete",
+            ):
+                response = await request(
+                    app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(
+                        update={"mode": "readback", "action": action}
+                    ).model_dump(mode="json"),
+                    headers={"Idempotency-Key": "original-key"},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.json()["detail"]["error"]["code"], "original_review_required"
+                )
+            host.assert_not_called()
+
     def setUp(self) -> None:
         self.fixture = RehearsalScenario()
         self.fixture.setUp()
@@ -5080,9 +5109,9 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.read_only_app(),
                     "POST",
                     ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                    payload=self.fixture.request.model_copy(update={"mode": mode}).model_dump(
-                        mode="json"
-                    ),
+                    payload=self.fixture.adapter("prepare")
+                    .request.model_copy(update={"mode": mode})
+                    .model_dump(mode="json"),
                     headers={"Idempotency-Key": "fixture-key"},
                 )
                 self.assertEqual(response.status_code, 202, response.text)

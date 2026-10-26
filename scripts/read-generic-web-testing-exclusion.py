@@ -51,7 +51,7 @@ def main() -> int:
             query=query,
             timeout=args.timeout,
         )
-        result = GenericWebTestingExclusionResponse.model_validate(payload)
+        result = GenericWebTestingExclusionResponse.model_validate(payload, extra="ignore")
         if (result.product, result.context, result.instance) != (
             args.product,
             args.context,

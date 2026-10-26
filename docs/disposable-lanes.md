@@ -3493,7 +3493,8 @@ through `--evidence-file`. It sends the original reviewed binding, including
 after publication changes the rehearsal record; readback never replays effects.
 The command-line clients ignore response fields their checkout does not know while
 retaining the existing identity, action, completion and custody validation.
-Request validation remains strict.
+Request validation remains strict. A keyless status read does not require
+saved review evidence and does not bind or reconcile an original operation.
 
 A completed later phase that cannot reach `verified`, for example a superseded
 `switched` rehearsal whose candidate cannot run business validation, uses the

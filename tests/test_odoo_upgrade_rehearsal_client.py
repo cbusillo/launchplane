@@ -24,6 +24,22 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
 
 
 class RehearsalClientTests(unittest.TestCase):
+    def test_keyless_status_read_does_not_need_an_original_review(self) -> None:
+        code, result, post = self.call(
+            "readback",
+            action="execute",
+            saved_review=False,
+            key="",
+            response_result={
+                "completed": True,
+                "public_route": False,
+                "business_host_frozen": False,
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(post.call_args.kwargs["idempotency_key"], "")
+
     def test_readback_sends_the_saved_original_binding_for_every_action(self) -> None:
         for action in ("prepare", "execute", "simulate-final", "verify", "retire"):
             with self.subTest(action=action):
@@ -227,6 +243,7 @@ class RehearsalClientTests(unittest.TestCase):
         response: dict[str, Any] | None = None,
         request: OdooUpgradeRehearsalRequest | None = None,
         product: str = "fixture-product",
+        key: str = "fixture-key",
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
@@ -320,7 +337,7 @@ class RehearsalClientTests(unittest.TestCase):
                             "intent": {
                                 "product": product,
                                 "request": reviewed_request,
-                                "key": "fixture-key",
+                                "key": key,
                             },
                             "plan": {**result, "plan_sha256": reviewed_binding, "applied": False},
                         }
@@ -344,7 +361,7 @@ class RehearsalClientTests(unittest.TestCase):
                 "--evidence-file",
                 str(evidence),
                 "--idempotency-key",
-                "fixture-key",
+                key,
             ]
             if mode == "apply":
                 args += ["--reviewed-dry-run"]
