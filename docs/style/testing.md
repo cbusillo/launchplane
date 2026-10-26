@@ -584,3 +584,18 @@ forms:
 - When moving a test between these paths, retain the behavior assertion and
   document any intentional coverage replacement in the change description; do
   not delete behavior tests merely because the support implementation changed.
+
+### Timing history across verified trees
+
+Skipping test execution on a verified tree must preserve its measured planning
+inputs whenever its history artifact exists. The validated coverage aggregate
+is published as `unittest-timing-history`; main imports it from successful push
+CI for the verified source SHA and saves it in the default-branch cache. Full
+main runs publish their own aggregate. Publication is advisory and bounded to
+five minutes outside `ci-gate`; missing history warns and leaves a complete cold
+plan. The existing Python timing reader validates history before it is frozen.
+
+Inspect the frozen plan's `timing_source_counts` to distinguish exact measured
+costs, parent estimates and default fallback before comparing candidate wall
+time, per-shard execution and runner waits. Timing hints never replace discovered
+test inventory or frozen-plan coverage checks.

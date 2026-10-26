@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -23,8 +24,21 @@ WITHDRAWAL_ROUTE = "/v1/product-review/withdrawal"
 WITHDRAWAL_ACTION = "product_review.withdraw"
 
 
+class ReviewWithdrawalRefusalReason(StrEnum):
+    REVIEW_AUTHORITY_CHANGED = "review_authority_changed"
+    REPOSITORY_MISMATCH = "repository_mismatch"
+    PULL_REQUEST_CLOSED = "pull_request_closed"
+    HEAD_CHANGED = "head_changed"
+    CLIENT_DECISION_EXISTS = "client_decision_exists"
+    NO_PENDING_LABELED_REQUEST = "no_pending_labeled_request"
+
+
 class ReviewWithdrawalRefused(ValueError):
-    pass
+    def __init__(
+        self, message: str, *, reason: ReviewWithdrawalRefusalReason | None = None
+    ) -> None:
+        self.reason = ReviewWithdrawalRefusalReason(reason) if reason is not None else None
+        super().__init__(message)
 
 
 class ReviewWithdrawalUnsettled(ReviewWithdrawalRefused):
@@ -129,26 +143,44 @@ class ReviewWithdrawalService:
     def _pending(self, request: ReviewWithdrawalRequest, *, require_label: bool = True) -> None:
         current = self.store.read_product_profile_record(request.product)
         if current != self.profile or not current.is_active or not current.owner.is_set:
-            raise ReviewWithdrawalRefused("The product or its Client changed. Review again.")
+            raise ReviewWithdrawalRefused(
+                "The product or its Client changed. Review again.",
+                reason=ReviewWithdrawalRefusalReason.REVIEW_AUTHORITY_CHANGED,
+            )
         if current.repository.casefold() != request.repository.casefold():
-            raise ReviewWithdrawalRefused("The product does not own this repository.")
+            raise ReviewWithdrawalRefused(
+                "The product does not own this repository.",
+                reason=ReviewWithdrawalRefusalReason.REPOSITORY_MISMATCH,
+            )
         change = self.source.change()
         head, labels = change.head_sha, change.labels
         if not change.is_open:
-            raise ReviewWithdrawalRefused("A new withdrawal requires an open pull request.")
+            raise ReviewWithdrawalRefused(
+                "A new withdrawal requires an open pull request.",
+                reason=ReviewWithdrawalRefusalReason.PULL_REQUEST_CLOSED,
+            )
         if head != request.expected_head_sha:
-            raise ReviewWithdrawalRefused("The PR head changed. Review again.")
+            raise ReviewWithdrawalRefused(
+                "The PR head changed. Review again.",
+                reason=ReviewWithdrawalRefusalReason.HEAD_CHANGED,
+            )
         if any(
             decision.product == current.product and decision.head_sha == head
             for decision in self.store.list_product_review_decision_records(
                 repository=current.repository, pull_request_number=request.pull_request
             )
         ):
-            raise ReviewWithdrawalRefused("The Client has already decided on this head.")
+            raise ReviewWithdrawalRefused(
+                "The Client has already decided on this head.",
+                reason=ReviewWithdrawalRefusalReason.CLIENT_DECISION_EXISTS,
+            )
         if require_label and current.owner.review_label.casefold() not in {
             label.casefold() for label in labels
         }:
-            raise ReviewWithdrawalRefused("This PR has no pending labeled Client review request.")
+            raise ReviewWithdrawalRefused(
+                "This PR has no pending labeled Client review request.",
+                reason=ReviewWithdrawalRefusalReason.NO_PENDING_LABELED_REQUEST,
+            )
 
     def run(self, request: ReviewWithdrawalRequest, *, key: str, trace: str) -> dict[str, object]:
         plan = self._plan(request)

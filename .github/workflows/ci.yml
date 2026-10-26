@@ -304,6 +304,7 @@ jobs:
       contents: read
     outputs:
       verified: ${{ steps.verify.outputs.verified }}
+      source_sha: ${{ steps.verify.outputs.source_sha }}
     steps:
       - name: Prove the pushed tree already passed CI
         id: verify
@@ -337,6 +338,7 @@ jobs:
             [[ "${REF}" == "refs/heads/main" || "${REF}" == refs/heads/launchplane/train/* ]]; then
             if passed_ci "${SHA}" main; then
               echo "Commit ${SHA} already passed main ci-gate."
+              echo "source_sha=${SHA}" >> "${GITHUB_OUTPUT}"
               echo "verified=true" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
@@ -358,6 +360,7 @@ jobs:
                 if [[ "${comparison}" == "ahead" || "${comparison}" == "identical" ]] && \
                   passed_ci "${merged_head}"; then
                   verified=true
+                  echo "source_sha=${merged_head}" >> "${GITHUB_OUTPUT}"
                   echo "Tree ${tree} already passed ci-gate on ${merged_head}."
                 fi
               fi
@@ -906,7 +909,11 @@ jobs:
       - name: Install Python
         run: uv python install 3.14
 
+      - name: Clear residual unittest history
+        run: rm -f "${UNITTEST_TIMINGS_CACHE}"
+
       - name: Restore unittest timings
+        continue-on-error: true
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.UNITTEST_TIMINGS_CACHE }}
@@ -922,8 +929,10 @@ jobs:
           set -euo pipefail
           snapshot_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timing-snapshot.XXXXXX")"
           printf 'UNITTEST_TIMING_SNAPSHOT_DIR=%s\n' "${snapshot_directory}" >> "${GITHUB_ENV}"
-          if [ -f "${UNITTEST_TIMINGS_CACHE}" ]; then
+          if [ -f "${UNITTEST_TIMINGS_CACHE}" ] && bash scripts/import-unittest-history.sh validate "${UNITTEST_TIMINGS_CACHE}"; then
             cp "${UNITTEST_TIMINGS_CACHE}" "${snapshot_directory}/history.json"
+          else
+            echo "::warning::No valid unittest timing history; planning all discovered tests with default estimates."
           fi
           printf '%s:%s\n' "${GITHUB_RUN_ID}" "${GITHUB_RUN_ATTEMPT}" \
             > "${snapshot_directory}/snapshot-id"
@@ -1107,8 +1116,48 @@ jobs:
           --plan-file "${UNITTEST_TIMING_SNAPSHOT_DIR}/plan.json"
           --timings-output "${UNITTEST_TIMINGS_CACHE}"
 
+      - name: Upload unittest timing history
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unittest-timing-history
+          path: ${{ env.UNITTEST_TIMINGS_CACHE }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  publish_test_timings:
+    needs: [runner_pool, verified_tree, test]
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      (needs.test.result == 'success' || needs.verified_tree.outputs.verified == 'true')
+    runs-on: ${{ fromJSON(needs.runner_pool.outputs.runner) }}
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    env:
+      UNITTEST_TIMINGS_CACHE: .ci-cache/unittest-timings/history.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: Import verified unittest timing history
+        id: history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_SHA: ${{ needs.verified_tree.outputs.source_sha }}
+        run: bash scripts/import-unittest-history.sh
+
       - name: Save unittest timings
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: steps.history.outputs.available == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.UNITTEST_TIMINGS_CACHE }}
