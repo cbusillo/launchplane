@@ -3491,7 +3491,7 @@ checkpoint and placement absence.
 Every original-key rehearsal readback requires the original saved review
 through `--evidence-file`. It sends the original reviewed binding, including
 after publication changes the rehearsal record; readback never replays effects.
-Operator clients ignore response fields their checkout does not know while
+The command-line clients ignore response fields their checkout does not know while
 retaining the existing identity, action, completion and custody validation.
 Request validation remains strict.
 
