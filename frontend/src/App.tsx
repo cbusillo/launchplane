@@ -3,6 +3,7 @@ import { AlertTriangle, KeyRound, LoaderCircle, ShieldCheck } from "lucide-react
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { ProductTopicsRoute } from "./ProductTopicsRoute";
+import { ProductReleaseReviewLink } from "./ProductReleaseReviewLink";
 import { AppShell } from "./AppShell";
 import { useEvidenceRefresh } from "./use-evidence-refresh";
 import { environmentEvidenceDeadlines } from "./product-environment-signal";
@@ -314,7 +315,6 @@ export function App() {
     );
   }
 
-  // A product Owner's session opens only the Owner review pages.
   if (authState.identity.role === "owner") {
     return (
       <OwnerReviewShell
@@ -327,10 +327,10 @@ export function App() {
         signingOut={signingOut}
         theme={theme}
       >
-        <p className="owner-review-note">
+        {route.kind === "product-workspace" ? <ProductReleaseReviewLink key={route.product} product={route.product} fixtureMode={fixtureMode} showProductName /> : <p className="owner-review-note">
           You are signed in as a product's Client. Open the review link you were sent to
           review a release.
-        </p>
+        </p>}
       </OwnerReviewShell>
     );
   }
