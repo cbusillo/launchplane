@@ -29,6 +29,7 @@ from control_plane.contracts.testing_publication import (
     TestingServingSnapshot,
 )
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy.testing_route import TestingLaneRoute
 from control_plane.testing_generation_retirement import RetainedTestingGeneration
 from control_plane.storage.postgres import PostgresRecordStore
@@ -46,6 +47,38 @@ def canonical_health_url(url: str, route: TestingLaneRoute, previous_host: str) 
     if parsed.hostname != previous_host:
         return url
     return parsed._replace(scheme="https", netloc=route.host).geturl()
+
+
+def testing_health_url_correction_allowed(
+    existing: LaunchplaneProductProfileRecord | None,
+    replacement: LaunchplaneProductProfileRecord,
+) -> bool:
+    if existing is None or not existing.is_active or existing.driver_id != "odoo":
+        return False
+    for index, lane in enumerate(existing.lanes):
+        if lane.instance != "testing" or not lane.health_url:
+            continue
+        origin, health = urlsplit(lane.base_url), urlsplit(lane.health_url)
+        if (
+            origin.scheme != "https"
+            or not origin.hostname
+            or origin.username is not None
+            or origin.password is not None
+            or origin.path not in {"", "/"}
+            or origin.query
+            or origin.fragment
+            or health.scheme != "https"
+            or not health.hostname
+            or health.username is not None
+            or health.password is not None
+            or health.netloc == origin.netloc
+        ):
+            continue
+        expected = existing.model_copy(deep=True)
+        expected.lanes[index].health_url = health._replace(netloc=origin.netloc).geturl()
+        if replacement == expected:
+            return True
+    return False
 
 
 def read_testing_address_recovery_copy(

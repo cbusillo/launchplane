@@ -1382,6 +1382,20 @@ the committed address receipt. Preserve the original request and key on any
 unknown outcome; do not clear old operation fences or edit publication history.
 The metadata transaction checks the original lease again immediately before commit.
 
+An already-completed address operation replays its original receipt and does not
+repair a previously stored health fallback. To correct only that fallback, read
+the current product profile and its ETag, replace one Odoo testing lane's HTTPS
+health origin with its existing base origin while preserving the path and query,
+and submit the otherwise unchanged profile to `POST /v1/product-profiles?dry_run=true`.
+Send its exact `If-Match` and an `Idempotency-Key`. Review the returned source and
+replacement profile digests, then submit the same profile and headers to
+`POST /v1/product-profiles`. Read the profile back and wait for the ordinary
+monitor's TLS and runtime observations. The Director-agent conditional write
+allows this exact metadata correction; scoped Client callers and production
+URL changes keep their existing authorization. This updates no route, runtime,
+credential, monitoring policy, accepted release or data, and concurrent profile
+changes refuse rather than being overwritten.
+
 If the unpublished amendment cannot finish, send `mode: apply` with
 `operation: cancel`, the original reviewed hash, reason and `Idempotency-Key`.
 Cancellation settles and excludes the original forward writer before restoring

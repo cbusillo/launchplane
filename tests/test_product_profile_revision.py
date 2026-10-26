@@ -9,13 +9,17 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _product_profile_write_policy
-from tests.support.auth import StubVerifier, identity
+from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+from tests.support.auth import StubVerifier, identity, scoped_agent_transport
+from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.support.http import request
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.support.stores import _sqlite_database_url
 from tests.test_release_review import seed, profile, github_read
 from control_plane.release_review import build_release_review
 from control_plane.release_request import record_release_request
+from tests.support.profiles import _odoo_profile_payload_with_prod_lane
+from urllib.parse import urlsplit
 
 
 class ProductProfileRevisionTests(unittest.IsolatedAsyncioTestCase):
@@ -141,3 +145,117 @@ class ProductProfileRevisionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(replay.status_code, 202)
         self.assertEqual(store.read_product_profile_record(before.product), after)
+
+
+class TestingHealthUrlCorrectionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        directory = self.enterContext(TemporaryDirectory())
+        self.store = PostgresRecordStore(
+            database_url=_sqlite_database_url(Path(directory) / "test.db")
+        )
+        self.addCleanup(self.store.close)
+        self.store.ensure_schema()
+        self.before = LaunchplaneProductProfileRecord.model_validate(
+            _odoo_profile_payload_with_prod_lane("example-site")
+        )
+        self.after = self.before.model_copy(deep=True)
+        self.lane_index = next(
+            index for index, lane in enumerate(self.before.lanes) if lane.instance == "testing"
+        )
+        lane = self.before.lanes[self.lane_index]
+        lane.health_url = (
+            urlsplit(lane.health_url)._replace(netloc="former-generation.example.invalid").geturl()
+        )
+        self.store.write_product_profile_record(self.before)
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            bearer_identity_config=_local_operator_bearer_config(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: self.store,
+        )
+        self.headers = {
+            "Authorization": "Bearer local-operator-token",
+            "If-Match": f'"{product_profile_record_sha256(self.before)}"',
+            "Idempotency-Key": "health-fallback-correction",
+        }
+
+    async def test_director_dry_run_apply_and_replay_preserve_every_other_field(self) -> None:
+        reviewed = await request(
+            self.app,
+            "POST",
+            "/v1/product-profiles?dry_run=true",
+            headers=self.headers,
+            payload=self.after.model_dump(mode="json"),
+        )
+        self.assertEqual(reviewed.status_code, 202, reviewed.text)
+        self.assertTrue(reviewed.json()["result"]["dry_run"])
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), self.before)
+        for _ in range(2):
+            applied = await request(
+                self.app,
+                "POST",
+                "/v1/product-profiles",
+                headers=self.headers,
+                payload=self.after.model_dump(mode="json"),
+            )
+            self.assertEqual(applied.status_code, 202, applied.text)
+            self.assertEqual(
+                self.store.read_product_profile_record(self.before.product), self.after
+            )
+
+    async def test_other_profile_changes_and_scoped_callers_still_refuse(self) -> None:
+        for changed in (
+            self.after.model_copy(update={"display_name": "Unreviewed name"}),
+            self.after.model_copy(update={"lanes": tuple(reversed(self.after.lanes))}),
+            self.before.model_copy(deep=True),
+        ):
+            for dry_run in (True, False):
+                with self.subTest(changed=changed, dry_run=dry_run):
+                    response = await request(
+                        self.app,
+                        "POST",
+                        f"/v1/product-profiles?dry_run={str(dry_run).lower()}",
+                        headers=self.headers,
+                        payload=changed.model_dump(mode="json"),
+                    )
+                    self.assertEqual(response.status_code, 403, response.text)
+                    self.assertEqual(
+                        self.store.read_product_profile_record(self.before.product), self.before
+                    )
+        with scoped_agent_transport():
+            response = await request(
+                self.app,
+                "POST",
+                "/v1/product-profiles?dry_run=true",
+                headers=self.headers,
+                payload=self.after.model_dump(mode="json"),
+            )
+        self.assertEqual(response.status_code, 403, response.text)
+
+    async def test_production_url_and_stale_profile_cannot_use_testing_correction(self) -> None:
+        changed = self.before.model_copy(deep=True)
+        production = next(lane for lane in changed.lanes if lane.instance == "prod")
+        production.health_url = (
+            urlsplit(production.health_url)
+            ._replace(netloc="another-production.example.invalid")
+            .geturl()
+        )
+        refused = await request(
+            self.app,
+            "POST",
+            "/v1/product-profiles",
+            headers=self.headers,
+            payload=changed.model_dump(mode="json"),
+        )
+        self.assertEqual(refused.status_code, 403, refused.text)
+        concurrent = self.before.model_copy(update={"display_name": "Concurrent edit"})
+        self.store.write_product_profile_record(concurrent)
+        refused = await request(
+            self.app,
+            "POST",
+            "/v1/product-profiles",
+            headers=self.headers,
+            payload=self.after.model_dump(mode="json"),
+        )
+        self.assertEqual(refused.status_code, 412, refused.text)
+        self.assertEqual(self.store.read_product_profile_record(self.before.product), concurrent)
