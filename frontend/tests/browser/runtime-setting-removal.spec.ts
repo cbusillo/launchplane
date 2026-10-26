@@ -68,6 +68,20 @@ test("stored removal reviews exact scope, invalidates edits, applies and reads b
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole("button", { name: "Remove reviewed settings" }).click();
   await expect(page.getByRole("status")).toContainText("Current stored record matches");
+  let finishReadback!: () => void;
+  const pendingReadback = new Promise<void>(resolve => { finishReadback = resolve; });
+  await page.route("**/v1/admin/runtime-settings/removal", async route => {
+    await pendingReadback;
+    await route.fallback();
+  });
+  await page.getByRole("button", { name: "Check current record" }).click();
+  try {
+    await expect(page.getByRole("status")).toContainText("Checking current record");
+    await expect(page.getByText("Current stored record matches", { exact: false })).toHaveCount(0);
+  } finally { finishReadback(); }
+  await waitForState(() => requests.filter(request => request.body.mode === "readback").length).toBe(2);
+  await expect(page.getByRole("status")).toContainText("Current stored record matches");
+  expect(requests.filter(request => request.body.mode === "apply")).toHaveLength(1);
   const apply = requests.find(request => request.body.mode === "apply")!;
   expect(apply.body).toMatchObject({ product: "fixture-site", scope: "instance", context: "fixture-context", instance: "testing", keys: ["OBSOLETE_INPUT"], reason: "Changed reason requires a fresh review." });
   expect(apply.body.review_id).toBe(requests.findLast(request => request.body.mode === "readback")!.body.review_id);

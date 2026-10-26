@@ -77,6 +77,7 @@ function RemovalForm({ actorId, target, onBusy }: { actorId: number; target: Rem
     if (applyOperation.state.phase === "failed") { setReview(null); setConfirmed(false); }
   }, [applyOperation.state.phase]);
   const readOperation = useBrowserOperationController({ ...operationOptions, scope: `${scope}:readback`, readOnly: true });
+  const checkingRecord = ["queued", "submitting"].includes(readOperation.state.phase);
   const busy = [planOperation, applyOperation, readOperation].some(operation => ["queued", "submitting"].includes(operation.state.phase));
   const uncertain = applyOperation.state.requiresIdempotencyContinuity;
   const committed = Boolean(completion);
@@ -104,6 +105,7 @@ function RemovalForm({ actorId, target, onBusy }: { actorId: number; target: Rem
   }
 
   async function checkReadback(request: RuntimeSettingRemovalRequest) {
+    setReadback(null);
     const result = await readOperation.run({ ...request, mode: "readback" });
     setReadback(result);
   }
@@ -159,7 +161,12 @@ function RemovalForm({ actorId, target, onBusy }: { actorId: number; target: Rem
     {readback && !committed ? <p role="status">Current record {readback.result.readback_matches ? "matches" : "does not match"} the reviewed removal.
       This does not confirm the original Apply; retry its original request to read the receipt.</p> : null}
     {uncertain && applyOperation.state.identity ? <p>Retained operation key <code>{applyOperation.state.identity.idempotencyKey}</code></p> : null}
-    {committed ? <p role="status">Removal committed. {readback?.result.readback_matches ? "Current stored record matches the reviewed removal." : "Current readback is unverified. Check again or review the current record before another removal."}</p> : null}
+    {committed || checkingRecord ? <p role="status">
+      {committed ? "Removal committed. " : ""}
+      {checkingRecord ? "Checking current record…" :
+        readback?.result.readback_matches ? "Current stored record matches the reviewed removal." :
+          "Current readback is unverified. Check again or review the current record before another removal."}
+    </p> : null}
     <div className="product-config-actions">
       <button type="button" className="button" disabled={locked || !canPlan} onClick={() => void preview()}>Review removal</button>
       <button type="button" className="button button-primary" disabled={busy || (uncertain ? !saved : !plan || !confirmed)} onClick={() => void apply()}>{uncertain ? "Retry original removal" : "Remove reviewed settings"}</button>
