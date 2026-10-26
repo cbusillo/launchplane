@@ -6,17 +6,29 @@ from pydantic import Field, StrictBool, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_address_settings import TestingAddressSettingsPlan
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.testing_publication import TestingServingSnapshot
 from control_plane.dokploy.testing_route import TestingLaneRoute, amend_testing_route_address
-from control_plane.testing_generation_retirement import RetainedTestingHostnameReservation
+from control_plane.testing_generation_retirement import (
+    RetainedTestingGeneration,
+    RetainedTestingHostnameReservation,
+)
 
 
 ADDRESS_SCOPE = "launchplane:testing-address:v1"
 ADDRESS_ROUTE = "service:testing-address"
+
+
+def retained_address_custody_sha256(
+    record: OdooStableTargetReplacementOperationRecord | RetainedTestingGeneration,
+) -> str:
+    return canonical_json_sha256(record.model_dump(mode="json", exclude_none=True))
 
 
 class TestingAddressPlan(FrozenRecord):

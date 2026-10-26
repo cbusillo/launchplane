@@ -7,7 +7,11 @@ from typing import cast
 import time
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.testing_address import TestingAddressPlan, address_binding
+from control_plane.contracts.testing_address import (
+    TestingAddressPlan,
+    address_binding,
+    retained_address_custody_sha256,
+)
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.dokploy import api, post_deploy, source
 from control_plane.dokploy.testing_route import (
@@ -345,8 +349,8 @@ def plan_testing_address(
     if reservation.status != "superseded":
         raise ValueError("The hostname recipient's original operation has not been superseded.")
     operations = {
-        key: canonical_json_sha256(
-            store._payload_dict(store.read_odoo_stable_target_replacement_operation_record(key))
+        key: retained_address_custody_sha256(
+            store.read_odoo_stable_target_replacement_operation_record(key)
         )
         for key in {retirement_operation_id, reservation_operation_id}
     }
@@ -457,7 +461,7 @@ def plan_testing_address(
             recipient_sha256=frame["address_recipients_sha256"],
             domain_inventory_sha256=inventory,
             operation_sha256=operations,
-            retirement_sha256=canonical_json_sha256(store._payload_dict(retained)),
+            retirement_sha256=retained_address_custody_sha256(retained),
             created_at=datetime.now(UTC),
         )
         from control_plane.testing_address_settings import plan_canonical_settings

@@ -11,6 +11,9 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooOverrideValue,
 )
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.testing_address import (
@@ -18,12 +21,14 @@ from control_plane.contracts.testing_address import (
     ADDRESS_SCOPE,
     TestingAddressRecord,
     TestingAddressPlan,
+    retained_address_custody_sha256,
 )
 from control_plane.contracts.testing_publication import (
     TestingPublicationRecord,
     TestingServingSnapshot,
 )
 from control_plane.dokploy.testing_route import TestingLaneRoute
+from control_plane.testing_generation_retirement import RetainedTestingGeneration
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage import postgres as db
 from control_plane.storage.product_authority_bundle import (
@@ -106,9 +111,7 @@ def check_testing_address_sources(
     ):
         raise ValueError("The original testing copy changed before address publication.")
     profile = session.get(db.LaunchplaneProductProfileRow, plan.product, with_for_update=True)
-    if profile is None or canonical_json_sha256(profile.payload) != canonical_json_sha256(
-        store._payload_dict(plan.profile)
-    ):
+    if profile is None or store.read_product_profile_payload(profile.payload) != plan.profile:
         raise ValueError("The original testing profile changed before address publication.")
     publication = session.scalar(
         store._idempotency_statement(
@@ -118,15 +121,16 @@ def check_testing_address_sources(
             for_update=True,
         )
     )
+    if publication is None:
+        raise ValueError("The original native publication is unavailable.")
+    original_publication = TestingPublicationRecord.model_validate(
+        publication.payload.get("response_payload")
+    )
     if (
-        publication is None
-        or canonical_json_sha256(publication.payload.get("response_payload"))
+        canonical_json_sha256(original_publication.model_dump(mode="json"))
         != plan.publication_sha256
     ):
         raise ValueError("The original native publication changed before address amendment.")
-    original_publication = TestingPublicationRecord.model_validate(
-        publication.payload["response_payload"]
-    )
     if (
         original_publication.state != "applied"
         or original_publication.plan.route != plan.route_before
@@ -143,18 +147,22 @@ def check_testing_address_retained_custody(
         operation = session.get(
             db.LaunchplaneOdooStableTargetReplacementOperationRow, key, with_for_update=True
         )
-        if (
-            operation is None
-            or canonical_json_sha256(operation.payload) != digest
-            or not store.testing_replacement_execution_is_excluded(key)
-        ):
-            raise ValueError("An original retained executor or its custody changed.")
+        if operation is None:
+            raise ValueError("An original retained operation is unavailable.")
+        original = OdooStableTargetReplacementOperationRecord.model_validate(operation.payload)
+        if retained_address_custody_sha256(original) != digest:
+            raise ValueError("An original retained operation's custody changed.")
+        if not store.testing_replacement_execution_is_excluded(key):
+            raise ValueError("An original retained executor is not excluded.")
     retirement = session.get(
         db.LaunchplaneRetainedTestingGenerationRow,
         plan.retirement_operation_id,
         with_for_update=True,
     )
-    if retirement is None or canonical_json_sha256(retirement.payload) != plan.retirement_sha256:
+    if retirement is None:
+        raise ValueError("The original retained testing generation is unavailable.")
+    retained = RetainedTestingGeneration.model_validate(retirement.payload)
+    if retained_address_custody_sha256(retained) != plan.retirement_sha256:
         raise ValueError("The original retained testing generation changed.")
     reservations = tuple(
         item

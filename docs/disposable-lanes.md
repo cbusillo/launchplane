@@ -1342,6 +1342,9 @@ router labels must remain strictly below the existing lane-owned priority, with
 known listeners. Foreign domains, matching foreign routers, automatic restart
 policies and incomplete observations refuse qualification. The original executor
 locks and all retained custody hashes are rechecked; no old fence is released.
+Source checks use the same typed serialization as the reviewed plan, including
+the existing profile migrations. Historical JSON that omits an unchanged default
+keeps its reviewed meaning. Hostname-reservation custody retains its raw hashes.
 The retained recipient facts form the comparison digest. Unrelated provider
 membership is not part of that digest. A full census runs immediately before
 each actual route dispatch, including retries of an unsent or busy writer.
@@ -1418,7 +1421,7 @@ Known staff, needed-copy, use and sharing protections remain refusals. Original
 retired executors stay excluded; their records and UNKNOWN fences never change.
 The synchronous testing lane reservation also excludes current maintenance,
 isolation and deployments. Only the plan's archived retirement operation is
-excluded from that active-owner check, under its retained executor lock and
+excluded from that active-operation check, under its retained executor lock and
 unchanged custody proof.
 
 After the canonical metadata commit, the same address operation runs three

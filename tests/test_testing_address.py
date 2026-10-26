@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from copy import deepcopy
 import json
 import unittest
 from typing import Any
@@ -9,7 +10,11 @@ from tests import test_testing_route_transport as transport_tests
 from control_plane.provider_operations import DurableProviderOperationResult
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.testing_address import TestingAddressPlan, address_binding
+from control_plane.contracts.testing_address import (
+    TestingAddressPlan,
+    address_binding,
+    retained_address_custody_sha256,
+)
 from control_plane.contracts.disposable_lane import DisposableTestingSupersession
 from control_plane.dokploy.testing_route import amend_testing_route_address
 from control_plane.dokploy.testing_address_recipients import qualify_testing_address_recipients
@@ -28,6 +33,7 @@ from control_plane.testing_address_storage import (
 )
 from control_plane.testing_address_qualification import exclude_address_executors
 from control_plane.testing_serving_copy import published_testing_copy
+from control_plane.testing_publication_storage import PUBLICATION_ROUTE, PUBLICATION_SCOPE
 from tests import test_testing_publication as publication_tests
 from tests.test_odoo_testing_restore import generation
 
@@ -125,11 +131,9 @@ class TestingAddressTests(unittest.TestCase):
             recipient_sha256=canonical_json_sha256({"recipients": "stopped"}),
             domain_inventory_sha256=canonical_json_sha256({"inventory": "complete"}),
             operation_sha256={
-                self.operation.operation_id: canonical_json_sha256(
-                    self.store._payload_dict(self.operation)
-                )
+                self.operation.operation_id: retained_address_custody_sha256(self.operation)
             },
-            retirement_sha256=canonical_json_sha256(self.store._payload_dict(retained)),
+            retirement_sha256=retained_address_custody_sha256(retained),
             created_at=self.now,
         )
         self.reservation = self.store.reserve_mutation(
@@ -159,6 +163,50 @@ class TestingAddressTests(unittest.TestCase):
             )
 
     def test_canonical_amendment_preserves_copy_and_original_receipts(self) -> None:
+        with self.store._session_factory() as session:
+            profile = session.get(db.LaunchplaneProductProfileRow, self.product)
+            operation = session.get(
+                db.LaunchplaneOdooStableTargetReplacementOperationRow, self.operation.operation_id
+            )
+            retained = session.get(
+                db.LaunchplaneRetainedTestingGenerationRow, self.operation.operation_id
+            )
+            publication = session.scalar(
+                self.store._idempotency_statement(
+                    scope=PUBLICATION_SCOPE,
+                    route_path=PUBLICATION_ROUTE,
+                    idempotency_key=self.plan.publication_key,
+                )
+            )
+            assert profile is not None and operation is not None
+            assert retained is not None and publication is not None
+            profile_payload = deepcopy(profile.payload)
+            profile_payload.pop("repository_owner_id")
+            profile.payload = profile_payload
+            operation_payload = deepcopy(operation.payload)
+            operation_payload.pop("idempotency_scope")
+            operation.payload = operation_payload
+            retained_payload = deepcopy(retained.payload)
+            retained_payload["operation"].pop("idempotency_scope")
+            retained.payload = retained_payload
+            publication_payload = deepcopy(publication.payload)
+            publication_payload["response_payload"]["plan"]["before"].pop("generation")
+            publication.payload = publication_payload
+            session.commit()
+        self.plan = self.plan.model_copy(
+            update={
+                "reservations": self.store.read_retained_testing_hostname_reservations(self.context)
+            }
+        )
+        self.reservation = self.store.reserve_mutation(
+            scope="fixture-address",
+            route_path="fixture-address",
+            idempotency_key="historical-original-key",
+            request_fingerprint=self.plan.digest,
+            lease_owner="fixture",
+            reconciliation_key=self.plan.digest,
+            provider_target_key="fixture-historical-address-target",
+        ).record
         legacy_payload = self.plan.model_dump(mode="json")
         legacy_payload.pop("canonical_settings", None)
         self.assertEqual(
@@ -373,11 +421,30 @@ class TestingAddressTests(unittest.TestCase):
             self.assertEqual(self.fixture.current(), before)
 
     def test_changed_original_custody_refuses_without_releasing_it(self) -> None:
+        before = self.fixture.current()
+        with self.assertRaises(ValueError):
+            commit_testing_address(self.store, self.plan, self.reservation, self.now, self.health)
+        self.assertEqual(self.fixture.current(), before)
         self.store.write_odoo_stable_target_replacement_operation_record(
             self.operation.model_copy(
                 update={"updated_at": (self.now + timedelta(seconds=1)).isoformat()}
             )
         )
+        before = self.fixture.current()
+        with self.assertRaises(ValueError):
+            self.commit()
+        self.assertEqual(self.fixture.current(), before)
+
+    def test_raw_hostname_reservation_custody_refuses_representation_changes(self) -> None:
+        with self.store._session_factory() as session:
+            retained = session.get(
+                db.LaunchplaneRetainedTestingGenerationRow, self.operation.operation_id
+            )
+            assert retained is not None
+            payload = deepcopy(retained.payload)
+            payload["plan"].pop("original_authority")
+            retained.payload = payload
+            session.commit()
         before = self.fixture.current()
         with self.assertRaises(ValueError):
             self.commit()

@@ -155,7 +155,9 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             return [result]
         return result
 
-    def read(self) -> ApplicationRuntimeObservation:
+    def read(
+        self, *, expected_environment: dict[str, str] | None = None
+    ) -> ApplicationRuntimeObservation:
         with (
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
@@ -167,7 +169,26 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 host="https://provider.example",
                 token="fixture-token",
                 application_id="application-1",
+                expected_environment=expected_environment,
             )
+
+    def test_environment_proof_merges_image_defaults_and_rejects_service_or_container_drift(
+        self,
+    ) -> None:
+        expected = {
+            "LAUNCHPLANE_DEPLOYMENT_RECORD_ID": "deployment-1",
+            "APP_TOKEN": "do-not-expose",
+        }
+        self.image["Config"] = {"Env": ["GPG_KEY=public-image-signing-key"]}
+        config = self.container["Config"]
+        assert isinstance(config, dict)
+        config["Env"].append("GPG_KEY=public-image-signing-key")
+        self.assertTrue(self.read(expected_environment=expected).ready)
+        config["Env"][-1] = "GPG_KEY=untracked-runtime-value"
+        self.assertFalse(self.read(expected_environment=expected).ready)
+        config["Env"][-1] = "GPG_KEY=public-image-signing-key"
+        with self.assertRaises(DokployEvidenceProviderError):
+            self.read(expected_environment={**expected, "APP_TOKEN": "different-provider-token"})
 
     def observe_artifact(self) -> GenericWebRuntimeArtifactObservation:
         self.target.setdefault("dockerImage", _TAG)
