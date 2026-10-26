@@ -42,7 +42,7 @@ def original_review_recovery_records(
     groups: dict[str, list[MergeTrainStackCollapsePlanRecord]] = {}
     for stored in records:
         if (
-            stored.plan.repository != snapshot.repository
+            stored.plan.repository.casefold() != snapshot.repository.casefold()
             or stored.plan.base_branch != snapshot.base_branch
         ):
             continue

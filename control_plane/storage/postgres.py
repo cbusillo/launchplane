@@ -24762,7 +24762,9 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeTrainPrFeedbackRecord, ...]:
         filters: list[Any] = []
         if repository:
-            filters.append(LaunchplaneMergeTrainPrFeedbackRow.repository == repository)
+            filters.append(
+                func.lower(LaunchplaneMergeTrainPrFeedbackRow.repository) == repository.lower()
+            )
         if base_branch:
             filters.append(LaunchplaneMergeTrainPrFeedbackRow.base_branch == base_branch)
         if pr_number is not None:
@@ -24781,7 +24783,11 @@ class PostgresRecordStore(HumanSessionStore):
                     row.event,
                     func.row_number()
                     .over(
-                        partition_by=(row.repository, row.base_branch, row.pull_request_number),
+                        partition_by=(
+                            func.lower(row.repository),
+                            row.base_branch,
+                            row.pull_request_number,
+                        ),
                         order_by=(
                             row.recorded_at.desc(),
                             created_order.desc(),
@@ -24848,7 +24854,7 @@ class PostgresRecordStore(HumanSessionStore):
             payloads.extend(
                 session.scalars(
                     select(model.payload).where(
-                        model.repository == repository.lower(),
+                        func.lower(model.repository) == repository.lower(),
                         model.base_branch == base_branch,
                         model.status == "active",
                     )
@@ -25476,7 +25482,7 @@ class PostgresRecordStore(HumanSessionStore):
                     select(row_type.record_id)
                     .where(
                         row_type.status == "active",
-                        row_type.repository == normalized_repository,
+                        func.lower(row_type.repository) == normalized_repository,
                         row_type.base_branch == normalized_base_branch,
                         row_type.payload["ordinary_job_binding"].as_string().is_not(None),
                     )
@@ -25956,7 +25962,10 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
         filters: list[object] = []
         if repository:
-            filters.append(LaunchplaneMergeTrainStackCollapsePlanRow.repository == repository)
+            filters.append(
+                func.lower(LaunchplaneMergeTrainStackCollapsePlanRow.repository)
+                == repository.lower()
+            )
         if base_branch:
             filters.append(LaunchplaneMergeTrainStackCollapsePlanRow.base_branch == base_branch)
         if status:

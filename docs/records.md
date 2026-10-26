@@ -94,6 +94,15 @@ remains until `e7c1d5e9a3b6` is applied with separate shared-data approval.
 No inspection profile, credential, expectation, or activation is created by
 this migration.
 
+## Merge-train repository identities
+
+Legacy feedback and stack rows match case-insensitively without being rewritten
+on read; branch and PR bindings stay exact. Subsequent writes normalize repository
+fields while retaining opaque IDs, comment markers and policy bindings.
+No schema transition is needed. For mixed-case policies, rolling back to an image
+without these compatible readers can hide lowercase stack progress or stall
+feedback retries. Recover with a compatible reader image or roll forward.
+
 ## Schema Migrations
 
 Launchplane uses SQLAlchemy ORM models as the persistence boundary and Alembic as

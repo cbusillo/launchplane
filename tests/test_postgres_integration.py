@@ -26,6 +26,7 @@ from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_preparation_recovery as preparation_recovery
 from tests import test_testing_activation as testing_activation
 from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
+from tests import test_merge_train_repository_names as repository_name_tests
 from tests import test_application_state_volume as application_volume_tests
 from tests import test_application_allocation as application_allocation_tests
 from tests import test_testing_rebuild as testing_rebuild_tests
@@ -1406,6 +1407,14 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                 self.assertEqual(probe(), TestingRead.ISOLATION_REFUSED)
                 spec["mode"] = "quiescence"
                 self.assertEqual(probe(), TestingRead.CLEAR)
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresRepositoryNameStorageTests(repository_name_tests.RepositoryNameSQLStorageTests):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
 
 
 @unittest.skipUnless(
