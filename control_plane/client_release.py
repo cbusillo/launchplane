@@ -54,7 +54,10 @@ from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
     build_generic_web_rollback_plan,
 )
-from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    build_launchplane_mutation_reservation_id,
+)
 from control_plane.contracts.durable_operation_authorization import (
     RELEASE_DECISION_GRANTS,
     DurableOperationAuthorization,
@@ -149,10 +152,12 @@ _STOPPED_STATUSES = frozenset({"fail", "cancelled", "reconciliation_required"})
 
 
 @dataclass(slots=True)
-class StandingReleaseReviewBackoff:
-    """Delay incomplete standing reviews; never cache acceptance authority."""
-
+class ClientReleaseBackoff:
     blocked: dict[str, tuple[str, float]] = field(default_factory=dict)
+    reconciliations: dict[str, tuple[str, float]] = field(default_factory=dict)
+
+
+CLIENT_RELEASE_RECONCILIATION_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,7 +721,7 @@ def _release_step_failure(
     elif status == "reconciliation_required":
         message = (
             message
-            or "The provider outcome needs admin reconciliation before this release can continue."
+            or "The original provider outcome is not verified. This release is held for reconciliation."
         )
     return ClientReleaseFailureView(
         code=safe_operation_error_code(code) or status,
@@ -1013,7 +1018,7 @@ def _record_standing_acceptance(
     store: PostgresRecordStore,
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
-    backoff: StandingReleaseReviewBackoff | None = None,
+    backoff: ClientReleaseBackoff | None = None,
 ) -> None:
     """Materialize the Director's recorded standing acceptance for one exact checklist.
 
@@ -1142,6 +1147,8 @@ def _run_generic_web_promotion(
     decision: ReleaseReviewDecisionRecord,
     step: ClientReleaseStep,
     backup_record_id: str,
+    *,
+    allow_mutation: bool = True,
 ) -> str:
     request = client_release_promotion_request(profile, decision, backup_record_id)
     lane = next(lane for lane in profile.lanes if lane.instance == "prod")
@@ -1175,6 +1182,11 @@ def _run_generic_web_promotion(
     from control_plane.production_recipient_cutover import RecipientCutoverAdapter
 
     recipient = custody(store, profile.product, lane.context)
+    original = store.read_idempotency_record(
+        scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+        idempotency_key=_step_key(decision, step),
+    )
     if (
         recipient is not None
         and recipient.activation
@@ -1209,8 +1221,15 @@ def _run_generic_web_promotion(
             # The adapter admits the source before this attempt starts production;
             # its later acceptance and recovery checks do not chase testing.
             _require_qualified_generic_web_release_source(store, profile, decision)
+            if original is not None and not recipient.execution:
+                try:
+                    _require_current_release(store, control_plane_root, profile, decision)
+                except ClientReleaseNotReady as error:
+                    raise GenericWebPromotionSourceRefused(
+                        "The accepted release changed."
+                    ) from error
 
-        if recipient.phase != "published" and not recipient.execution:
+        if recipient.phase != "published" and not recipient.execution and original is None:
             _require_current_release(store, control_plane_root, profile, decision)
 
         recipient_adapter = RecipientCutoverAdapter(
@@ -1231,6 +1250,7 @@ def _run_generic_web_promotion(
             lease_owner=f"client-release-{decision.record_id}-{datetime.now(UTC).isoformat()}",
             response_trace_id=f"client-release-{decision.record_id}",
             adapter=recipient_adapter,
+            allow_mutation=allow_mutation,
         )
         expected_id = client_release_step_operation_id(
             profile=profile, decision=decision, step=step
@@ -1267,6 +1287,7 @@ def _run_generic_web_promotion(
         lease_owner=f"client-release-{decision.record_id}-{datetime.now(UTC).isoformat()}",
         response_trace_id=f"client-release-{decision.record_id}",
         adapter=adapter,
+        allow_mutation=allow_mutation,
     )
     operation_id = client_release_step_operation_id(profile=profile, decision=decision, step=step)
     return (
@@ -1281,7 +1302,7 @@ def advance_client_releases(
     store: object,
     control_plane_root: Path,
     stop_event: Event | None = None,
-    standing_review_backoff: StandingReleaseReviewBackoff | None = None,
+    release_backoff: ClientReleaseBackoff | None = None,
 ) -> tuple[str, ...]:
     """Queue the next step of every Client release that is ready for one.
 
@@ -1299,14 +1320,14 @@ def advance_client_releases(
         if profile.driver_id not in {"odoo", "generic-web"}:
             continue
         try:
-            _record_standing_acceptance(store, control_plane_root, profile, standing_review_backoff)
+            _record_standing_acceptance(store, control_plane_root, profile, release_backoff)
         except (ClientReleaseNotReady, FileNotFoundError, ValueError, click.ClickException):
             _LOGGER.info("standing acceptance not ready product=%s", profile.product)
         covered = _covering_decision(store, profile.product)
         if covered is None:
             continue
         try:
-            operation_id = _advance(store, control_plane_root, *covered)
+            operation_id = _advance(store, control_plane_root, *covered, backoff=release_backoff)
         except (
             ClientReleaseNotReady,
             BusinessHoursHeld,
@@ -1357,11 +1378,12 @@ def _advance(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
+    *,
+    backoff: ClientReleaseBackoff | None = None,
 ) -> str:
     from control_plane.service_deploy_drain import read_status
 
-    if read_status(store).get("admission_paused"):
-        return ""
+    admission_paused = bool(read_status(store).get("admission_paused"))
     context = _prod_context(profile)
     previous: object | None = None
     for step in client_release_steps(decision.release_start):
@@ -1369,8 +1391,21 @@ def _advance(
         if status == "pass":
             previous = operation
             continue
+        if status == "reconciliation_required" and profile.driver_id == "generic-web":
+            return _reconcile_generic_web_step(
+                store,
+                control_plane_root,
+                profile,
+                decision,
+                step,
+                operation,
+                previous,
+                allow_mutation=not admission_paused,
+                backoff=backoff,
+            )
         if status != "not_started":
-            # Running, or stopped: a stopped release never continues by itself.
+            return ""
+        if admission_paused:
             return ""
         authorized_at = utc_now_timestamp()
         if decision.release_start == "rollback":
@@ -1406,6 +1441,102 @@ def _advance(
             authorized_at,
         )
     return ""
+
+
+def _reconcile_generic_web_step(
+    store: PostgresRecordStore,
+    root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    operation: object | None,
+    previous: object | None,
+    *,
+    allow_mutation: bool,
+    backoff: ClientReleaseBackoff | None,
+) -> str:
+    if (
+        decision.decision != "accepted"
+        or not isinstance(operation, LaunchplaneIdempotencyRecord)
+        or step.kind not in {"promote", "rollback"}
+    ):
+        return ""
+    if backoff is not None:
+        now = monotonic()
+        blocked = backoff.reconciliations.get(profile.product)
+        if blocked is not None and blocked[0] == operation.record_id and now < blocked[1]:
+            return ""
+        backoff.reconciliations[profile.product] = (
+            operation.record_id,
+            now + CLIENT_RELEASE_RECONCILIATION_SECONDS,
+        )
+    from control_plane.production_recipient import custody
+    from control_plane.production_recipient_cutover import cutover_reconciliation_key
+    from control_plane.production_recipient_inverse import inverse_reconciliation_key
+
+    context = _prod_context(profile)
+    recipient = custody(store, profile.product, context)
+    if recipient is not None:
+        if step.kind == "promote" and operation.reconciliation_key == cutover_reconciliation_key(
+            recipient.plan_sha256
+        ):
+            return _run_generic_web_promotion(
+                store,
+                root,
+                profile,
+                decision,
+                step,
+                str(getattr(previous, "backup_record_id", "")),
+                allow_mutation=allow_mutation,
+            )
+        if step.kind == "rollback" and operation.reconciliation_key == inverse_reconciliation_key(
+            recipient.plan_sha256
+        ):
+            return (
+                _queue_recipient_inverse(
+                    store,
+                    root,
+                    profile,
+                    decision,
+                    step,
+                    context,
+                    utc_now_timestamp(),
+                    allow_mutation=allow_mutation,
+                )
+                or ""
+            )
+    from control_plane.generic_web_promotion_recovery import (
+        adopt_inspected_promotion,
+        inspect_promotion,
+        inspect_rollback_drill,
+    )
+
+    inspect = inspect_promotion if step.kind == "promote" else inspect_rollback_drill
+    inspection = inspect(
+        store=store,
+        root=root,
+        product=profile.product,
+        decision_record_id=decision.record_id,
+        attempt=step.attempt,
+    )
+    if inspection.reservation != operation or inspection.action not in {
+        "adopt_promotion",
+        "adopt_rollback",
+    }:
+        return ""
+    adopted = adopt_inspected_promotion(
+        store=store,
+        inspection=inspection,
+        trace_id=f"client-release-{decision.record_id}",
+        recovery_receipt={"action": inspection.action, "source": "accepted_release_worker"},
+    )
+    return (
+        operation.record_id
+        if adopted.status in {"adopted", "replayed"}
+        and adopted.record is not None
+        and adopted.record.record_id == operation.record_id
+        else ""
+    )
 
 
 def _require_qualified_generic_web_release_source(
@@ -1886,6 +2017,8 @@ def _queue_recipient_inverse(
     step: ClientReleaseStep,
     context: str,
     authorized_at: str,
+    *,
+    allow_mutation: bool = True,
 ) -> str | None:
     from control_plane.production_recipient_inverse import run_recipient_inverse
 
@@ -1912,6 +2045,7 @@ def _queue_recipient_inverse(
         key=_step_key(decision, step),
         trace=f"client-release-{decision.record_id}",
         validate_release=validate,
+        allow_mutation=allow_mutation,
     )
     expected = client_release_step_operation_id(profile=profile, decision=decision, step=step)
     return expected if actual == expected else ""

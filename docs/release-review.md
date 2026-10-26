@@ -1080,6 +1080,22 @@ that is still running finishes before another begins, and shutdown joins admitte
 promotion or rollback work. Queued Odoo operations still use their normal worker;
 generic-web steps executed by the release pass can continue independently.
 
+The worker also reconciles an already accepted generic-web promotion or rollback
+under that step's original key. It checks the current decision, Client and release
+hold before each scan. Native recipient observers may adopt a proved terminal
+outcome or retry only a positively absent, retry-safe original attempt through
+the durable runner. Standard promotion and drill recovery share the admin
+surface's exact provider inspection and atomic adoption. Unknown outcomes and
+active leases remain held. Reconciliation scans are rate-limited per product;
+they never mint a replacement step or grant a caller promotion access.
+
+During self-deploy drain, original observation and completion adoption remain
+available. Fresh or reacquired provider effects still require drain admission
+and the existing acceptance, source, backup, lease and writer checks. A permanently
+fenced writer attempt is adopted as failed with no writer effect; it is never
+replayed or reported as a successful release. Failed and cancelled steps still
+stop forward progress. Existing reviewed admin recovery remains supported.
+
 For Odoo, promotion admission pins the checklist's production artifact and its
 passing deployment in the operation's initial checkpoint. The worker verifies
 that binding again before the first production write and records that write's

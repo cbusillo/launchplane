@@ -456,6 +456,9 @@ original decision, kind and attempt. Planning returns the existing original
 idempotency key; apply takes it from the saved review rather than minting a key. It cannot invent a
 step or bypass acceptance, backup gates, leases or terminal provider evidence.
 
+See [accepted-release reconciliation](release-review.md#interrupted-provider-operations)
+for worker-owned original-step recovery and the self-deploy drain boundary.
+
 ## Retained original-key continuation
 
 After an unknown create or authority drift, authorized product readers can read

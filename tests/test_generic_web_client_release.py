@@ -13,7 +13,7 @@ import click
 from control_plane.client_release import (
     ClientReleaseStep,
     advance_client_releases,
-    StandingReleaseReviewBackoff,
+    ClientReleaseBackoff,
     read_client_release_run,
     release_start_for_acceptance,
     client_release_grant,
@@ -2223,7 +2223,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
 
     def test_unpublished_acceptance_backs_off_then_reuses_its_saved_record(self) -> None:
         self.switch("director_standing")
-        backoff = StandingReleaseReviewBackoff()
+        backoff = ClientReleaseBackoff()
         self.publish.side_effect = ValueError("Issues unavailable")
         with (
             patch("control_plane.client_release.monotonic", return_value=0) as clock,
@@ -2232,11 +2232,11 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             ) as read,
         ):
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             saved = self.store.list_release_review_decision_records(product=self.profile.product)[0]
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             read.assert_called_once()
             self.publish.assert_called_once()
@@ -2244,7 +2244,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             clock.return_value = backoff.blocked[self.profile.product][1] + 1
             self.publish.side_effect = None
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             retry = self.store.list_release_review_decision_records(product=self.profile.product)[0]
             self.assertEqual(retry.record_id, saved.record_id)
@@ -2269,15 +2269,15 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         )
         self.accept()
         self.write_qualified_testing_inventory(prior_inventory)
-        backoff = StandingReleaseReviewBackoff()
+        backoff = ClientReleaseBackoff()
         with patch(
             "control_plane.client_release.current_release_review", side_effect=self.review
         ) as read:
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
         read.assert_called_once()
         self.assertEqual(self.provider.deployed_artifacts, [])
@@ -2432,15 +2432,15 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)})
             }
         )
-        backoff = StandingReleaseReviewBackoff()
+        backoff = ClientReleaseBackoff()
         with patch(
             "control_plane.client_release.current_release_review", return_value=incomplete
         ) as read:
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             read.assert_called_once()
             inventory = self.store.read_environment_inventory(
@@ -2458,7 +2458,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
             read.reset_mock()
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             read.assert_called_once()
             self.assertEqual(
