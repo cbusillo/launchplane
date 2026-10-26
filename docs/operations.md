@@ -5279,7 +5279,9 @@ overrides preserve persisted parameters; installed producer defaults apply only
 when the parameter is absent. Legacy field environments and copied defaults are
 not a fallback. Uninstalled addons, missing password delivery, conflicting or
 secret-backed non-secret authority, unverified TLS and drift refuse the optional
-source. Ordinary previews without the source remain available.
+source. Ordinary previews without the source remain available. Planning compares the
+selected managed password with delivered metadata in memory; it does not copy
+the password into its response or evidence digest.
 
 Apply that service-issued plan through the existing
 `POST /v1/drivers/odoo/preview-apply` route with its plan id as the idempotency

@@ -340,6 +340,13 @@ class DiagnosticTests(unittest.TestCase):
         result = run()
         self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
         self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
+        with patch.object(
+            diagnostic, "_decrypt_secret_value", side_effect=ValueError("unavailable")
+        ):
+            unavailable = run()
+        self.assertTrue(
+            all(source.binding == "missing_or_unsafe" for source in unavailable.sources)
+        )
 
         def drift(connection: object, sources: tuple[str, ...], **kwargs: object) -> dict[str, str]:
             self.fixture.bindings.clear()

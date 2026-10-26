@@ -28,6 +28,7 @@ def runtime_grants(
         database_url=database_url,
         mode="grants",
         sources=sources,
+        expected_runtime=connection,
     )
     return {
         name: next((source.grants for source in result.sources if source.source == name), "unknown")

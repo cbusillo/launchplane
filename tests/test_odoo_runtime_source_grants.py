@@ -117,7 +117,6 @@ class RuntimeSourceTests(PrerequisiteFixture):
         for kind in ("managed_password", "delivered_password", "disabled_tls", "payload_mismatch"):
             with self.subTest(kind=kind):
                 self.probes.clear()
-                self.drift = kind
                 self.set_overrides({"fishbowl.db": "inventory"})
                 self.values.pop("fishbowl.ssl_verify", None)
                 self.env[config_parameter_secret_env_key("fishbowl.password")] = PRIVATE
@@ -200,7 +199,11 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 reads, "inspect_runtime_container", side_effect=lambda *args: self.env.copy()
             ),
             patch.object(reads, "assert_selection_current"),
-            patch.object(reader, "_decrypt_secret_value", return_value=PRIVATE),
+            patch.object(reader, "_decrypt_secret_value", return_value=PRIVATE) as compare_decrypt,
+            patch(
+                "control_plane.odoo_preview_import_source.copy_source_value",
+                side_effect=AssertionError("Planning must not copy source passwords"),
+            ),
             patch.object(diagnostic, "_decrypt_secret_value", return_value=PRIVATE),
             patch.dict(diagnostic._FAILED_PROBES, {}, clear=True),
         ):
@@ -231,3 +234,35 @@ class RuntimeSourceTests(PrerequisiteFixture):
         }
         self.assertEqual(fields["fishbowl.port"], self.values["fishbowl.port"])
         self.assertEqual(preview.environment, {})
+        compare_decrypt.assert_called()
+
+    def test_grant_consumer_cannot_substitute_a_new_runtime_origin(self) -> None:
+        from dataclasses import replace
+        from control_plane import odoo_runtime_reads as reads, odoo_runtime_source_grants as grants
+
+        previous = replace(
+            self.fixture.connection,
+            evidence=self.fixture.connection.evidence.model_copy(update={"container_id": "d" * 64}),
+        )
+        with (
+            patch.object(reader, "_read_remote", side_effect=self.remote),
+            patch.object(
+                reads, "select_stable_runtime", return_value=self.fixture.connection.selection
+            ),
+            patch.object(reads, "connect_runtime", return_value=self.fixture.connection),
+            patch.object(
+                reads, "inspect_runtime_container", side_effect=lambda *args: self.env.copy()
+            ),
+            patch.object(reads, "assert_selection_current"),
+            patch.object(reader, "_decrypt_secret_value", return_value=PRIVATE),
+        ):
+            result = grants.runtime_grants(
+                previous,
+                tuple(SOURCE_PREFIXES),
+                store=self.fixture.store,
+                product=self.fixture.profile.product,
+                control_plane_root=self.root,
+                database_url=None,
+            )
+        self.assertTrue(all(value == "unknown" for value in result.values()))
+        self.assertEqual(self.container_calls, 0)

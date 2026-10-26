@@ -457,7 +457,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refused.json()["error"]["code"], "authorization_denied")
         prepare.assert_not_called()
 
-    def test_plan_never_decrypts_and_rotated_source_becomes_stale_before_apply(self) -> None:
+    def test_plan_never_copies_password_and_rotated_source_becomes_stale_before_apply(self) -> None:
         request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
         planned = _issued_plan(request)
         inputs = planned.plan_request.model_copy(update={"fishbowl_source": self.reference})
@@ -468,8 +468,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 return_value=planned,
             ),
             patch(
-                "control_plane.secrets._decrypt_secret_value",
-                side_effect=AssertionError("planning must not decrypt"),
+                "control_plane.odoo_preview_import_source.copy_source_value",
+                side_effect=AssertionError("planning must not copy source passwords"),
             ),
         ):
             result = _build_odoo_preview_apply_inputs(

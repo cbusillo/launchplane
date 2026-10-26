@@ -570,7 +570,8 @@ def diagnose_runtime_source_grants(
                 ):
                     selected[name] = source
             except Exception:
-                pass
+                sources.append(SourceDiagnostic(source=source_name))
+                continue
             sources.append(SourceDiagnostic(source=source_name, binding="selected"))
         grants = runtime_origin_grants(
             connection,

@@ -447,6 +447,7 @@ def read_source_consumers(
     database_url: str | None,
     mode: Literal["grants", "preview"],
     sources: tuple[str, ...],
+    expected_runtime: reads.OdooRuntimeConnection | None = None,
 ) -> SourceConsumerResult:
     unknown = SourceConsumerResult(
         runtime="unknown",
@@ -468,6 +469,24 @@ def read_source_consumers(
             control_plane_root=control_plane_root,
             database_url=database_url,
         )
+        if expected_runtime is not None and (
+            connection.selection != expected_runtime.selection
+            or (
+                connection.evidence.container_id,
+                connection.evidence.target_id,
+                connection.host,
+                connection.server_id,
+                connection.app_name,
+            )
+            != (
+                expected_runtime.evidence.container_id,
+                expected_runtime.evidence.target_id,
+                expected_runtime.host,
+                expected_runtime.server_id,
+                expected_runtime.app_name,
+            )
+        ):
+            return unknown
         files = producer_files(manifest, connection, profile.repository)
         before = reads.inspect_runtime_container(
             connection.host,
