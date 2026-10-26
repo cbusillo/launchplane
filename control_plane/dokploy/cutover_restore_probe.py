@@ -4,7 +4,7 @@ from control_plane.dokploy.slot_maintenance import ContainerCommand
 
 
 RESTORE_PROBE_PROGRAM = r"""
-import json,subprocess,sys,time
+import json,re,subprocess,sys,time
 spec=json.load(sys.stdin)
 def run(argv,**kwargs):
     result=subprocess.run(['docker',*argv],capture_output=True,**kwargs)
@@ -35,9 +35,25 @@ try:
     finally:
         if source.poll() is None: source.kill();source.wait()
     if run(['exec',spec['runner'],'sha256sum',spec['dump']]).decode().split()[0]!=spec['database_dump_sha256']: raise ValueError('restore input changed during verification')
+    if run(['exec',spec['runner'],'sha256sum',spec['filestore']]).decode().split()[0]!=spec['filestore_sha256']: raise ValueError('filestore differs from verified capture')
+    run(['exec',name,'mkdir','/tmp/filestore'])
+    source=subprocess.Popen(['docker','exec',spec['runner'],'cat',spec['filestore']],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    try:
+        extracted=subprocess.run(['docker','exec','-i',name,'tar','--no-same-owner','--no-same-permissions','-xzf','-','-C','/tmp/filestore'],stdin=source.stdout,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=300)
+        source.stdout.close()
+        if source.wait(timeout=10) or extracted.returncode: raise RuntimeError('filestore archive could not be restored')
+    finally:
+        if source.poll() is None: source.kill();source.wait()
+    attachments=run(['exec',name,'psql','-U','postgres','-d','postgres','-At','-F','|','-c',"SELECT store_fname,checksum FROM ir_attachment WHERE store_fname IS NOT NULL"]).decode().splitlines()
+    for attachment in attachments:
+        path,checksum=attachment.split('|')
+        if not re.fullmatch(r'[0-9a-f]{2}/[0-9a-f]{40}',path) or not re.fullmatch(r'[0-9a-f]{40}',checksum): raise ValueError('restored attachment has no verifiable filestore binding')
+        actual=run(['exec',name,'sha1sum','--','/tmp/filestore/'+spec['database']+'/'+path]).decode().split()[0]
+        if actual!=checksum: raise ValueError('restored SQL/filestore contents differ')
+    if run(['exec',spec['runner'],'sha256sum',spec['filestore']]).decode().split()[0]!=spec['filestore_sha256']: raise ValueError('filestore input changed during verification')
     observed=run(['exec',name,'psql','-U','postgres','-d','postgres','-Atc',"SELECT value FROM ir_config_parameter WHERE key='database.uuid'"]).decode().strip()
     if observed!=spec['database_uuid']: raise ValueError('restored database identity differs')
-    print(json.dumps({'restored_database_uuid':observed,'database_dump_sha256':spec['database_dump_sha256']},sort_keys=True))
+    print(json.dumps({'restored_database_uuid':observed,'database_dump_sha256':spec['database_dump_sha256'],'filestore_archive_sha256':spec['filestore_sha256']},sort_keys=True))
 finally:
     run(['rm','-f',name])
 """
@@ -52,6 +68,9 @@ def verify_disposable_database_restore(
     dump: str,
     database_uuid: str,
     dump_sha256: str,
+    database: str,
+    filestore: str,
+    filestore_sha256: str,
 ) -> dict[str, str]:
     request = dict(
         image=image,
@@ -61,10 +80,17 @@ def verify_disposable_database_restore(
         dump=dump,
         database_uuid=database_uuid,
         database_dump_sha256=dump_sha256,
+        database=database,
+        filestore=filestore,
+        filestore_sha256=filestore_sha256,
     )
     value: dict[str, str] = json.loads(
         execute(("python3", "-c", RESTORE_PROBE_PROGRAM), json.dumps(request))
     )
-    if value != {"restored_database_uuid": database_uuid, "database_dump_sha256": dump_sha256}:
+    if value != {
+        "restored_database_uuid": database_uuid,
+        "database_dump_sha256": dump_sha256,
+        "filestore_archive_sha256": filestore_sha256,
+    }:
         raise ValueError("isolated restore has no exact database/capture witness")
     return value

@@ -32,6 +32,9 @@ def build_fixture_images(
     root: Path, *, base_image: str, inputs: Path, prefix: str
 ) -> tuple[ArtifactIdentityManifest, ...]:
     template = Path(__file__).parent / "cutover_probe"
+    base = json.loads(docker("image", "inspect", base_image))[0]
+    base_alias = "launchplane-cutover-base:" + base["Id"].removeprefix("sha256:")
+    docker("tag", base["Id"], base_alias)
     graph_text = docker(
         "run",
         "--rm",
@@ -179,13 +182,26 @@ def build_fixture_images(
         shutil.copytree(inputs / "launchplane/addons", build / "health")
         shutil.copy(inputs / "scripts/launchplane-readiness.py", build / "readiness.py")
         (build / "Dockerfile").write_text(
-            f"FROM {base_image}\nUSER root\nCOPY scripts /volumes/scripts\n"
+            f"FROM {base_alias}\nUSER root\nCOPY scripts /volumes/scripts\n"
             "COPY runtime-libraries /venv/lib/python3.13/site-packages\n"
             "COPY health /opt/launchplane/addons\nCOPY addon /opt/fixture-addons\n"
             "COPY readiness.py /opt/launchplane-readiness.py\n"
             "COPY declaration.json /opt/launchplane/evidence/release-compatibility.json\n"
         )
-        docker("build", "--network", "none", "-t", image_name + ":" + name, str(build))
+        docker(
+            "build",
+            "--pull=false",
+            "--platform",
+            "linux/" + architecture,
+            "--network",
+            "none",
+            "-t",
+            image_name + ":" + name,
+            str(build),
+        )
+        derived = json.loads(docker("image", "inspect", image_name + ":" + name))[0]
+        if derived["RootFS"]["Layers"][: len(base["RootFS"]["Layers"])] != base["RootFS"]["Layers"]:
+            raise ValueError("fixture build did not retain the selected immutable base layers")
         digests = json.loads(
             docker("image", "inspect", "--format", "{{json .RepoDigests}}", image_name + ":" + name)
         )

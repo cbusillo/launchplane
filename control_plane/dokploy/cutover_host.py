@@ -980,6 +980,9 @@ class BoundOdooCutoverHost:
             dump=directory + "/" + plan.old.binding.database + ".dump",
             database_uuid=plan.old.runtime_identity.database_uuid,
             dump_sha256=capture.database_dump_sha256,
+            database=plan.old.binding.database,
+            filestore=directory + "/" + plan.old.binding.database + "-filestore.tar.gz",
+            filestore_sha256=capture.filestore_archive_sha256,
         )
         backup_record = BackupGateRecord(
             record_id=backup_id,

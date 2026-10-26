@@ -110,7 +110,7 @@ class PreparedDirectoryServing:
             if signature != self.signature:
                 site = self.directory.load(pause_id)
                 self.app = prepared_public_app(site)
-                self.host = urlsplit(site.plan.origin).netloc
+                self.host = urlsplit(site.plan.origin).hostname or ""
                 self.pause_id = pause_id
                 self.signature = signature
         except (OSError, ValueError, KeyError, TypeError):
@@ -159,10 +159,22 @@ class PreparedCatalogServing:
         if scope["type"] != "http":
             await send({"type": "websocket.close", "code": 1008})
             return
-        hosts = [value.decode("ascii") for key, value in scope.get("headers", []) if key == b"host"]
+        try:
+            hosts = [
+                value.decode("ascii") for key, value in scope.get("headers", []) if key == b"host"
+            ]
+            host = urlsplit("http://" + hosts[0]) if len(hosts) == 1 else None
+        except (UnicodeError, ValueError):
+            host = None
         candidates = []
         if (
-            len(hosts) == 1
+            host is not None
+            and host.hostname
+            and not host.username
+            and not host.password
+            and not host.path
+            and not host.query
+            and not host.fragment
             and self.directory.is_dir()
             and self.directory.resolve() == self.directory
         ):
@@ -171,7 +183,7 @@ class PreparedCatalogServing:
                     continue
                 site = self.sites.setdefault(path, PreparedDirectoryServing(path))
                 site.refresh()
-                if site.host == hosts[0]:
+                if site.host == host.hostname:
                     candidates.append(site)
         if len(candidates) != 1:
             await PlainTextResponse("Prepared public copy is unavailable.", status_code=503)(

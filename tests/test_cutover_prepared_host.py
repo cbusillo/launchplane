@@ -2,9 +2,14 @@ import base64
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from control_plane.dokploy.prepared_host import PreparedSiteDirectory, prepared_directory_app
-from control_plane.prepared_public_site import prepare_public_site
+from control_plane.dokploy.prepared_host import (
+    PreparedSiteDirectory,
+    prepared_directory_app,
+    prepared_service_app,
+)
+from control_plane.prepared_public_site import prepare_public_site, snapshot_digest
 from tests.support.http import lifespan_client, request
 from tests.support.prepared_public_fixture import WebsiteFixture
 
@@ -51,3 +56,24 @@ class PreparedHostTests(unittest.IsolatedAsyncioTestCase):
             response = await request(client, "GET", "/")
             self.assertEqual(response.status_code, 503)
             self.assertNotIn("x-launchplane-public-copy", response.headers)
+
+    async def test_catalog_selects_exact_http_host_across_private_origin_ports(self) -> None:
+        site = self.site.model_copy(
+            update={
+                "plan": self.site.plan.model_copy(update={"origin": "http://fixture.invalid:8080"}),
+                "content_digest": "",
+            }
+        )
+        site = site.model_copy(update={"content_digest": snapshot_digest(site)})
+        lane = self.directory / "lane"
+        lane.mkdir()
+        PreparedSiteDirectory(lane).publish(site, "original-operation")
+        with patch.dict("os.environ", {"LAUNCHPLANE_PREPARED_PUBLIC_ROOT": str(self.directory)}):
+            app = prepared_service_app()
+        async with lifespan_client(app) as client:
+            response = await request(client, "GET", "/", headers={"Host": "FIXTURE.INVALID"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers["x-launchplane-pause-id"], "original-operation")
+            foreign = await request(client, "GET", "/", headers={"Host": "foreign.invalid"})
+            self.assertEqual(foreign.status_code, 503)
+            self.assertNotIn("x-launchplane-public-copy", foreign.headers)

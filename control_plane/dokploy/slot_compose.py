@@ -76,13 +76,13 @@ def render_odoo_app_slot_compose(
     return json.dumps(
         {
             "services": {
-                "web": {**base, "command": web.replace("$", "$$")},
+                "web": {**base, "command": [web.replace("$", "$$")]},
                 "scheduler": {
                     **base,
                     "environment": {**environment, "ODOO_MAX_CRON_THREADS": "1"},
-                    "command": scheduler.replace("$", "$$"),
+                    "command": [scheduler.replace("$", "$$")],
                 },
-                "script-runner": {**base, "command": "exec sleep infinity"},
+                "script-runner": {**base, "command": ["exec sleep infinity"]},
             },
             "volumes": {"data": {"external": True, "name": data_volume}},
             "networks": {"private": {"external": True, "name": private_network}},

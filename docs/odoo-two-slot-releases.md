@@ -351,3 +351,103 @@ Artifacts used for this topology must include that startup capability. Older
 images without it cannot qualify scheduler startup. Installed host binding and
 isolated qualification remain prerequisites to lane activation; this source
 capability alone proves no live release.
+
+### Installed Dokploy host
+
+The service package registers `DokployCutoverHost` as the `dokploy` member of
+`launchplane.cutover_hosts`. API and Odoo workers discover that same installed
+package. Discovery constructs no provider client and performs no effects. This
+host implements Odoo slots; generic-web host activation remains unavailable.
+
+The lane's optional `host_runtime` record supplies the watched route file and
+Traefik API, public origin, remote authority directory, existing shared data
+volume and private network, backup locations, website/module/readiness coverage,
+public-copy paths and exclusions. It also names the retained prepared container,
+its dedicated public volume and immutable Launchplane image, and an immutable
+PostgreSQL image for the disposable restore probe. These are persisted lane
+coordinates, never Python defaults or request-selected commands. Existing lanes
+without these capabilities remain unavailable for installed-host activation.
+
+The worker uses Dokploy's existing registered-server terminal WebSocket. It
+requires both Compose targets on that server, private without provider domains
+or automatic deploys. Production execution uses the existing operation's lease,
+authorization and backup checkpoint at each dispatch. A lost terminal completion
+holds the original operation; it does not become a successful deployment result.
+The worker image needs neither a Docker CLI nor a Docker socket.
+
+Route publication remains synchronous and local. API, worker and registered
+provider host must share the same Linux host and the exact watched-file mount.
+A read-only boot identity, inode, device and content comparison proves that
+placement before admission. The initial file must already name the serving slot,
+and applied Traefik authority must agree with its single exact route. Missing
+mounts or file permissions are activation prerequisites, not a reason to use a
+provider-side route write. Changing live ingress access remains a Director stop
+boundary.
+
+The service Compose mounts a dedicated prepared-public volume into API and Odoo
+workers at `/app/prepared-public`. The `LAUNCHPLANE_PREPARED_PUBLIC_ROOT` bootstrap
+setting names that mount. It contains only already-public immutable bundles and
+an atomic active-pause pointer, not runtime records or credentials. Staging
+reads back every resource, its digest and original pause ID through the retained
+server before publishing the route. Another process can serve the persisted
+bundle after the worker exits; missing or corrupt bundles return unavailable.
+
+`prepared-public.compose.yml` is the separate retained server definition. Supply
+its explicit image, container, volume and private network from the lane record.
+Deploy/adopt the component through Launchplane's existing
+[target setup and service deployment paths](service-boundary.md)
+under the applicable release authority. It has no env file, credential source,
+public port, database connection or Docker socket. It reads the public volume
+only, as `launchplane-browser`, with a read-only root filesystem and dropped
+capabilities. The host inspects the exact running image, command, environment,
+network and mount before admitting it. Keep this component outside API/worker
+replacement; retain its original image throughout an active pause. Profile-based
+artifact protection includes its image and the restore-probe image. A package
+update must not replace this retained server while it serves a pause.
+
+Admission seals the original plan, provider placement, maintenance payload,
+run directory and startup stamp before effects. Default-only model additions
+preserve semantic hashes. A package that changes an original maintenance payload
+keeps that cutover held instead of selecting another run directory. Historical
+records load their recorded classification; new admissions still validate the
+classifier. Immutable prepared bundles omit additive defaults, retaining their
+original content and pause authority across worker replacement.
+
+Drain evidence comes from a registry-free connection to the selected physical
+database, with its UUID verified. It observes selected-database and system-DB
+connections for the runtime user, and prepared transactions. Persisted process
+address history survives container recreation; absent containers never imply
+zero database work. Unknown sessions or missing evidence hold the lane. Every
+logical role keeps its own observation even when cron-family roles share the
+separate scheduler. Handoff additionally checks the effective Odoo command,
+configuration, current database connection, stable restart identity, and absence
+of scheduler HTTP listeners. Docker `Running` alone is insufficient.
+
+Candidate writers are fenced before maintenance releases the native marker.
+Private readiness starts only its web process and keeps its cron-family services
+drained. Real native readiness and a headless browser verify the declared pages,
+assets and exact runtime; previous retained asset bytes must still match the
+original capture. The coherent backup uses the existing online SQL/attachment
+capture and archive verifier, plus an actual database restore into an owned,
+networkless, disposable PostgreSQL container. The exact capture and restore
+readback are persisted before the recovery tuple is returned. An interrupted
+capture without its manifest is held, never captured again under another nonce.
+
+A passing native-maintenance receipt is checkpointed before startup recreation.
+Automatic original-operation recovery requires that receipt, the coherent
+backup, complete logical drain evidence and the still-published original public
+pause. It uses the stored startup authority for zero/multiple stopped inventory,
+refreshes the same logical writer object, and rechecks the operation's lease and
+pause before effects. Both promotion and rollback continuation retain their
+original operation and key, wait behind pending work, and obey the existing
+attempt budget and delay. Missing, ended, foreign or unproved evidence remains
+held. A failing candidate health probe can be switched back after retained-slot
+private readiness; positive foreign identity still refuses rollback.
+
+The installed qualification uses isolated representative Odoo 20 data and the
+shipped web/scheduler commands. It must prove real scheduled ticks without HTTP,
+physical drain, coherent capture/restore, browser readiness, persisted prepared
+serving and original-operation forward/rollback recovery. Infrastructure backup
+provider simulation in that fixture is explicitly separate from native logical
+backup proof. It neither proves a real infrastructure backup nor activates a
+live lane. Parent #3268 still waits for its exact accepted real-release event.
