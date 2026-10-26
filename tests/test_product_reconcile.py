@@ -7562,6 +7562,77 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 )
                 self.assertFalse(self.sweep_preview())
 
+    def seed_retired_preview_failure(self) -> None:
+        self.request("preview", 5)
+        request = self.store.claim_next_product_reconcile_request("seed", 600)
+        assert request is not None
+        self.store.complete_product_reconcile_request(
+            request.target_key,
+            "seed",
+            "failed",
+            {
+                "action": "wait",
+                "last_failed_error_summary": record_failure_summary("preview_reconcile_failed"),
+                "pr_feedback": {"status": "failed", "delivery_status": "delivered"},
+            },
+            "preview_reconcile_failed",
+        )
+        self.write_preview(state="destroyed")
+        self.github.pull_request["state"] = "closed"
+
+    def test_retirement_recovers_stale_failure_without_another_pr_event(self) -> None:
+        from control_plane.contracts.product_environment_read_model import (
+            build_product_site_overview,
+        )
+
+        self.seed_retired_preview_failure()
+        preview = self.store.list_preview_records()[0]
+        warning_prefix = f"PR #{preview.anchor_pr_number}:"
+        before = build_product_site_overview(
+            record_store=self.store, product="site", action_allowed=lambda *_: False
+        )
+        self.assertTrue(any(warning.startswith(warning_prefix) for warning in before.warnings))
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+
+        after = build_product_site_overview(
+            record_store=self.store, product="site", action_allowed=lambda *_: False
+        )
+        self.assertEqual(recovered.last_plan["reason"], "pull_request_not_open")
+        self.assertFalse(any(warning.startswith(warning_prefix) for warning in after.warnings))
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_retired_failure_recovery_keeps_unknown_reads_bounded(self) -> None:
+        self.seed_retired_preview_failure()
+        attempts = 0
+        with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+            while self.sweep_preview():
+                failed = self.run_swept_preview()
+                attempts += 1
+                self.assertLessEqual(attempts, PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS)
+        self.assertGreater(attempts, 0)
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_failed_feedback_requires_a_completed_retirement(self) -> None:
+        self.seed_retired_preview_failure()
+        self.write_preview(state="teardown_pending")
+
+        self.assertFalse(self.sweep_preview())
+        self.assertEqual(self.provider.applied, [])
+
+    def test_failed_feedback_does_not_borrow_another_contexts_retirement(self) -> None:
+        self.seed_retired_preview_failure()
+        preview = self.store.list_preview_records()[0]
+        self.store.write_preview_record(preview.model_copy(update={"context": "other"}))
+
+        self.assertFalse(self.sweep_preview())
+        self.assertEqual(self.provider.applied, [])
+
     def test_recovery_discovers_feedback_beyond_the_default_history_limit(self) -> None:
         for number in range(10, 120):
             self.store.request_product_reconcile(
