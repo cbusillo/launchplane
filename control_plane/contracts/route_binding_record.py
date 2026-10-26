@@ -137,7 +137,13 @@ class RouteBindingExternalIngress(BaseModel):
         self.custodian = require_text(self.custodian, "External ingress requires its custodian")
         self.evidence_url = self.evidence_url.strip()
         parsed = urlsplit(self.evidence_url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+        ):
             raise ValueError("External ingress evidence requires a credential-free HTTPS URL")
         if self.attested_at:
             self.attestation_stale_after()
@@ -290,6 +296,14 @@ class EnvironmentRouteBindingRecord(BaseModel):
         return self.tls
 
     @property
+    def external_ingress_expires_at(self) -> str:
+        return (
+            self.external_ingress.attestation_stale_after().isoformat().replace("+00:00", "Z")
+            if self.external_ingress
+            else ""
+        )
+
+    @property
     def binding_key(self) -> str:
         return build_route_binding_key(
             product=self.product,
@@ -312,6 +326,11 @@ class EnvironmentRouteBindingReadModel(BaseModel):
     external_ingress: RouteBindingExternalIngress | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    external_ingress_expires_at: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     status: RouteBindingStatus
@@ -356,6 +375,7 @@ def redacted_route_binding_record(
             owner=record.tls.owner,
         ),
         external_ingress=record.external_ingress,
+        external_ingress_expires_at=record.external_ingress_expires_at,
         status=record.status,
         source=record.source,
         updated_at=record.updated_at,

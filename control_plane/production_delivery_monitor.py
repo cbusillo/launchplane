@@ -1,6 +1,7 @@
 """Delivery attention is independent of the health of the artifact still running."""
 
 from __future__ import annotations
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -120,6 +121,9 @@ def _resolve_guard_refusal(
     health_after: datetime,
     summary: str,
 ) -> str:
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(store, profile, lane)
+    )
     checks = tuple(
         check
         for check in lane.health_monitoring.checks

@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import cast
+from urllib.parse import urlsplit
+from control_plane.split_ingress import split_ingress_check_name
 
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
@@ -116,6 +118,8 @@ def read_lane_runtime_verification(
             detail="Launchplane has no current monitor runtime-identity and health verification.",
         )
     )
+    if split_binding is not None and lane.health_monitoring.monitoring_intent != "public":
+        return missing
     if read_observations is None or not callable(read_observations):
         return missing
     read_observations = cast(
@@ -164,8 +168,8 @@ def read_lane_runtime_verification(
         provenance = monitor_observation_provenance(observation, now=now)
         observed_at = _timestamp(observation.observed_at)
         authority_times = [profile.updated_at, deployment_at]
-        if split_binding is not None:
-            authority_times.append(split_binding.updated_at)
+        if split_binding is not None and split_binding.external_ingress:
+            authority_times.append(split_binding.external_ingress.attested_at)
         if check.private_endpoint_key:
             read_endpoint = getattr(record_store, "read_private_health_endpoint_record", None)
             if read_endpoint is None or not callable(read_endpoint):
@@ -202,6 +206,15 @@ def read_lane_runtime_verification(
         passed = (
             current
             and observation.status == "pass"
+            and (
+                split_binding is None
+                or not any(
+                    check.name == split_ingress_check_name(domain.domain_name)
+                    for domain in split_binding.domains
+                )
+                or target is not None
+                and urlsplit(target.url).hostname == urlsplit(check.url).hostname
+            )
             and (
                 not check.require_runtime_identity
                 or (

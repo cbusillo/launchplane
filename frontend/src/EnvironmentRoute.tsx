@@ -744,6 +744,7 @@ function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
         <EvidenceFact label="Desired endpoint" value={detail.topology.desired.base_url || "Not recorded"} />
         <EvidenceFact label="Recorded path" value={split ? "Separate business and recovery paths" : humanize(ingress.path)} />
         {split && <EvidenceFact label="External custodian" value={`${split.custodian}: ${split.domains.join(", ")}`} />}
+        {split && <EvidenceFact label="Custody review due" value={detail.topology.provider_recorded.external_ingress_expires_at ? new Date(detail.topology.provider_recorded.external_ingress_expires_at).toLocaleString() : "Unknown"} />}
         {split && detail.topology.provider_recorded.domains.map(domain => <EvidenceFact key={domain.domain_name} label={domain.domain_name} value={`${domain.ingress?.provider ?? "Unknown ingress"} · TLS: ${domain.tls?.owner ?? "Unknown"}`} />)}
         <EvidenceFact label="Route authority" value={trustLabel(detail.topology.provider_recorded.trust_state)} />
         <EvidenceFact label="Termination" value={humanize(ingress.termination_kind)} />

@@ -204,6 +204,11 @@ class ProductProviderRecordedTopology(BaseModel):
         exclude_if=lambda value: value is None,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    external_ingress_expires_at: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     trust_state: FreshnessStatus = "missing"
     provenance: DataProvenance = Field(
         default_factory=lambda: _missing_provenance(
@@ -470,7 +475,7 @@ def _split_ingress_warnings(
             instance_name=binding.instance,
             check_kind="public_http",
             check_name=split_ingress_check_name(domain.domain_name),
-            limit=1,
+            limit=50,
         )
         observation = next(
             (
@@ -486,7 +491,14 @@ def _split_ingress_warnings(
         elif (
             monitor_observation_provenance(observation, now=now).freshness_status != "verified"
             or (observed_at := _parse_timestamp(observation.observed_at)) is None
-            or (authority_at := _parse_timestamp(binding.updated_at)) is None
+            or (
+                authority_at := _parse_timestamp(
+                    binding.external_ingress.attested_at
+                    if binding.external_ingress
+                    else binding.updated_at
+                )
+            )
+            is None
             or observed_at <= authority_at
         ):
             code = "stale_public_ingress_observation"
@@ -701,6 +713,7 @@ def _provider_recorded_topology(
         ingress=ingress,
         tls=tls,
         external_ingress=route_binding.external_ingress,
+        external_ingress_expires_at=route_binding.external_ingress_expires_at,
         trust_state=trust_state,
         provenance=provenance,
     )
@@ -1410,12 +1423,30 @@ def _topology_warnings(
                     code="stale_route_authority",
                     scope="authority",
                     severity=(
-                        "error"
-                        if route_binding.ingress.provider == "external"
-                        or route_binding.external_ingress
-                        else "warning"
+                        "error" if route_binding.ingress.provider == "external" else "warning"
                     ),
                     detail="The provider-neutral route-binding evidence is stale.",
+                )
+            )
+        if (
+            route_binding.external_ingress
+            and route_binding.external_ingress.attestation_stale_after() <= now
+        ):
+            warnings.append(
+                _warning(
+                    code="stale_route_authority",
+                    scope="authority",
+                    severity="error",
+                    detail="External custody attestation expired; review the custodian's current report in Route binding.",
+                )
+            )
+        if route_binding.external_ingress and lane.health_monitoring.monitoring_intent != "public":
+            warnings.append(
+                _warning(
+                    code="public_website_check_missing",
+                    scope="observation",
+                    severity="error",
+                    detail="Split ingress requires public monitoring; restore public monitoring or review a different route authority.",
                 )
             )
         desired_names = {domain.domain_name for domain in desired.domains}
@@ -1538,7 +1569,11 @@ def _topology_warnings(
                         severity=(
                             "error"
                             if route_binding is not None
-                            and route_binding.ingress.provider == "external"
+                            and any(
+                                domain.domain_name == domain_name
+                                for domain in route_binding.domains
+                            )
+                            and route_binding.ingress_for_domain(domain_name).provider == "external"
                             else "warning"
                         ),
                         domain_name=domain_name,
@@ -1643,7 +1678,13 @@ def _tls_warnings(
                 scope="tls",
                 severity=(
                     "error"
-                    if route_binding is not None and route_binding.ingress.provider == "external"
+                    if route_binding is not None
+                    and any(
+                        domain.domain_name == projection.domain_name
+                        for domain in route_binding.domains
+                    )
+                    and route_binding.ingress_for_domain(projection.domain_name).provider
+                    == "external"
                     else "warning"
                 ),
                 domain_name=projection.domain_name,

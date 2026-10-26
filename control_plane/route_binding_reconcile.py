@@ -124,6 +124,7 @@ class RouteBindingReconcileRequest(BaseModel):
     source_label: str = "operator-reconcile"
     evaluated_at: str
     external_ingress: RouteBindingExternalIngress | None = None
+    allow_authority_change: bool = False
 
     @model_validator(mode="after")
     def _validate_request(self) -> "RouteBindingReconcileRequest":
@@ -232,6 +233,7 @@ def plan_route_binding_reconcile(
         current_record is not None
         and current_record.external_ingress
         and request.external_ingress is None
+        and not request.allow_authority_change
     ):
         request = request.model_copy(update={"external_ingress": current_record.external_ingress})
     candidate = build_route_binding_candidate(
@@ -286,6 +288,25 @@ def plan_route_binding_reconcile(
     if route_binding_authority_projection(current_record) != (
         route_binding_authority_projection(record)
     ):
+        if request.allow_authority_change and (
+            current_record.external_ingress or record.external_ingress
+        ):
+            return RouteBindingReconcilePlan(
+                status="ready",
+                operation="refresh",
+                review_target_id=review_target_id,
+                review_sources=candidate.review_sources,
+                current_record=current_record,
+                record=record,
+                current_record_sha256=current_record_sha256,
+                candidate_record_sha256=candidate_record_sha256,
+                findings=(
+                    RouteBindingReconcileFinding(
+                        code="split_ingress_authority_change",
+                        detail="The signed-in decision replaces the shown custody using the exact managed evidence for all remaining hosts.",
+                    ),
+                ),
+            )
         return _conflict_plan(
             code="route_binding_authority_conflict",
             detail=(
@@ -554,6 +575,17 @@ def build_route_binding_candidate(
                 RouteBindingReconcileFinding(
                     code="tls_ownership_unknown",
                     detail="The matching ingress audit does not record TLS ownership evidence.",
+                ),
+            ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+        )
+    if request.external_ingress and audit_record.tls_owner in {"none", "external"}:
+        return _blocked_plan(
+            findings=(
+                RouteBindingReconcileFinding(
+                    code="managed_tls_ownership_required",
+                    detail="Split ingress requires managed TLS evidence for the recovery aliases.",
                 ),
             ),
             current_record=current_record,
@@ -959,10 +991,12 @@ def route_binding_authority_projection(
         record.ingress.termination_kind,
         tuple(sorted((domain.role, domain.domain_name) for domain in record.domains)),
         record.tls.owner,
-        record.external_ingress.model_dump(mode="json", exclude={"attested_at"})
-        if record.external_ingress
-        else None,
         record.status,
+        *(
+            (record.external_ingress.model_dump(mode="json", exclude={"attested_at"}),)
+            if record.external_ingress
+            else ()
+        ),
     )
 
 

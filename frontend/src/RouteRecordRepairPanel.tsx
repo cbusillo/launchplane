@@ -198,11 +198,12 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     <p>{kind === "domain" ? "Compare stored domains with the verified provider hosts before recognizing them." : "Join recorded destination, ingress and TLS ownership without inventing missing evidence."}</p>
     <label className="product-config-field">Reason<input aria-label={`${title} reason`} value={reason} disabled={locked} onChange={event => edited(event.target.value)} /></label>
     {kind === "binding" && <details><summary>Separate externally managed domains</summary>
-      <p>Keep the recovery route managed here. Name the business domains managed by another custodian and link their configuration report. Saving attests custody for 30 days and enables strict health and TLS checks for every recorded hostname.</p>
+      <p>Keep the recovery route managed here. Name the business domains managed by another custodian and link their permanent configuration report. Saving attests custody and enables strict health and TLS checks for every recorded hostname.</p>
       <label className="product-config-field">External domains<input aria-label="External domains" value={externalDomains} disabled={locked} onChange={event => { setExternalDomains(event.target.value); edited(reason); }} /></label>
       <label className="product-config-field">Proxy custodian<input aria-label="Proxy custodian" value={custodian} disabled={locked} onChange={event => { setCustodian(event.target.value); edited(reason); }} /></label>
       <label className="product-config-field">Configuration evidence URL<input aria-label="Configuration evidence URL" value={evidenceUrl} disabled={locked} onChange={event => { setEvidenceUrl(event.target.value); edited(reason); }} /></label>
     </details>}
+    {kind === "binding" && externalIngress && <p>Applying this decision attests the custodian's current report. Review the report before confirming; the proposed expiry is shown below.</p>}
     <button type="button" className="button button-secondary" disabled={locked || !reason.trim()} onClick={() => void inspect()}>Review {title.toLowerCase()}</button>
     {review && <div className="product-owner-plan route-repair-review" aria-label={`${title} review`}>
       <p><strong>{review.status === "ready" ? "Ready for your decision" : review.status === "unchanged"
@@ -213,15 +214,17 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
       <div className="route-repair-comparison"><DomainList label="Current stored domains" domains={review.current_domains} /><DomainList label="Proposed domains" domains={review.proposed_domains} /></div>
       {review.operation === "repair-domain-authority" ? <DomainList label="Observed provider hosts" domains={review.observed_domains} /> : <>
         <p>Current binding: {review.current_record ? "present" : "absent"}. Decision: {review.binding_operation}.</p>
+        {review.current_record?.external_ingress && <p>Current external custody: {review.current_record.external_ingress.domains.join(", ")} · {review.current_record.external_ingress.custodian}. <a href={review.current_record.external_ingress.evidence_url} target="_blank" rel="noreferrer">Current configuration report</a>.</p>}
         {review.proposed_record && <p>Destination: {review.proposed_record.provider_target.target_name}. Ingress: {review.proposed_record.ingress.provider} · {review.proposed_record.ingress.endpoint_key || "no endpoint"}. TLS ownership: {review.proposed_record.tls.owner}.</p>}
         {review.proposed_record?.external_ingress && <p>External ingress and TLS for {review.proposed_record.external_ingress.domains.join(", ")}: {review.proposed_record.external_ingress.custodian}. <a href={review.proposed_record.external_ingress.evidence_url} target="_blank" rel="noreferrer">Configuration evidence</a>. Other domains retain the managed ingress and TLS shown above.</p>}
+        {review.proposed_record?.external_ingress_expires_at && <p>External custody expires: <time dateTime={review.proposed_record.external_ingress_expires_at}>{new Date(review.proposed_record.external_ingress_expires_at).toLocaleString()}</time>.</p>}
         {review.findings.length > 0 && <ul>{review.findings.map(finding => <li key={finding.code}>{finding.detail}</li>)}</ul>}
       </>}
       <details><summary>Investigate evidence</summary><p>Lane: {scope.product} / {scope.context} / {scope.instance}</p><p>Reviewed digest: <code>{review.plan_sha256}</code></p>
         {review.operation === "repair-domain-authority" ? <p>Target: <code>{review.target_id}</code></p> : <p>Current record: <code>{review.current_record_sha256 || "absent"}</code></p>}
         <ul>{review.source_records.map(source => <li key={source.identity}><code>{source.identity}</code> · {source.version}</li>)}</ul>
       </details>
-      {review.status === "ready" && <><label className="confirmation-check"><input type="checkbox" disabled={locked} checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I reviewed this lane’s {title.toLowerCase()} and want to update its Launchplane records.</label>
+      {review.status === "ready" && <><label className="confirmation-check"><input type="checkbox" disabled={locked} checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{review.operation === "reconcile-route-binding" && review.proposed_record?.external_ingress ? "I verified the custodian's current configuration report and want to record the shown custody and expiry." : <>I reviewed this lane’s {title.toLowerCase()} and want to update its Launchplane records.</>}</label>
         <button className="button button-primary" type="button" disabled={locked || !confirmed} onClick={() => void save()}>Apply reviewed {title.toLowerCase()}</button></>}
       <button className="button button-secondary" type="button" disabled={busy || recovering} onClick={() => { revision.current += 1; setReview(null); setConfirmed(false); }}>Leave records unchanged</button>
     </div>}

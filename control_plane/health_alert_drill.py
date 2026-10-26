@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 import hashlib
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 import json
 from typing import Literal
 from uuid import uuid4
@@ -106,6 +107,10 @@ def _routing(
         ),
         None,
     )
+    if lane is not None:
+        lane = split_ingress_monitoring_lane(
+            profile, lane, read_split_ingress_binding(store, profile, lane)
+        )
     check = (
         next(
             (check for check in lane.health_monitoring.checks if check.name == scope.check_name),

@@ -961,8 +961,17 @@ an ORM column/table or remains only in the evidence payload.
   duplicated profile entries and cannot be disabled by the legacy non-strict
   check. Observations are bound to the current route record and must postdate
   its authority. Missing, stale, failed or wrong-runtime observations for any
-  hostname keep topology/readiness unverified or blocked. Custodian-reported
+  hostname keep topology/readiness unverified or blocked. Managed audit
+  staleness retains its existing advisory treatment; custody expiration is a
+  separate error with its deadline shown in the lane and decision. An
+  evidence-only refresh does not invalidate still-current public observations
+  or extend the external attestation. Custodian-reported
   configuration remains distinct from directly verified public behavior.
+  A new report, custodian or domain split can be reviewed as an exact authority
+  replacement in the same signed-in card. Clearing the external subset requires
+  a complete managed audit for all recorded hosts. Exact provider no-op audits
+  may use the lane's tracked target hostnames without duplicating profile check
+  URLs; that hostname source is unavailable when any provider write is enabled.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from

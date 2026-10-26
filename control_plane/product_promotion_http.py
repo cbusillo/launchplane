@@ -1,4 +1,5 @@
 from __future__ import annotations
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 
 import hashlib
 import json
@@ -674,6 +675,9 @@ def _promotion_evidence(
     summary: LaunchplaneLaneSummary | None,
     now: datetime,
 ) -> ProductPromotionEvidence:
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+    )
     inventory = summary.inventory if summary is not None else None
     if inventory is None:
         return ProductPromotionEvidence(environment=lane.instance)

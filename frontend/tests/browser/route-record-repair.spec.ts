@@ -5,6 +5,7 @@ import { repairOperationScope, repairStorageKey, type RepairKind } from "../../s
 const scope = { product: "atlas-commerce", context: "atlas-testing", instance: "testing" };
 const proposedDomains = ["testing.example.invalid", "alias.example.invalid"];
 const planDigest = "a".repeat(64);
+const custodyExpiresAt = "2026-11-19T10:00:00Z";
 function bindingRecord(): EnvironmentRouteBindingReadModel {
   return { schema_version: 1, ...scope, provider_target: { provider_id: "dokploy", target_category: "application", provider_target_type: "application", target_name: "Recorded testing destination" },
     ingress: { provider: "edge", endpoint_key: "recorded-testing-edge", termination_kind: "edge" },
@@ -72,7 +73,9 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
     }
     let review = kind === "domain" ? domainReview(applying, !applying && stored) : bindingReview(applying, !applying && stored);
     if (scenario === "split" && review.operation === "reconcile-route-binding" && review.proposed_record) {
-      review = { ...review, proposed_record: { ...review.proposed_record, external_ingress: body.external_ingress } };
+      review = { ...review, proposed_record: { ...review.proposed_record,
+        external_ingress: { ...body.external_ingress, attested_at: bindingRecord().updated_at },
+        external_ingress_expires_at: custodyExpiresAt } };
     }
     if (activeConfirmation) review = { ...review, expected_confirmation: activeConfirmation };
     if (applying || !stored) review = { ...review, plan_sha256: activeDigest };
@@ -131,18 +134,21 @@ test("binding card refuses an unchanged verdict with no stored binding", async (
 test("split ingress review preserves both custodians through save and readback @responsive", async ({ page }) => {
   const { panel, calls } = await fixture(page, "binding", "split");
   await panel.getByLabel("Route binding reason", { exact: true }).fill("Record both existing ingress paths.");
-  await panel.getByText("Separate externally managed domains", { exact: true }).click();
+  await panel.locator("details").filter({ has: page.getByLabel("External domains", { exact: true }) }).locator("summary").click();
   await panel.getByLabel("External domains", { exact: true }).fill(proposedDomains[0]);
   await panel.getByLabel("Proxy custodian", { exact: true }).fill("Office proxy operator");
   await panel.getByLabel("Configuration evidence URL", { exact: true }).fill("https://example.test/proxy-report");
   await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
-  await expect(panel.getByText(/External ingress and TLS for/)).toContainText("Office proxy operator");
-  await expect(panel.getByRole("link", { name: "Configuration evidence", exact: true })).toHaveAttribute("href", "https://example.test/proxy-report");
+  await expect(panel.getByLabel("Route binding review", { exact: true })).toContainText("Office proxy operator");
+  await expect(panel.locator('a[href="https://example.test/proxy-report"]')).toBeVisible();
+  await expect(panel.locator(`time[datetime="${custodyExpiresAt}"]`)).toBeVisible();
   await panel.getByRole("checkbox").check();
   await panel.getByRole("button", { name: "Apply reviewed route binding", exact: true }).click();
   await expect(panel.getByRole("status")).toContainText("current record readback verified");
-  const bodies = calls.map(call => call.body as unknown as { external_ingress: unknown });
-  expect(bodies.every(body => JSON.stringify(body.external_ingress) === JSON.stringify(bodies[0].external_ingress))).toBe(true);
+  const bodies = calls.map(call => call.body as unknown as { external_ingress: { domains: string[]; custodian: string; evidence_url: string; attested_at?: string } });
+  for (const body of bodies) expect(body.external_ingress).toMatchObject(bodies[0].external_ingress);
+  expect(bodies[1].external_ingress.attested_at).toBe(bindingRecord().updated_at);
+  expect(bodies.at(-1)?.external_ingress).toEqual(bodies[1].external_ingress);
 });
 
 for (const kind of ["domain", "binding"] as const) {

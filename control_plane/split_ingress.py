@@ -63,4 +63,4 @@ def split_ingress_monitoring_lane(
 
 
 def split_ingress_check_name(domain_name: str) -> str:
-    return f"route-{sha256(domain_name.encode()).hexdigest()[:24]}"
+    return f"HTTPS {domain_name} ({sha256(domain_name.encode()).hexdigest()[:12]})"

@@ -69,6 +69,7 @@ class SplitIngressTests(unittest.TestCase):
         self.assertEqual(binding.tls_for_domain("operator.example.test"), binding.tls)
         public = redacted_route_binding_record(binding)
         self.assertEqual(public.external_ingress, binding.external_ingress)
+        self.assertEqual(public.external_ingress_expires_at, binding.external_ingress_expires_at)
         self.assertEqual(public.record_sha256, route_binding_record_sha256(binding))
 
     def test_external_scope_cannot_hide_or_replace_managed_hosts(self) -> None:
@@ -81,6 +82,16 @@ class SplitIngressTests(unittest.TestCase):
                         "external_ingress": {**payload["external_ingress"], "domains": domains},
                     }
                 )
+        with self.assertRaises(ValidationError):
+            EnvironmentRouteBindingRecord.model_validate(
+                {
+                    **payload,
+                    "external_ingress": {
+                        **payload["external_ingress"],
+                        "evidence_url": "https://example.test/report?token=private",
+                    },
+                }
+            )
 
     def test_unknown_host_has_no_inferred_authority(self) -> None:
         with self.assertRaises(ValueError):
@@ -149,6 +160,59 @@ class SplitIngressTests(unittest.TestCase):
             record_store=store, profile=profile, lane=profile.lanes[0], summary=summary, now=_NOW
         )
         self.assertEqual(verification.provenance.freshness_status, "verified")
+        store.route_binding = binding.model_copy(
+            update={
+                "updated_at": _NOW.isoformat(),
+                "source": binding.source.model_copy(
+                    update={"stale_after": (_NOW - timedelta(hours=1)).isoformat()}
+                ),
+            }
+        )
+        refreshed_topology = build_product_environment_topology(
+            record_store=store,
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=summary,
+            now=_NOW,
+        )
+        self.assertFalse(
+            any(
+                warning.code == "stale_route_authority" and warning.severity == "error"
+                for warning in refreshed_topology.warnings
+            )
+        )
+        self.assertEqual(
+            read_lane_runtime_verification(
+                record_store=store,
+                profile=profile,
+                lane=profile.lanes[0],
+                summary=summary,
+                now=_NOW,
+            ).provenance.freshness_status,
+            "verified",
+        )
+        assert binding.external_ingress is not None
+        store.route_binding = binding.model_copy(
+            update={
+                "external_ingress": binding.external_ingress.model_copy(
+                    update={"attested_at": (_NOW - timedelta(days=31)).isoformat()}
+                )
+            }
+        )
+        expired_topology = build_product_environment_topology(
+            record_store=store,
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=summary,
+            now=_NOW,
+        )
+        self.assertTrue(
+            any(
+                warning.code == "stale_route_authority" and warning.severity == "error"
+                for warning in expired_topology.warnings
+            )
+        )
+        store.route_binding = binding
         failed = _http_observation(
             domain_name="business.example.test",
             monitoring_intent="public",
@@ -267,12 +331,14 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         assert hosts["app.example.test"].ingress is not None
         assert hosts["operator.example.test"].ingress is not None
         self.assertEqual(hosts["app.example.test"].ingress.provider, "external")
-        self.assertEqual(hosts["operator.example.test"].ingress.provider, "npmplus")
+        self.assertEqual(hosts["operator.example.test"].ingress.provider, current.ingress.provider)
         targets = discover_public_ingress_monitor_targets(self.store, profiles=(profile,))
         strict = {
             target.check_name: target
             for target in targets
-            if target.check_kind == "public_http" and target.check_name.startswith("route-")
+            if target.check_kind == "public_http"
+            and target.check_name
+            in {split_ingress_check_name(host) for host in self.target.domains}
         }
         self.assertEqual(
             set(strict), {split_ingress_check_name(host) for host in self.target.domains}
@@ -292,13 +358,49 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
             {
                 "app.example.test": "external",
                 "www.example.test": "external",
-                "operator.example.test": "provider",
+                "operator.example.test": current.tls.owner,
             },
         )
         replay = await self.post(
             route, {**payload, "external_ingress": review["proposed_record"]["external_ingress"]}
         )
         self.assertEqual(replay.json()["review"]["status"], "unchanged")
+        machine = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_route_binding_policy(action="route_binding.apply"),
+            record_store_factory=lambda: self.store,
+        )
+        refresh_payload = {
+            "product": current.product,
+            "context": current.context,
+            "instance": current.instance,
+            "expected_current": {
+                "state": "present",
+                "record_sha256": route_binding_record_sha256(current),
+            },
+            "mode": "apply",
+            "reason": "Refresh unchanged managed evidence.",
+            "confirmation": review["expected_confirmation"],
+        }
+        refreshed = await request(
+            machine,
+            "POST",
+            route,
+            payload=refresh_payload,
+            headers={
+                "Authorization": "Bearer valid-token",
+                "Idempotency-Key": "split-machine-refresh",
+            },
+        )
+        self.assertEqual(refreshed.status_code, 202, refreshed.text)
+        self.assertEqual(
+            self.store.read_route_binding_record(
+                product=current.product,
+                context_name=current.context,
+                instance_name=current.instance,
+            ).external_ingress,
+            current.external_ingress,
+        )
 
     async def test_external_scope_change_after_review_cannot_apply(self) -> None:
         payload = self.seed_split()
@@ -328,6 +430,69 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                 context_name=payload["context"],
                 instance_name=payload["instance"],
             )
+
+    async def test_signed_review_can_change_or_relinquish_custody_with_managed_proof(self) -> None:
+        payload = self.seed_split()
+        route = "/v1/route-bindings/reconcile"
+
+        async def save(candidate: dict[str, Any], key: str) -> dict[str, Any]:
+            review = (await self.post(route, candidate)).json()["review"]
+            self.assertEqual(review["status"], "ready", review)
+            proposed = review["proposed_record"]
+            apply_payload = {
+                **candidate,
+                "mode": "apply",
+                "reason": "Record the reviewed custody.",
+                "external_ingress": proposed.get("external_ingress"),
+                "expected_current": review["expected_current"],
+                "confirmation": review["expected_confirmation"],
+                "browser_review": {
+                    "product": payload["product"],
+                    "reviewed_plan_sha256": review["plan_sha256"],
+                },
+            }
+            applied = await self.post(route, apply_payload, key)
+            self.assertEqual(applied.status_code, 202, applied.text)
+            saved_record: dict[str, Any] = applied.json()["review"]["proposed_record"]
+            return saved_record
+
+        await save(payload, "create-split-custody")
+        changed = {
+            **payload,
+            "external_ingress": {
+                **payload["external_ingress"],
+                "custodian": "Successor custodian",
+                "evidence_url": "https://example.test/new-report",
+            },
+        }
+        updated = await save(changed, "update-split-custody")
+        self.assertEqual(
+            updated["external_ingress"]["custodian"], changed["external_ingress"]["custodian"]
+        )
+        blocked = (await self.post(route, {**payload, "external_ingress": None})).json()["review"]
+        self.assertEqual(blocked["status"], "blocked")
+        self.store.write_ingress_route_audit_record(
+            _ingress_audit_record(record_id="audit-all-managed", domains=self.target.domains)
+        )
+        managed = await save({**payload, "external_ingress": None}, "relinquish-split-custody")
+        self.assertNotIn("external_ingress", managed)
+
+    async def test_http_only_managed_alias_is_a_blocked_plan(self) -> None:
+        payload = self.seed_split()
+        self.store.write_ingress_route_audit_record(
+            _ingress_audit_record(
+                record_id="audit-alias",
+                domains=("operator.example.test",),
+                tls_owner="none",
+                provider_certificate_ref="",
+            )
+        )
+        response = await self.post("/v1/route-bindings/reconcile", payload)
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            [finding["code"] for finding in response.json()["review"]["findings"]],
+            ["managed_tls_ownership_required"],
+        )
 
     async def test_managed_apply_grant_cannot_establish_split_custody(self) -> None:
         payload = self.seed_split()
