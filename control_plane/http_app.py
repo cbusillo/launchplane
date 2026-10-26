@@ -22023,15 +22023,34 @@ def create_launchplane_fastapi_app(
         authorization_action = (
             "route_binding.apply" if binding_request.mode == "apply" else "route_binding.read"
         )
-        ensure_route_binding_allowed(
+        policy_authorized = resolved_authz_policy_runtime.allows(
             identity=identity,
-            trace_id=trace_id,
             action=authorization_action,
             product=binding_request.product,
-            context_name=binding_request.context,
-            instance_name=binding_request.instance,
-            message="Workflow cannot reconcile route bindings for the requested product/context.",
+            context=binding_request.context,
+            target=AuthorizationTarget(scope="instance", instances=(binding_request.instance,)),
         )
+        director_evidence_refresh = (
+            not policy_authorized
+            and director_agent_identity(identity)
+            and binding_request.mode == "apply"
+            and binding_request.expected_current.state == "present"
+        )
+        if not policy_authorized and not director_evidence_refresh:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot reconcile route bindings for the requested product/context.",
+            )
+        if director_evidence_refresh:
+            require_browser_repair_lane(
+                record_store=record_store,
+                product=binding_request.product,
+                context=binding_request.context,
+                instance=binding_request.instance,
+                trace_id=trace_id,
+            )
         if binding_request.mode == "apply" and not idempotency_key.strip():
             raise _launchplane_http_error(
                 status_code=400,
@@ -22150,6 +22169,18 @@ def create_launchplane_fastapi_app(
             ),
         )
 
+        if director_evidence_refresh and not (
+            control_plane_route_binding_reconcile.is_evidence_only_route_binding_refresh(
+                reconcile_plan
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Director agents may refresh only unchanged existing route authority.",
+            )
+
         review = None
         if binding_request.browser_review is not None:
             review = browser_route_repair.binding_repair_review(
@@ -22239,7 +22270,7 @@ def create_launchplane_fastapi_app(
             response_payload=response.model_dump(mode="json", exclude_none=True),
             lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
         )
-        if binding_request.browser_review is not None:
+        if binding_request.browser_review is not None or director_evidence_refresh:
             assert isinstance(record_store, PostgresRecordStore)
             try:
                 mutation_result = record_store.reconcile_route_binding_record(
@@ -22252,7 +22283,14 @@ def create_launchplane_fastapi_app(
             except (
                 control_plane_route_binding_reconcile.RouteBindingSourceChanged,
                 ProductContextOwnershipError,
-            ):
+            ) as error:
+                if director_evidence_refresh:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="route_binding_changed",
+                        message="Route evidence or product ownership changed before commit.",
+                    ) from error
                 return settle_browser_route_repair_stale(
                     database_store=record_store,
                     identity=identity,

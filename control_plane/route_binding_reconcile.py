@@ -313,6 +313,20 @@ def plan_route_binding_reconcile(
     )
 
 
+def is_evidence_only_route_binding_refresh(plan: RouteBindingReconcilePlan) -> bool:
+    return (
+        plan.status in {"ready", "unchanged"}
+        and plan.operation in {"refresh", "none"}
+        and not plan.findings
+        and plan.review_sources is not None
+        and plan.current_record is not None
+        and plan.record is not None
+        and plan.current_record.source.source_kind in {"backfill", "service"}
+        and route_binding_authority_projection(plan.current_record)
+        == route_binding_authority_projection(plan.record)
+    )
+
+
 def build_route_binding_candidate(
     *,
     record_store: RouteBindingReconcileStore,
