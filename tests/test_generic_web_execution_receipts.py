@@ -2071,6 +2071,13 @@ class ExecutionRecoveryTests(unittest.TestCase):
 
     def test_legacy_missing_record_with_required_executor_is_not_image_only(self) -> None:
         self.profile = _profile()
+        lane = self.profile.lanes[0]
+        extensions = lane.generic_web_extensions.model_copy(
+            update={"verification_extension": "verireel-testing"}
+        )
+        self.profile = self.profile.model_copy(
+            update={"lanes": (lane.model_copy(update={"generic_web_extensions": extensions}),)}
+        )
         self.store.write_product_profile_record(self.profile)
         reservation = _write_generic_web_recovery_reservation(
             self.store,
@@ -2098,12 +2105,8 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 return_value=self.provider,
             ),
             patch(
-                "control_plane.generic_web_deploy_provider_adapter.generic_web_post_deploy_executor_for_profile",
-                return_value=executor,
-            ),
-            patch(
-                "control_plane.workflows.generic_web_post_deploy.generic_web_post_deploy_executor_for_profile",
-                return_value=executor,
+                "control_plane.workflows.verireel_testing_post_deploy.execute_verireel_testing_post_deploy",
+                new=executor,
             ),
         ):
             status, result = _invoke_recovery(
