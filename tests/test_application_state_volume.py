@@ -496,7 +496,9 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         self.assertNotIn(value, result.text)
         self.assert_production_unchanged()
 
-    async def test_application_lift_refuses_unreviewed_plan_without_clearing_staff_hold(self) -> None:
+    async def test_application_lift_refuses_unreviewed_plan_without_clearing_staff_hold(
+        self,
+    ) -> None:
         await self.prepare_application_hold()
         self.serve_application()
         target = self.store.read_dokploy_target_record(
