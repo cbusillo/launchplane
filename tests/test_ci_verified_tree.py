@@ -108,6 +108,7 @@ class VerifiedTreeWorkflowTests(unittest.TestCase):
                 timeout=10,
             )
             values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            self.assertIn(values["verified"], ("true", "false"))
             if expected_source is not None:
                 self.assertEqual(values["source_sha"], expected_source)
             if values["verified"] != "true":
