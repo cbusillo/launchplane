@@ -25,6 +25,7 @@ from control_plane.dokploy.testing_route_execution import (
 )
 from control_plane.provider_operations import (
     ProviderEvidenceLease,
+    DurableProviderMutationAdapter,
     ProviderMutationOutcome,
     ProviderObservation,
     ProviderOperationLease,
@@ -89,7 +90,7 @@ def address_plan_result(plan: TestingAddressPlan, *, applied: bool) -> dict[str,
     return result
 
 
-class TestingAddressAdapter:
+class TestingAddressAdapter(DurableProviderMutationAdapter):
     def __init__(
         self,
         root: Path,
@@ -256,16 +257,14 @@ class TestingAddressAdapter:
     ) -> ProviderMutationOutcome:
         try:
             with self.canonical_lane():
-                return self.apply_held(provider_operation_key, lease)
+                return self.apply_held(lease)
         except (ValueError, FileNotFoundError) as error:
             assert isinstance(lease, ProviderEvidenceLease)
             if not lease.evidence_reservation().provider_effect_started_at:
                 raise ProviderMutationRejectedError(error) from error
             raise
 
-    def apply_held(
-        self, provider_operation_key: str, lease: ProviderOperationLease
-    ) -> ProviderMutationOutcome:
+    def apply_held(self, lease: ProviderOperationLease) -> ProviderMutationOutcome:
         from control_plane.testing_address_settings import (
             apply_canonical_settings,
             preflight_canonical_settings,

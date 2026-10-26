@@ -26,6 +26,7 @@ from control_plane.odoo_testing_restore import (
 )
 from control_plane.provider_operations import (
     ProviderEvidenceLease,
+    DurableProviderMutationAdapter,
     ProviderMutationOutcome,
     ProviderObservation,
     ProviderOperationLease,
@@ -58,7 +59,10 @@ def canonical_address_payload(encoded: str, *, context: str, before: str, after:
     ]:
         raise ValueError("Canonical settings require unambiguous existing parameters.")
     current = next((item for item in parameters if item["key"] == "web.base.url"), None)
-    if current is None or current["value"] != {"source": "literal", "value": before}:
+    if not isinstance(current, dict) or current.get("value") != {
+        "source": "literal",
+        "value": before,
+    }:
         raise ValueError("The existing payload does not own the reviewed address.")
     replacements = {"web.base.url": after, "web.base.url.freeze": "True"}
     for item in parameters:
@@ -251,7 +255,7 @@ def plan_canonical_settings(
     )
 
 
-class CanonicalAddressEffect:
+class CanonicalAddressEffect(DurableProviderMutationAdapter):
     def __init__(
         self,
         adapter: TestingAddressAdapter,
@@ -368,11 +372,15 @@ class CanonicalAddressEffect:
             self.frame("observe")
             return ProviderObservation("present", 200, {"canonical_deployment_verified": True})
         frame = self.frame("observe")
-        if frame.get("canonical_gate_released") is True:
-            return ProviderObservation("present", 200, {"canonical_gate_released": True})
-        if frame.get("canonical_gate_released") is False:
-            return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
-        return ProviderObservation("unknown")
+        match frame.get("canonical_gate_released"):
+            case True:
+                return ProviderObservation("present", 200, {"canonical_gate_released": True})
+            case False:
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
+            case _:
+                return ProviderObservation("unknown")
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -435,9 +443,11 @@ class CanonicalAddressEffect:
                     time.sleep(min(2, remaining))
             return ProviderMutationOutcome(200, {"canonical_deployment_verified": True})
         frame = self.frame("gate", dispatch_guard=checkpoint)
-        if frame.get("canonical_gate_released") is not True:
-            raise NativeSourceUnavailable("The original canonical gate writer is unverified.")
-        return ProviderMutationOutcome(200, {"canonical_gate_released": True})
+        match frame.get("canonical_gate_released"):
+            case True:
+                return ProviderMutationOutcome(200, {"canonical_gate_released": True})
+            case _:
+                raise NativeSourceUnavailable("The original canonical gate writer is unverified.")
 
 
 def preflight_canonical_settings(

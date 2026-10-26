@@ -238,13 +238,18 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.assertEqual(self.run_address(False).status, "replayed")
         self.assertEqual(self.events, ["environment", "deployment", "gate"])
 
-    def test_unknown_deploy_trigger_is_observed_and_never_dispatched_again(self) -> None:
+    def lose_deployment_reply(self) -> None:
         self.lost = "deployment"
         with self.assertRaises(NativeSourceUnavailable):
             self.run_address(False)
-        with self.assertRaises(NativeSourceUnavailable):
-            self.run_address(False)
-        self.assertEqual(self.events, ["environment", "deployment"])
+
+    def test_unobserved_and_failed_deployments_require_positive_native_completion(self) -> None:
+        self.lose_deployment_reply()
+        for status in ("done", "failed"):
+            self.deployment_status = status
+            with self.assertRaises(NativeSourceUnavailable):
+                self.run_address(False)
+            self.assertEqual(self.events, ["environment", "deployment"])
         self.deployment_visible = True
         self.assertEqual(self.run_address(False).status, "completed")
         self.assertEqual(self.events, ["environment", "deployment", "gate"])
@@ -299,22 +304,8 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.assertTrue(pause.called)
         self.assertEqual(self.events, ["environment", "deployment", "gate"])
 
-    def test_failed_deployment_without_executor_proof_stays_unknown(self) -> None:
-        self.lost = "deployment"
-        with self.assertRaises(NativeSourceUnavailable):
-            self.run_address(False)
-        self.deployment_status = "failed"
-        with self.assertRaises(NativeSourceUnavailable):
-            self.run_address(False)
-        self.assertEqual(self.events, ["environment", "deployment"])
-        self.deployment_visible = True
-        self.assertEqual(self.run_address(False).status, "completed")
-        self.assertEqual(self.events, ["environment", "deployment", "gate"])
-
     def test_running_deployment_prevents_adoption_of_a_visible_runtime(self) -> None:
-        self.lost = "deployment"
-        with self.assertRaises(NativeSourceUnavailable):
-            self.run_address(False)
+        self.lose_deployment_reply()
         self.deployment_visible = True
         self.deployment_status = "running"
         with self.assertRaises((NativeSourceUnavailable, ValueError)):
@@ -327,7 +318,7 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         refusal = ValueError("Fixture reviewed intent changed")
         original = settings.CanonicalAddressEffect.frame
 
-        def frame(effect: settings.CanonicalAddressEffect, *args: Any, **kwargs: Any) -> Any:
+        def frame(effect: Any, *args: Any, **kwargs: Any) -> Any:
             if effect.phase == "deployment":
                 raise refusal
             return original(effect, *args, **kwargs)
@@ -646,28 +637,31 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             self.parameters[TESTING_COPY_COMPLETION_PARAMETER] = self.native.spec[
                 "copy_binding_sha256"
             ]
-            status, frame = self.run_program()
-            self.assertEqual(status, 0, frame)
-            kwargs["receive"](frame)
+            status, native_frame = self.run_program()
+            self.assertEqual(status, 0, native_frame)
+            kwargs["receive"](native_frame)
 
         def runtime_payload(payload: str) -> None:
             environment[settings.PAYLOAD_KEY] = payload
             provider["env"] = api.serialize_dokploy_env_text(environment)
             self.environment[settings.PAYLOAD_KEY] = payload
-            for service in ("web", "script-runner"):
-                values = self.native.containers[service]["Config"]["Env"]
-                self.native.containers[service]["Config"]["Env"] = [
-                    value for value in values if not value.startswith(settings.PAYLOAD_KEY + "=")
+            for runtime_service in ("web", "script-runner"):
+                container_environment = self.native.containers[runtime_service]["Config"]["Env"]
+                self.native.containers[runtime_service]["Config"]["Env"] = [
+                    value
+                    for value in container_environment
+                    if not value.startswith(settings.PAYLOAD_KEY + "=")
                 ] + [settings.PAYLOAD_KEY + "=" + payload]
 
         with (
             patch.object(api, "list_dokploy_schedules", return_value=()),
             patch.object(api, "list_deployments_for_target", return_value=[]),
-            patch.object(settings, "run_managed_server_program", side_effect=remote),
-            patch.object(
-                settings,
-                "CANDIDATE_CONTAINER_PROBE",
-                "print('candidate_credentials_verified=true')",
+            patch.dict(
+                settings.__dict__,
+                {
+                    "run_managed_server_program": remote,
+                    "CANDIDATE_CONTAINER_PROBE": "print('candidate_credentials_verified=true')",
+                },
             ),
         ):
             runtime_payload(environment[settings.PAYLOAD_KEY])
