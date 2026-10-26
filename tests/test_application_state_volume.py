@@ -314,7 +314,9 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             context_name=self.context, instance_name="testing"
         )
         calls = self.provider.call_count
-        result = await self._reviewed_application_lift()
+        plan = await self._testing_hold()
+        reviewed = plan.json()["result"]["plan_sha256"]
+        result = await self._testing_hold(mode="apply", reviewed_plan_sha256=reviewed)
         self.assertEqual(result.status_code, 202, result.text)
         self.assertFalse(result.json()["result"]["reconcile_requested"])
         self.assertIsNone(
@@ -330,6 +332,11 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         )
         self.assertEqual(self.provider.call_count, calls)
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.storage_inspector.assert_called_once()
+        self.live["dockerImage"] = "changed-after-clear"
+        replay = await self._testing_hold(mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(replay.json()["result"], result.json()["result"])
         self.storage_inspector.assert_called_once()
         self.assert_production_unchanged()
 
@@ -359,6 +366,14 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             {"endpointSpecSwarm": {"Mode": "vip", "Ports": [{"PublishedPort": 443}]}},
             {"networkSwarm": [{"Target": "production-network"}]},
             {"mounts": []},
+            {"env": "DISCORD_TOKEN=untracked-live-token"},
+            {"env": "DOKPLOY_TOKEN=platform-token"},
+            {
+                "deployments": [
+                    {"deploymentId": "later-deployment", "status": "done"},
+                    *original["deployments"],
+                ]
+            },
         )
         for provider_change in provider_changes:
             with self.subTest(changes=provider_change):
@@ -393,13 +408,26 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         )
         self.assert_production_unchanged()
 
-    async def test_serving_continuation_cannot_lift_a_production_hold(self) -> None:
+    async def test_serving_newer_unsettled_deployment_keeps_original_hold(self) -> None:
         await self.prepare_application_hold()
         self.serve_application()
-        result = await self._testing_hold(instance="prod")
+        current = self.store.read_deployment_record("serving-deployment")
+        self.store.write_deployment_record(
+            current.model_copy(
+                update={
+                    "record_id": "newer-attempt",
+                    "deploy": current.deploy.model_copy(update={"status": "pending"}),
+                }
+            )
+        )
+        result = await self._reviewed_application_lift()
         self.assertEqual(result.status_code, 409, result.text)
-        self.assertEqual(result.json()["error"]["code"], "testing_hold_not_testing_lane")
         self.storage_inspector.assert_not_called()
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
         self.assert_production_unchanged()
 
     async def test_application_lift_plan_remains_inert_when_provider_or_allocation_is_unavailable(

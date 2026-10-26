@@ -154,10 +154,18 @@ def qualify_application_staging_lift(
         root, store, product=request.product, context=request.context, scope=scope, trace=trace
     )
     serving = None
+    inputs = ""
     if inventory is not None:
         from control_plane.application_serving_hold import current_application_deployment
+        from control_plane.generic_web_testing_inputs import testing_input_authority
 
         serving = current_application_deployment(adapter)
+        lane = next(
+            lane
+            for lane in profile.lanes
+            if (lane.context, lane.instance) == (request.context, "testing")
+        )
+        inputs = testing_input_authority(store, profile, lane)
     binding = adapter.qualify_testing_continuation(
         inspect_provider=inspect_provider, serving_deployment=serving
     )
@@ -178,5 +186,6 @@ def qualify_application_staging_lift(
             "allocation": binding,
             "inventory": inventory.model_dump(mode="json") if inventory else None,
             "deployment": serving.model_dump(mode="json") if serving else None,
+            "inputs": inputs,
         }
     )

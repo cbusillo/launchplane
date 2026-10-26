@@ -7,7 +7,10 @@ from control_plane.application_state_volume import ApplicationStateVolumeAdapter
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.dokploy import post_deploy, source
-from control_plane.testing_application_capabilities import single_local_swarm_node
+from control_plane.testing_application_capabilities import (
+    single_local_swarm_node,
+    runtime_capability_program_header,
+)
 
 
 def inspect_application_testing_storage(
@@ -18,7 +21,7 @@ def inspect_application_testing_storage(
 ) -> None:
     """Dispatch only the fixed inspection, using original service-owned placement."""
     phase = json.loads(adapter._progress_phase())
-    spec = {
+    spec: dict[str, object] = {
         "plan_id": adapter.intent["plan_id"],
         "binding": adapter.intent["plan_sha256"],
         "volume": adapter.intent["volume_name"],
@@ -27,12 +30,16 @@ def inspect_application_testing_storage(
         "server": adapter.request.server_id,
     }
     if serving_deployment is not None:
-        assert serving_deployment.artifact_identity is not None
+        from control_plane.application_serving_hold import serving_application_credential_hashes
+
+        if serving_deployment.artifact_identity is None:
+            raise ValueError("Serving artifact identity is unavailable.")
         spec.update(
             image=serving_deployment.artifact_identity.artifact_id,
             deployment=serving_deployment.record_id,
             mount_path=adapter.request.state_volume_path,
         )
+        spec["credential_hashes"] = serving_application_credential_hashes(adapter)
     live = adapter._live(phase["application"], phase["environment"], phase["app_name"])
     host, token = source.read_dokploy_config(control_plane_root=adapter.root)
     kind, lookup, _, server = post_deploy._resolve_dokploy_schedule_runtime(
@@ -45,7 +52,7 @@ def inspect_application_testing_storage(
     if kind != "server" or server != adapter.request.server_id:
         raise ValueError("Testing storage inspection requires its original recorded server.")
     encoded = base64.b64encode(json.dumps(spec).encode()).decode()
-    schedule_name = "Launchplane testing application storage inspection"
+    schedule_name = "Launchplane fresh testing application storage inspection"
     # A server has one inspection slot per owned lane, reused after a replacement.
     # The caller holds the lane and current target's event-execution locks.
     schedule_app = (
@@ -93,6 +100,7 @@ def inspect_application_testing_storage(
 APPLICATION_STORAGE_INSPECTION_PROGRAM = (
     "from collections.abc import Callable\nfrom typing import Any\nimport json\n"
     + inspect.getsource(single_local_swarm_node)
+    + runtime_capability_program_header()
     + r"""
 import base64, hashlib, json, re, subprocess, sys
 from pathlib import Path
@@ -108,6 +116,20 @@ def identifiers(*arguments):
     if len(rows) > 10000 or len(set(rows)) != len(rows) or any(not row.strip() for row in rows):
         raise ValueError("inventory incomplete")
     return sorted(rows)
+
+def require_managed_credentials(rows, spec):
+    if not isinstance(rows, list):
+        raise ValueError("runtime inputs unavailable")
+    values = {}
+    for row in rows:
+        key, separator, value = row.partition("=")
+        if not separator or key in values:
+            raise ValueError("runtime inputs ambiguous")
+        values[key] = value
+    if find_platform_credentials(values) or values.get("DOCKER_HOST"):
+        raise ValueError("runtime holds platform authority")
+    if any(looks_like_credential(key, value) and spec.get("credential_hashes", {}).get(key) != hashlib.sha256(value.encode()).hexdigest() for key, value in values.items() if value):
+        raise ValueError("runtime credential has no managed testing supplier")
 
 try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
@@ -149,6 +171,7 @@ try:
         service = json.loads(docker("service", "inspect", spec["application"]))[0]
         current = service["Spec"]
         runtime = current["TaskTemplate"]["ContainerSpec"]
+        require_managed_credentials(runtime.get("Env"), spec)
         image = runtime["Image"]
         def repository(reference):
             value = reference.split("@", 1)[0]
@@ -166,6 +189,15 @@ try:
         if (mount.get("Type"), mount.get("Source"), mount.get("Target")) != ("volume", spec["volume"], spec["mount_path"]) or mount.get("ReadOnly") not in (None, False):
             raise ValueError("serving state mount changed")
         services = identifiers("service", "ls", "-q")
+        tasks = identifiers("service", "ps", "--no-trunc", "-q", service["ID"])
+        task_rows = {identifier: json.loads(docker("inspect", "--type", "task", identifier))[0] for identifier in tasks}
+        for identifier, task in task_rows.items():
+            if (task.get("ID") != identifier or task.get("ServiceID") != service["ID"]
+                or task.get("Status", {}).get("State") not in {"running", "complete", "shutdown", "failed", "rejected", "remove"}
+                or task.get("DesiredState") not in {"running", "shutdown", "remove"}
+                or task.get("DesiredState") == "running" and task.get("Status", {}).get("State") != "running"
+                or task.get("DesiredState") != "running" and task.get("Status", {}).get("State") == "running"):
+                raise ValueError("serving tasks are not settled")
         service_rows = {}
         for identifier in services:
             other = json.loads(docker("service", "inspect", identifier))[0]
@@ -197,10 +229,15 @@ try:
         if attributed:
             if (labels or {}).get("com.docker.swarm.service.name") != spec["application"]:
                 raise ValueError("container attribution changed")
+            task = task_rows.get((labels or {}).get("com.docker.swarm.task.id"))
+            if (not isinstance(task, dict) or task.get("ServiceID") != service["ID"] or task.get("NodeID") != nodes[0]["ID"]
+                or task.get("Status", {}).get("ContainerStatus", {}).get("ContainerID") != identifier):
+                raise ValueError("container is not an attributed service task")
             if len(mounts) != 1 or mounts[0].get("RW") is not True or (mounts[0].get("Type"), mounts[0].get("Name"), mounts[0].get("Destination"), mounts[0].get("Source")) != ("volume", spec["volume"], spec["mount_path"], str(allocation / "_data")):
                 raise ValueError("serving container mounts changed")
             owned += 1
             if row.get("state") == "running":
+                require_managed_credentials(row.get("env"), spec)
                 running += 1
                 if ([value for value in row.get("env", []) if value.startswith("LAUNCHPLANE_DEPLOYMENT_RECORD_ID=")] != ["LAUNCHPLANE_DEPLOYMENT_RECORD_ID=" + spec["deployment"]]
                     or row.get("ports") or row.get("privileged") is not False):
@@ -243,6 +280,11 @@ try:
         for identifier, previous in container_rows.items():
             if json.loads(docker("inspect", "--format", template, identifier)) != previous:
                 raise ValueError("container inventory changed")
+        if identifiers("service", "ps", "--no-trunc", "-q", service["ID"]) != tasks:
+            raise ValueError("task inventory changed")
+        for identifier, previous in task_rows.items():
+            if json.loads(docker("inspect", "--type", "task", identifier))[0] != previous:
+                raise ValueError("task inventory changed")
     print("testing_resources_binding_sha256=" + hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
     print("testing_resources_ok=true")
 except Exception:

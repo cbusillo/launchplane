@@ -395,8 +395,11 @@ foreign ownership and production lanes remain refused.
 Apply checks the provider's completed Docker-source deployment and original
 placement, then runs the fixed read-only host inspection. The serving variant
 requires positively local Swarm coverage, the original local volume backing,
-the expected single-replica image/deployment and no foreign container or service
-using its storage. It preserves the volume's contents. Missing or changing
+the expected single-replica image/deployment, attributed settled tasks and no
+foreign container or service using its storage. Provider and running credentials
+must match current managed testing suppliers under the existing key-safety
+policy; platform credentials refuse continuation. It preserves the volume's
+contents. Missing or changing
 evidence keeps the hold. Execution locks, repeated authority checks and atomic
 hold/receipt publication also cover this variant. Original reservations and
 unresolved activations remain unchanged; this continuation never settles them.

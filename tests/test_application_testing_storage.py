@@ -8,6 +8,8 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+import hashlib
+from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -24,7 +26,7 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
         (self.root / "volumes").mkdir()
         plan = uuid4().hex
         names = state_volume_allocation_names(plan)
-        self.spec = {
+        self.spec: dict[str, Any] = {
             "plan_id": plan,
             "volume": names["volume_name"],
             "application": names["app_name"],
@@ -39,6 +41,7 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
         self.volume_rows: dict[str, object] = {}
         self.services: dict[str, object] = {}
         self.images: dict[str, object] = {}
+        self.tasks: dict[str, object] = {}
 
     def docker(self, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         arguments = command[1:]
@@ -52,6 +55,8 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
             output = "\n".join(self.services)
         elif arguments[:2] == ["service", "inspect"]:
             output = json.dumps([self.services[arguments[-1]]])
+        elif arguments[:2] == ["service", "ps"]:
+            output = "\n".join(self.tasks)
         elif arguments[:2] == ["image", "inspect"]:
             output = json.dumps([self.images[arguments[-1]]])
         elif arguments[:2] == ["node", "ls"]:
@@ -66,6 +71,8 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
             output = "\n".join(self.containers)
             if self.change_inventory and self.list_calls > 1:
                 output += "\nchanged-container"
+        elif arguments[:3] == ["inspect", "--type", "task"]:
+            output = json.dumps([self.tasks[arguments[-1]]])
         elif arguments[0] == "inspect":
             output = json.dumps(self.containers[arguments[-1]])
         else:
@@ -140,6 +147,7 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
             "labels": {
                 "com.docker.swarm.service.id": "serving-service",
                 "com.docker.swarm.service.name": self.spec["application"],
+                "com.docker.swarm.task.id": "serving-task",
             },
             "mounts": [
                 {
@@ -157,6 +165,51 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
             "privileged": False,
         }
         self.images["fixture-image"] = {"RepoDigests": [self.spec["image"]]}
+        self.tasks["serving-task"] = {
+            "ID": "serving-task",
+            "ServiceID": "serving-service",
+            "NodeID": "local-node",
+            "DesiredState": "running",
+            "Status": {"State": "running", "ContainerStatus": {"ContainerID": identifier}},
+        }
+
+    def test_serving_credentials_match_managed_testing_inputs_in_service_and_container(
+        self,
+    ) -> None:
+        self.prepare_serving()
+        value = "fixture-managed-testing-token"
+        self.spec["credential_hashes"] = {
+            "DISCORD_TOKEN": hashlib.sha256(value.encode()).hexdigest()
+        }
+        service = self.services[self.spec["application"]]
+        container = self.containers["a" * 64]
+        assert isinstance(service, dict) and isinstance(container, dict)
+        service["Spec"]["TaskTemplate"]["ContainerSpec"]["Env"].append("DISCORD_TOKEN=" + value)
+        container["env"].append("DISCORD_TOKEN=" + value)
+        self.assertEqual(self.run_program()["testing_resources_ok"], "true")
+        for rows in (service["Spec"]["TaskTemplate"]["ContainerSpec"]["Env"], container["env"]):
+            with self.subTest(rows=rows):
+                rows[-1] = "DISCORD_TOKEN=foreign-production-token"
+                self.assertEqual(self.run_program()["testing_resources_ok"], "false")
+                rows[-1] = "DISCORD_TOKEN=" + value
+
+    def test_serving_unmanaged_credentials_and_forged_task_labels_remain_fenced(self) -> None:
+        self.prepare_serving()
+        container = self.containers["a" * 64]
+        assert isinstance(container, dict)
+        original = deepcopy(container)
+        for key, value in (
+            ("DISCORD_TOKEN", "untracked-live-token"),
+            ("DATABASE_URL", "postgres://user:live@production/db"),
+            ("DOKPLOY_TOKEN", "platform-token"),
+        ):
+            with self.subTest(key=key):
+                container["env"] = [*original["env"], key + "=" + value]
+                self.assertEqual(self.run_program()["testing_resources_ok"], "false")
+        container["env"] = original["env"]
+        container["state"] = "exited"
+        container["labels"] = {**original["labels"], "com.docker.swarm.task.id": "forged-task"}
+        self.assertEqual(self.run_program()["testing_resources_ok"], "false")
 
     def test_serving_local_volume_qualifies_and_preserves_its_contents(self) -> None:
         self.prepare_serving()
