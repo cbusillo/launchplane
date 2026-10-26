@@ -30,6 +30,7 @@ from control_plane.testing_address_storage import (
     commit_testing_address,
     effective_testing_route,
     amended_testing_maintenance_overrides,
+    canonical_health_url,
 )
 from control_plane.testing_address_qualification import exclude_address_executors
 from control_plane.testing_serving_copy import published_testing_copy
@@ -161,6 +162,37 @@ class TestingAddressTests(unittest.TestCase):
             return commit_testing_address(
                 self.store, self.plan, self.reservation, self.now, self.health
             )
+
+    def test_canonical_address_moves_health_fallback_with_its_path(self) -> None:
+        from urllib.parse import urlsplit
+
+        original = next(lane for lane in self.plan.profile.lanes if lane.instance == "testing")
+        self.commit()
+        profile = self.store.read_product_profile_record(self.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        self.assertEqual(urlsplit(lane.health_url).netloc, urlsplit(lane.base_url).netloc)
+        self.assertEqual(urlsplit(lane.health_url).path, urlsplit(original.health_url).path)
+        self.assertEqual(
+            tuple(lane for lane in profile.lanes if lane.instance != "testing"),
+            tuple(lane for lane in self.plan.profile.lanes if lane.instance != "testing"),
+        )
+
+    def test_address_health_rewrite_preserves_url_components_and_other_hosts(self) -> None:
+        from urllib.parse import urlsplit
+
+        original = "https://" + self.plan.route_before.host + "/health?depth=full#status"
+        rewritten = canonical_health_url(
+            original, self.plan.route_after, self.plan.route_before.host
+        )
+        self.assertEqual(urlsplit(rewritten).path, urlsplit(original).path)
+        self.assertEqual(urlsplit(rewritten).query, urlsplit(original).query)
+        self.assertEqual(urlsplit(rewritten).fragment, urlsplit(original).fragment)
+        for url in ("", "https://independent-health.example.invalid/check"):
+            with self.subTest(url=url):
+                self.assertEqual(
+                    canonical_health_url(url, self.plan.route_after, self.plan.route_before.host),
+                    url,
+                )
 
     def test_canonical_amendment_preserves_copy_and_original_receipts(self) -> None:
         with self.store._session_factory() as session:

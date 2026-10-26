@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -38,6 +39,13 @@ from control_plane.storage.product_authority_bundle import (
 )
 
 ADDRESS_PLAN_ROUTE = ADDRESS_ROUTE + ":plan"
+
+
+def canonical_health_url(url: str, route: TestingLaneRoute, previous_host: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.hostname != previous_host:
+        return url
+    return parsed._replace(scheme="https", netloc=route.host).geturl()
 
 
 def read_testing_address_recovery_copy(
@@ -360,7 +368,14 @@ def commit_testing_address(
         profile = plan.profile.model_copy(
             update={
                 "lanes": tuple(
-                    lane.model_copy(update={"base_url": "https://" + plan.route_after.host})
+                    lane.model_copy(
+                        update={
+                            "base_url": "https://" + plan.route_after.host,
+                            "health_url": canonical_health_url(
+                                lane.health_url, plan.route_after, plan.route_before.host
+                            ),
+                        }
+                    )
                     if (lane.context, lane.instance) == (plan.context, "testing")
                     else lane
                     for lane in plan.profile.lanes

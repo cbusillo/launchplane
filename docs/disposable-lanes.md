@@ -1373,8 +1373,10 @@ entry so its certificate order and renewal remain independent; see
 [Traefik ACME domain definition](https://doc.traefik.io/traefik/reference/install-configuration/tls/certificate-resolvers/acme/#domain-definition).
 Original-attempt receipts settle an uncertain writer before another
 dispatch. Both HTTPS origins must return the current testing runtime identity
-before one transaction updates the lane base URL, binding provenance and canonical
-Odoo override intent. The original publication, candidate, restore generation,
+before one transaction updates the lane base URL, its same-host health fallback,
+binding provenance and canonical Odoo override intent. The health fallback keeps
+its path and query; an empty fallback or a separately declared health host stays
+unchanged. The original publication, candidate, restore generation,
 retirement and resources remain unchanged. A lost metadata reply resolves from
 the committed address receipt. Preserve the original request and key on any
 unknown outcome; do not clear old operation fences or edit publication history.
