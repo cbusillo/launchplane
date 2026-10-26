@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -50,7 +52,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
-from control_plane.contracts.public_ingress_monitoring import build_public_ingress_lane_incident_id
+from tests.support.ingress_incidents import build_public_ingress_lane_incident_id
 from control_plane.contracts.public_ingress_monitoring import build_public_ingress_observation_id
 from control_plane.contracts.public_ingress_monitoring import (
     public_ingress_incident_record_sha256,
@@ -72,15 +74,15 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
     PublicIngressNotificationDriverSet,
+    PublicIngressMonitorResult,
     _deliver_github_issue_notification,
     _gh_issue_client,
-    _incident_event,
     check_public_ingress_target,
     deliver_public_ingress_notification_outbox_delivery,
     discover_public_ingress_monitor_targets,
-    reconcile_public_ingress_incident,
     run_public_ingress_monitor_once,
 )
+from tests.support.ingress_incidents import reconcile_public_ingress_incident
 from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsCertificate
 from control_plane.outbound_http import PublicTlsProbeResult
@@ -507,6 +509,14 @@ def _hold_deploy_fence(
         lease_owner="trace-original",
         reconciliation_key=reconciliation_key,
         provider_target_key=build_generic_web_provider_target_key(target),
+        provider_target_origin=ProviderTargetOrigin(
+            product="example-site",
+            context=target.ship_request.context,
+            instance=target.ship_request.instance,
+            provider_id=target.ship_request.provider_id,
+            target_type=target.resolved_target.target_type,
+            target_id=target.resolved_target.target_id,
+        ),
     ).record
     checkpointed = store.checkpoint_mutation_provider_effect(
         reservation=reserved, effect_phase="deploy_trigger"
@@ -519,6 +529,13 @@ def _hold_deploy_fence(
     ).record
     assert held is not None
     return held
+
+
+def _run_provider_monitor_at(
+    *, record_store: PostgresRecordStore, checked_at: str
+) -> PublicIngressMonitorResult:
+    with patch.object(record_store, "_database_mutation_timestamp", return_value=checked_at):
+        return run_public_ingress_monitor_once(record_store=record_store, checked_at=checked_at)
 
 
 def _minutes_after(timestamp: str, minutes: int) -> str:
@@ -1506,7 +1523,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         tls_incident = next(
             incident for incident in store.incidents if incident.check_kind == "tls"
         )
-        self.assertEqual(_incident_event(incident=tls_incident), "opened")
         self.assertEqual(
             [
                 event.event
@@ -3148,10 +3164,10 @@ class PublicIngressMonitorTests(unittest.TestCase):
             )
             held = _hold_deploy_fence(store, idempotency_key="generic-web-stable-deploy:run-7:1")
 
-            settling = run_public_ingress_monitor_once(
+            settling = _run_provider_monitor_at(
                 record_store=store, checked_at=_minutes_after(held.updated_at, 5)
             )
-            stuck = run_public_ingress_monitor_once(
+            stuck = _run_provider_monitor_at(
                 record_store=store, checked_at=_minutes_after(held.updated_at, 60)
             )
             outbox_rows = store.list_outbox_delivery_records(
@@ -3167,10 +3183,10 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     }
                 )
             )
-            cleared = run_public_ingress_monitor_once(
+            cleared = _run_provider_monitor_at(
                 record_store=store, checked_at=_minutes_after(held.updated_at, 120)
             )
-            idle = run_public_ingress_monitor_once(
+            idle = _run_provider_monitor_at(
                 record_store=store, checked_at=_minutes_after(held.updated_at, 150)
             )
             store.close()
@@ -3183,7 +3199,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
         incident = stuck.incidents[0]
         self.assertEqual(incident.failure_code, "deploy_fence_held")
         self.assertEqual(incident.severity, "warning")
-        self.assertIn("generic-web-stable-deploy:run-7:1", stuck.records[0].summary)
+        self.assertIn(held.record_id, stuck.records[0].summary)
+        self.assertNotIn(held.idempotency_key, stuck.records[0].summary)
         self.assertIn("deploy_trigger", stuck.records[0].summary)
         self.assertNotIn(held.scope, stuck.records[0].summary)
         self.assertEqual(len(outbox_rows), 1)
@@ -3208,10 +3225,10 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 reconcile_required=False,
             )
 
-            live = run_public_ingress_monitor_once(
+            live = _run_provider_monitor_at(
                 record_store=store, checked_at=_minutes_after(running.lease_expires_at, -1)
             )
-            dead = run_public_ingress_monitor_once(
+            dead = _run_provider_monitor_at(
                 record_store=store, checked_at=_minutes_after(running.lease_expires_at, 1)
             )
             store.close()
@@ -3238,9 +3255,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                 reconcile_required=False,
             )
             expired_hour_later = _minutes_after(running.lease_expires_at, 60)
-            stuck = run_public_ingress_monitor_once(
-                record_store=store, checked_at=expired_hour_later
-            )
+            stuck = _run_provider_monitor_at(record_store=store, checked_at=expired_hour_later)
             with patch.object(
                 store,
                 "_database_mutation_timestamp",
@@ -3255,7 +3270,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     reconciliation_key=running.reconciliation_key,
                     provider_target_key=running.provider_target_key,
                 )
-            still_stuck = run_public_ingress_monitor_once(
+            still_stuck = _run_provider_monitor_at(
                 record_store=store, checked_at=_minutes_after(expired_hour_later, 5)
             )
             store.close()
@@ -3435,7 +3450,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         delivered = deliver_public_ingress_notification_outbox_delivery(
             record=reminder_record,
             drivers=PublicIngressNotificationDriverSet(github_client=github_client),
-            mark_provider_started=lambda _key, _provider: None,
+            mark_provider_started=lambda _record, _key, _provider: None,
         )
 
         self.assertEqual([action for action, _payload in calls], ["find_marker", "comment"])
@@ -3815,7 +3830,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         result = deliver_public_ingress_notification_outbox_delivery(
             record=record,
             drivers=PublicIngressNotificationDriverSet(github_client=github_client),
-            mark_provider_started=lambda _provider_operation_key, _provider_id: self.fail(
+            mark_provider_started=lambda _record, _provider_operation_key, _provider_id: self.fail(
                 "existing provider marker must not be replaced"
             ),
         )
@@ -3871,7 +3886,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     "resolution without a prior issue must not call GitHub"
                 )
             ),
-            mark_provider_started=lambda _key, _provider: self.fail(
+            mark_provider_started=lambda _record, _key, _provider: self.fail(
                 "skipped resolution must not start a provider operation"
             ),
         )

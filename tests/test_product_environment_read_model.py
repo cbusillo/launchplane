@@ -9,6 +9,8 @@ from typing import cast
 import unittest
 import os
 
+from control_plane.action_effects import ACTION_DECLARATIONS
+from control_plane.integration_readback import integration_credential_warnings
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
 )
@@ -18,7 +20,12 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecord,
+    DokployTargetPolicies,
+    DokployTargetIntegrationAllowance,
+    DokployTargetStaffTestingHold,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -64,6 +71,8 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
+from control_plane.product_review import ProductReviewPreview
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.support.artifact_manifests import artifact_manifest_v2
 
@@ -669,6 +678,82 @@ class _HistoricalActivityRecordStore(_PreviewRecordStore):
 
 
 class ProductEnvironmentReadModelTest(unittest.TestCase):
+    def test_lane_status_warns_for_stored_credentials_without_integration_allowance(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{directory}/state.sqlite3"
+            )
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload())
+            store.write_product_profile_record(profile)
+            lane = profile.lanes[0]
+            binding = SecretBinding(
+                binding_id="shopify-token",
+                secret_id="token",
+                integration="runtime_environment",
+                binding_key="ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",
+                context=lane.context,
+                instance=lane.instance,
+                status="configured",
+                created_at=profile.updated_at,
+                updated_at=profile.updated_at,
+            )
+            store.write_secret_binding(binding)
+            target = DokployTargetRecord(
+                context=lane.context, instance=lane.instance, updated_at=profile.updated_at
+            )
+            store.write_dokploy_target_record(target)
+
+            def warnings() -> tuple[str, ...]:
+                detail = build_product_environment_detail(
+                    record_store=store,
+                    product=profile.product,
+                    environment=lane.instance,
+                    action_allowed=lambda *_: False,
+                )
+                overview = build_product_site_overview(
+                    record_store=store,
+                    product=profile.product,
+                    action_allowed=lambda *_: False,
+                )
+                summary = next(
+                    item for item in overview.environments if item.environment == lane.instance
+                )
+                expected = integration_credential_warnings(
+                    store.read_lane_summary(context_name=lane.context, instance_name=lane.instance),
+                    record_store=store,
+                )
+                detail_warnings = tuple(item for item in detail.warnings if item in expected)
+                self.assertEqual(detail_warnings, expected)
+                self.assertEqual(
+                    detail_warnings,
+                    tuple(item for item in summary.warnings if item in expected),
+                )
+                return detail_warnings
+
+            self.assertTrue(warnings())
+            store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
+            self.assertFalse(warnings())
+            store.write_secret_binding(binding)
+            store.write_dokploy_target_record(
+                target.model_copy(
+                    update={
+                        "policies": DokployTargetPolicies(
+                            integration_allowances=(
+                                DokployTargetIntegrationAllowance(
+                                    integration="shopify",
+                                    kind="dev_store",
+                                    reason="Isolated development store",
+                                    recorded_by="test",
+                                    recorded_at=profile.updated_at,
+                                ),
+                            )
+                        )
+                    }
+                )
+            )
+            self.assertFalse(warnings())
+
     def setUp(self) -> None:
         keys = patch.dict(
             os.environ,
@@ -714,11 +799,11 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     action_allowed=lambda *_: False,
                 )
 
-    def test_action_authz_map_matches_live_service_handlers(self) -> None:
-        self.assertEqual(
-            ACTION_AUTHZ_BY_ROUTE["/v1/drivers/odoo/post-deploy"],
-            "odoo_post_deploy.execute",
-        )
+    def test_action_authz_map_names_declared_actions(self) -> None:
+        self.assertTrue(ACTION_AUTHZ_BY_ROUTE)
+        for route, authz_action in ACTION_AUTHZ_BY_ROUTE.items():
+            with self.subTest(route=route):
+                self.assertIn(authz_action, ACTION_DECLARATIONS)
 
     def test_product_site_overview_hides_non_operator_driver_actions(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
@@ -876,6 +961,128 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
         self.assertEqual(allowed.preview.records[0].recorded_state, "active")
         self.assertEqual(allowed.preview.trust_state, overview.preview.trust_state)
+
+    def test_product_ops_keeps_preview_failure_attention_through_retry(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+        store = _PreviewRecordStore(profile, ())
+        baseline = build_product_site_overview(
+            record_store=store, product=profile.product, action_allowed=lambda *_: True
+        )
+        request = ProductReconcileRequestRecord(
+            target_key="example-site:preview:42",
+            product="example-site",
+            target_kind="preview",
+            pull_request_number=42,
+            state="failed",
+            requested_at="2026-10-24T15:00:00Z",
+            updated_at="2026-10-24T15:00:00Z",
+            request_count=1,
+            last_error="Provider unavailable password=hunter2",
+            last_plan={"action": "apply", "head_sha": "new-head"},
+        )
+        for state in ("failed", "pending", "running"):
+            with (
+                self.subTest(state=state),
+                patch.object(
+                    store,
+                    "list_product_reconcile_requests",
+                    create=True,
+                    return_value=(request.model_copy(update={"state": state}),),
+                ),
+            ):
+                overview = build_product_site_overview(
+                    record_store=store,
+                    product=profile.product,
+                    action_allowed=lambda *_: True,
+                )
+                warning = " ".join(overview.warnings)
+                self.assertIn("Provider unavailable", warning)
+                self.assertNotIn("hunter2", warning)
+        replacement = request.model_copy(
+            update={
+                "state": "done",
+                "last_error": "",
+                "last_plan": {
+                    "head_sha": "new-head",
+                    "last_failed_error_summary": "Provider unavailable",
+                },
+            }
+        )
+        with patch.object(
+            store, "list_product_reconcile_requests", create=True, return_value=(replacement,)
+        ):
+            for serving_head in ("old-head", "new-head"):
+                with (
+                    self.subTest(serving_head=serving_head),
+                    patch(
+                        "control_plane.product_review.resolve_serving_preview",
+                        return_value=ProductReviewPreview(
+                            preview_url="https://pr-42.example.invalid", head_sha=serving_head
+                        ),
+                    ),
+                ):
+                    overview = build_product_site_overview(
+                        record_store=store,
+                        product=profile.product,
+                        action_allowed=lambda *_: True,
+                    )
+                    self.assertEqual(
+                        overview.warnings != baseline.warnings, serving_head != "new-head"
+                    )
+        with (
+            patch.object(
+                store,
+                "list_product_reconcile_requests",
+                create=True,
+                return_value=(request.model_copy(update={"last_plan": {}}),),
+            ),
+            patch(
+                "control_plane.product_review.resolve_serving_preview",
+                return_value=ProductReviewPreview(
+                    preview_url="https://pr-42.example.invalid", head_sha="new-head"
+                ),
+            ),
+        ):
+            overview = build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: True
+            )
+            self.assertNotEqual(overview.warnings, baseline.warnings)
+            self.assertIn("Provider unavailable", " ".join(overview.warnings))
+        for plan in (
+            {"action": "wait", "reason": "no_verified_build"},
+            {"action": "destroy", "last_failed_error_summary": "Cleanup refused"},
+            {"destroy_retry_key": "closed-cleanup", "last_failed_error_summary": "Read failed"},
+            {"feedback_recovery_closed_observed": True, "last_failed_error_summary": "Read failed"},
+        ):
+            with (
+                self.subTest(plan=plan),
+                patch.object(
+                    store,
+                    "list_product_reconcile_requests",
+                    create=True,
+                    return_value=(
+                        request.model_copy(update={"last_error": "", "last_plan": plan}),
+                    ),
+                ),
+            ):
+                overview = build_product_site_overview(
+                    record_store=store,
+                    product=profile.product,
+                    action_allowed=lambda *_: True,
+                )
+                self.assertEqual(overview.warnings, baseline.warnings)
+        with patch.object(
+            store,
+            "list_product_reconcile_requests",
+            create=True,
+            side_effect=ValueError("invalid saved record"),
+        ):
+            overview = build_product_site_overview(
+                record_store=store,
+                product=profile.product,
+                action_allowed=lambda *_: True,
+            )
+            self.assertNotEqual(overview.warnings, baseline.warnings)
 
     def test_preview_references_keep_full_count_when_display_is_bounded(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
@@ -2103,6 +2310,41 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
                     self.assertTrue(
                         all(warning.severity == "info" for warning in projected.topology.warnings)
                     )
+
+    def test_product_overview_says_which_hold_stops_testing_deploys(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{database_path}")
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _site_profile_payload(preview_enabled=False, preview_context="")
+            )
+            store.write_product_profile_record(profile)
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="example-site-testing",
+                    instance="testing",
+                    target_type="compose",
+                    target_name="example-site-testing",
+                    policies=DokployTargetPolicies(
+                        staff_testing_hold=DokployTargetStaffTestingHold(
+                            reason="Prove separation from production first.",
+                            purpose="isolation_staging",
+                        )
+                    ),
+                    updated_at="2026-05-02T22:30:00Z",
+                    source_label="test",
+                )
+            )
+
+            overview = build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: False
+            )
+            store.close()
+
+        holds = {summary.environment: summary.deploy_hold for summary in overview.environments}
+        self.assertEqual(holds, {"testing": "isolation_staging", "prod": None})
+        self.assertNotIn("Prove separation", overview.model_dump_json())
 
     def test_product_environment_detail_exposes_physical_provider_target(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

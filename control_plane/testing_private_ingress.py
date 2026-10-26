@@ -5,7 +5,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 import click
@@ -98,6 +98,7 @@ class TestingPrivateIngressAdapter:
     request: TestingPrivateIngressRequest
     trace_id: str
     client: NpmplusClient
+    route_activation: Any = None
 
     def target_key(self) -> str:
         return f"testing-private-ingress:{self.product}:{self.request.context}"
@@ -181,16 +182,30 @@ class TestingPrivateIngressAdapter:
         require_exclusive_testing_application_hostname(
             hostname=hostname, target=target, targets=self.store.list_dokploy_target_records()
         )
+        from control_plane.testing_application_private_route import published_application_lineage
+
+        origin_id, lineage = published_application_lineage(
+            self.store, self.product, self.request.context, target_id.target_id, hostname
+        )
         edge = self.store.read_edge_endpoint_record(self.request.edge_endpoint_key)
         if edge.status != "active" or edge.upstream_scheme != "http":
             raise ValueError("Private testing requires an active HTTP application edge.")
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         actual = api.fetch_dokploy_target_payload(
-            host=host, token=token, target_type="application", target_id=target_id.target_id
+            host=host, token=token, target_type="application", target_id=origin_id
         )
         server_id = actual.get("serverId")
-        if actual.get("applicationId") != target_id.target_id or not isinstance(server_id, str):
+        if actual.get("applicationId") != origin_id or not isinstance(server_id, str):
             raise ValueError("Testing application placement is unavailable.")
+        if lineage:
+            serving = api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type="application", target_id=target_id.target_id
+            )
+            if (
+                serving.get("applicationId") != target_id.target_id
+                or serving.get("serverId") != server_id
+            ):
+                raise ValueError("The serving private application placement changed.")
         server = api.as_json_object(
             api.dokploy_request(
                 host=host, token=token, path="/api/server.one", query={"serverId": server_id}
@@ -227,7 +242,8 @@ class TestingPrivateIngressAdapter:
             "target_id": target_id.model_dump(mode="json"),
             "provider": provider.model_dump(mode="json", exclude={"provider_evidence"}),
             "hostname": hostname,
-            "application_id": target_id.target_id,
+            "application_id": origin_id,
+            "activation_lineage": [record.plan_sha256 for record in lineage],
             "runtime_port": profile.runtime_port,
             "server_id": server_id,
             "certificate": certificate.model_dump(mode="json"),
@@ -447,6 +463,20 @@ class TestingPrivateIngressAdapter:
             runtime_port=int(str(authority["runtime_port"])),
             application_id=str(authority["application_id"]),
         )
+        from control_plane.testing_application_private_route import (
+            published_application_lineage,
+            require_application_route_selected,
+        )
+
+        current_id = self.store.read_dokploy_target_id_record(
+            context_name=self.request.context, instance_name="testing"
+        ).target_id
+        _, lineage = published_application_lineage(
+            self.store, self.product, self.request.context, current_id, hostname
+        )
+        selected = self.route_activation or (lineage[0] if lineage else None)
+        if selected is not None:
+            require_application_route_selected(self.root, selected)
         return (
             {
                 "authority": authority,
@@ -715,7 +745,13 @@ class TestingPrivateIngressAdapter:
             raise ValueError("Private testing hostname is unavailable.")
         self.store.write_product_public_hosts_bundle(
             ProductAuthorityBundle(
-                dokploy_targets=(target.model_copy(update={"domains": (hostname,)}),),
+                dokploy_targets=(
+                    target.model_copy(
+                        update={}
+                        if self._authority().get("activation_lineage")
+                        else {"domains": (hostname,)}
+                    ),
+                ),
                 expected_product_profiles=(profile,),
                 required_context_owner=(self.product, self.request.context),
             ),

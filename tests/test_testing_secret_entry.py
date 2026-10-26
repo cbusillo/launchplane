@@ -18,7 +18,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.product_config_service import apply_product_config_service_request
+from tests.support.product_config_service import apply_product_config_service_request
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
     evaluate_runtime_key_safety_from_store,

@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 import time
 from types import SimpleNamespace
 from typing import Any
+from collections.abc import Callable
 import unittest
 from unittest.mock import patch
 
@@ -23,10 +24,15 @@ from control_plane.contracts.runtime_identity import (
     RUNTIME_IDENTITY_ENV_KEY,
     runtime_identity_env,
 )
+from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
 from control_plane.dokploy.odoo_walkthrough import (
     ACCOUNT_DATABASE_PROBE,
     ACCOUNT_JOURNAL_READ_PROGRAM,
     WALKTHROUGH_JOURNAL_DIRECTORY,
+    TestingRead,
+    read_testing_task_usage,
+    testing_account_dispatch_finished,
+    testing_task_unused,
 )
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.odoo_connection_isolation import connection_isolation_library
@@ -118,53 +124,39 @@ class ProbeConnection:
         self.closed = True
 
 
-class NativeProbeTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.identity = RuntimeIdentity(
-            product="example",
-            context="example",
-            instance="testing",
-            deployment_record_id="deployment",
-            artifact_id="artifact",
-            source_git_ref="a" * 40,
-            image_reference="example@sha256:" + "b" * 64,
-        )
-        self.spec: dict[str, Any] = {
-            "mode": "quiescence",
-            "dispatch_id": "d" * 64,
-            "dispatch_deadline": int(time.time()) - 1,
-            "copy_binding": "c" * 64,
-            "binding": "e" * 64,
-            "task_id": "f" * 32,
-            "project": "testing-project",
-            "database": "testing",
-            "identity_key": RUNTIME_IDENTITY_ENV_KEY,
-            "identity": self.identity.model_dump(mode="json"),
-            "image": self.identity.image_reference,
-            "usage_since": datetime.now(timezone.utc).isoformat(),
-            "probe": ACCOUNT_DATABASE_PROBE,
-        }
+class NativeHost:
+    """Runs the shipped host and database programs against fixture Docker and SQL."""
+
+    def __init__(
+        self, identity: RuntimeIdentity, journal: Path, *, database: str, copy_binding: str
+    ) -> None:
+        self.identity = identity
+        self.journal = journal
+        self.spec: dict[str, Any] = {"copy_binding": copy_binding, "binding": "", "task_id": ""}
         self.connection = ProbeConnection(self.spec)
-        self.addCleanup(self.connection.database.close)
         self.environment = {
-            **runtime_identity_env(self.identity),
+            **runtime_identity_env(identity),
             "PLATFORM_INSTANCE": "testing",
             "ODOO_DB_HOST": "database",
-            "ODOO_DB_NAME": "testing",
+            "ODOO_DB_NAME": database,
             "ODOO_DB_USER": "fixture",
             "ODOO_DB_PASSWORD": "private-database-fixture",
         }
+        self.runners = ["fixture-runner"]
         self.database_reads = 0
 
-    def run_probe(self) -> bool:
+    def close(self) -> None:
+        self.connection.database.close()
+
+    def run(self, program: str, spec: dict[str, Any]) -> dict[str, object]:
+        self.spec.clear()
+        self.spec.update(spec)
         output = io.StringIO()
         original_path = Path
 
         def run(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
             if arguments[:2] == ["docker", "ps"]:
-                raw = b"fixture-runner\n"
+                raw = "".join(runner + "\n" for runner in self.runners).encode()
             elif arguments[:2] == ["docker", "inspect"]:
                 raw = json.dumps(
                     [
@@ -181,16 +173,20 @@ class NativeProbeTests(unittest.TestCase):
             elif arguments[:2] == ["docker", "exec"]:
                 self.database_reads += 1
                 response = io.StringIO()
-                with (
-                    patch.dict("os.environ", self.environment),
-                    patch.dict(
-                        sys.modules,
-                        {"psycopg2": SimpleNamespace(connect=lambda **kwargs: self.connection)},
-                    ),
-                    patch.object(sys, "stdin", io.StringIO(kwargs["input"].decode())),
-                    redirect_stdout(response),
-                ):
-                    exec(compile(arguments[-1], "database-probe", "exec"), {})
+                try:
+                    with (
+                        patch.dict("os.environ", self.environment),
+                        patch.dict(
+                            sys.modules,
+                            {"psycopg2": SimpleNamespace(connect=lambda **_: self.connection)},
+                        ),
+                        patch.object(sys, "stdin", io.StringIO(kwargs["input"].decode())),
+                        redirect_stdout(response),
+                    ):
+                        exec(compile(arguments[-1], "database-probe", "exec"), {})
+                except Exception:
+                    # An uncaught probe error exits nonzero inside the real container.
+                    return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"")
                 raw = response.getvalue().encode()
             else:
                 raise AssertionError("Unexpected provider effect")
@@ -201,33 +197,115 @@ class NativeProbeTests(unittest.TestCase):
             patch.object(
                 sys,
                 "argv",
-                ["probe", base64.b64encode(json.dumps(self.spec).encode()).decode(), "FRAME:"],
+                ["probe", base64.b64encode(json.dumps(spec).encode()).decode(), "FRAME:"],
             ),
             redirect_stdout(output),
             patch(
                 "pathlib.Path",
                 side_effect=lambda path: (
-                    original_path(self.temporary.name) / "journal"
-                    if path == WALKTHROUGH_JOURNAL_DIRECTORY
-                    else original_path(path)
+                    self.journal if path == WALKTHROUGH_JOURNAL_DIRECTORY else original_path(path)
                 ),
             ),
         ):
-            exec(compile(ACCOUNT_JOURNAL_READ_PROGRAM, "host-probe", "exec"), {})
-        self.assertNotIn(self.environment["ODOO_DB_PASSWORD"], output.getvalue())
-        return json.loads(output.getvalue().removeprefix("FRAME:"))["clear"] is True
+            exec(compile(program, "host-probe", "exec"), {})
+        if self.environment["ODOO_DB_PASSWORD"] in output.getvalue():
+            raise AssertionError("The native read echoed a database credential.")
+        frame: dict[str, object] = json.loads(output.getvalue().removeprefix("FRAME:"))
+        return frame
+
+    def read_remote(
+        self,
+        *,
+        program: str,
+        payload: dict[str, Any],
+        receive: Callable[[dict[str, object]], None],
+        **_: object,
+    ) -> None:
+        """Stand-in for the private transport, executing the real fixed program."""
+        receive(self.run(program, payload))
+
+
+class NativeProbeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.identity = RuntimeIdentity(
+            product="example",
+            context="example",
+            instance="testing",
+            deployment_record_id="deployment",
+            artifact_id="artifact",
+            source_git_ref="a" * 40,
+            image_reference="example@sha256:" + "b" * 64,
+        )
+        self.host = NativeHost(
+            self.identity,
+            Path(self.temporary.name) / "journal",
+            database="testing",
+            copy_binding="c" * 64,
+        )
+        self.addCleanup(self.host.close)
+        self.connection = self.host.connection
+        self.environment = self.host.environment
+        self.spec: dict[str, Any] = {
+            "mode": "quiescence",
+            "dispatch_id": "d" * 64,
+            "dispatch_deadline": int(time.time()) - 1,
+            "copy_binding": "c" * 64,
+            "binding": "e" * 64,
+            "task_id": "f" * 32,
+            "project": "testing-project",
+            "database": "testing",
+            "identity_key": RUNTIME_IDENTITY_ENV_KEY,
+            "identity": self.identity.model_dump(mode="json"),
+            "image": self.identity.image_reference,
+            "usage_since": datetime.now(timezone.utc).isoformat(),
+            "probe": ACCOUNT_DATABASE_PROBE,
+        }
+
+    @property
+    def database_reads(self) -> int:
+        return self.host.database_reads
+
+    @database_reads.setter
+    def database_reads(self, value: int) -> None:
+        self.host.database_reads = value
+
+    def run_probe(self) -> bool:
+        return self.host.run(ACCOUNT_JOURNAL_READ_PROGRAM, dict(self.spec))["clear"] is True
+
+    def read(self) -> object:
+        return self.host.run(ACCOUNT_JOURNAL_READ_PROGRAM, dict(self.spec))["reason"]
 
     def test_absent_journal_settles_only_after_deadline_and_actual_transaction_quiescence(
         self,
     ) -> None:
         self.spec["dispatch_deadline"] = int(time.time()) + 60
-        self.assertFalse(self.run_probe())
+        # Nothing was observed: no journal and no database read before the deadline.
+        self.assertEqual(self.read(), TestingRead.UNAVAILABLE)
+        self.host.journal.mkdir(mode=0o700)
+        journal = self.host.journal / (self.spec["dispatch_id"] + ".json")
+        for content, expected in (
+            ("not-json", TestingRead.UNAVAILABLE),
+            (json.dumps({"finished": False}), TestingRead.DISPATCH_UNSETTLED),
+            (
+                json.dumps({"finished": True, "needs_quiescence": True}),
+                TestingRead.DISPATCH_UNSETTLED,
+            ),
+            (json.dumps({"finished": True}), TestingRead.CLEAR),
+        ):
+            with self.subTest(content):
+                journal.write_text(content)
+                self.assertEqual(self.read(), expected)
+        self.host.journal.chmod(0o755)
+        self.assertEqual(self.read(), TestingRead.UNAVAILABLE)
+        journal.unlink()
         self.assertEqual(self.database_reads, 0)
         self.spec["dispatch_deadline"] = int(time.time()) - 1
         self.connection.free = False
-        self.assertFalse(self.run_probe())
+        self.assertEqual(self.read(), TestingRead.DISPATCH_UNSETTLED)
         self.connection.free = True
-        self.assertTrue(self.run_probe())
+        self.assertEqual(self.read(), TestingRead.CLEAR)
         self.assertTrue(self.connection.readonly)
         self.assertTrue(self.connection.closed)
 
@@ -265,3 +343,47 @@ class NativeProbeTests(unittest.TestCase):
                     self.connection.repair(self.connection.sql, apply=True)
                 self.connection.isolation_readable = False
                 self.assertFalse(self.run_probe())
+
+    def test_browser_and_quiescence_consumers_fail_closed_on_observed_and_unavailable_reads(
+        self,
+    ) -> None:
+        intent = {key: value for key, value in self.spec.items() if key not in {"mode", "probe"}}
+        host, token, server = "https://provider.example", "fixture", "server"
+
+        def task() -> tuple[TestingRead, bool]:
+            return (
+                read_testing_task_usage(host=host, token=token, server_id=server, intent=intent),
+                testing_task_unused(host=host, token=token, server_id=server, intent=intent),
+            )
+
+        def quiescent() -> bool:
+            return testing_account_dispatch_finished(
+                host=host,
+                token=token,
+                server_id=server,
+                dispatch_id=self.spec["dispatch_id"],
+                original_intent=intent,
+            )
+
+        with patch(
+            "control_plane.dokploy.odoo_walkthrough._read_remote",
+            side_effect=self.host.read_remote,
+        ) as remote:
+            self.assertEqual(task(), (TestingRead.CLEAR, True))
+            self.assertTrue(quiescent())
+            self.connection.active = False
+            self.assertEqual(task(), (TestingRead.TASK_ACCOUNT_CHANGED, False))
+            self.connection.active = True
+            self.connection.used = True
+            self.assertEqual(task(), (TestingRead.PROTECTED_SIGNIN, False))
+            self.connection.used = False
+            self.connection.free = False
+            self.assertFalse(quiescent())
+            self.connection.free = True
+            self.connection.isolation_readable = False
+            self.assertEqual(task(), (TestingRead.UNAVAILABLE, False))
+            self.assertFalse(quiescent())
+            self.connection.isolation_readable = True
+            remote.side_effect = NativeSourceUnavailable("fixture transport")
+            self.assertEqual(task(), (TestingRead.UNAVAILABLE, False))
+            self.assertFalse(quiescent())

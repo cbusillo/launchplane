@@ -17,19 +17,21 @@ from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 from typing import Literal
 from typing import cast
-from typing import Protocol
 
 import click
 from playwright.sync_api import (
+    APIResponse,
     Browser,
     BrowserType,
     Page,
+    Request as BrowserRequest,
+    Response as BrowserResponse,
+    Route,
     expect,
     sync_playwright,
 )
 
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence, ReleaseStatus
-from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebPostDeployContext,
@@ -51,24 +53,86 @@ from control_plane.provider_operations import ProviderMutationUnknownError
 
 _LOGGER = logging.getLogger(__name__)
 MAX_TRANSIENT_QUALIFICATION_ATTEMPTS = 3
+_TESTING_REQUEST_PATHS = {
+    "/sign-up",
+    "/billing",
+    "/dashboard",
+    "/site-config",
+    "/site-config/billing",
+    "/api/auth/sign-up/email",
+}
+
+
+def _is_testing_read(request: BrowserRequest) -> bool:
+    return (
+        request.method in {"GET", "HEAD"}
+        and "next-action" not in request.headers
+        and urlparse(request.url).path != "/api/auth/sign-up/email"
+        and not urlparse(request.url).path.startswith("/v/")
+    )
+
+
+def _testing_request_path(url: str) -> str:
+    path = urlparse(url).path
+    if path.startswith("/v/"):
+        return "/v/<fixture>"
+    return path if path in _TESTING_REQUEST_PATHS else "unknown"
+
+
+def _unknown_testing_effect(
+    site: str,
+    reason: str,
+    *,
+    request: BrowserRequest | None = None,
+    response: BrowserResponse | None = None,
+    phase: str = "unknown",
+    status: int | None = None,
+) -> ProviderMutationUnknownError:
+    if phase not in {
+        "post_deploy_fixture_signup",
+        "post_deploy_fixture_qr",
+        "post_deploy_grant-sponsored",
+        "post_deploy_promote-owner",
+        "post_deploy_delete-user",
+    }:
+        phase = "unknown"
+    method, path, resource_type = "unknown", "unknown", "unknown"
+    try:
+        if response is not None:
+            request = response.request
+            observed_status = response.status
+            if type(observed_status) is int and 100 <= observed_status <= 599:
+                status = observed_status
+        if request is not None:
+            observed_method = request.method
+            if observed_method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+                method = observed_method
+            path = _testing_request_path(request.url)
+            observed_type = request.resource_type
+            if observed_type in {"document", "fetch", "xhr"}:
+                resource_type = observed_type
+    except Exception:
+        method, path, resource_type, status = "unknown", "unknown", "unknown", None
+    _LOGGER.warning(
+        "Testing effect unknown site=%s reason=%s phase=%s method=%s path=%s status=%s resource_type=%s",
+        site,
+        reason,
+        phase,
+        method,
+        path,
+        status,
+        resource_type,
+    )
+    return ProviderMutationUnknownError("Testing product exchange completion is unknown.")
 
 
 class TestingProductCheckFailed(click.ClickException):
     pass
 
 
-class TestingQualificationInventoryStore(Protocol):
-    def read_environment_inventory(
-        self, *, context_name: str, instance_name: str
-    ) -> EnvironmentInventory: ...
-
-
-def previous_transient_attempts(store: object, context: GenericWebPostDeployContext) -> int:
-    try:
-        inventory = cast(TestingQualificationInventoryStore, store).read_environment_inventory(
-            context_name=context.context, instance_name=context.instance
-        )
-    except FileNotFoundError:
+def previous_transient_attempts(context: GenericWebPostDeployContext) -> int:
+    inventory = context.previous_inventory
+    if inventory is None:
         return 0
     if (
         inventory.artifact_identity is None
@@ -107,8 +171,8 @@ def checkpoint_testing_effect(guard: GenericWebPostDeployGuard, phase: str) -> N
     try:
         guard.checkpoint_effect(phase)
     except Exception as error:
-        raise ProviderMutationUnknownError(
-            "Testing qualification lost its effect fence."
+        raise _unknown_testing_effect(
+            "checkpoint_testing_effect", "effect_fence_lost", phase=phase
         ) from error
 
 
@@ -248,29 +312,244 @@ def _maintenance(
     if application_id != context.target_id:
         raise click.ClickException("Testing maintenance target changed during deployment.")
     checkpoint_testing_effect(guard, f"post_deploy_{action}")
-    result = execute_verireel_app_maintenance(
-        control_plane_root=root,
-        request=VeriReelAppMaintenanceRequest.model_validate(
-            {
-                "action": action,
-                "intent": intent,
-                "email": email,
-            }
-        ),
-        testing_target=RecordedTestingMaintenanceTarget(context.context, context.target_id),
-    )
+    try:
+        result = execute_verireel_app_maintenance(
+            control_plane_root=root,
+            request=VeriReelAppMaintenanceRequest.model_validate(
+                {
+                    "action": action,
+                    "intent": intent,
+                    "email": email,
+                }
+            ),
+            testing_target=RecordedTestingMaintenanceTarget(context.context, context.target_id),
+            execution_guard=guard,
+        )
+    except ProviderMutationUnknownError:
+        _unknown_testing_effect(
+            "maintenance", "maintenance_unobserved", phase=f"post_deploy_{action}"
+        )
+        raise
     if result.maintenance_status != "pass":
         raise click.ClickException(f"Testing {action} did not complete successfully.")
 
 
-def _goto(page: Page, base_url: str, path: str) -> None:
-    response = page.goto(f"{base_url}{path}", wait_until="domcontentloaded")
+def _goto(
+    page: Page,
+    base_url: str,
+    path: str,
+    guard: GenericWebPostDeployGuard | None = None,
+    exchanges: "_TestingPageExchanges | None" = None,
+) -> None:
+    try:
+        if exchanges is not None:
+            exchanges.finish()
+        response = page.goto(f"{base_url}{path}", wait_until="domcontentloaded")
+        if guard is not None:
+            if response is None or response.status >= 400:
+                raise _unknown_testing_effect(
+                    "goto", "navigation_response_unavailable", response=response
+                )
+            if exchanges is None:
+                raise _unknown_testing_effect("goto", "response_observer_unavailable")
+            exchanges.finish_response(response)
+    except ProviderMutationUnknownError:
+        raise
+    except Exception as error:
+        if guard is not None:
+            raise _unknown_testing_effect("goto", "navigation_failed") from error
+        raise
     if response is not None and response.status >= 500:
         raise click.ClickException("Testing product gateway is unavailable.")
     if response is None or response.status >= 400:
         raise TestingProductCheckFailed("Testing product route failed.")
     if urlparse(page.url).netloc != urlparse(base_url).netloc:
         raise TestingProductCheckFailed("Testing product route left the recorded origin.")
+
+
+class _TestingPageExchanges:
+    def __init__(self, page: Page, base_url: str, guard: GenericWebPostDeployGuard) -> None:
+        self.origin = urlparse(base_url)
+        self.page = page
+        self.guard = guard
+        self.requests: dict[BrowserRequest, str] = {}
+        self.redirects: set[BrowserRequest] = set()
+        self.completed: set[BrowserRequest] = set()
+        self.pending: set[BrowserRequest] = set()
+        self.closing = False
+        page.on("request", self.started_redirect)
+        page.on("requestfinished", lambda request: self.completed.add(request))
+        page.context.route(self.matches, self.capture)
+
+    def same_origin(self, url: str) -> bool:
+        parsed = urlparse(url)
+        return (parsed.scheme, parsed.netloc) == (self.origin.scheme, self.origin.netloc)
+
+    def matches(self, url: str) -> bool:
+        return self.same_origin(url) and _testing_request_path(url) != "unknown"
+
+    def enroll(self, request: BrowserRequest) -> str:
+        if request in self.requests:
+            return self.requests[request]
+        name = f"dynamic-request:{len(self.guard.exchanges)}"
+        self.requests[request] = name
+        self.guard.begin_exchange(name)
+        if (
+            request.method == "POST"
+            and urlparse(request.url).path == "/dashboard"
+            and "next-action" in request.headers
+        ):
+            self.guard.begin_exchange("qr-success")
+        return name
+
+    def started_redirect(self, request: BrowserRequest) -> None:
+        if request.redirected_from is not None and (
+            request.redirected_from in self.requests or self.matches(request.url)
+        ):
+            self.enroll(request)
+            self.redirects.add(request)
+
+    def acceptable(self, request: BrowserRequest, status: int, headers: dict[str, str]) -> bool:
+        if 200 <= status < 300:
+            return True
+        target = urlparse(urljoin(request.url, headers.get("location", "")))
+        return (
+            300 <= status < 400
+            and _is_testing_read(request)
+            and self.same_origin(target.geturl())
+            and target.path != "/api/auth/sign-up/email"
+            and not target.path.startswith("/v/")
+        )
+
+    def fetch_response(self, route: Route) -> APIResponse | None:
+        request = route.request
+        status: int | None = None
+        try:
+            response = route.fetch(max_redirects=0, max_retries=0, timeout=30_000)
+            status = response.status
+            response.body()
+            if not self.acceptable(request, status, response.headers):
+                _unknown_testing_effect(
+                    "capture", "response_unavailable_or_failed", request=request, status=status
+                )
+                return None
+            self.guard.complete_exchange(self.requests[request])
+            return response
+        except Exception:
+            _unknown_testing_effect(
+                "capture", "upstream_completion_unobserved", request=request, status=status
+            )
+            return None
+
+    def capture(self, route: Route) -> None:
+        if self.closing:
+            route.abort()
+            return
+        request = route.request
+        self.enroll(request)
+        self.pending.add(request)
+        try:
+            response = self.fetch_response(route)
+            try:
+                if response is None or self.closing:
+                    route.abort()
+                else:
+                    route.fulfill(response=response)
+            except Exception:
+                if response is None:
+                    _LOGGER.warning(
+                        "Testing request abort failed after an unknown upstream effect."
+                    )
+                else:
+                    _LOGGER.warning("Testing browser delivery failed after upstream completion.")
+        finally:
+            self.pending.discard(request)
+
+    def finish_response(self, response: BrowserResponse) -> None:
+        self.finish_request(response.request, time.monotonic() + 30)
+
+    def drain(self, deadline: float) -> None:
+        while self.pending and time.monotonic() < deadline:
+            self.page.wait_for_timeout(50)
+        if self.pending:
+            raise _unknown_testing_effect("drain", "upstream_completion_unobserved")
+
+    def finish_request(self, request: BrowserRequest, deadline: float) -> None:
+        self.drain(deadline)
+        name = self.requests.get(request)
+        if name is None:
+            raise _unknown_testing_effect("finish_request", "receipt_unavailable", request=request)
+        if self.guard.exchanges[name]:
+            return
+        if (
+            request not in self.redirects
+            or not self.same_origin(request.url)
+            or not _is_testing_read(request)
+        ):
+            raise _unknown_testing_effect(
+                "finish_request", "upstream_completion_unobserved", request=request
+            )
+        parent = request.redirected_from
+        if parent is None or not _is_testing_read(parent):
+            raise _unknown_testing_effect(
+                "finish_request", "redirect_receipt_unavailable", request=request
+            )
+        if parent in self.requests:
+            self.finish_request(parent, deadline)
+        if request not in self.completed and not request.failure:
+            try:
+                with self.page.expect_request_finished(
+                    predicate=lambda finished: finished == request,
+                    timeout=max(1, (deadline - time.monotonic()) * 1000),
+                ):
+                    pass
+            except Exception as error:
+                raise _unknown_testing_effect(
+                    "finish_request", "redirect_completion_unobserved", request=request
+                ) from error
+        response = request.response()
+        if (
+            request not in self.completed
+            or request.failure
+            or response is None
+            or not self.acceptable(request, response.status, response.headers)
+        ):
+            raise _unknown_testing_effect(
+                "finish_request",
+                "redirect_completion_unobserved",
+                request=request,
+                response=response,
+            )
+        self.guard.complete_exchange(name)
+
+    def finish(self) -> None:
+        deadline = time.monotonic() + 30
+        self.drain(deadline)
+        while pending := [
+            request for request, name in self.requests.items() if not self.guard.exchanges[name]
+        ]:
+            for request in pending:
+                self.finish_request(request, deadline)
+            if time.monotonic() >= deadline:
+                raise _unknown_testing_effect("finish", "exchange_completion_unobserved")
+
+    def close(self) -> None:
+        self.closing = True
+        try:
+            self.page.close()
+            self.page.context.unroute_all(behavior="wait")
+        except Exception as error:
+            raise _unknown_testing_effect("close", "browser_lost") from error
+        self.finish()
+
+
+def _finish_action(
+    response: BrowserResponse,
+    exchanges: _TestingPageExchanges,
+) -> None:
+    if response.status >= 400:
+        raise _unknown_testing_effect("finish_action", "action_http_error", response=response)
+    exchanges.finish_response(response)
 
 
 def verification_path(base_url: str, href: str) -> str:
@@ -301,27 +580,40 @@ def verify_verireel_testing_product(
         with sync_playwright() as playwright:
             browser = launch_testing_browser(playwright.chromium)
             try:
-                with browser.new_context() as browser_context:
+                with browser.new_context(service_workers="block") as browser_context:
                     page = browser_context.new_page()
+                    exchanges = _TestingPageExchanges(page, base_url, guard)
                     page.set_default_timeout(30_000)
                     try:
                         assert_verireel_testing_identity(base_url, context)
-                        _goto(page, base_url, "/sign-up")
+                        _goto(page, base_url, "/sign-up", guard, exchanges)
                         page.wait_for_load_state("networkidle")
                         page.get_by_label("Creator name").fill("Launchplane testing")
                         page.get_by_label("Email").fill(email)
                         page.get_by_placeholder("Create a strong password").fill(
                             "Quartz!Canopy$" + "-".join(str(randbelow(10)) for _ in range(18))
                         )
+                        exchanges.finish()
                         checkpoint_testing_effect(guard, "post_deploy_fixture_signup")
-                        page.get_by_role(
-                            "button", name=re.compile("create account and choose a plan", re.I)
-                        ).click()
+                        with page.expect_response(
+                            lambda response: (
+                                response.request.method == "POST"
+                                and response.url == f"{base_url}/api/auth/sign-up/email"
+                            )
+                        ) as signup:
+                            page.get_by_role(
+                                "button", name=re.compile("create account and choose a plan", re.I)
+                            ).click()
+                        _finish_action(signup.value, exchanges)
                         page.wait_for_url(f"{base_url}/billing", wait_until="domcontentloaded")
+                        exchanges.finish()
+                        expect(
+                            page.get_by_role("heading", level=1, name=re.compile("billing", re.I))
+                        ).to_be_visible(timeout=30_000)
                         assert_verireel_testing_identity(base_url, context)
                         # Exercise creator denial before turning this fixture into an admin.
                         for path in ("/site-config", "/site-config/billing"):
-                            _goto(page, base_url, path)
+                            _goto(page, base_url, path, guard, exchanges)
                             if urlparse(page.url).path in {path, "/sign-in", "/sign-up"}:
                                 raise TestingProductCheckFailed(
                                     "Creator admin denial did not preserve its session."
@@ -329,6 +621,7 @@ def verify_verireel_testing_product(
                             expect(page.get_by_text(email, exact=False).first).to_be_visible(
                                 timeout=30_000
                             )
+                        exchanges.finish()
                         _maintenance(
                             root,
                             context,
@@ -337,31 +630,50 @@ def verify_verireel_testing_product(
                             intent="stable-testing-remote-e2e-grant-sponsored",
                             email=email,
                         )
-                        _goto(page, base_url, "/dashboard")
+                        _goto(page, base_url, "/dashboard", guard, exchanges)
                         page.get_by_label("Video label").fill(f"Launchplane creator {stamp}")
                         page.get_by_label("Public verification label").fill(public_label)
                         page.get_by_label("Destination URL").fill(destination)
+                        exchanges.finish()
                         checkpoint_testing_effect(guard, "post_deploy_fixture_qr")
-                        page.get_by_role(
-                            "button", name=re.compile("create verification qr", re.I)
-                        ).click()
+                        with page.expect_response(
+                            lambda response: (
+                                response.request.method == "POST"
+                                and urlparse(response.url).netloc == urlparse(base_url).netloc
+                                and urlparse(response.url).path == "/dashboard"
+                                and "next-action" in response.request.headers
+                            )
+                        ) as qr:
+                            page.get_by_role(
+                                "button", name=re.compile("create verification qr", re.I)
+                            ).click()
+                        _finish_action(qr.value, exchanges)
                         link = page.locator("a[href*='/v/']").last
                         expect(link).to_be_visible(timeout=30_000)
                         href = link.get_attribute("href") or ""
                         # Only this fixture's QR can qualify; never inspect another user's record.
                         path = verification_path(base_url, href)
-                        with browser.new_context() as public_context:
+                        guard.complete_exchange("qr-success")
+                        exchanges.finish()
+                        with browser.new_context(service_workers="block") as public_context:
                             public_page = public_context.new_page()
+                            public_exchanges = _TestingPageExchanges(public_page, base_url, guard)
                             public_page.set_default_timeout(30_000)
-                            _goto(public_page, base_url, path)
-                            expect(
-                                public_page.get_by_text(public_label, exact=False)
-                            ).to_be_visible(timeout=30_000)
-                            expect(
-                                public_page.get_by_role("link", name=destination, exact=True)
-                            ).to_be_visible(timeout=30_000)
+                            try:
+                                _goto(public_page, base_url, path, guard, public_exchanges)
+                                expect(
+                                    public_page.get_by_text(public_label, exact=False)
+                                ).to_be_visible(timeout=30_000)
+                                public_exchanges.finish()
+                                expect(
+                                    public_page.get_by_role("link", name=destination, exact=True)
+                                ).to_be_visible(timeout=30_000)
+                                public_exchanges.finish()
+                            finally:
+                                public_exchanges.close()
                         assert_verireel_testing_identity(base_url, context)
                         evidence["creator_verification_status"] = "pass"
+                        exchanges.finish()
                         _maintenance(
                             root,
                             context,
@@ -371,7 +683,7 @@ def verify_verireel_testing_product(
                             email=email,
                         )
                         for path in ("/site-config", "/site-config/billing"):
-                            _goto(page, base_url, path)
+                            _goto(page, base_url, path, guard, exchanges)
                             if urlparse(page.url).path != path:
                                 raise TestingProductCheckFailed(
                                     "Admin could not reach the protected route."
@@ -391,11 +703,26 @@ def verify_verireel_testing_product(
                     except ProviderMutationUnknownError as error:
                         effect_unknown = error
                         raise
+                    except Exception as error:
+                        try:
+                            if page.is_closed() or not browser.is_connected():
+                                raise _unknown_testing_effect("verify_product", "browser_lost")
+                            exchanges.finish()
+                            guard.require_completed_exchanges()
+                        except Exception as completion_error:
+                            effect_unknown = _unknown_testing_effect(
+                                "verify_product", "exchange_completion_unobserved"
+                            )
+                            raise effect_unknown from completion_error
+                        raise error
                     finally:
                         # The existing cleanup intent also removes sponsored creator fixtures.
                         evidence["cleanup_status"] = "fail"
                         if not effect_unknown:
                             try:
+                                exchanges.finish()
+                                guard.require_completed_exchanges()
+                                exchanges.close()
                                 _maintenance(
                                     root,
                                     context,
@@ -480,11 +807,23 @@ def execute_verireel_testing_post_deploy(
         status = "pass"
         detail = "Testing creator and admin verification passed; fixture removed."
     except ProviderMutationUnknownError:
+        _LOGGER.warning(
+            "VeriReel testing qualification remains unknown phase=%s deployment=%s",
+            phase,
+            context.deployment_record_id,
+        )
         raise
     except Exception as error:
-        _LOGGER.warning(
-            "VeriReel testing qualification failed in %s (%s)", phase, type(error).__name__
-        )
+        if not all(guard.exchanges.values()):
+            _LOGGER.warning(
+                "VeriReel testing qualification remains unknown phase=%s deployment=%s",
+                phase,
+                context.deployment_record_id,
+            )
+        else:
+            _LOGGER.warning(
+                "VeriReel testing qualification failed in %s (%s)", phase, type(error).__name__
+            )
         status = "fail"
         evidence["failure_kind"] = (
             "product_check"
@@ -493,9 +832,7 @@ def execute_verireel_testing_post_deploy(
             else "transient"
         )
         if evidence["failure_kind"] == "transient":
-            evidence["transient_attempts"] = str(
-                previous_transient_attempts(record_store, context) + 1
-            )
+            evidence["transient_attempts"] = str(previous_transient_attempts(context) + 1)
         detail = f"Testing qualification failed in {phase}; no passing qualification is recorded."
     evidence["finished_at"] = utc_now_timestamp()
     return PostDeployUpdateEvidence(attempted=True, status=status, detail=detail, evidence=evidence)

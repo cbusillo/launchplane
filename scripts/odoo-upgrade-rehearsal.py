@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import re
 import urllib.error
 from urllib.parse import quote
 
@@ -110,10 +111,10 @@ def main() -> int:
             return 0
         assert draft is not None
         if args.mode == "apply" or (
-            draft.action == "validate-business" and args.mode == "readback"
+            draft.action in {"validate-business", "rebuild-final"} and args.mode == "readback"
         ):
             if evidence is None:
-                raise ValueError("Business readback requires its original saved review.")
+                raise ValueError("This readback requires its original saved review.")
             saved = json.loads(evidence.read_text())
             if saved["intent"] != intent or saved["plan"]["applied"] is not False:
                 raise ValueError("Review belongs to another intent.")
@@ -129,6 +130,36 @@ def main() -> int:
         if response.get("status") != "accepted":
             raise ValueError("The operation outcome is unverified.")
         result = response["result"]
+        if not isinstance(result, dict):
+            raise ValueError("The operation receipt is malformed.")
+        if result.get("state") == "checkpointed":
+            records = response.get("records")
+            operation = records.get("operation") if isinstance(records, dict) else None
+            trace = transport["public_trace_id"](response.get("trace_id"))
+            if (
+                args.mode != "apply"
+                or draft.action != "execute"
+                or set(result) != {"state", "original_key_required"}
+                or result.get("original_key_required") is not True
+                or not trace
+                or not isinstance(operation, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}", operation)
+            ):
+                raise ValueError("The response is not an execute checkpoint.")
+            print(
+                json.dumps(
+                    {
+                        "status": "checkpointed",
+                        "state": result["state"],
+                        "mode": args.mode,
+                        "action": draft.action,
+                        "trace_id": trace,
+                        "operation_id": operation,
+                        "original_key_required": True,
+                    }
+                )
+            )
+            return 1
         if result.get("product") != args.product or (
             draft.rehearsal_id and result.get("rehearsal_id") != draft.rehearsal_id
         ):
@@ -149,7 +180,10 @@ def main() -> int:
             and result.get("action", draft.action) != draft.action
         ):
             raise ValueError("The receipt describes a different rehearsal action.")
-        if draft.action == "retire-incomplete" and args.mode != "dry-run":
+        if (
+            draft.action in {"retire-incomplete", "abandon-validation"}
+            or draft.consumer_confirmation is not None
+        ) and args.mode != "dry-run":
             IncompleteRehearsalRetirementReceipt.model_validate(result)
         unobserved_readback = (
             args.mode == "readback"

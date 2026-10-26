@@ -15,7 +15,10 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane import runtime_platform_credentials
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.odoo_online_backup import OdooProdBackupCaptureEvidence
+from control_plane.contracts.odoo_online_backup import (
+    OdooProdBackupCaptureEvidence,
+    normalized_odoo_backup_root,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.workflows.ship import utc_now_timestamp
@@ -318,13 +321,12 @@ def _normalized_backup_root(raw_value: str) -> str:
     backup_root = _normalized_runtime_path(raw_value, label="ODOO_BACKUP_ROOT")
     if not backup_root:
         return ""
-    allowed_root = PurePosixPath(dokploy_post_deploy.DEFAULT_ODOO_BACKUP_ROOT)
-    backup_root_path = PurePosixPath(backup_root)
-    if backup_root_path != allowed_root and allowed_root not in backup_root_path.parents:
+    try:
+        return normalized_odoo_backup_root(backup_root)
+    except ValueError as error:
         raise click.ClickException(
             "Odoo prod backup workflow requires ODOO_BACKUP_ROOT to stay within the dedicated Launchplane backup root."
-        )
-    return backup_root
+        ) from error
 
 
 def _normalized_runtime_path(raw_value: str, *, label: str) -> str:

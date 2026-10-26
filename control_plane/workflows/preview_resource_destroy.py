@@ -1,16 +1,31 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import click
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy.api import JsonObject
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.disposable_lanes import (
+    DisposableLaneSafetyUnknown,
+    require_lane_target_ownership,
+)
 
 
 PreviewResourceType = Literal["application", "compose"]
 PreviewResourceDestroyStatus = Literal["pass", "fail"]
+PREVIEW_CLEANUP_SAFETY_UNKNOWN = "preview_cleanup_safety_unknown"
+
+
+@runtime_checkable
+class PreviewTargetOwnershipStore(Protocol):
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]: ...
+
+    def list_physical_provider_target_records(self) -> tuple[ProviderTargetRecord, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -28,6 +43,29 @@ class PreviewResourceDestroyResult:
 
 
 def destroy_dokploy_preview_resource(
+    *, record_store: object, context: str, instance: str, resource_id: str, **kwargs: Any
+) -> PreviewResourceDestroyResult:
+    resource_id = resource_id.strip()
+    try:
+        if not context or not instance or not isinstance(record_store, PreviewTargetOwnershipStore):
+            raise DisposableLaneSafetyUnknown("Preview target ownership inventory is unavailable.")
+        require_lane_target_ownership(
+            (
+                *record_store.list_dokploy_target_id_records(),
+                *record_store.list_physical_provider_target_records(),
+            ),
+            context=context,
+            instance=instance,
+            target_id=resource_id,
+        )
+    except DisposableLaneSafetyUnknown as error:
+        return PreviewResourceDestroyResult(
+            status="fail", cleanup_errors=(f"{PREVIEW_CLEANUP_SAFETY_UNKNOWN}: {error}",)
+        )
+    return destroy_dokploy_resource(resource_id=resource_id, **kwargs)
+
+
+def destroy_dokploy_resource(
     *,
     host: str,
     token: str,
@@ -39,7 +77,9 @@ def destroy_dokploy_preview_resource(
     missing_resource_is_clean: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     propagate_domain_lookup_error: bool = False,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> PreviewResourceDestroyResult:
+    guard = provider_mutation_guard or nullcontext
     normalized_resource_id = resource_id.strip()
     normalized_domain_host = domain_host.strip().lower()
     steps: list[PreviewResourceDestroyStep] = []
@@ -59,10 +99,11 @@ def destroy_dokploy_preview_resource(
         )
         steps.append(PreviewResourceDestroyStep("domain_lookup", normalized_resource_id))
         for domain_id in domain_ids:
-            if before_provider_mutation is not None:
-                before_provider_mutation("domain_delete")
-            domain_mutation_attempted = True
-            _delete_domain(host=host, token=token, domain_id=domain_id)
+            with guard():
+                if before_provider_mutation is not None:
+                    before_provider_mutation("domain_delete")
+                domain_mutation_attempted = True
+                _delete_domain(host=host, token=token, domain_id=domain_id)
             steps.append(PreviewResourceDestroyStep("domain_delete", domain_id))
     except click.ClickException as exc:
         if propagate_domain_lookup_error and not domain_mutation_attempted:
@@ -76,19 +117,26 @@ def destroy_dokploy_preview_resource(
                 cleanup_errors=tuple(cleanup_errors),
             )
 
+    resource_mutation_attempted = False
     try:
-        if before_provider_mutation is not None:
-            before_provider_mutation(f"{resource_type}_destroy")
-        _delete_preview_resource(
-            host=host,
-            token=token,
-            resource_type=resource_type,
-            resource_id=normalized_resource_id,
-            delete_volumes=delete_volumes,
-        )
+        with guard():
+            if before_provider_mutation is not None:
+                before_provider_mutation(f"{resource_type}_destroy")
+            resource_mutation_attempted = True
+            _delete_preview_resource(
+                host=host,
+                token=token,
+                resource_type=resource_type,
+                resource_id=normalized_resource_id,
+                delete_volumes=delete_volumes,
+            )
         steps.append(PreviewResourceDestroyStep(f"{resource_type}_delete", normalized_resource_id))
     except click.ClickException as exc:
-        if not (missing_resource_is_clean and _is_resource_delete_not_found(exc)):
+        if not (
+            missing_resource_is_clean
+            and resource_mutation_attempted
+            and _is_resource_delete_not_found(exc)
+        ):
             cleanup_errors.append(f"{resource_type} cleanup failed: {exc}")
         else:
             steps.append(

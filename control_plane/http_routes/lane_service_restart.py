@@ -26,6 +26,7 @@ from control_plane.http_routes.support import (
 )
 from control_plane.drivers import native_routes
 from control_plane.dokploy.api import redact_dokploy_log_line
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 from control_plane.lane_service_restart import (
     ServiceRestartAdapter,
     ServiceRestartRefused,
@@ -38,6 +39,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     LocalAdminIdentity,
     LocalOperatorIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -73,9 +75,13 @@ def register_service_restart_route(
         operator = isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity) or (
             isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
         )
-        # Reuse the existing runtime-operation authority; no grant is added.
+        director_testing = (
+            isinstance(identity, LocalOperatorIdentity)
+            and director_agent_identity(identity)
+            and payload.instance == "testing"
+        )
         if payload.mode != "dry-run":
-            allowed = native_routes.native_driver_route_authorization_allows(
+            allowed = director_testing or native_routes.native_driver_route_authorization_allows(
                 endpoint=restart_lane_service,
                 authorization_allows=dependencies.authorization_allows,
                 identity=identity,
@@ -188,6 +194,14 @@ def register_service_restart_route(
                     "restart_identity_unavailable", "Recorded restart identity is unavailable.", 404
                 )
                 raise AssertionError
+            except ServiceRestartRefused as error:
+                if recovering:
+                    refuse(
+                        "mutation_reconciliation_required",
+                        "Original restart is unsettled; the lane or identity is temporarily unavailable. Preserve the original request.",
+                    )
+                refuse("restart_refused", str(error))
+                raise AssertionError
             except (ValueError, click.ClickException, OSError):
                 if recovering:
                     refuse(
@@ -238,6 +252,7 @@ def register_service_restart_route(
                 token=token,
                 health_url=health_url,
                 trace_id=trace,
+                require_disposable=director_testing,
             )
             try:
                 result = run_durable_provider_operation(
@@ -251,11 +266,14 @@ def register_service_restart_route(
                     adapter=adapter,
                     allow_mutation=not recovering and payload.mode == "apply",
                 )
-            except ServiceRestartRefused:
+            except DisposableLaneSafetyUnknown:
                 refuse(
-                    "restart_refused",
-                    "Service identity or release ownership changed before restart.",
+                    "disposable_lane_safety_unknown",
+                    "Restart requires resolved use, target ownership and resource protections. Inspect /v1/disposable-lanes/observations.",
                 )
+                raise AssertionError
+            except ServiceRestartRefused as error:
+                refuse("restart_refused", str(error))
                 raise AssertionError
             if result.status in {"completed", "replayed", "adopted"}:
                 response = LaneServiceRestartResponse.model_validate(result.response_payload)

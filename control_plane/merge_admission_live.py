@@ -302,6 +302,7 @@ class LiveMergeAdmissionEvaluator:
                     transport=self.technical_check_client.transport,
                     branch_refresh_store=optional_merge_train_branch_refresh_read_store(self.store),
                     repository_policy=repository_policy,
+                    source_screening=candidate_record.ordinary_job_binding is None,
                 )
             snapshot = self._read_snapshot(
                 snapshot_reader,

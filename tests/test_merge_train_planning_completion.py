@@ -9,6 +9,7 @@ from typing import Any, cast
 from unittest import TestCase
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlsplit
 
 import click
 from github_plan_status import DEFAULT_STATUS_LABELS
@@ -20,6 +21,7 @@ from control_plane.merge_train_pr_feedback import (
     deliver_merge_train_pr_feedback_record,
     PLANNING_RECEIPT_PREFIX,
     _PLANNING_NOTE_START,
+    queue_landing_planning_feedback,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
@@ -88,6 +90,12 @@ class PlanningProvider:
         self.drop_project_write = False
         self.missing_project_item = False
         self.references = [7]
+        self.pull_title = ""
+        self.pull_author = {"databaseId": 99, "login": "author", "__typename": "User"}
+        self.pull_number = 9
+        self.pull_body = ""
+        self.pull_comments: list[dict[str, Any]] = []
+        self.timeline: list[dict[str, Any]] = []
         self.merged = True
         self.base_branch = "main"
         self.default_branch: Any = "main"
@@ -107,6 +115,9 @@ class PlanningProvider:
                             "defaultBranchRef": {"name": self.default_branch},
                             "object": {"text": json.dumps(self.config)},
                             "pullRequest": {
+                                "author": self.pull_author,
+                                "title": self.pull_title,
+                                "body": self.pull_body,
                                 "merged": self.merged,
                                 "mergedAt": self.merged_at,
                                 "baseRefName": self.base_branch,
@@ -173,6 +184,14 @@ class PlanningProvider:
             }
         if path == "/users/example":
             return {"type": "User"}
+        if path.startswith(f"/repos/{_REPO}/issues/{self.pull_number}/comments?"):
+            query = parse_qs(urlsplit(path).query)
+            page, per_page = int(query["page"][0]), int(query["per_page"][0])
+            return copy.deepcopy(self.pull_comments[(page - 1) * per_page : page * per_page])
+        if path.startswith(f"/repos/{_REPO}/issues/{self.pull_number}/timeline?"):
+            query = parse_qs(urlsplit(path).query)
+            page, per_page = int(query["page"][0]), int(query["per_page"][0])
+            return copy.deepcopy(self.timeline[(page - 1) * per_page : page * per_page])
         if "/comments?" in path:
             return copy.deepcopy(self.comments)
         if "/dependencies/blocked_by?" in path:
@@ -229,7 +248,11 @@ class PlanningCompletionTests(TestCase):
         self.addCleanup(self.comment.stop)
 
     def record(
-        self, *, recorded_at: str = "2026-10-01T00:00:00Z", base_branch: str = "main"
+        self,
+        *,
+        recorded_at: str = "2026-10-01T00:00:00Z",
+        base_branch: str = "main",
+        planning_author_ids: tuple[int, ...] = (_BOT,),
     ) -> MergeTrainPrFeedbackRecord:
         return build_merge_train_pr_feedback_record(
             request=MergeTrainPrFeedbackEnvelope(
@@ -244,7 +267,7 @@ class PlanningCompletionTests(TestCase):
             token="fixture",
             recorded_at=recorded_at,
             response_trace_id="test",
-            planning_author_ids=(_BOT,),
+            planning_author_ids=planning_author_ids,
         )
 
     def test_native_completion_cleans_labels_and_persists_readback_without_driver(self) -> None:
@@ -272,6 +295,41 @@ class PlanningCompletionTests(TestCase):
         )
         self.assertEqual(retry.delivery_status, "delivered")
         self.assertEqual(self.provider.writes, writes)
+
+    def test_native_landing_without_trusted_authors_still_queues_completion_review(self) -> None:
+        policy_record = _policy_record(
+            (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        policy = policy_record.policy.policies[0]
+        _, landing = _records((_entry(9, 1),), repository=_REPO)
+        landing = landing.model_copy(
+            update={
+                "landing_plan": landing.landing_plan.model_copy(
+                    update={
+                        "entries": tuple(
+                            entry.model_copy(
+                                update={"status": "merged", "merge_commit_sha": "landed"}
+                            )
+                            for entry in landing.landing_plan.entries
+                        )
+                    }
+                )
+            }
+        )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            queue_landing_planning_feedback(
+                store=store, landing_record=landing, repository_policy=policy, trace_id="no-authors"
+            )
+            queued = store.list_merge_train_pr_feedback_records(repository=_REPO)
+            self.assertEqual(len(queued), 1)
+            reviewed = deliver_merge_train_pr_feedback_record(
+                record=queued[0], token="fixture", attempted_at="2026-10-17T00:00:00Z"
+            )
+        self.assertEqual(reviewed.delivery_status, "failed")
+        self.assertFalse(reviewed.retryable)
+        self.assertTrue(_receipt(reviewed)["review_required"])
+        self.assertFalse(self.provider.writes)
 
     def test_scheduler_landing_reconciles_before_persisting_completed_feedback(self) -> None:
         policy_record = _policy_record(
@@ -317,6 +375,8 @@ class PlanningCompletionTests(TestCase):
     def test_direct_controller_landing_queues_cleanup_for_idle_worker_without_caller_return(
         self,
     ) -> None:
+        self.provider.references = []
+        self.provider.pull_body = "Refs #7"
         policy_record = _policy_record(
             (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
         )
@@ -764,13 +824,18 @@ class PlanningCompletionTests(TestCase):
                         },
                     )
 
-    def test_failed_metadata_or_project_readback_is_never_delivered(self) -> None:
+    def test_failed_readback_never_certifies_completion_or_publishes_an_unknown_write(self) -> None:
         self.provider.drop_label_write = True
-        self.assertEqual(self.record().delivery_status, "failed")
+        partial = self.record()
+        self.assertEqual(partial.delivery_status, "failed")
+        self.assertFalse(_receipt(partial)["ok"])
+        self.comment_mock.assert_called_once()
+        self.comment_mock.reset_mock()
         self.provider.drop_label_write = False
         self.provider.config = {"planning": {"projects": {"default_project": 2}}}
         self.provider.drop_project_write = True
         self.assertEqual(self.record().delivery_status, "failed")
+        self.comment_mock.assert_not_called()
         self.assertEqual(self.provider.project_status, "active")
         self.provider.drop_project_write = False
         record = self.record()
@@ -809,6 +874,15 @@ class PlanningCompletionTests(TestCase):
         self.assertFalse(self.provider.writes)
         self.provider.references = []
         self.assertEqual(self.record().delivery_status, "delivered")
+        self.assertFalse(self.provider.writes)
+
+    def test_nonplanning_source_needs_no_automation_author_grant(self) -> None:
+        self.provider.issue["labels"] = [{"name": "bug"}]
+
+        record = self.record(planning_author_ids=())
+
+        self.assertEqual(record.delivery_status, "delivered")
+        self.assertTrue(_receipt(record)["ok"])
         self.assertFalse(self.provider.writes)
 
     def test_reopened_projection_has_a_bounded_pending_window(self) -> None:

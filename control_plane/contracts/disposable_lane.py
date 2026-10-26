@@ -26,7 +26,7 @@ class DisposableLaneSafety(BaseModel):
     context: str = Field(min_length=1)
     instance: str = Field(min_length=1)
     observed_by: str = Field(min_length=1)
-    observer_kind: Literal["director_agent", "director_agent_preview_cleanup"]
+    observer_kind: str
     binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     usage: Literal["unknown", "unused", "in_use"] = "unknown"
     data: Literal["unknown", "reproducible", "only_copy"] = "unknown"
@@ -79,6 +79,15 @@ class DisposableLaneObservationRequest(BaseModel):
     isolation_evidence: str = ""
     replaces_operation_id: str = ""
     lifetime_seconds: int = Field(default=300, gt=0, le=MAX_DISPOSABLE_LANE_SAFETY_SECONDS)
+    include_application_resources: bool = False
+
+    @model_validator(mode="after")
+    def validate_application_resource_collection(self) -> "DisposableLaneObservationRequest":
+        if self.include_application_resources and (
+            self.mode != "collect" or self.instance != "testing" or self.preview_id
+        ):
+            raise ValueError("Application resource observation requires testing collection.")
+        return self
 
 
 class DisposableTestingReplacementPreparation(BaseModel):

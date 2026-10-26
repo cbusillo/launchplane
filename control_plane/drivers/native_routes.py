@@ -139,22 +139,6 @@ def _text_value(value: Any) -> str:
     return str(value)
 
 
-def _fastapi_route_paths_by_method(app: object, method: str) -> frozenset[str]:
-    normalized_method = method.upper()
-    route_paths: set[str] = set()
-    for route in _iterable_values(getattr(app, "routes", ())):
-        route_path = getattr(route, "path", None)
-        route_methods = getattr(route, "methods", None)
-        if not isinstance(route_path, str) or route_methods is None:
-            continue
-        methods = {
-            _text_value(route_method).upper() for route_method in _iterable_values(route_methods)
-        }
-        if normalized_method in methods:
-            route_paths.add(route_path)
-    return frozenset(route_paths)
-
-
 def _driver_route_metadata_from_descriptors() -> dict[str, _DriverRouteMetadata]:
     route_metadata: dict[str, _DriverRouteMetadata] = {}
     for descriptor in list_driver_descriptors():

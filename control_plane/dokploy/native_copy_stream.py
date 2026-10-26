@@ -6,6 +6,7 @@ existing SSH identity stays inside Dokploy. Raw terminal output is never logged.
 """
 
 import base64
+from control_plane._filestore_capture import FILESTORE_TAR_WARNING_LIBRARY
 from collections.abc import Callable, Iterator
 import json
 import hashlib
@@ -20,12 +21,47 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import uuid
 import click
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
+from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_failure_evidence
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 from websockets.sync.client import connect
+
+NATIVE_PROGRAM_SOURCE_SITE_LIMIT = 8
+CAPABILITY_FAILURE_SITES_MARKER = "testing_resources_failure_sites"
+NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS = 20
+NATIVE_CONTAINER_SPEC_FIELDS = (
+    "Image",
+    "Labels",
+    "Command",
+    "Args",
+    "Hostname",
+    "Env",
+    "Dir",
+    "User",
+    "Groups",
+    "Privileges",
+    "Init",
+    "StopSignal",
+    "TTY",
+    "OpenStdin",
+    "ReadOnly",
+    "Mounts",
+    "StopGracePeriod",
+    "Healthcheck",
+    "Hosts",
+    "DNSConfig",
+    "Secrets",
+    "Configs",
+    "Isolation",
+    "Sysctls",
+    "CapabilityAdd",
+    "CapabilityDrop",
+    "Ulimits",
+    "OomScoreAdj",
+)
 
 
 class NativeSourceAuthorizationDenied(DurableOperationAuthorizationDeniedError):
@@ -43,9 +79,67 @@ class NativeSourceUnavailable(click.ClickException, ValueError):
 class NativeProgramFailed(NativeSourceUnavailable):
     """A fixed program returned a failed frame; this proves no writer exclusion."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        predicate: str = "",
+        kind: str = "unavailable",
+        program: str = "",
+        program_sites: object = None,
+        container_fields: object = None,
+    ) -> None:
+        super().__init__(message)
+        line_count = len(program.splitlines())
+        self.program_sites: tuple[int, ...] = (
+            tuple(program_sites)
+            if isinstance(program_sites, list)
+            and 0 < len(program_sites) <= NATIVE_PROGRAM_SOURCE_SITE_LIMIT
+            and all(type(line) is int and 1 <= line <= line_count for line in program_sites)
+            else ()
+        )
+        self.program_sha256 = (
+            hashlib.sha256(program.encode()).hexdigest() if self.program_sites else ""
+        )
+        self.container_fields: tuple[tuple[str, str], ...] = (
+            tuple((item["field"], item["difference"]) for item in container_fields)
+            if self.program_sites
+            and isinstance(container_fields, list)
+            and 0 < len(container_fields) <= len(NATIVE_CONTAINER_SPEC_FIELDS) + 1
+            and all(
+                isinstance(item, dict)
+                and set(item) == {"field", "difference"}
+                and isinstance(item["field"], str)
+                and item["field"] in (*NATIVE_CONTAINER_SPEC_FIELDS, "other")
+                and isinstance(item["difference"], str)
+                and item["difference"] in ("service_only", "task_only", "unequal")
+                for item in container_fields
+            )
+            and len({item["field"] for item in container_fields}) == len(container_fields)
+            else ()
+        )
+        self.has_diagnostic = predicate in ReadbackPredicate and kind in {"refused", "unavailable"}
+        self.evidence = readback_failure_evidence(
+            {
+                "readback_failed_predicate": predicate
+                if predicate in ReadbackPredicate
+                else ReadbackPredicate.NATIVE_READ,
+                "readback_failure_kind": kind if self.has_diagnostic else "unavailable",
+            }
+        )
+        self.predicate = ReadbackPredicate(self.evidence["readback_failed_predicate"])
+        self.unavailable = self.evidence["readback_failure_kind"] == "unavailable"
+        self.code = self.predicate.value + "_" + self.evidence["readback_failure_kind"]
+
 
 class NativeSourceExceedsBound(NativeSourceUnavailable):
     """A determinate capture limit; recovery must not repeat this source read."""
+
+
+def native_failure_diagnostic(error: BaseException) -> str:
+    return (
+        " " + error.code if isinstance(error, NativeProgramFailed) and error.has_diagnostic else ""
+    )
 
 
 class NativeUploadRejected(NativeSourceUnavailable):
@@ -222,7 +316,16 @@ def _read_program(
         if value.get("type") == "denied":
             raise NativeSourceAuthorizationDenied("The registered source refused the read.")
         if value.get("type") == "failed":
-            raise NativeProgramFailed("The registered source read did not pass.")
+            predicate = value.get("predicate")
+            kind = value.get("kind")
+            raise NativeProgramFailed(
+                "The registered source read did not pass.",
+                predicate=predicate if isinstance(predicate, str) else "",
+                kind=kind if isinstance(kind, str) else "unavailable",
+                program=program,
+                program_sites=value.get("sites"),
+                container_fields=value.get("container_fields"),
+            )
         if value.get("type") == "source_exceeds_bound":
             raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")
         if value.get("type") == "upload_failed":
@@ -383,7 +486,7 @@ except BaseException:
 """.replace("__CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES))
 
 
-def _read_remote(
+def run_managed_server_program(
     *,
     host: str,
     token: str,
@@ -437,7 +540,12 @@ def _read_remote(
         raise NativeSourceUnavailable("The provider source stream is incomplete.") from None
 
 
-NATIVE_ODOO_SOURCE_READ_PROGRAM = r"""
+_read_remote = run_managed_server_program
+
+
+NATIVE_ODOO_SOURCE_READ_PROGRAM = (
+    FILESTORE_TAR_WARNING_LIBRARY
+    + r"""
 import base64, hashlib, json, os, re, subprocess, sys, threading
 
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
@@ -499,17 +607,18 @@ def validate():
 def stream(part, arguments):
     digest=hashlib.sha256()
     size=0
-    # Drain stderr without logging or returning it, retaining only a bounded
-    # private prefix for an explicit authorization-refusal classification.
     with subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE) as process:
         errors=bytearray()
+        truncated=False
         def drain():
+            nonlocal truncated
             while True:
                 chunk=process.stderr.read(4096)
                 if not chunk:
                     return
-                if len(errors)<16384:
-                    errors.extend(chunk[:16384-len(errors)])
+                remaining=16384-len(errors)
+                truncated=truncated or len(chunk)>remaining
+                errors.extend(chunk[:remaining])
         reader=threading.Thread(target=drain,daemon=True)
         reader.start()
         try:
@@ -526,7 +635,7 @@ def stream(part, arguments):
             reader.join()
             if status and denied(bytes(errors)):
                 raise ReadDenied()
-            if status!=0 or not size:
+            if (status and not (part=='filestore' and filestore_tar_warning_only(status,bytes(errors),truncated))) or not size:
                 raise RuntimeError('Source export failed')
         except BaseException:
             process.kill()
@@ -541,7 +650,7 @@ try:
     database=['docker','exec',source['database_container'],'sh','-c',
         'exec timeout --signal=TERM --kill-after=5s 180s pg_dump --host=/var/run/postgresql --username="$POSTGRES_USER" --lock-wait-timeout=10s --format=custom --no-owner -- "$1"',
         '_',source['database_name']]
-    filestore=['docker','exec',source['web_container'],'timeout','--signal=TERM','--kill-after=5s','180s','tar','--create','--gzip','--file=-',
+    filestore=['docker','exec',source['web_container'],'env','LC_ALL=C','timeout','--signal=TERM','--kill-after=5s','180s','tar','--create','--gzip','--file=-',
         '--directory',source['filestore_path'],'.']
     if spec['mode']=='probe':
         checks=[['docker','exec',source['database_container'],'sh','-c',
@@ -568,5 +677,6 @@ except BaseException:
     emit({'type':'failed'})
     raise SystemExit(1)
 """.replace("__RUNTIME_IDENTITY_ENV_KEY__", RUNTIME_IDENTITY_ENV_KEY).replace(
-    "__ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES)
+        "__ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES)
+    )
 )

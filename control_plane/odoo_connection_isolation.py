@@ -29,12 +29,22 @@ class ConnectionIsolationPreconditionFailed(click.ClickException):
         )
 
 
+NEUTRALIZED_FLAG = "database.is_neutralized"
+SETTINGS_ADDON_STORED_TRUE = "True"
+
 # Invalid URI schemes make requests reject the URL before opening a connection,
 # including for an account recreated by an addon or a synchronous SMS call.
 CONNECTION_ISOLATION_PARAMETERS = {
-    "database.is_neutralized": "true",
+    NEUTRALIZED_FLAG: "true",
     "sms.endpoint": "disabled://sms",
     "iap.endpoint": "disabled://iap",
+}
+CONNECTION_ISOLATION_ACCEPTED_VALUES = {
+    **{key: (value,) for key, value in CONNECTION_ISOLATION_PARAMETERS.items()},
+    NEUTRALIZED_FLAG: (
+        CONNECTION_ISOLATION_PARAMETERS[NEUTRALIZED_FLAG],
+        SETTINGS_ADDON_STORED_TRUE,
+    ),
 }
 
 # Discover only these known carrier credential columns. Missing optional carrier
@@ -109,10 +119,13 @@ def connection_isolation(cursor, *, apply):
                 " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 (key, value),
             )
+    accepted_pairs = [
+        (key, value) for key, values in ACCEPTED_ISOLATION_VALUES.items() for value in values
+    ]
     cursor.execute(
-        "SELECT count(*) FROM ir_config_parameter WHERE (key, value) IN "
-        "((%s, %s), (%s, %s), (%s, %s))",
-        tuple(item for pair in parameters.items() for item in pair),
+        "SELECT count(*) FROM ir_config_parameter WHERE (key, value) IN ("
+        + ", ".join(["(%s, %s)"] * len(accepted_pairs)) + ")",
+        tuple(item for pair in accepted_pairs for item in pair),
     )
     refused = []
     if cursor.fetchone()[0] != len(parameters):
@@ -188,6 +201,7 @@ def connection_isolation(cursor, *, apply):
 def connection_isolation_library() -> str:
     return (
         f"ISOLATION_PARAMETERS = {CONNECTION_ISOLATION_PARAMETERS!r}\n"
+        f"ACCEPTED_ISOLATION_VALUES = {CONNECTION_ISOLATION_ACCEPTED_VALUES!r}\n"
         f"CARRIER_COLUMNS = {CARRIER_CREDENTIAL_COLUMNS!r}\n" + CONNECTION_ISOLATION_LIBRARY
     )
 

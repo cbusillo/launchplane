@@ -1,5 +1,6 @@
 """Run the service-owned release with real storage, backup gates and fake providers."""
 
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,12 +13,17 @@ import click
 from control_plane.client_release import (
     ClientReleaseStep,
     advance_client_releases,
-    StandingReleaseReviewBackoff,
+    ClientReleaseBackoff,
     read_client_release_run,
     release_start_for_acceptance,
     client_release_grant,
     client_release_grant_allows,
     _generic_web_release_authority_allows,
+)
+from control_plane.client_release_backup_continuation import (
+    BackupContinuationReview,
+    BackupContinuationRefused,
+    continue_release_backup,
 )
 from control_plane.contracts.product_profile_record import ProductOwnerProfile
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
@@ -29,7 +35,9 @@ from control_plane.contracts.release_review import (
     ReleaseDecision,
 )
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
+from control_plane.contracts.durable_operation_authorization import DurableOperationCancellation
 from control_plane.workflows.runtime_identity_health import HealthcheckPass
+from control_plane.odoo_business_hours import BusinessHoursHeld
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
 from control_plane.client_release import CLIENT_RELEASE_IDEMPOTENCY_SCOPE
@@ -74,6 +82,26 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             }
         )
         self.store.write_product_profile_record(self.profile)
+        for key, binding in source.provider_targets.items():
+            source.provider_targets[key] = binding.model_copy(update={"target_id": "testing-app"})
+            self.store.write_provider_target_record(source.provider_targets[key])
+        testing = source.read_environment_inventory(
+            context_name=self.profile.lanes[0].context, instance_name="testing"
+        )
+        prior = source.read_deployment_record(testing.deployment_record_id)
+        assert prior.deployed_target is not None and prior.resolved_target is not None
+        source.write_deployment_record(
+            prior.model_copy(
+                update={
+                    "deployed_target": prior.deployed_target.model_copy(
+                        update={"target_id": "testing-app"}
+                    ),
+                    "resolved_target": prior.resolved_target.model_copy(
+                        update={"target_id": "testing-app"}
+                    ),
+                }
+            )
+        )
         for inventory in source.inventories.values():
             sha = BASE if inventory.instance == "prod" else HEAD
             deployment = source.deployments[inventory.deployment_record_id]
@@ -260,6 +288,273 @@ class GenericWebClientReleaseTests(unittest.TestCase):
     def advance(self) -> tuple[str, ...]:
         return advance_client_releases(store=self.store, control_plane_root=self.root)
 
+    def stopped_precapture_backup(self) -> tuple[ReleaseReviewDecisionRecord, str]:
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        (operation_id,) = self.advance()
+        with patch(
+            "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
+            side_effect=ValueError("capture credential unbound"),
+        ):
+            result = run_production_backup_gate_operation_worker_once(
+                record_store=self.store, control_plane_root_path=self.root, lease_owner="test"
+            )
+        self.assertTrue(result.terminal_write_committed)
+        self.assertEqual(self.advance(), ())
+        return accepted, operation_id
+
+    def continue_backup(
+        self, accepted: ReleaseReviewDecisionRecord, *, digest: str = "", apply: bool = False
+    ) -> Any:
+        with patch(
+            "control_plane.client_release_backup_continuation.guest_capture_metadata",
+            return_value=(),
+        ):
+            return continue_release_backup(
+                store=self.store,
+                root=self.root,
+                product=self.profile.product,
+                decision_record_id=accepted.record_id,
+                review=BackupContinuationReview(
+                    reason="Approved capture enrollment is now qualified",
+                    expected_digest=digest,
+                    apply=apply,
+                ),
+                actor="local:release-agent",
+                trace_id="continuation-trace",
+            )
+
+    def test_precapture_continuation_preserves_acceptance_and_completes_drill(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        original = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        original_backup = self.store.read_backup_gate_record(original.backup_record_id)
+        plan = self.continue_backup(accepted)
+        assert original.authorization is not None
+        self.assertEqual(
+            self.store.read_verireel_prod_backup_gate_operation_record(operation_id), original
+        )
+        self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        resumed = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        self.assertEqual(resumed.previous_attempt, original)
+        self.assertEqual(resumed.previous_backup, original_backup)
+        self.assertEqual(resumed.authorization, original.authorization)
+        self.assertEqual(resumed.status, "pending")
+        with patch(
+            "control_plane.client_release.ROLLBACK_DRILL_CODE_CHANGED_AT", "2000-01-01T00:00:00Z"
+        ):
+            self.capture()
+            self.assertTrue(self.advance())
+            self.assertTrue(self.advance())
+            self.assertTrue(self.advance())
+            self.capture()
+            self.assertTrue(self.advance())
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "passed")
+        self.assertEqual(
+            self.store.read_verireel_prod_backup_gate_operation_record(
+                operation_id
+            ).previous_backup,
+            original_backup,
+        )
+        self.assertTrue(all(step.status == "pass" for step in run.steps))
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=accepted.product, record_id=accepted.record_id
+            ),
+            accepted,
+        )
+        replay = self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(replay.status, "replayed")
+        self.assertEqual(self.advance(), ())
+
+    def test_precapture_continuation_refuses_unknown_capture_and_stale_review(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        original = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        original_backup = self.store.read_backup_gate_record(original.backup_record_id)
+        plan = self.continue_backup(accepted)
+        assert original.authorization is not None
+        updates: tuple[dict[str, Any], ...] = (
+            {"progress_evidence": {}},
+            {"progress_evidence": {"provider_stage": "snapshot"}},
+            {"progress_evidence": {"provider_stage": "backup_preflight", "snapshot_name": "saved"}},
+            {"error_code": "backup_source_lock_lost"},
+            {"status": "running"},
+            {
+                "status": "cancelled",
+                "phase": "cancelled",
+                "error_code": "",
+                "error_message": "",
+                "cancellation": DurableOperationCancellation(
+                    reason="Release stopped",
+                    cancelled_at=original.finished_at,
+                    caller=original.authorization.caller,
+                ),
+            },
+        )
+        for update in updates:
+            with self.subTest(update=update):
+                changed = original.model_copy(update=update)
+                changed_backup = original_backup.model_copy(
+                    update={
+                        "evidence": {
+                            **changed.progress_evidence,
+                            "error_message": changed.error_message,
+                        }
+                    }
+                )
+                self.store.write_verireel_prod_backup_gate_operation_record(changed)
+                self.store.write_backup_gate_record(changed_backup)
+                with self.assertRaises(BackupContinuationRefused) as refusal:
+                    self.continue_backup(accepted)
+                self.assertEqual(refusal.exception.code, "backup_capture_outcome_not_proven_absent")
+                with self.assertRaises(BackupContinuationRefused) as refusal:
+                    self.store.continue_precapture_backup_operation(
+                        expected=changed,
+                        expected_backup=changed_backup,
+                        resumed=changed.model_copy(
+                            update={
+                                "previous_attempt": changed,
+                                "previous_backup": changed_backup,
+                                "status": "pending",
+                                "phase": "created",
+                            }
+                        ),
+                    )
+                self.assertEqual(refusal.exception.code, "backup_capture_outcome_not_proven_absent")
+                self.assertEqual(
+                    self.store.read_verireel_prod_backup_gate_operation_record(operation_id),
+                    changed,
+                )
+        self.store.write_backup_gate_record(original_backup)
+        self.store.write_verireel_prod_backup_gate_operation_record(
+            original.model_copy(update={"runner_trace_id": "changed-evidence"})
+        )
+        with self.assertRaises(BackupContinuationRefused) as refusal:
+            self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(refusal.exception.code, "backup_continuation_review_changed")
+
+    def test_precapture_continuation_refuses_changed_authority_and_acceptance(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        original = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        assert original.authorization is not None
+        self.store.write_verireel_prod_backup_gate_operation_record(
+            original.model_copy(
+                update={
+                    "authorization": original.authorization.model_copy(
+                        update={
+                            "caller": original.authorization.caller.model_copy(
+                                update={
+                                    "github_id": original.authorization.caller.github_id + 1,
+                                }
+                            ),
+                        }
+                    ),
+                }
+            )
+        )
+        with self.assertRaises(BackupContinuationRefused) as refusal:
+            self.continue_backup(accepted)
+        self.assertEqual(refusal.exception.code, "backup_acceptance_provenance_invalid")
+        self.store.write_verireel_prod_backup_gate_operation_record(original)
+        plan = self.continue_backup(accepted)
+        self.switch("held")
+        with self.assertRaises(BackupContinuationRefused) as refusal:
+            self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(refusal.exception.code, "release_acceptance_no_longer_current")
+        self.switch("promote_with_rollback_drill")
+        self.accept("changes_requested", suffix="-new")
+        with self.assertRaises(BackupContinuationRefused) as refusal:
+            self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(refusal.exception.code, "release_acceptance_no_longer_current")
+        operation = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        self.assertIsNone(operation.previous_attempt)
+
+    def test_precapture_continuation_compare_and_swap_preserves_changed_operation(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        plan = self.continue_backup(accepted)
+        commit = self.store.continue_precapture_backup_operation
+
+        def race(**kwargs: Any) -> bool:
+            current = kwargs["expected"].model_copy(update={"runner_trace_id": "racing-write"})
+            self.store.write_verireel_prod_backup_gate_operation_record(current)
+            return commit(**kwargs)
+
+        with patch.object(self.store, "continue_precapture_backup_operation", side_effect=race):
+            with self.assertRaises(BackupContinuationRefused) as refusal:
+                self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(refusal.exception.code, "backup_continuation_review_changed")
+        self.assertEqual(
+            self.store.read_verireel_prod_backup_gate_operation_record(
+                operation_id
+            ).runner_trace_id,
+            "racing-write",
+        )
+
+    def test_concurrent_identical_continuation_replays_the_winning_receipt(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        plan = self.continue_backup(accepted)
+        commit = self.store.continue_precapture_backup_operation
+
+        def race(**kwargs: Any) -> bool:
+            self.assertTrue(commit(**kwargs))
+            return commit(**kwargs)
+
+        with patch.object(self.store, "continue_precapture_backup_operation", side_effect=race):
+            result = self.continue_backup(accepted, digest=plan.review_digest, apply=True)
+        self.assertEqual(result.status, "replayed")
+        current = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        assert current.previous_attempt is not None
+        self.assertIsNone(current.previous_attempt.previous_attempt)
+
+    def test_continuation_reports_bounded_prerequisite_causes_without_requeueing(self) -> None:
+        accepted, operation_id = self.stopped_precapture_backup()
+        original = self.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        cases: tuple[tuple[str, Exception, str], ...] = (
+            (
+                "guest_capture_metadata",
+                ValueError("private credential failure"),
+                "backup_capture_credential_unavailable",
+            ),
+            (
+                "resolve_production_backup_binding",
+                ValueError("private target failure"),
+                "backup_authority_unavailable",
+            ),
+            (
+                "require_release_window",
+                BusinessHoursHeld("private calendar failure"),
+                "release_window_held",
+            ),
+        )
+        for target, error, code in cases:
+            with (
+                self.subTest(target=target),
+                patch(
+                    "control_plane.client_release_backup_continuation.guest_capture_metadata",
+                    return_value=(),
+                ),
+                patch(
+                    f"control_plane.client_release_backup_continuation.{target}", side_effect=error
+                ),
+            ):
+                with self.assertRaises(BackupContinuationRefused) as refusal:
+                    continue_release_backup(
+                        store=self.store,
+                        root=self.root,
+                        product=self.profile.product,
+                        decision_record_id=accepted.record_id,
+                        review=BackupContinuationReview(reason="Capture enrollment qualified"),
+                        actor="release-agent",
+                        trace_id="bounded-cause",
+                    )
+                self.assertEqual(refusal.exception.code, code)
+                self.assertEqual(str(refusal.exception), code)
+                self.assertEqual(
+                    self.store.read_verireel_prod_backup_gate_operation_record(operation_id),
+                    original,
+                )
+
     def write_qualified_testing_inventory(self, inventory: EnvironmentInventory) -> None:
         """Represent a complete testing deployment when moving this fixture's candidate."""
         identity = inventory.runtime_identity
@@ -286,7 +581,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
         )
 
-    def capture(self) -> None:
+    def capture(self, *, host: BackupHost | None = None, expected_status: str = "pass") -> None:
         with (
             # Real backup captures take longer than a second. Preserve ordering
             # for the two fast stub captures without a wall-clock sleep.
@@ -295,7 +590,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 side_effect=lambda: datetime.now(UTC).isoformat(),
             ),
             patch(
-                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
                 return_value={
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "synthetic",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "synthetic",
@@ -303,7 +598,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.production_backup_provider.subprocess.run",
-                side_effect=BackupHost().run,
+                side_effect=(host or BackupHost()).run,
             ),
         ):
             result = run_production_backup_gate_operation_worker_once(
@@ -311,9 +606,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
         self.assertTrue(result.terminal_write_committed)
         operation = self.store.list_verireel_prod_backup_gate_operation_records()[0]
-        self.assertEqual(operation.status, "pass")
+        self.assertEqual(operation.status, expected_status)
         self.assertEqual(
-            self.store.read_backup_gate_record(operation.backup_record_id).status, "pass"
+            self.store.read_backup_gate_record(operation.backup_record_id).status, expected_status
         )
 
     def _qualification_lost_after_acceptance(self, *, backup_completed: bool) -> None:
@@ -334,8 +629,23 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 }
             )
         )
-        with self.assertRaises(ReleaseEvidenceUnavailable):
+        from control_plane.release_review import recorded_generic_web_testing_version
+
+        with self.assertRaises(ReleaseEvidenceUnavailable) as fresh:
             self.review()
+        with self.assertRaises(ReleaseEvidenceUnavailable) as recorded:
+            recorded_generic_web_testing_version(store=self.store, profile=self.profile)
+        self.assertEqual(recorded.exception.code, fresh.exception.code)
+        for read_error in (FileNotFoundError(), ValueError()):
+            with (
+                self.subTest(read_error=type(read_error).__name__),
+                patch.object(self.store, "read_deployment_record", side_effect=read_error),
+            ):
+                with self.assertRaises(ReleaseEvidenceUnavailable) as fresh_read:
+                    self.review()
+                with self.assertRaises(ReleaseEvidenceUnavailable) as recorded_read:
+                    recorded_generic_web_testing_version(store=self.store, profile=self.profile)
+                self.assertEqual(recorded_read.exception.code, fresh_read.exception.code)
         self.assertEqual(self.advance(), ())
         self.assertEqual(self.provider.deployed_artifacts, [])
         self.assertEqual(
@@ -1082,9 +1392,11 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         commands: list[str] = []
 
         def upsert(**kwargs: Any) -> dict[str, Any]:
-            payload = kwargs["schedule_payload"]
-            schedules[str(payload["name"])] = dict(payload)
-            return {**payload, "scheduleId": payload["name"]}
+            guard = kwargs.get("provider_mutation_guard")
+            with guard() if callable(guard) else nullcontext():
+                payload = kwargs["schedule_payload"]
+                schedules[str(payload["name"])] = dict(payload)
+                return {**payload, "scheduleId": payload["name"]}
 
         with (
             patch(
@@ -1621,6 +1933,49 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
         )
 
+    def test_private_standing_release_needs_no_website_and_still_waits_for_backup(self) -> None:
+        private = self.profile.model_copy(
+            update={
+                "public_website": "none",
+                "lanes": tuple(
+                    lane.model_copy(update={"base_url": "", "health_url": ""})
+                    for lane in self.profile.lanes
+                ),
+            }
+        )
+        private = type(private).model_validate(private.model_dump())
+        self.store.write_product_profile_record(private)
+        self.switch("director_standing")
+        self.assertTrue(self.review().checklist_complete)
+        self.advance()
+        decision = self.store.list_release_review_decision_records(product=private.product)[0]
+        self.assertEqual(decision.acceptance_source, "director_standing")
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        self.capture()
+        self.advance()
+        self.assertEqual(
+            self.provider.deployed_artifacts, [decision.checklist.candidate.artifact_id]
+        )
+
+    def test_website_standing_release_without_testing_url_stays_blocked(self) -> None:
+        website = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"base_url": "", "health_url": ""})
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(website)
+        self.switch("director_standing")
+        self.assertFalse(self.review().checklist_complete)
+        self.advance()
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=website.product), ()
+        )
+        self.publish.assert_not_called()
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
     def test_standing_release_drills_once_then_promotes_the_next_candidate(self) -> None:
         from tests.support.lane_builds import LaneBuildGitHub
 
@@ -1868,7 +2223,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
 
     def test_unpublished_acceptance_backs_off_then_reuses_its_saved_record(self) -> None:
         self.switch("director_standing")
-        backoff = StandingReleaseReviewBackoff()
+        backoff = ClientReleaseBackoff()
         self.publish.side_effect = ValueError("Issues unavailable")
         with (
             patch("control_plane.client_release.monotonic", return_value=0) as clock,
@@ -1877,11 +2232,11 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             ) as read,
         ):
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             saved = self.store.list_release_review_decision_records(product=self.profile.product)[0]
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             read.assert_called_once()
             self.publish.assert_called_once()
@@ -1889,7 +2244,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             clock.return_value = backoff.blocked[self.profile.product][1] + 1
             self.publish.side_effect = None
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             retry = self.store.list_release_review_decision_records(product=self.profile.product)[0]
             self.assertEqual(retry.record_id, saved.record_id)
@@ -1914,15 +2269,15 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         )
         self.accept()
         self.write_qualified_testing_inventory(prior_inventory)
-        backoff = StandingReleaseReviewBackoff()
+        backoff = ClientReleaseBackoff()
         with patch(
             "control_plane.client_release.current_release_review", side_effect=self.review
         ) as read:
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
         read.assert_called_once()
         self.assertEqual(self.provider.deployed_artifacts, [])
@@ -2077,15 +2432,15 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)})
             }
         )
-        backoff = StandingReleaseReviewBackoff()
+        backoff = ClientReleaseBackoff()
         with patch(
             "control_plane.client_release.current_release_review", return_value=incomplete
         ) as read:
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             read.assert_called_once()
             inventory = self.store.read_environment_inventory(
@@ -2103,7 +2458,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
             read.reset_mock()
             advance_client_releases(
-                store=self.store, control_plane_root=self.root, standing_review_backoff=backoff
+                store=self.store, control_plane_root=self.root, release_backoff=backoff
             )
             read.assert_called_once()
             self.assertEqual(
@@ -2187,6 +2542,413 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.state, "stopped")
         self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def hold_testing_source(self) -> None:
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.generic_web_source_qualification import generic_web_source_target_key
+
+        target = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        deployment = self.store.read_deployment_record(inventory.deployment_record_id)
+        reservation = self.store.reserve_mutation(
+            scope="testing-source",
+            route_path="/v1/drivers/generic-web/deploy",
+            idempotency_key="uncertain-original",
+            request_fingerprint="a" * 64,
+            lease_owner="testing-worker",
+            reconciliation_key="testing-source-original",
+            provider_target_key=generic_web_source_target_key(
+                target, deployment.deploy.target_type
+            ),
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.profile.product,
+                context=self.context,
+                instance="testing",
+                provider_id=target.provider_id,
+                target_type=deployment.deploy.target_type,
+                target_id=target.target_id,
+            ),
+        )
+        self.assertEqual(reservation.status, "acquired")
+
+    def test_queued_backup_preserves_saved_source_authority_during_testing_retest(self) -> None:
+        for change in (
+            "hold_before_queue",
+            "hold_before_capture",
+            "hold_during_preflight",
+            "hold_after_snapshot",
+            "binding_repoint",
+            "failed_pair",
+            "changed_pair",
+            "withdrawal",
+            "release_hold",
+        ):
+            with self.subTest(change=change):
+                fixture = GenericWebClientReleaseTests()
+                fixture.setUp()
+                try:
+                    decision = fixture.accept()
+                    if change == "hold_before_queue":
+                        fixture.hold_testing_source()
+                        self.assertEqual(fixture.advance(), ())
+                        self.assertEqual(
+                            fixture.store.list_verireel_prod_backup_gate_operation_records(), ()
+                        )
+                        with self.assertRaises(ReleaseEvidenceUnavailable) as refused:
+                            fixture.review()
+                        self.assertEqual(refused.exception.code, "candidate_operation_unresolved")
+                        continue
+                    self.assertTrue(fixture.advance())
+                    inventory = fixture.store.read_environment_inventory(
+                        context_name=fixture.context, instance_name="testing"
+                    )
+                    record = fixture.store.read_deployment_record(inventory.deployment_record_id)
+                    binding = fixture.store.read_provider_target_record(
+                        context_name=fixture.context, instance_name="testing"
+                    )
+
+                    def after_snapshot() -> None:
+                        if change == "hold_after_snapshot":
+                            fixture.hold_testing_source()
+                        elif change == "binding_repoint":
+                            fixture.store.write_provider_target_record(
+                                binding.model_copy(update={"target_id": "replacement-testing"})
+                            )
+                        elif change == "failed_pair":
+                            fixture.store.write_deployment_record(
+                                record.model_copy(
+                                    update={
+                                        "deploy": record.deploy.model_copy(
+                                            update={"status": "fail"}
+                                        )
+                                    }
+                                )
+                            )
+                        elif change == "changed_pair":
+                            assert inventory.runtime_identity is not None
+                            fixture.write_qualified_testing_inventory(
+                                inventory.model_copy(
+                                    update={
+                                        "runtime_identity": inventory.runtime_identity.model_copy(
+                                            update={
+                                                "artifact_id": fixture.profile.image.repository
+                                                + "@sha256:"
+                                                + "d" * 64,
+                                                "source_git_ref": "d" * 40,
+                                            }
+                                        )
+                                    }
+                                )
+                            )
+                        elif change == "withdrawal":
+                            fixture.accept("changes_requested", suffix="-withdrawal")
+                        elif change == "release_hold":
+                            fixture.switch("held")
+
+                    host = BackupHost(after_snapshot=after_snapshot)
+                    host_run = host.run
+
+                    def run(command: list[str], **kwargs: Any) -> Any:
+                        result = host_run(command, **kwargs)
+                        if change == "hold_during_preflight" and host.commands[-1] == [
+                            "pvesm",
+                            "status",
+                            "--storage",
+                            host.storage,
+                        ]:
+                            fixture.hold_testing_source()
+                        return result
+
+                    if change == "hold_before_capture":
+                        fixture.hold_testing_source()
+                    admission_only_change = (
+                        change.startswith("hold_") or change == "binding_repoint"
+                    )
+                    with patch.object(host, "run", side_effect=run):
+                        fixture.capture(
+                            host=host, expected_status="pass" if admission_only_change else "fail"
+                        )
+                    operation = fixture.store.list_verireel_prod_backup_gate_operation_records()[0]
+                    self.assertTrue(operation.progress_evidence.get("snapshot_finished_at"))
+                    self.assertEqual(
+                        bool(operation.progress_evidence.get("independent_backup_finished_at")),
+                        admission_only_change,
+                    )
+                    self.assertEqual(fixture.advance(), ())
+                    self.assertEqual(fixture.provider.deployed_artifacts, [])
+                    if admission_only_change:
+                        self.assertEqual(
+                            fixture.store.read_environment_inventory(
+                                context_name=fixture.context, instance_name="testing"
+                            ),
+                            inventory,
+                        )
+                        self.assertEqual(
+                            fixture.store.read_release_review_decision_record(
+                                product=fixture.profile.product, record_id=decision.record_id
+                            ),
+                            decision,
+                        )
+                        if change == "binding_repoint":
+                            fixture.store.write_provider_target_record(binding)
+                        else:
+                            held = fixture.store.read_idempotency_record(
+                                scope="testing-source",
+                                route_path="/v1/drivers/generic-web/deploy",
+                                idempotency_key="uncertain-original",
+                            )
+                            assert held is not None
+                            completion = held.model_copy(
+                                update={
+                                    "state": "completed",
+                                    "response_status_code": 200,
+                                    "response_trace_id": "testing-finished",
+                                    "response_payload": {},
+                                    "recorded_at": datetime.now(UTC).isoformat(),
+                                }
+                            )
+                            self.assertEqual(
+                                fixture.store.complete_mutation_reservation(
+                                    completion=completion
+                                ).status,
+                                "completed",
+                            )
+                        self.assertTrue(fixture.advance())
+                        self.assertEqual(
+                            fixture.provider.deployed_artifacts,
+                            [decision.checklist.candidate.artifact_id],
+                        )
+                    else:
+                        self.assertEqual(
+                            operation.error_code, "operation_authorization_client_release_refused"
+                        )
+                finally:
+                    fixture.doCleanups()
+
+    def test_testing_admission_wait_preserves_train_hold_and_permanent_blockers(self) -> None:
+        from control_plane.merge_train_release_hold import merge_train_release_hold
+
+        for blocker in (
+            "hold",
+            "binding",
+            "drill",
+            "withdrawal",
+            "release_hold",
+            "changed_pair",
+            "failed_pair",
+        ):
+            with self.subTest(blocker=blocker):
+                fixture = GenericWebClientReleaseTests()
+                fixture.setUp()
+                try:
+                    if blocker == "drill":
+                        fixture.switch("promote_with_rollback_drill")
+                    decision = fixture.accept()
+                    self.assertTrue(fixture.advance())
+                    fixture.capture()
+                    self.assertIsNotNone(
+                        merge_train_release_hold(fixture.store, fixture.profile.repository)
+                    )
+                    inventory = fixture.store.read_environment_inventory(
+                        context_name=fixture.context, instance_name="testing"
+                    )
+                    if blocker == "drill":
+                        for record in fixture.store.list_deployment_records(
+                            context_name=fixture.context, instance_name="prod"
+                        ):
+                            fixture.store.write_deployment_record(
+                                record.model_copy(
+                                    update={
+                                        "deploy": record.deploy.model_copy(
+                                            update={"status": "fail"}
+                                        )
+                                    }
+                                )
+                            )
+                    elif blocker == "withdrawal":
+                        fixture.accept("changes_requested", suffix="-withdrawal")
+                    elif blocker == "release_hold":
+                        fixture.switch("held")
+                    elif blocker == "changed_pair":
+                        assert inventory.runtime_identity is not None
+                        fixture.write_qualified_testing_inventory(
+                            inventory.model_copy(
+                                update={
+                                    "runtime_identity": inventory.runtime_identity.model_copy(
+                                        update={
+                                            "artifact_id": fixture.profile.image.repository
+                                            + "@sha256:"
+                                            + "d" * 64,
+                                            "source_git_ref": "d" * 40,
+                                        }
+                                    )
+                                }
+                            )
+                        )
+                    elif blocker == "failed_pair":
+                        record = fixture.store.read_deployment_record(
+                            inventory.deployment_record_id
+                        )
+                        fixture.store.write_deployment_record(
+                            record.model_copy(
+                                update={
+                                    "deploy": record.deploy.model_copy(update={"status": "fail"})
+                                }
+                            )
+                        )
+                    if blocker == "binding":
+                        binding = fixture.store.read_provider_target_record(
+                            context_name=fixture.context, instance_name="testing"
+                        )
+                        fixture.store.write_provider_target_record(
+                            binding.model_copy(update={"target_id": "replacement-testing"})
+                        )
+                    else:
+                        fixture.hold_testing_source()
+                    held = merge_train_release_hold(fixture.store, fixture.profile.repository)
+                    self.assertEqual(held is not None, blocker in {"hold", "binding"})
+                    run = read_client_release_run(
+                        store=fixture.store,
+                        profile=fixture.store.read_product_profile_record(fixture.profile.product),
+                        decision=decision,
+                    )
+                    assert run is not None
+                    self.assertTrue(run.blocked_reason)
+                    self.assertEqual(run.state, "waiting")
+                    self.assertEqual(fixture.advance(), ())
+                    self.assertEqual(fixture.provider.deployed_artifacts, [])
+                finally:
+                    fixture.doCleanups()
+
+    def test_default_input_promotion_rechecks_the_selected_build_at_final_checkpoint(self) -> None:
+        from control_plane.generic_web_promotion_provider_adapter import (
+            GenericWebProdPromotionProviderMutationAdapter,
+        )
+        from control_plane.generic_web_promotion_http import GenericWebProdPromotionEnvelope
+        from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionRequest
+        from control_plane.provider_operations import run_durable_provider_operation
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+
+        self.accept()
+        self.advance()
+        self.capture()
+        backup = self.store.list_verireel_prod_backup_gate_operation_records()[0].backup_record_id
+        original = self.store.checkpoint_mutation_provider_effect
+        inserted = False
+
+        def checkpoint(**kwargs: Any) -> Any:
+            nonlocal inserted
+            if not inserted:
+                inventory = self.store.read_environment_inventory(
+                    context_name=self.context, instance_name="testing"
+                )
+                assert inventory.runtime_identity is not None
+                self.write_qualified_testing_inventory(
+                    inventory.model_copy(
+                        update={
+                            "runtime_identity": inventory.runtime_identity.model_copy(
+                                update={
+                                    "artifact_id": self.profile.image.repository
+                                    + "@sha256:"
+                                    + "d" * 64,
+                                    "source_git_ref": "d" * 40,
+                                }
+                            ),
+                        }
+                    )
+                )
+                inserted = True
+            return original(**kwargs)
+
+        adapter = GenericWebProdPromotionProviderMutationAdapter(
+            control_plane_root=self.root,
+            record_store=self.store,
+            promotion_request=GenericWebProdPromotionEnvelope(
+                product=self.profile.product,
+                promotion=GenericWebProdPromotionRequest(
+                    product=self.profile.product, backup_record_id=backup
+                ),
+            ),
+            profile=self.profile,
+            lane=next(lane for lane in self.profile.lanes if lane.instance == "prod"),
+            trace_id="default-input-race",
+            validate_before_effect=lambda _: None,
+            deploy_provider=self.provider,
+        )
+        with patch.object(
+            self.store, "checkpoint_mutation_provider_effect", side_effect=checkpoint
+        ):
+            with self.assertRaises(GenericWebPromotionSourceRefused):
+                run_durable_provider_operation(
+                    store=self.store,
+                    scope="default-input-promotion",
+                    route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                    idempotency_key="selected-build",
+                    request_fingerprint="f" * 64,
+                    lease_owner="default-worker",
+                    response_trace_id="default-input-race",
+                    adapter=adapter,
+                )
+        self.assertTrue(inserted)
+        self.assertEqual(self.provider.deployed_artifacts, [])
+
+    def test_testing_hold_after_cached_admission_refuses_at_first_effect(self) -> None:
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        original = self.store.checkpoint_mutation_provider_effect
+        inserted = False
+
+        def checkpoint(**kwargs: Any) -> Any:
+            nonlocal inserted
+            if not inserted:
+                self.hold_testing_source()
+                inserted = True
+            return original(**kwargs)
+
+        with patch.object(
+            self.store, "checkpoint_mutation_provider_effect", side_effect=checkpoint
+        ):
+            self.assertEqual(self.advance(), ())
+        self.assertTrue(inserted)
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=f"{accepted.record_id}:promote-1",
+            )
+        )
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product),
+            (accepted,),
+        )
+
+    def test_testing_hold_after_first_effect_keeps_forward_and_inverse_usable(self) -> None:
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        self.provider.fail_artifact = accepted.checklist.candidate.artifact_id
+        original = self.provider.execute_artifact_deploy
+
+        def execute(**kwargs: Any) -> None:
+            try:
+                original(**kwargs)
+            finally:
+                if len(self.provider.deployed_artifacts) == 1:
+                    self.hold_testing_source()
+
+        with patch.object(self.provider, "execute_artifact_deploy", side_effect=execute):
+            self.advance()
+        self.assertEqual(
+            self.provider.deployed_artifacts,
+            [accepted.checklist.candidate.artifact_id, accepted.checklist.production.artifact_id],
+        )
+        self.assertEqual(self.store.list_promotion_records()[0].rollback.status, "pass")
 
     def test_source_loss_during_target_resolution_keeps_accepted_step_retryable(self) -> None:
         self.source_loss_before_effect(during_review=False)
@@ -2301,6 +3063,8 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             idempotency_key=f"{accepted.record_id}:promote-1",
         )
         assert promotion is not None
+        origin = self.store.read_provider_target_origin(promotion)
+        assert origin is not None
         competing = self.store.reserve_mutation(
             scope="manual-deploy",
             route_path="/v1/admin/generic-web/deploy",
@@ -2309,6 +3073,7 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             lease_owner="admin-worker",
             reconciliation_key=promotion.reconciliation_key,
             provider_target_key=promotion.provider_target_key,
+            provider_target_origin=origin.origin,
         )
         self.assertEqual(competing.status, "acquired")
         effects = list(self.provider.deployed_artifacts)

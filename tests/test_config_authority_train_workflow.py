@@ -114,10 +114,15 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
                 _git(product, "commit", "-m", "unrelated root")
                 _git(product, "branch", "-D", "trunk")
                 _git(product, "branch", "-m", "trunk")
-            elif target_movement == "fast_forward":
-                _git(product, "merge", "--ff-only", head)
-            elif target_movement == "landed":
+            elif target_movement in {"landed", "no_op", "no_op_advanced"}:
                 _git(product, "merge", "--no-ff", "-m", "land candidate", head)
+                if target_movement != "landed":
+                    base = head = _git(product, "rev-parse", "HEAD")
+                    _git(product, "branch", "-f", "candidate", head)
+                    if target_movement == "no_op_advanced":
+                        (product / "later.py").write_text("VALUE = 4\n")
+                        _git(product, "add", ".")
+                        _git(product, "commit", "-m", "target advanced")
             else:
                 (product / "later.py").write_text("VALUE = 4\n")
                 _git(product, "add", ".")
@@ -224,6 +229,25 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
             self._assert_pair(capture, base, head)
             self.assertTrue(json.loads(result.stdout)["gate"]["rejected_findings"])
 
+    def test_already_protected_no_op_creation_and_update_audit_the_empty_contribution(self) -> None:
+        for reconstructed in (False, True):
+            for movement in ("no_op", "no_op_advanced"):
+                with (
+                    self.subTest(reconstructed=reconstructed, movement=movement),
+                    TemporaryDirectory() as directory,
+                ):
+                    result, capture, base, head = self._exercise(
+                        Path(directory),
+                        batch=True,
+                        rejected=True,
+                        target_movement=movement,
+                        reconstructed=reconstructed,
+                    )
+                    self.assertEqual(base, head)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self._assert_pair(capture, base, head)
+                    self.assertFalse(json.loads(result.stdout)["gate"]["rejected_findings"])
+
     def test_reconstructed_train_ref_scans_all_entries_against_original_base(self) -> None:
         for batch, rejected, movement in (
             (False, True, ""),
@@ -271,7 +295,7 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
                 self.assertFalse(json.loads(result.stdout)["gate"]["rejected_findings"])
 
     def test_reconstructed_train_ref_refuses_missing_comparison_history(self) -> None:
-        for movement in ("deleted", "unrelated", "fast_forward", "shallow"):
+        for movement in ("deleted", "unrelated", "shallow"):
             with self.subTest(movement=movement), TemporaryDirectory() as directory:
                 result, capture, _, _ = self._exercise(
                     Path(directory), reconstructed=True, target_movement=movement
@@ -303,8 +327,8 @@ class ConfigAuthorityTrainWorkflowTests(unittest.TestCase):
                 self._assert_pair(capture, base, head)
                 self.assertTrue(json.loads(result.stdout)["gate"]["rejected_findings"])
 
-    def test_missing_unrelated_or_same_head_target_refuses_before_audit(self) -> None:
-        for movement in ("deleted", "unrelated", "fast_forward", "shallow"):
+    def test_missing_unrelated_or_shallow_history_refuses_before_audit(self) -> None:
+        for movement in ("deleted", "unrelated", "shallow"):
             with self.subTest(movement=movement), TemporaryDirectory() as directory:
                 result, capture, _, _ = self._exercise(Path(directory), target_movement=movement)
                 self.assertNotEqual(result.returncode, 0)

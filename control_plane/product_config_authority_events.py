@@ -28,12 +28,12 @@ from control_plane.contracts.advisory_check_projection import (
 )
 from control_plane.build_provenance import BuildProvenanceTransport, GitHubBuildProvenanceTransport
 from control_plane.config_authority_audit import (
-    GIT_COMMIT_SHA_PATTERN,
     MAX_SCANNED_FILE_BYTES,
     build_config_authority_audit,
     evaluate_config_authority_gate,
 )
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
+from control_plane.contracts.record_fields import GIT_SHA1_PATTERN
 from control_plane.contracts.repository_inventory import RepositoryInventoryRecord
 from control_plane.contracts.product_reconcile import GitHubAppWebhookDeliveryRecord
 from control_plane.repository_inventory import get_repository_inventory_read_model
@@ -397,11 +397,7 @@ def config_authority_event_supported(event: str, payload: dict[str, object]) -> 
 
 
 def _sha(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not GIT_COMMIT_SHA_PATTERN.fullmatch(value)
-        or value == "0" * 40
-    ):
+    if not isinstance(value, str) or not GIT_SHA1_PATTERN.fullmatch(value) or value == "0" * 40:
         raise ValueError("Source evidence requires an available explicit commit SHA.")
     return value
 

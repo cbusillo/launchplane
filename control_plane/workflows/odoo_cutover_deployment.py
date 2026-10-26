@@ -17,6 +17,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.odoo_cutover_plan import cutover_record_id
 from control_plane.odoo_cutover_storage import DeploymentCutoverStore, DeploymentStore
+from control_plane.dokploy.cutover_execution import bind_cutover_execution
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider, execute_odoo_cutover
 from control_plane.workflows.odoo_cutover import rollback_compatible_cutover
 from control_plane.release_tuples import (
@@ -69,6 +70,8 @@ def execute_odoo_cutover_deployment(
     context: str,
     instance: str,
     checkpoint: Callable[[str], None],
+    abort_only: bool = False,
+    dispatch_guard: Callable[[], None] | None = None,
 ) -> OdooCutoverApplyResult:
     if context != plan.new.runtime_identity.context or instance != plan.new.binding.environment_id:
         raise ValueError("deployment envelope differs from cutover context/lane")
@@ -94,16 +97,44 @@ def execute_odoo_cutover_deployment(
     )
     store = DeploymentCutoverStore(record_store, deployment)
 
-    record = execute_odoo_cutover(
-        plan,
-        store,
-        provider,
-        record_id=record_id,
-        checkpoint=checkpoint,
-        settings_checkpoint=lambda: record_website_application(
-            record_store, plan, plan.website_settings, verified=False
-        ),
-    )
+    def guard_records() -> None:
+        if dispatch_guard is not None:
+            dispatch_guard()
+        else:
+            checkpoint("cutover_record")
+
+    def guarded_checkpoint(step: str) -> None:
+        if dispatch_guard is not None:
+            dispatch_guard()
+        checkpoint(step)
+
+    def record_settings() -> None:
+        guard_records()
+        record_website_application(record_store, plan, plan.website_settings, verified=False)
+
+    with bind_cutover_execution(plan, guarded_checkpoint, dispatch_guard=dispatch_guard):
+        record = execute_odoo_cutover(
+            plan,
+            store,
+            provider,
+            record_id=record_id,
+            checkpoint=guarded_checkpoint,
+            abort_only=abort_only,
+            settings_checkpoint=record_settings,
+        )
+    guard_records()
+    if record.step == "aborted":
+        persisted = record_store.read_deployment_record(deployment_id)
+        persisted.deploy.status = "fail"
+        persisted.deploy.finished_at = record.ended_at.isoformat() if record.ended_at else ""
+        record_store.write_deployment_record(persisted)
+        return OdooCutoverApplyResult(
+            deployment_record_id=deployment_id,
+            deploy_status="fail",
+            post_deploy_status="skipped",
+            health_status="skipped",
+            error_message="Backup verification failed; the original serving slot was restored before maintenance.",
+        )
     if record.step != "complete" or record.readiness is None or record.route is None:
         raise ValueError("cutover does not have verified completed traffic/writer evidence")
     record_website_application(record_store, plan, plan.website_settings, verified=True)
@@ -138,19 +169,41 @@ def execute_odoo_cutover_rollback_deployment(
     record_store: DeploymentStore,
     provider: OdooCutoverProvider,
     artifact_id: str,
+    checkpoint: Callable[[str], None] | None = None,
+    dispatch_guard: Callable[[], None] | None = None,
 ) -> OdooCutoverApplyResult:
     record = deployment.odoo_cutover
     if record is None or artifact_id != record.plan.production.artifact_id:
         raise ValueError("cutover rollback requires its exact retained production artifact")
     store = DeploymentCutoverStore(record_store, deployment)
-    rolled = rollback_compatible_cutover(
-        store,
-        provider,
-        record.record_id,
-        settings_checkpoint=lambda: record_website_application(
+    checkpoint = checkpoint or (lambda _step: None)
+
+    def guard_records() -> None:
+        if dispatch_guard is not None:
+            dispatch_guard()
+        else:
+            checkpoint("cutover_record")
+
+    def guarded_checkpoint(step: str) -> None:
+        if dispatch_guard is not None:
+            dispatch_guard()
+        checkpoint(step)
+
+    def record_settings() -> None:
+        guard_records()
+        record_website_application(
             record_store, record.plan, record.plan.rollback_website_settings, verified=False
-        ),
-    )
+        )
+
+    with bind_cutover_execution(record.plan, guarded_checkpoint, dispatch_guard=dispatch_guard):
+        rolled = rollback_compatible_cutover(
+            store,
+            provider,
+            record.record_id,
+            settings_checkpoint=record_settings,
+            checkpoint=guarded_checkpoint,
+        )
+    guard_records()
     record_website_application(
         record_store,
         record.plan,
@@ -168,7 +221,8 @@ def execute_odoo_cutover_rollback_deployment(
             "artifact_identity": ArtifactIdentityReference(artifact_id=artifact_id),
             "runtime_identity": old.runtime_identity,
             "runtime_source": {
-                "retained_deployment_record_id": old.runtime_identity.deployment_record_id
+                "retained_deployment_record_id": old.runtime_identity.deployment_record_id,
+                "cutover_deployment_record_id": deployment.record_id,
             },
             "source_git_ref": rolled.plan.production.source_commit,
             "resolved_target": ResolvedTargetEvidence(

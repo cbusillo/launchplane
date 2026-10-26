@@ -28,6 +28,7 @@ from control_plane.contracts.testing_route_refresh import (
     TestingRouteRefreshSources,
     is_native_testing_binding,
 )
+from control_plane.contracts.text_fields import require_text
 
 
 NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER = "native_testing_route_requires_controller"
@@ -125,13 +126,13 @@ class RouteBindingReconcileRequest(BaseModel):
     def _validate_request(self) -> "RouteBindingReconcileRequest":
         if self.schema_version != 1:
             raise ValueError("Unsupported route binding reconcile schema version")
-        self.product = _required_text(self.product, "route binding reconcile requires product")
-        self.context = _required_text(self.context, "route binding reconcile requires context")
-        self.instance = _required_text(self.instance, "route binding reconcile requires instance")
-        self.source_label = _required_text(
+        self.product = require_text(self.product, "route binding reconcile requires product")
+        self.context = require_text(self.context, "route binding reconcile requires context")
+        self.instance = require_text(self.instance, "route binding reconcile requires instance")
+        self.source_label = require_text(
             self.source_label, "route binding reconcile requires source_label"
         )
-        self.evaluated_at = _required_text(
+        self.evaluated_at = require_text(
             self.evaluated_at, "route binding reconcile requires evaluated_at"
         )
         _parse_utc_timestamp(self.evaluated_at)
@@ -309,6 +310,20 @@ def plan_route_binding_reconcile(
         candidate_record_sha256=current_record_sha256,
         current_record=current_record,
         record=current_record,
+    )
+
+
+def is_evidence_only_route_binding_refresh(plan: RouteBindingReconcilePlan) -> bool:
+    return (
+        plan.status in {"ready", "unchanged"}
+        and plan.operation in {"refresh", "none"}
+        and not plan.findings
+        and plan.review_sources is not None
+        and plan.current_record is not None
+        and plan.record is not None
+        and plan.current_record.source.source_kind in {"backfill", "service"}
+        and route_binding_authority_projection(plan.current_record)
+        == route_binding_authority_projection(plan.record)
     )
 
 
@@ -943,10 +958,3 @@ def _normalized_domains(
         if domain not in domains:
             domains.append(domain)
     return tuple(domains), None
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

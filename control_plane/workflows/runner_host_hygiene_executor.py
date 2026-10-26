@@ -4193,18 +4193,6 @@ def _docker_labels(value: object) -> tuple[str, ...]:
     return tuple(labels)
 
 
-def _non_negative_int(value: object) -> int:
-    if isinstance(value, bool) or value is None:
-        return 0
-    if isinstance(value, int):
-        return max(value, 0)
-    try:
-        parsed_value = int(_optional_scalar_text(value))
-    except ValueError:
-        return 0
-    return max(parsed_value, 0)
-
-
 def _optional_scalar_text(value: object) -> str:
     if value is None or isinstance(value, bool | dict | list | tuple):
         return ""

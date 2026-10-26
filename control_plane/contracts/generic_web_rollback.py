@@ -15,6 +15,7 @@ from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     HealthcheckEvidence,
 )
+from control_plane.contracts.text_fields import require_text
 from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.contracts.deploy_reference import (
     is_digest_pinned_image_reference,
@@ -147,28 +148,28 @@ class GenericWebRollbackPlanRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "GenericWebRollbackPlanRecord":
-        self.plan_id = _required_text(
+        self.plan_id = require_text(
             self.plan_id, "generic web rollback plan record requires plan_id"
         )
-        self.product = _required_text(
+        self.product = require_text(
             self.product, "generic web rollback plan record requires product"
         )
-        self.context = _required_text(
+        self.context = require_text(
             self.context, "generic web rollback plan record requires context"
         )
-        self.instance = _required_text(
+        self.instance = require_text(
             self.instance, "generic web rollback plan record requires instance"
         )
-        self.rollback_deployment_record_id = _required_text(
+        self.rollback_deployment_record_id = require_text(
             self.rollback_deployment_record_id,
             "generic web rollback plan record requires rollback_deployment_record_id",
         )
         self.source_git_ref = self.source_git_ref.strip()
         self.backup_record_id = self.backup_record_id.strip()
-        self.created_at = _required_text(
+        self.created_at = require_text(
             self.created_at, "generic web rollback plan record requires created_at"
         )
-        self.summary = _required_text(
+        self.summary = require_text(
             self.summary, "generic web rollback plan record requires summary"
         )
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
@@ -496,10 +497,3 @@ def _generic_web_rollback_plan_id(*, context: str, instance: str, deployment_rec
 
 def _blocker(code: GenericWebRollbackBlockerCode, message: str) -> GenericWebRollbackBlocker:
     return GenericWebRollbackBlocker(code=code, message=message)
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

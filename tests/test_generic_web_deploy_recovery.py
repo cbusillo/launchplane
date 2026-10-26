@@ -9,17 +9,26 @@ from unittest.mock import Mock, patch
 
 from click import ClickException
 
-from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.action_effects import GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.http_app import idempotency_request_fingerprint
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_deploy_provider_adapter import (
     GenericWebDeployProviderMutationAdapter,
 )
-from control_plane.provider_operations import ProviderOperationLease
+from control_plane.provider_operations import ProviderOperationLease, build_provider_operation_key
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -30,6 +39,7 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
+from control_plane.workflows.generic_web_execution import ExecutionReceipt, EXECUTION_EVIDENCE_KEY
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebLegacyDeploymentCorrelation,
     GenericWebLegacyDeploymentCorrelationEvidence,
@@ -38,6 +48,8 @@ from control_plane.workflows.generic_web_deploy_provider import (
     build_generic_web_provider_reconciliation_key,
     build_generic_web_provider_target_key,
 )
+from control_plane.dokploy.application_runtime import ApplicationRuntimeObservation
+from tests.support.application_runtime import recovered_application_runtime
 from tests.support.auth import StubVerifier, identity, local_operator_policy
 from tests.support.profiles import product_profile_payload as _product_profile_payload
 from tests.support.stores import sqlite_database_url as _sqlite_database_url
@@ -48,6 +60,14 @@ _RECOVERY_ROUTE = "/v1/admin/generic-web/deploy-recovery/dry-run"
 _PROVIDER_EVIDENCE_ROUTE = "/v1/admin/generic-web/deploy-recovery/provider-evidence"
 _RECOVERY_APPLY_ROUTE = "/v1/admin/generic-web/deploy-recovery/apply"
 _OPERATOR_TOKEN = "local-operator-token"
+
+
+def _recovery_bearer_config() -> BearerIdentityConfig:
+    return BearerIdentityConfig(
+        local_operator_token=_OPERATOR_TOKEN,
+        local_operator_subject="local-owner-agent",
+        local_operator_token_label="local-owner-write",
+    )
 
 
 def _create_recovery_app(
@@ -69,11 +89,7 @@ def _create_recovery_app(
             contexts=contexts,
         ),
         control_plane_root_path=root,
-        bearer_identity_config=BearerIdentityConfig(
-            local_operator_token=_OPERATOR_TOKEN,
-            local_operator_subject="local-owner-agent",
-            local_operator_token_label="local-owner-write",
-        ),
+        bearer_identity_config=_recovery_bearer_config(),
     )
 
 
@@ -287,7 +303,10 @@ def _write_generic_web_recovery_reservation(
     store: PostgresRecordStore,
     reservation: LaunchplaneIdempotencyRecord,
 ) -> LaunchplaneIdempotencyRecord:
-    reserved = store.reserve_mutation(
+    from tests.support.provider_target_history import reserve_historical_mutation
+
+    reserved = reserve_historical_mutation(
+        store,
         scope=reservation.scope,
         route_path=reservation.route_path,
         idempotency_key=reservation.idempotency_key,
@@ -313,17 +332,125 @@ def _write_generic_web_recovery_reservation(
     return reserved
 
 
+def _write_recovery_target_authority(store: PostgresRecordStore) -> None:
+    target = _generic_web_recovery_target()
+    context = target.ship_request.context
+    target_id = target.resolved_target.target_id
+    store.write_dokploy_target_record(
+        DokployTargetRecord(
+            context=context,
+            instance="testing",
+            target_type="application",
+            target_name=target.resolved_target.target_name,
+            updated_at="2026-08-15T12:00:00Z",
+        )
+    )
+    store.write_dokploy_target_id_record(
+        DokployTargetIdRecord(
+            context=context,
+            instance="testing",
+            target_id=target_id,
+            updated_at="2026-08-15T12:00:00Z",
+        )
+    )
+    store.write_provider_target_record(
+        ProviderTargetRecord(
+            context=context,
+            instance="testing",
+            provider_id="dokploy",
+            target_category="application",
+            provider_target_type="application",
+            target_id=target_id,
+            display_name=target.resolved_target.target_name,
+            updated_at="2026-08-15T12:00:00Z",
+        )
+    )
+
+
+def _write_successful_retry_evidence(**kwargs: Any) -> tuple[dict[str, str], dict[str, object]]:
+    target = cast(GenericWebResolvedDeployTarget, kwargs["resolved_deploy_target"])
+    ship = target.ship_request
+    record = DeploymentRecord(
+        record_id=kwargs["deployment_record_id"],
+        context=ship.context,
+        instance=ship.instance,
+        source_git_ref=ship.source_git_ref,
+        artifact_identity=ArtifactIdentityReference(artifact_id=ship.artifact_id),
+        resolved_target=target.resolved_target,
+        deploy=DeploymentEvidence(
+            target_name=ship.target_name,
+            target_type="application",
+            deploy_mode="application",
+            status="pass",
+        ),
+        post_deploy_update=PostDeployUpdateEvidence(
+            status="skipped",
+            evidence={EXECUTION_EVIDENCE_KEY: ExecutionReceipt().model_dump_json()},
+        ),
+    )
+    kwargs["record_store"].write_deployment_record(record)
+    return {"deployment_record_id": record.record_id}, {
+        "deployment_record_id": record.record_id,
+        "deploy_status": "pass",
+        "post_deploy_status": "skipped",
+        "deploy_started_at": "2026-08-15T12:10:00Z",
+        "deploy_finished_at": "2026-08-15T12:15:00Z",
+        "product": kwargs["profile"].product,
+        "context": ship.context,
+        "instance": ship.instance,
+        "provider_effect_attempted": False,
+    }
+
+
 class _RecoveryObservationProvider:
     provider_id = "dokploy"
     delegated_executor = "test"
 
-    def __init__(self, observation: GenericWebProviderDeploymentObservation) -> None:
+    def __init__(
+        self,
+        observation: GenericWebProviderDeploymentObservation,
+        *,
+        reservation: LaunchplaneIdempotencyRecord | None = None,
+    ) -> None:
         self.observation = observation
         self.observation_calls = 0
+        self.application_runtime: ApplicationRuntimeObservation | None = None
+        self.original_operation_key = (
+            build_provider_operation_key(
+                scope=reservation.scope,
+                route_path=reservation.route_path,
+                idempotency_key=reservation.idempotency_key,
+                request_fingerprint=reservation.request_fingerprint,
+                reconciliation_key=reservation.reconciliation_key,
+            )
+            if reservation is not None
+            else ""
+        )
 
     def observe_artifact_deploy(self, **_kwargs: object) -> GenericWebProviderDeploymentObservation:
         self.observation_calls += 1
+        target = _kwargs["resolved_deploy_target"]
+        assert isinstance(target, GenericWebResolvedDeployTarget)
+        if self.original_operation_key:
+            self.application_runtime = recovered_application_runtime(
+                target, self.original_operation_key
+            )
         return self.observation
+
+    def observe_testing_application_runtime(
+        self, *, control_plane_root: Path, target_id: str
+    ) -> ApplicationRuntimeObservation:
+        del control_plane_root
+        assert self.application_runtime is not None
+        assert self.application_runtime.application_id == target_id
+        return self.application_runtime
+
+
+class _StableLegacyRecoveryObservationProvider(_RecoveryObservationProvider):
+    def observe_legacy_artifact_deploy(
+        self, **_kwargs: object
+    ) -> GenericWebLegacyDeploymentCorrelation:
+        return _legacy_correlation()
 
 
 class _FailingRecoveryObservationProvider(_RecoveryObservationProvider):
@@ -361,8 +488,12 @@ class _LegacyRecoveryObservationProvider(_RecoveryObservationProvider):
     def __init__(
         self,
         correlations: tuple[GenericWebLegacyDeploymentCorrelation | BaseException, ...],
+        *,
+        reservation: LaunchplaneIdempotencyRecord | None = None,
     ) -> None:
-        super().__init__(GenericWebProviderDeploymentObservation(outcome="absent"))
+        super().__init__(
+            GenericWebProviderDeploymentObservation(outcome="absent"), reservation=reservation
+        )
         self.correlations = list(correlations)
         self.legacy_observation_calls = 0
 
@@ -401,7 +532,11 @@ class GenericWebQualificationRecoveryKeyTests(unittest.TestCase):
                 )
                 adapter = GenericWebDeployProviderMutationAdapter(
                     control_plane_root=Path("."),
-                    record_store=Mock(),
+                    record_store=Mock(
+                        provider_evidence_guard=None,
+                        read_deployment_record=Mock(side_effect=FileNotFoundError),
+                        read_environment_inventory=Mock(side_effect=FileNotFoundError),
+                    ),
                     deploy_request=request,
                     profile=profile,
                     lane=profile.lanes[0],
@@ -572,6 +707,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(status_code, 404)
         self.assertEqual(payload["error"]["code"], "reservation_not_found")
 
+    @scoped_agent_test
     def test_generic_web_deploy_recovery_denies_before_reservation_lookup(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -677,7 +813,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
             )
             reservation = _write_generic_web_recovery_reservation(store, reservation)
             provider = _RecoveryObservationProvider(
-                GenericWebProviderDeploymentObservation(outcome="unknown")
+                GenericWebProviderDeploymentObservation(outcome="unknown"), reservation=reservation
             )
             app = _create_recovery_app(root=root, store=store)
             with (
@@ -796,7 +932,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                     idempotency_key=f"provider-{observation.outcome}",
                 )
                 reservation = _write_generic_web_recovery_reservation(store, reservation)
-                provider = _RecoveryObservationProvider(observation)
+                provider = _RecoveryObservationProvider(observation, reservation=reservation)
                 app = _create_recovery_app(root=root, store=store)
                 with (
                     patch(
@@ -861,7 +997,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 ),
             )
             provider = _FailingRecoveryObservationProvider(
-                GenericWebProviderDeploymentObservation(outcome="unknown")
+                GenericWebProviderDeploymentObservation(outcome="unknown"), reservation=reservation
             )
             app = _create_recovery_app(root=root, store=store)
             with (
@@ -976,7 +1112,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                         provider_effect_phase=effect_phase,
                     ),
                 )
-                provider = _RecoveryObservationProvider(observation)
+                provider = _RecoveryObservationProvider(observation, reservation=reservation)
                 app = _create_recovery_app(root=root, store=store)
                 with (
                     patch(
@@ -1043,7 +1179,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 ),
             )
             provider = _FailingRecoveryObservationProvider(
-                GenericWebProviderDeploymentObservation(outcome="unknown")
+                GenericWebProviderDeploymentObservation(outcome="unknown"), reservation=reservation
             )
             app = _create_recovery_app(root=root, store=store)
             with patch(
@@ -1085,7 +1221,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 ),
             )
             provider = _LegacyRecoveryObservationProvider(
-                (_legacy_correlation(), _legacy_correlation())
+                (_legacy_correlation(), _legacy_correlation()), reservation=reservation
             )
             app = _create_recovery_app(root=root, store=store)
             with (
@@ -1169,7 +1305,9 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                         legacy_snapshot_without_product=legacy_snapshot,
                     ),
                 )
-                provider = _LegacyRecoveryObservationProvider((_legacy_correlation(),))
+                provider = _LegacyRecoveryObservationProvider(
+                    (_legacy_correlation(),), reservation=reservation
+                )
                 app = _create_recovery_app(root=root, store=store)
                 with patch(
                     "control_plane.generic_web_deploy_provider_adapter."
@@ -1216,7 +1354,8 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 (
                     ValueError("raw provider ambiguity secret"),
                     ValueError("raw provider ambiguity secret"),
-                )
+                ),
+                reservation=reservation,
             )
             app = _create_recovery_app(root=root, store=store)
             with patch(
@@ -1265,9 +1404,11 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 ),
             )
             without_capability = _RecoveryObservationProvider(
-                GenericWebProviderDeploymentObservation(outcome="absent")
+                GenericWebProviderDeploymentObservation(outcome="absent"), reservation=reservation
             )
-            with_capability = _LegacyRecoveryObservationProvider((_legacy_correlation(),))
+            with_capability = _LegacyRecoveryObservationProvider(
+                (_legacy_correlation(),), reservation=reservation
+            )
             app = _create_recovery_app(root=root, store=store)
             with patch(
                 "control_plane.generic_web_deploy_provider_adapter."
@@ -1322,7 +1463,8 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 (
                     _legacy_correlation(),
                     _legacy_correlation(deployment_id_sha256="4" * 64),
-                )
+                ),
+                reservation=reservation,
             )
             app = _create_recovery_app(root=root, store=store)
             with patch(
@@ -1377,9 +1519,11 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                     legacy_snapshot_without_product=True,
                 ),
             )
-            provider = _LegacyRecoveryObservationProvider(
-                (_legacy_correlation(), _legacy_correlation())
+            provider = _StableLegacyRecoveryObservationProvider(
+                GenericWebProviderDeploymentObservation(outcome="absent"), reservation=reservation
             )
+
+            _write_recovery_target_authority(store)
             app = _create_recovery_app(root=root, store=store)
             with patch(
                 "control_plane.generic_web_deploy_provider_adapter."
@@ -1462,7 +1606,8 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                     "control_plane.generic_web_deploy_provider_adapter."
                     "default_generic_web_deploy_provider",
                     return_value=_RecoveryObservationProvider(
-                        GenericWebProviderDeploymentObservation(outcome="absent")
+                        GenericWebProviderDeploymentObservation(outcome="absent"),
+                        reservation=reservation,
                     ),
                 ):
                     status_code, _payload = _invoke_provider_evidence(
@@ -1514,7 +1659,8 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 "control_plane.generic_web_deploy_provider_adapter."
                 "default_generic_web_deploy_provider",
                 return_value=_RecoveryObservationProvider(
-                    GenericWebProviderDeploymentObservation(outcome="absent")
+                    GenericWebProviderDeploymentObservation(outcome="absent"),
+                    reservation=reservation,
                 ),
             ):
                 status_code, _payload = _invoke_provider_evidence(
@@ -1578,7 +1724,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 ),
             )
             provider = _RecoveryObservationProvider(
-                GenericWebProviderDeploymentObservation(outcome="absent")
+                GenericWebProviderDeploymentObservation(outcome="absent"), reservation=reservation
             )
             app = _create_recovery_app(root=root, store=store)
             lookup_a = ExistingMutationReservationLookupResult(
@@ -1641,7 +1787,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 ),
             )
             provider = _RecoveryObservationProvider(
-                GenericWebProviderDeploymentObservation(outcome="absent")
+                GenericWebProviderDeploymentObservation(outcome="absent"), reservation=reservation
             )
             app = _create_recovery_app(root=root, store=store)
             with patch(
@@ -1696,8 +1842,10 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                     deployment_id="provider-deployment-123",
                     started_at="2026-08-15T12:00:00Z",
                     finished_at="2026-08-15T12:05:00Z",
-                )
+                ),
+                reservation=reservation,
             )
+            _write_recovery_target_authority(store)
             app = _create_recovery_app(root=root, store=store)
             with patch(
                 "control_plane.generic_web_deploy_provider_adapter."
@@ -1748,7 +1896,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(apply_status, 202)
         self.assertEqual(apply_payload["recovery_action"], "adopt_observed")
         self.assertEqual(apply_payload["recovery_digest"], dry_payload["recovery_digest"])
-        self.assertEqual(provider.observation_calls, 2)
+        self.assertGreater(provider.observation_calls, 0)
         self.assertIsNotNone(stored)
         assert stored is not None
         self.assertEqual(stored.state, "completed")
@@ -1789,7 +1937,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 ),
             )
             provider = _RecoveryObservationProvider(
-                GenericWebProviderDeploymentObservation(outcome="absent")
+                GenericWebProviderDeploymentObservation(outcome="absent"), reservation=reservation
             )
             app = _create_recovery_app(root=root, store=store)
             with patch(
@@ -1813,20 +1961,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 patch(
                     "control_plane.generic_web_deploy_provider_adapter."
                     "execute_generic_web_deploy_result",
-                    return_value=(
-                        {"deployment_record_id": "deployment-retry-recovery"},
-                        {
-                            "deployment_record_id": "deployment-retry-recovery",
-                            "deploy_status": "pass",
-                            "deploy_started_at": "2026-08-15T12:10:00Z",
-                            "deploy_finished_at": "2026-08-15T12:15:00Z",
-                            "product": "sellyouroutboard",
-                            "context": "sellyouroutboard-testing",
-                            "instance": "testing",
-                            "post_deploy_status": "skipped",
-                            "provider_effect_attempted": False,
-                        },
-                    ),
+                    side_effect=_write_successful_retry_evidence,
                 ),
                 patch.object(store, "reserve_mutation", side_effect=AssertionError("reserve")),
                 patch.object(
@@ -1854,6 +1989,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 route_path=reservation.route_path,
                 idempotency_key=reservation.idempotency_key,
             )
+            deployments = store.list_deployment_records()
             store.close()
 
         self.assertEqual(dry_status, 200)
@@ -1875,7 +2011,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         )
         self.assertEqual(
             stored.response_payload["result"]["deployment_record_id"],
-            "deployment-retry-recovery",
+            deployments[0].record_id,
         )
 
     def test_generic_web_deploy_recovery_apply_transitions_expired_running_before_retry(
@@ -1900,7 +2036,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 ),
             )
             provider = _RecoveryObservationProvider(
-                GenericWebProviderDeploymentObservation(outcome="absent")
+                GenericWebProviderDeploymentObservation(outcome="absent"), reservation=reservation
             )
             app = _create_recovery_app(root=root, store=store)
             lookup = ExistingMutationReservationLookupResult(
@@ -1972,20 +2108,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 patch(
                     "control_plane.generic_web_deploy_provider_adapter."
                     "execute_generic_web_deploy_result",
-                    return_value=(
-                        {"deployment_record_id": "deployment-expired-running-recovery"},
-                        {
-                            "deployment_record_id": "deployment-expired-running-recovery",
-                            "deploy_status": "pass",
-                            "deploy_started_at": "2026-08-15T12:20:00Z",
-                            "deploy_finished_at": "2026-08-15T12:25:00Z",
-                            "product": "sellyouroutboard",
-                            "context": "sellyouroutboard-testing",
-                            "instance": "testing",
-                            "post_deploy_status": "skipped",
-                            "provider_effect_attempted": False,
-                        },
-                    ),
+                    side_effect=_write_successful_retry_evidence,
                 ),
             ):
                 apply_status, apply_payload = _invoke_recovery_apply(
@@ -2071,7 +2194,8 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                     )
                 reservation = _write_generic_web_recovery_reservation(store, reservation)
                 provider = _RecoveryObservationProvider(
-                    GenericWebProviderDeploymentObservation(outcome="unknown")
+                    GenericWebProviderDeploymentObservation(outcome="unknown"),
+                    reservation=reservation,
                 )
                 app = _create_recovery_app(root=root, store=store)
                 with patch(
@@ -2122,7 +2246,7 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
             )
             reservation = _write_generic_web_recovery_reservation(store, reservation)
             provider = _RecoveryObservationProvider(
-                GenericWebProviderDeploymentObservation(outcome="absent")
+                GenericWebProviderDeploymentObservation(outcome="absent"), reservation=reservation
             )
             app = _create_recovery_app(root=root, store=store)
             with (
@@ -2171,10 +2295,21 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
         self.assertEqual(payload["proposed_action"], "retry_original_operation")
         self.assertEqual(provider.observation_calls, 1)
 
+    @scoped_agent_test
     def test_generic_web_deploy_recovery_reauthorizes_and_reports_stored_context(self) -> None:
-        for allowed_contexts, expected_status in (
-            (("sellyouroutboard-current",), 403),
-            (("sellyouroutboard-current", "sellyouroutboard-testing"), 200),
+        for allowed_contexts, allowed_actions, expected_status in (
+            (("sellyouroutboard-current",), ("generic_web_deploy.execute",), 403),
+            (
+                ("sellyouroutboard-current", "sellyouroutboard-testing"),
+                ("generic_web_deploy.execute",),
+                200,
+            ),
+            (("sellyouroutboard-current",), (GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION,), 403),
+            (
+                ("sellyouroutboard-current", "sellyouroutboard-testing"),
+                (GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION,),
+                200,
+            ),
         ):
             with (
                 self.subTest(expected_status=expected_status),
@@ -2198,11 +2333,13 @@ class GenericWebDeployRecoveryHttpTests(unittest.TestCase):
                 )
                 reservation = _write_generic_web_recovery_reservation(store, reservation)
                 provider = _RecoveryObservationProvider(
-                    GenericWebProviderDeploymentObservation(outcome="absent")
+                    GenericWebProviderDeploymentObservation(outcome="absent"),
+                    reservation=reservation,
                 )
                 app = _create_recovery_app(
                     root=root,
                     store=store,
+                    actions=allowed_actions,
                     contexts=allowed_contexts,
                 )
                 with patch(

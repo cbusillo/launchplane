@@ -9,6 +9,11 @@ title: Secrets
 
 ## Client credential input
 
+The same form also accepts the Director's service-owned artifact scan credential
+at the [artifact credential path](artifact-security.md#verified-artifact-scanning).
+That fixed service request writes the managed-secret bindings directly; the
+product-requested Client flow below remains a submission for admin application.
+
 An admin can request a credential by setting `owner_input` on one managed-secret
 requirement in the stored product profile. It contains a human-readable `label` and
 `instructions` and requires an explicit product context. An optional instance
@@ -336,6 +341,13 @@ authentication before creating a separate private token file.
   env. Missing managed bindings are a hard error.
 - Secret status surfaces return metadata only. Launchplane does not expose
   routine plaintext read commands or service endpoints.
+  `GET /v1/secrets/{secret_id}` and context/instance secret inventories expose
+  `current_version_value_origin` from the exact current immutable version,
+  without decryption. A null value means origin is unknown or the current
+  version is missing; a missing version also has an empty current-version
+  timestamp. Neither mutable binding metadata nor another version certifies
+  origin. This diagnostic does not qualify external-resource isolation or change
+  observer/deploy gates.
 - Credentials that only Launchplane's own jobs use for one lane, such as the
   production backup and VeriReel Proxmox SSH keys, live in the
   `launchplane_worker` integration, stored for exactly that lane. They are not
@@ -530,11 +542,11 @@ decryption key state denies the reveal or resolution.
 - Runtime key-safety gates classify managed secret bindings by binding key and
   Launchplane metadata, not by plaintext value. The initial classification
   contract is `prod_only`, `testing`, `preview`, `non_prod`, and `shared_safe`.
-- Deploy-time runtime key-safety reconciliation accepts admin-supplied
-  `LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON` metadata for runtime secret
-  bindings that need Launchplane-managed storage. It writes binding key,
-  `secret_class`, and target-scope metadata only; admins still supply or
-  rotate secret values through product-config managed secret writes.
+- The active DB policy record is the only source of key-safety rules. Deploys
+  do not import rules. Admins change a rule through
+  `POST /v1/runtime-key-safety/policies/apply`, or declare a lane secret's class
+  in product-config; secret values still go through product-config managed
+  secret writes.
 - Shared and production runtime mutations must execute through the deployed
   Launchplane service API or a Launchplane UI path backed by that API. Do not use
   local CLI live-target mutation commands from arbitrary checkouts as a fallback
@@ -667,11 +679,9 @@ decryption key state denies the reveal or resolution.
   records with `launchplane runtime-key-safety list-policies`, and run a
   metadata-only check with `launchplane runtime-key-safety evaluate` before a
   workflow mutates runtime keys.
-- The Launchplane deploy workflow may reconcile known runtime binding
-  classifications through `POST /v1/runtime-key-safety/policies/apply`. That
-  service path is OIDC-authenticated, DB-backed, additive by binding key, and
-  carries only binding metadata such as class, context, and instance scope. It
-  must not carry secret plaintext or provider env dumps.
+- `POST /v1/runtime-key-safety/policies/apply` is DB-backed, additive by
+  binding key, and carries only binding metadata such as class, context, and
+  instance scope. It must not carry secret plaintext or provider env dumps.
 - Evaluation reads only Launchplane managed secret bindings for the requested
   context and instance. If no active policy record exists, the gate fails closed
   instead of falling back to service-host env or product-local scripts.
@@ -712,7 +722,6 @@ decryption key state denies the reveal or resolution.
     `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST`; request bodies cannot
     override them
   - route-specific webhook ingress secrets such as
-    `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` and
     `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
 - Treat these as DB-backed Launchplane-owned data instead of live service-host
   env once the shared store is available:
@@ -923,6 +932,26 @@ unchanged. Product ownership and source record/binding changes before commit
 abort the copy. Both database-backed and filesystem bundles also abort if the
 reviewed product profile changes before commit. The
 audit records the source secret and version IDs.
+Each immutable managed value version records its service-computed `value_origin`:
+`supplied`, `provider`, `generated`, or unknown for historical values. Copies inherit
+the exact reviewed source version's origin; re-encryption preserves it. Caller
+metadata, binding names, relabels and onboarding updates cannot certify or change
+value origin. The binding's method remains `copy`, so a copy earns neither fresh
+local-generation credit nor the independently supplied key-safety exception.
+The external-resource observer accepts only known supplied/provider versions.
+Generated and unknown values, including copies, remain unavailable. A supported
+product-config value write creates a new version with origin computed by the
+service; historical origin is never inferred from mutable binding metadata.
+Any required secret entry stays in that private value-writing flow, never comments
+or agent evidence.
+Provider adoption reads retained managed history after capturing the provider
+environment. A matching value-backed key in the lane's current or declared
+historical contexts leaves origin unknown, including disabled and retired
+bindings: the provider may still hold an earlier generated value. Empty onboarding
+placeholders without a secret record do not count as prior values. Other exact
+lanes and unrelated contexts do not taint the lane. Adoption still works; a
+product-config supplied-value write is the supported way to establish origin
+when retained history prevents certifying the adopted value.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime
 sync or deployment remains a separate operation.

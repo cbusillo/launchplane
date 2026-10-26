@@ -46,6 +46,201 @@
     },
     "operations": [
       {
+        "idempotency": "body",
+        "identity_dependencies": [
+          "read_release_request_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "request"
+        ],
+        "operation_id": "request_release_review",
+        "path": "/v1/release-review/requests",
+        "purpose": "Record a Director request or agreed finish-line release decision and deliver its Client invitation without accepting or deploying.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "checklist_digest",
+          "decision_reference"
+        ],
+        "schema_fingerprint_sha256": "f115692c3fb674b18f91ad11f6babe3fa8592a1a8e8fe4e50015fd769dd22382",
+        "supported_surfaces": [
+          "service_api",
+          "browser"
+        ]
+      },
+      {
+        "idempotency": "body",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "continue_backup_v1_products__product__releases__decision_record_id__backup_continuation_post",
+        "path": "/v1/products/{product}/releases/{decision_record_id}/backup-continuation",
+        "purpose": "Review or requeue only a proved pre-capture failure under the original accepted release; retain failed history and unknown-effect fences.",
+        "response_statuses": [
+          "200",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_digest"
+        ],
+        "schema_fingerprint_sha256": "58db8a0b3f3df37db61c4601e028c49feebe958c318d45a43a250598dfdd4382",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_testing_discord_identity",
+        "path": "/v1/products/{product}/environments/{environment}/discord-identity",
+        "purpose": "Identify an exact testing Discord credential through fixed provider reads without changing origin or qualifying isolation.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "02c6e7012e3e7533e0c9ecb3a5a8ee312af755b6b7274583b85de4003744aad7",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "original",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "readback"
+        ],
+        "operation_id": "dry_run_generic_web_deploy_recovery",
+        "path": "/v1/admin/generic-web/deploy-recovery/dry-run",
+        "purpose": "Inspect an exact generic-web original without mutation, including completed testing abandonment readback by its retained reference.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "8cfbb235e6a5cf86aefb0d2cca62a133d4afa53f049b119ba716353002f6ba2c",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "original",
+        "identity_dependencies": [
+          "read_write_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "apply"
+        ],
+        "operation_id": "apply_generic_web_deploy_recovery",
+        "path": "/v1/admin/generic-web/deploy-recovery/apply",
+        "purpose": "Recover a reviewed original or abandon only a fenced testing verifier, preserving unknown history without provider mutation.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_recovery_digest"
+        ],
+        "schema_fingerprint_sha256": "386933a4bfe1b123111068ee033fe1387a1c6a4fe72f6cfd051aa3a7cbdb8dd0",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_odoo_shopify_identity",
+        "path": "/v1/products/{product}/environments/{environment}/shopify-identity",
+        "purpose": "Read hash-only held testing Shopify identity and compare applied production identity without activation or credential output.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "410",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "7d7b87bb458d0fa5dbe3e9ef102590d26e7fb33c002c2ddd0f2b7bc2e9c56a89",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_product_environment_health_history",
+        "path": "/v1/products/{product}/environments/{environment}/health-history",
+        "purpose": "Read complete paginated retained health and identity evidence within existing lane read access; no probes or mutations.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "29adc4075f38325d0f365026f8223fb1cd7a27fad6f9e112b8714fa39447f914",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_owner_review_identity"
@@ -369,9 +564,9 @@
           "apply",
           "readback"
         ],
-        "operation_id": "retire_incomplete_testing_generation",
-        "path": "/v1/products/{product}/testing-generation-retirement",
-        "purpose": "Retain an incomplete legacy testing generation and its unknown history without releasing the operation; an isolated successor remains separately qualified.",
+        "operation_id": "amend_native_testing_address",
+        "path": "/v1/products/{product}/testing-address",
+        "purpose": "Amend the current native Odoo testing lane's canonical hostname from exact retained custody, preserving its copy, original hostname and operation fences; verify both public runtime identities before publishing canonical metadata. Cancel an unpublished amendment under its original request and key to restore the route preimage.",
         "response_statuses": [
           "202",
           "400",
@@ -383,7 +578,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "a647fa4ac57158aebdfc4fecde23df3299549aea436c09259b8c1ab0746e0e81",
+        "schema_fingerprint_sha256": "535f901764568d1524de5200f4dcde9accda388481881f327afdeca509186a71",
         "supported_surfaces": [
           "service_api"
         ]
@@ -398,26 +593,23 @@
           "dry-run",
           "apply",
           "readback",
-          "route-repair-dry-run",
-          "route-repair-apply",
-          "route-repair-readback"
+          "inspect"
         ],
-        "operation_id": "prepare_fresh_testing_bootstrap",
-        "path": "/v1/products/{product}/testing-replacement-bootstrap",
-        "purpose": "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate. Reviewed certificate repair preserves the original generation, copy, and queue without retrying.",
+        "operation_id": "retire_incomplete_testing_generation",
+        "path": "/v1/products/{product}/testing-generation-retirement",
+        "purpose": "Retain an incomplete legacy testing generation and its unknown history without releasing the operation; an isolated successor remains separately qualified.",
         "response_statuses": [
           "202",
           "400",
           "401",
           "403",
-          "404",
           "409",
           "503"
         ],
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "99f6733db65900e96c77e95c0754bb37dc678c7d0908dfcbb1a019d70a6a29c2",
+        "schema_fingerprint_sha256": "9a480ac84f0cbadc885ff981e9c42e04affa7e3f7a04d83434203b38dcef9395",
         "supported_surfaces": [
           "service_api"
         ]
@@ -433,9 +625,41 @@
           "apply",
           "readback"
         ],
+        "operation_id": "prepare_fresh_testing_bootstrap",
+        "path": "/v1/products/{product}/testing-replacement-bootstrap",
+        "purpose": "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "c511c140ac67b2921121dc599c8a086983925b6e7edf23daf9c041b437521c6d",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback",
+          "release"
+        ],
         "operation_id": "prepare_testing_replacement_resources",
         "path": "/v1/products/{product}/testing-replacement-resources",
-        "purpose": "Prepare fresh empty Odoo testing resources while preserving the retained target, then qualify their actual backing storage; this never restores data or starts web.",
+        "purpose": "Prepare fresh empty Odoo testing resources while preserving the retained target, qualify their actual backing storage or release an unused initial preparation; this never restores data or starts web.",
         "response_statuses": [
           "202",
           "400",
@@ -482,7 +706,7 @@
           "expected_binding_sha256",
           "expected_observation_sha256"
         ],
-        "schema_fingerprint_sha256": "08c156407604b4c48a65eb9f97abd8eda48cac03628cd23df288eb9cb441d043",
+        "schema_fingerprint_sha256": "9f597f2977189b213c7e5ac9c74a17e6de16008407a3e568f7e538adc1674eb3",
         "supported_surfaces": [
           "service_api"
         ]
@@ -628,7 +852,7 @@
         "reviewed_evidence": [
           "reviewed_dry_run"
         ],
-        "schema_fingerprint_sha256": "c080710b984c8d6ded4f1d62df55c5f7d875f851426d6527d0a779dea2342aed",
+        "schema_fingerprint_sha256": "7204ea174461e746df94c2a6ae2a4ecdb8c067b39c17c936f720c0d5721c6b01",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -773,7 +997,7 @@
         ],
         "operation_id": "reconcile_legacy_generic_web_preview",
         "path": "/v1/previews/legacy-generic-web/reconciliation",
-        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web preview.",
+        "purpose": "Inspect, plan or reconcile one provider-absent legacy generic-web or Odoo preview.",
         "response_statuses": [
           "202",
           "400",
@@ -881,7 +1105,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "9d473f48936f5bdc245a9da6abd292fc8c2e66ed3aee4a8b63d0302b237d1cd4",
+        "schema_fingerprint_sha256": "74213c5c364421a8107eceac865c87176d2d555a5b6cb93fd8b58caed37b1e72",
         "supported_surfaces": [
           "operator_ui",
           "service_api"
@@ -967,8 +1191,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "636a1216f5a7b99519dffe5c0bcdc80353ef2438"
+    "source_commit_sha": "9daa832438244046691d09bef08127881ab64962"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "79e59de1e97e674a4c6a479d2ef103f203952d356d4d5ba639be03be322f4670"
+  "semantic_digest_sha256": "f736184328466904238affe51ddffaeec5e572580857dd02b2de0b9fe86944e9"
 }

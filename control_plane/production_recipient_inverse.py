@@ -1,5 +1,7 @@
 """Exact operator rollback and Client drill restore the retained recipient's own data."""
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,6 +105,16 @@ class RecipientInverseAdapter:
     validate_release: Callable[[], None]
     abort_observed: bool = False
     request: RecipientInverseRequest | None = None
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        return ProviderTargetOrigin(
+            product=self.record.product,
+            context=self.record.context,
+            instance="prod",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=self.record.target_id,
+        )
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -439,6 +451,7 @@ def run_recipient_inverse(
     key: str,
     trace: str,
     validate_release: Callable[[], None],
+    allow_mutation: bool = True,
 ) -> str:
     adapter = RecipientInverseAdapter(root, store, record, trace, validate_release)
     outcome = run_durable_provider_operation(
@@ -456,5 +469,6 @@ def run_recipient_inverse(
         lease_owner=trace + "-inverse",
         response_trace_id=trace,
         adapter=adapter,
+        allow_mutation=allow_mutation,
     )
     return outcome.record.record_id if outcome.record is not None else ""

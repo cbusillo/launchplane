@@ -1,9 +1,13 @@
 import type {
+  ApplyPromotionRecoveryData,
+  DryRunPromotionRecoveryData,
+  RuntimeSettingRemovalData,
   ApplyTestingHoldData,
   SetupDokployTargetData,
   ReconcileRouteBindingData,
   SubmitTestingRebuildData,
   LookupTestingRebuildData,
+  SettleTestingRebuildData,
   ResumeTestingRebuildData,
   DecideBackupPolicyProposalData,
   ExecuteProductRetirementData,
@@ -28,13 +32,12 @@ import type {
   EnqueueOdooProdPromotionData,
   EnqueueOdooProdRollbackData,
   EnqueueProductionBackupGateData,
-  RankWorkGraphSnapshotData,
   RevokeHumanPrivilegedOperationData,
   PrepareAuthorizationCandidateData,
   WriteProductReviewDecisionData,
   RetryProductReviewFeedbackData,
   WriteReleaseReviewDecisionData,
-  OpenUrgentReleaseReviewData,
+  RequestReleaseReviewData,
   SubmitOwnerSecretInputData,
   DeliverTestingLocalConsumerData,
   ConfigureLaunchplaneGithubDeliveryData,
@@ -42,11 +45,15 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  promotionRecoveryReview: "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/dry-run" satisfies DryRunPromotionRecoveryData["url"],
+  promotionRecoveryApply: "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/apply" satisfies ApplyPromotionRecoveryData["url"],
+  runtimeSettingRemoval: "/v1/admin/runtime-settings/removal" satisfies RuntimeSettingRemovalData["url"],
   testingHoldApply: "/v1/product-config/testing-hold/apply" satisfies ApplyTestingHoldData["url"],
   domainAuthorityRepair: "/v1/dokploy-targets/setup" satisfies SetupDokployTargetData["url"],
   routeBindingRepair: "/v1/route-bindings/reconcile" satisfies ReconcileRouteBindingData["url"],
   testingRebuild: "/v1/products/{product}/testing-rebuild" satisfies SubmitTestingRebuildData["url"],
   testingRebuildLookup: "/v1/products/{product}/testing-rebuild/lookup" satisfies LookupTestingRebuildData["url"],
+  testingRebuildSettle: "/v1/products/{product}/testing-rebuild/settle" satisfies SettleTestingRebuildData["url"],
   testingRebuildResume: "/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume" satisfies ResumeTestingRebuildData["url"],
   backupPolicyDecision: "/v1/production-backup-authority/proposals/{operation_id}/decision" satisfies DecideBackupPolicyProposalData["url"],
   localConsumerDelivery: "/v1/local-consumer-deliveries" satisfies DeliverTestingLocalConsumerData["url"],
@@ -65,7 +72,7 @@ export const BROWSER_WRITE_ROUTES = {
   serviceGitHubTokenRetire: "/v1/service/github-delivery/token-retirement" satisfies RetireServiceGithubTokensData["url"],
   ownerSecretSubmit: "/v1/owner-secret-inputs/submit" satisfies SubmitOwnerSecretInputData["url"],
   releaseReviewDecision: "/v1/release-review/decisions" satisfies WriteReleaseReviewDecisionData["url"],
-  releaseReviewUrgentOpening: "/v1/release-review/urgent-openings" satisfies OpenUrgentReleaseReviewData["url"],
+  releaseReviewRequest: "/v1/release-review/requests" satisfies RequestReleaseReviewData["url"],
   productEnvironmentConfigApply:
     "/v1/products/{product}/environments/{environment}/config/apply" satisfies ApplyProductEnvironmentConfigData["url"],
   productImageRepositoryApply: "/v1/product-profiles/{product}/image-repository" satisfies ApplyProductImageRepositoryData["url"],
@@ -82,8 +89,6 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/odoo-prod-promotions" satisfies EnqueueOdooProdPromotionData["url"],
   odooProdRollbackEnqueue:
     "/v1/odoo-prod-rollbacks" satisfies EnqueueOdooProdRollbackData["url"],
-  workGraphRank:
-    "/v1/work-graph/rank" satisfies RankWorkGraphSnapshotData["url"],
   productReviewDecision:
     "/v1/product-review/decisions" satisfies WriteProductReviewDecisionData["url"],
   productReviewFeedbackRetry:

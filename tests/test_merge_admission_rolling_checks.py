@@ -54,6 +54,8 @@ class _StrictCandidateChecks:
                     }
                 },
             }
+        if "/rules/branches/main?" in path:
+            return []
         if "/compare/" in path:
             # GitHub's actual first landing has the candidate step's tree, but
             # a distinct commit identity that is not an ancestor of the candidate.
@@ -62,7 +64,7 @@ class _StrictCandidateChecks:
                 if path.endswith(f"/{BASE_SHA}...{FINAL_CANDIDATE_SHA}")
                 else "diverged"
             }
-        if path.endswith(f"/commits/{FINAL_CANDIDATE_SHA}/status"):
+        if f"/commits/{FINAL_CANDIDATE_SHA}/status?" in path:
             return {"sha": FINAL_CANDIDATE_SHA, "statuses": []}
         if f"/commits/{FINAL_CANDIDATE_SHA}/check-runs?" in path:
             return {

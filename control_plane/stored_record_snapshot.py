@@ -11,7 +11,7 @@ import json
 import re
 import secrets
 from time import monotonic
-from typing import Any, Literal, overload
+from typing import Any, Literal, NamedTuple, overload
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import LargeBinary, Text, case, cast, func, select, text
@@ -26,7 +26,11 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    TRANSPORT_DATABASE_PREFIX_PATTERN,
+    LaunchplaneProductProfileRecord,
+)
+from control_plane.contracts.public_dns import public_dns_addresses, public_dns_name
 from control_plane.contracts.stored_record_snapshot import (
     SNAPSHOT_MAX_BYTES,
     SNAPSHOT_MAX_ROWS,
@@ -112,11 +116,19 @@ def snapshot_failure_diagnostics(error: Exception) -> dict[str, Any]:
     return result
 
 
+class _ScrubbedItem(NamedTuple):
+    schema: Mapping[str, Any]
+    root: Mapping[str, Any]
+    value: Any
+
+
 class _Scrubber:
     def __init__(self) -> None:
         self._salt = secrets.token_bytes(32)
         self._numbers: dict[str, int] = {}
         self._used_numbers: set[int] = set()
+        self._scrubbed_items_by_source: dict[tuple[int, int, str, bool, bytes], _ScrubbedItem] = {}
+        self._cached_source_bytes = 0
 
     def _digest(self, value: str) -> str:
         return hmac.new(self._salt, value.encode(), hashlib.sha256).hexdigest()
@@ -177,6 +189,25 @@ class _Scrubber:
             if expression == value.strip():
                 expression = f"{(minute + 1) % 60} {hour} * * {weekday}"
             return expression
+        if (
+            protocol
+            and name == "transport_database_prefix"
+            and TRANSPORT_DATABASE_PREFIX_PATTERN.fullmatch(value)
+            and (maximum_length is None or len(value) <= maximum_length)
+        ):
+            return f"snapshot_{digest[:12]}"
+        if (
+            protocol
+            and name == "public_name"
+            and (public_name := _normalized(public_dns_name, value))
+        ):
+            return f"snapshot-{self._digest(public_name)[:12]}.invalid"
+        if (
+            protocol
+            and name == "addresses"
+            and (addresses := _normalized(public_dns_addresses, (value,)))
+        ):
+            return self._public_address(addresses[0])
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
             return digest[: len(value)]
         if name == "slug_template":
@@ -194,6 +225,10 @@ class _Scrubber:
         if value.startswith("/"):
             return f"/snapshot-{digest[:12]}"
         return f"snapshot-{digest[:12]}"
+
+    def _public_address(self, address: str) -> str:
+        digest = self._digest(address)
+        return ".".join(("8", *(str(int(digest[index : index + 2], 16)) for index in (0, 2, 4))))
 
     def scrub(
         self,
@@ -248,9 +283,16 @@ class _Scrubber:
                 scrubbed["policy_key"] = f"{scrubbed['repository']}:{scrubbed['base_branch']}"
             return scrubbed
         if isinstance(value, list):
+            positional = schema.get("prefixItems", [])
             return [
-                self.scrub(item, schema.get("items", {}), root, name, declared=declared)
-                for item in value
+                self._scrub_list_item(
+                    item,
+                    positional[index] if index < len(positional) else schema.get("items", {}),
+                    root,
+                    name,
+                    declared=declared,
+                )
+                for index, item in enumerate(value)
             ]
         if isinstance(value, str):
             if value in schema.get("enum", []) or ("const" in schema and value == schema["const"]):
@@ -276,6 +318,35 @@ class _Scrubber:
                 pseudonym = self.number(str(value))
                 return float(pseudonym) if isinstance(value, float) else pseudonym
         return value
+
+    def _scrub_list_item(
+        self,
+        value: Any,
+        schema: Mapping[str, Any],
+        root: Mapping[str, Any],
+        name: str,
+        *,
+        declared: bool,
+    ) -> Any:
+        if not isinstance(value, dict):
+            return self.scrub(value, schema, root, name, declared=declared)
+        source = json.dumps(value, separators=(",", ":")).encode()
+        key = (id(schema), id(root), name, declared, hashlib.sha256(source).digest())
+        cached = self._scrubbed_items_by_source.get(key)
+        if cached is not None and cached.schema is schema and cached.root is root:
+            return cached.value
+        scrubbed = self.scrub(value, schema, root, name, declared=declared)
+        if self._cached_source_bytes + len(source) <= SNAPSHOT_MAX_BYTES:
+            self._cached_source_bytes += len(source)
+            self._scrubbed_items_by_source[key] = _ScrubbedItem(schema, root, scrubbed)
+        return scrubbed
+
+
+def _normalized(normalize: Callable[[Any], Any], value: object) -> Any:
+    try:
+        return normalize(value)
+    except ValueError:
+        return None
 
 
 def _statement_timeout_ms(remaining: int) -> int:
@@ -332,6 +403,11 @@ def export_stored_record_snapshot(
     deadline = monotonic() + 20
     encoder = SnapshotRowEncoder() if format_version == 2 else None
     active_policy_count = 0
+    nested_schemas = {
+        "dry_run_result": MergeTrainDryRunResult.model_json_schema(),
+        "snapshot": MergeTrainDryRunSnapshot.model_json_schema(),
+        "worker_step_result": MergeTrainWorkerStepResult.model_json_schema(),
+    }
 
     def refuse(reason: str) -> SnapshotUnavailable:
         return SnapshotUnavailable(
@@ -435,12 +511,7 @@ def export_stored_record_snapshot(
                             inventory.append(EnvironmentInventory.model_validate(raw["payload"]))
                     payload = scrubber.scrub(raw["payload"], schema, schema)
                     if model_type is MergeTrainRunRecord:
-                        for key, nested_type in (
-                            ("dry_run_result", MergeTrainDryRunResult),
-                            ("snapshot", MergeTrainDryRunSnapshot),
-                            ("worker_step_result", MergeTrainWorkerStepResult),
-                        ):
-                            nested_schema = nested_type.model_json_schema()
+                        for key, nested_schema in nested_schemas.items():
                             if key in raw["payload"]:
                                 payload[key] = scrubber.scrub(
                                     raw["payload"][key], nested_schema, nested_schema

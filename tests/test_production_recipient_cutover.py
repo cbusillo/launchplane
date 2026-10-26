@@ -9,6 +9,7 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
 from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
@@ -224,7 +225,7 @@ class RecipientCutoverTests(unittest.TestCase):
                 side_effect=lambda: datetime.now(UTC).isoformat(),
             ),
             patch(
-                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
                 return_value={
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "synthetic",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "synthetic",
@@ -366,6 +367,22 @@ class RecipientCutoverTests(unittest.TestCase):
     def test_accepted_release_bootstraps_then_publishes_one_atomic_set(self) -> None:
         result = self.run_release()
         self.assertEqual(result.response_status_code, 202, result.response_payload)
+        capsule = self.store.read_provider_target_origin(result.record)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (
+                self.record.product,
+                self.record.context,
+                "prod",
+                self.record.retained_target_id.target_id,
+            ),
+        )
         payload = result.response_payload["result"]
         assert isinstance(payload, dict)
         self.assertEqual(payload["promotion_status"], "pass")
@@ -399,6 +416,43 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertEqual(self.actions, [])
         self.assertEqual(self.deploys, 0)
         self.fixture.assert_old_preserved()
+
+    def test_cutover_accepts_both_compose_environment_forms(self) -> None:
+        application = self.record.request.application_service
+        database = self.record.request.database_service
+        for list_services in ((database,), (application,), (application, database)):
+            with self.subTest(list_services=list_services):
+                document = json.loads(self.record.compose_source)
+                for name in list_services:
+                    document["services"][name]["environment"] = [
+                        f"{key}={value}"
+                        for key, value in document["services"][name]["environment"].items()
+                    ]
+                record = self.record.model_copy(update={"compose_source": json.dumps(document)})
+                intent = cutover_intent(self.fixture.root, self.store, record, self.request)
+                binding = next(
+                    row
+                    for row in self.store.list_secret_bindings()
+                    if row.binding_id == self.request.writer_binding_id
+                )
+                self.assertEqual(intent["writer_secret_id"], binding.secret_id)
+                self.assertEqual(self.actions, [])
+
+    def test_cutover_refuses_api_credential_in_database_in_both_environment_forms(self) -> None:
+        for use_list in (False, True):
+            with self.subTest(use_list=use_list):
+                document = json.loads(self.record.compose_source)
+                database = document["services"][self.record.request.database_service]
+                environment = database["environment"]
+                environment["SYNC_API_TOKEN"] = "${SYNC_API_TOKEN}"
+                if use_list:
+                    database["environment"] = [
+                        f"{key}={value}" for key, value in environment.items()
+                    ]
+                record = self.record.model_copy(update={"compose_source": json.dumps(document)})
+                with self.assertRaises(ValueError):
+                    cutover_intent(self.fixture.root, self.store, record, self.request)
+                self.assertEqual(self.actions, [])
 
     def test_terminal_bad_health_stops_only_new_writer_and_restores_old(self) -> None:
         with patch(
@@ -449,6 +503,33 @@ class RecipientCutoverTests(unittest.TestCase):
         )
         with self.assertRaises(FileNotFoundError):
             cutover_intent(self.fixture.root, self.store, self.record, wrong)
+
+    def test_source_lost_after_cached_admission_refuses_first_effect(self) -> None:
+        from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+
+        qualified = True
+        original = self.store.checkpoint_mutation_provider_effect
+
+        def source() -> None:
+            if not qualified:
+                raise GenericWebPromotionSourceRefused("Current testing original is unresolved.")
+
+        def checkpoint(**kwargs: Any) -> Any:
+            nonlocal qualified
+            qualified = False
+            return original(**kwargs)
+
+        self.adapter.validate_source = source
+        with patch.object(
+            self.store, "checkpoint_mutation_provider_effect", side_effect=checkpoint
+        ):
+            with self.assertRaises(GenericWebPromotionSourceRefused):
+                self.run_release()
+        self.assertFalse(qualified)
+        self.assertEqual(self.actions, [])
+        self.assertEqual(self.deploys, 0)
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
 
     def test_drill_restores_retained_data_then_repromotes_without_reinitialization(self) -> None:
         from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
@@ -607,6 +688,14 @@ class RecipientCutoverTests(unittest.TestCase):
             lease_owner="peer",
             provider_target_key=key,
             reconciliation_key="peer-restart",
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.record.product,
+                context=self.record.context,
+                instance="prod",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id=self.record.retained_provider.target_id,
+            ),
         )
         result = self.run_release()
         self.assertEqual(result.response_status_code, 409)
@@ -638,6 +727,14 @@ class RecipientCutoverTests(unittest.TestCase):
             lease_owner="peer",
             provider_target_key=key,
             reconciliation_key="peer-restart",
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.record.product,
+                context=self.record.context,
+                instance="prod",
+                provider_id="dokploy",
+                target_type="compose",
+                target_id=self.record.retained_provider.target_id,
+            ),
         ).record
         assert peer is not None
         with self.assertRaises(ValueError):
@@ -786,6 +883,21 @@ class RecipientCutoverTests(unittest.TestCase):
                 trace=self.adapter.trace_id,
                 validate_release=self.validate_release,
             )
+        inverse = self.store.read_idempotency_record(
+            scope="client-release", route_path="/fixture/inverse", idempotency_key="inverse"
+        )
+        assert inverse is not None
+        capsule = self.store.read_provider_target_origin(inverse)
+        assert capsule is not None
+        self.assertEqual(
+            (
+                capsule.origin.product,
+                capsule.origin.context,
+                capsule.origin.instance,
+                capsule.origin.target_id,
+            ),
+            (current.product, current.context, "prod", current.target_id),
+        )
         restored = custody(self.store, self.record.product, self.record.context)
         assert restored is not None
         self.assertEqual(restored.phase, "rolled_back")

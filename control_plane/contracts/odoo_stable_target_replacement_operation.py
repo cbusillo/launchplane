@@ -192,6 +192,13 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
                 "Schema-v2 Odoo stable target replacement operation requires authorization provenance."
             )
         if self.authorization is not None:
+            if (
+                self.authorization.grant == "director_testing_rebuild"
+                and not self.is_native_testing_rebuild
+            ):
+                raise ValueError(
+                    "Director testing rebuild provenance requires the native lifecycle."
+                )
             if self.schema_version != 2:
                 raise ValueError(
                     "Odoo target replacement authorization provenance requires schema version 2."
@@ -299,6 +306,22 @@ def odoo_stable_target_replacement_operation_is_terminal(
     record: OdooStableTargetReplacementOperationRecord,
 ) -> bool:
     return record.status in ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES
+
+
+def odoo_replacement_original_identity(
+    record: OdooStableTargetReplacementOperationRecord,
+) -> tuple[object, ...]:
+    return (
+        record.operation_id,
+        record.product,
+        record.context,
+        record.instance,
+        record.created_at,
+        record.idempotency_scope,
+        record.idempotency_key,
+        record.request_fingerprint,
+        record.request.model_dump(mode="json"),
+    )
 
 
 def _normalize_required(value: str, message: str) -> str:

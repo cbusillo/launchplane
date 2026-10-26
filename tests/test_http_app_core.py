@@ -279,14 +279,6 @@ class FastApiConstructionMetadataTests(unittest.TestCase):
             "/v1/work-graph/merge-train/controller/status",
             first_payload["paths"],
         )
-        self.assertIn(
-            "/v1/every-code/summary",
-            first_payload["paths"],
-        )
-        self.assertIn(
-            "/v1/every-code/summary",
-            first_payload["x-launchplane-ui-read-operations"],
-        )
         self.assertEqual(
             first_payload["x-launchplane-ui-read-operations"][
                 "/v1/products/{product}/environments/{environment}/config-status"

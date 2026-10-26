@@ -13,6 +13,7 @@ from control_plane.contracts.product_profile_record import ProductOdooLaneDataPo
 from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
 from control_plane.odoo_walkthrough import WalkthroughPrerequisite
 from control_plane.testing_replacement_bootstrap import BootstrapPrerequisiteCode
+from control_plane.testing_replacement_resources import NativeTestingRebuildRequired
 from control_plane.odoo_testing_usage import OdooTestingUsage
 from control_plane.secrets import write_secret_value, LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR
 from tests import test_testing_replacement_resources as resources
@@ -54,7 +55,15 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
         # Legacy successful replacement is not an eligible stranded-operation anchor.
         self.store.write_odoo_stable_target_replacement_operation_record(
-            self.fixture.operation.model_copy(update={"status": "pass", "phase": "completed"})
+            self.fixture.operation.model_copy(
+                update={
+                    "status": "pass",
+                    "phase": "completed",
+                    "finished_at": self.fixture.operation.updated_at,
+                    "error_code": "",
+                    "error_message": "",
+                }
+            )
         )
         self.query = urlencode(
             {
@@ -72,6 +81,29 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             f"/v1/products/{self.fixture.profile.product}/path-check?{self.query}",
             headers={"Authorization": "Bearer local-operator-token"},
         )
+
+    async def test_native_copy_redirects_legacy_generation_without_blocking_account_reads(
+        self,
+    ) -> None:
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"source_label": "service:testing-rebuild"})
+        )
+        for intent, state in (("generation", "blocked"), ("provision", "clear")):
+            with self.subTest(intent=intent):
+                self.query = urlencode({"path": "testing", "intent": intent})
+                response = await self.read()
+                self.assertEqual(response.status_code, 200, response.text)
+                step = next(
+                    item
+                    for item in response.json()["check"]["steps"]
+                    if item["step_id"] == "testing_resources"
+                )
+                self.assertEqual(step["state"], state)
+                if state == "blocked":
+                    self.assertEqual(step["code"], NativeTestingRebuildRequired.code)
 
     async def test_default_testing_read_preserves_deploy_scope_without_copy_probes(self) -> None:
         with (
@@ -128,6 +160,21 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_copy_hold_and_unreadable_source_are_not_cleared(self) -> None:
         from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 
+        operation = self.fixture.operation.model_copy(
+            update={
+                "operation_id": self.fixture.operation.operation_id + "-held-read",
+                "idempotency_key": self.fixture.operation.idempotency_key + "-held-read",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(operation)
+        self.assertTrue(self.store.prepare_disposable_testing_replacement(operation, "fixture"))
+        self.query = urlencode(
+            {
+                "path": "testing",
+                "operation_id": operation.operation_id,
+                "intent": "generation",
+            }
+        )
         target = self.store.read_dokploy_target_record(
             context_name=self.fixture.context, instance_name="testing"
         )
@@ -151,6 +198,9 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             response = await self.read()
         steps = {step["step_id"]: step for step in response.json()["check"]["steps"]}
         self.assertEqual(steps["testing_generation_use"]["state"], "blocked")
+        for step_id in ("testing_generation_use", "testing_resource_allocation"):
+            self.assertEqual(steps[step_id]["code"], steps["testing_hold"]["code"])
+            self.assertEqual(steps[step_id]["fix"], steps["testing_hold"]["fix"])
         self.assertEqual(steps["testing_restore_source"]["state"], "unknown")
         self.assertNotIn("private-source", response.text)
 

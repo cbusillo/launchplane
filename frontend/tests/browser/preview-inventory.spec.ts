@@ -2,6 +2,7 @@ import { expect, test } from "./state";
 import { previewInventoryPresentation } from "../../src/preview-inventory";
 import { expireProductEvidence } from "../../src/product-environment-signal";
 import type { ProductPreviewSummary } from "../../src/generated/openapi.ts";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 const cases: Array<{ name: string; enabled: boolean; count: number;
   trust: ProductPreviewSummary["trust_state"]; scan?: NonNullable<ProductPreviewSummary["inventory"]>["status"]; observedCount?: number }> = [
@@ -86,7 +87,7 @@ for (const state of cases) {
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     if (state.name === "missing nonzero") {
-      await page.screenshot({ path: `../tmp/browser-smoke/preview-unknown-${testInfo.project.name}.png`, fullPage: true });
+      await page.screenshot({ path: smokeArtifact(`preview-unknown-${testInfo.project.name}.png`), fullPage: true });
       // A supported fresh read, rather than the recorded count, changes the claim.
       product.preview.trust_state = "verified";
       product.preview.provenance.freshness_status = "verified";
@@ -98,7 +99,7 @@ for (const state of cases) {
     }
     if (state.scan === "empty") {
       await expect(detail).toContainText(expected.detail);
-      await page.screenshot({ path: `../tmp/browser-smoke/preview-scanned-empty-${testInfo.project.name}.png`, fullPage: true });
+      await page.screenshot({ path: smokeArtifact(`preview-scanned-empty-${testInfo.project.name}.png`), fullPage: true });
       const expiredPresentation = previewInventoryPresentation(expireProductEvidence(product, now + 60_001).preview);
       const recordedPresentation = previewInventoryPresentation({ ...product.preview, trust_state: "recorded" });
       // An expired scan must explain its historical counts differently from an

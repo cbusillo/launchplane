@@ -285,13 +285,22 @@ class RecipientOwnedAuthorityChanged(RecipientAuthorityChanged):
 
 
 def require_owned_publication_rows(
-    store: PostgresRecordStore, record: ProductionRecipientRecord
+    store: PostgresRecordStore,
+    record: ProductionRecipientRecord,
+    *,
+    inventory_timestamp_required: bool = True,
 ) -> None:
     published = RecipientPublication.model_validate(record.publication["published"])
     current = authority_snapshot(store, record.product, record.context)
     expected = published.model_dump(mode="json")
     for key in ("target", "target_id", "provider", "inventory"):
-        if current[key] != expected[key]:
+        actual_row, expected_row = current[key], expected[key]
+        if key == "inventory" and not inventory_timestamp_required and actual_row is not None:
+            actual_row = {name: value for name, value in actual_row.items() if name != "updated_at"}
+            expected_row = {
+                name: value for name, value in expected_row.items() if name != "updated_at"
+            }
+        if actual_row != expected_row:
             raise RecipientOwnedAuthorityChanged(
                 "An owned authority row changed; preserve it for review."
             )

@@ -58,17 +58,30 @@ def observe_stall(
     progress_key: str,
     ready: tuple[str, ...],
     busy: bool,
+    blocked: tuple[str, ...] = (),
     orphaned_lease: bool = False,
     recovered_failure: bool = False,
+    wait_reason: str = "",
+    setting_gaps: tuple[str, ...] = (),
 ) -> MergeTrainStallObservation:
     changed = progress_key != previous.progress_key
     since = now if changed or not previous.progress_since else previous.progress_since
     ready_since = {key: previous.ready_since.get(key, now) for key in ready}
-    reasons: list[str] = []
+    blocked_since = {key: previous.blocked_since.get(key, now) for key in blocked}
+    reasons: list[str] = ["target_not_ready"] if setting_gaps else []
     if busy and _age(now, since) >= STALL_SECONDS:
         reasons.append("controller_unchanged")
+        if wait_reason in {
+            "candidate_checks_retry_pending",
+            "candidate_check_retry_unavailable",
+            "candidate_checks_disagree",
+            "candidate_checks_admin_hold",
+        }:
+            reasons.append(wait_reason)
     if any(_age(now, started) >= STALL_SECONDS for started in ready_since.values()):
         reasons.append("ready_change_not_moving")
+    if any(_age(now, started) >= STALL_SECONDS for started in blocked_since.values()):
+        reasons.append("blocked_change_not_moving")
     signals: list[str] = []
     if orphaned_lease:
         signals.append("lease_without_live_heartbeat")
@@ -82,8 +95,10 @@ def observe_stall(
         progress_key=progress_key,
         progress_since=since,
         ready_since=ready_since,
+        blocked_since=blocked_since,
         reasons=tuple(reasons),
         suspected_signals=tuple(signals),
+        setting_gaps=setting_gaps,
     )
 
 
@@ -205,6 +220,11 @@ def _issue_body(record: MergeTrainStallRecord) -> str:
                 f"  - Ready change `{key}` since {since}."
                 for key, since in sorted(observation.ready_since.items())
             )
+            lines.extend(
+                f"  - Train-blocked change `{key}` since {since}."
+                for key, since in sorted(observation.blocked_since.items())
+            )
+            lines.extend(f"  - Missing setting: {gap}" for gap in observation.setting_gaps)
     if not any(item.reasons for item in record.observations.values()):
         lines.append("Resolved: no actionable stall condition remains.")
     lines.extend(
@@ -253,9 +273,11 @@ def run_stall_monitor_pass(
                         include_permissions=True,
                     )
                     client = GitHubMergeTrainClient(
-                        transport=UrllibMergeTrainGitHubTransport(token=token)
+                        transport=UrllibMergeTrainGitHubTransport(token=token),
+                        source_screening=True,
                     )
                     client.begin_snapshot_pass(policy=target, read_only=True)
+                    setting_gaps = client.target_setting_gaps(repository_policy=target)
                     snapshot = client.read_merge_train_snapshot(
                         repository=repository, base_branch=target.base_branch
                     )
@@ -315,6 +337,13 @@ def run_stall_monitor_pass(
                         else set()
                     )
                     ready = tuple(f"{e.number}:{e.head_sha}" for e in queue.queue if e.eligible)
+                    blocked_heads = {
+                        (pr.number, pr.head_sha)
+                        for pr in snapshot.pull_requests
+                        if target.blocked_label.casefold()
+                        in {label.casefold() for label in pr.labels}
+                    }
+                    blocked = tuple(sorted(f"{number}:{head}" for number, head in blocked_heads))
                     previous = previous.model_copy(
                         update={
                             "ready_since": {
@@ -324,7 +353,7 @@ def run_stall_monitor_pass(
                             }
                         }
                     )
-                    recovered = any(
+                    recovered = not setting_gaps and any(
                         r.candidate.status == "failed"
                         and r.candidate.required_checks_status == "fail"
                         and r.candidate.candidate_sha
@@ -340,6 +369,7 @@ def run_stall_monitor_pass(
                         now=observed_at,
                         progress_key=progress_key,
                         ready=() if release_held else ready,
+                        blocked=() if release_held else blocked,
                         busy=not release_held
                         and bool(ready or current or (state and state.lease_owner)),
                         orphaned_lease=bool(
@@ -348,6 +378,10 @@ def run_stall_monitor_pass(
                             and _age(observed_at, state.lease_expires_at) >= 0
                         ),
                         recovered_failure=recovered,
+                        wait_reason=str(
+                            getattr(getattr(state, "last_result", None), "reason_code", "")
+                        ),
+                        setting_gaps=setting_gaps,
                     ).model_copy(update={"queue_suspended": release_held})
                 current_reasons = {
                     base: item.reasons for base, item in observations.items() if item.reasons

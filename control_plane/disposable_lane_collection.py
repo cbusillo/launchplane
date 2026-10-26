@@ -103,6 +103,7 @@ def collect_testing_resource_facts(
     from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
     from control_plane.odoo_testing_restore import (
         read_current_testing_generation,
+        require_distinct_testing_credentials,
         generation_binding,
     )
     from control_plane.odoo_testing_drill_usage import read_drill_recent_signins
@@ -115,17 +116,11 @@ def collect_testing_resource_facts(
         lane = next(
             lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")
         )
-        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
-        hold = target.policies.staff_testing_hold
-        if (
-            profile.driver_id != "odoo"
-            or lane.odoo_data_policy.data_authority != "resettable"
-            or hold is not None
-            and hold.purpose == "staff_testing"
-        ):
+        if profile.driver_id != "odoo" or lane.odoo_data_policy.data_authority != "resettable":
             return None
+        require_distinct_testing_credentials(store, profile, context)
         generation = read_current_testing_generation(
-            store, product=product, context=context, instance="testing"
+            store, product=product, context=context, instance="testing", resource_qualification=True
         )
         if generation is None or not generation.completed_at:
             return None

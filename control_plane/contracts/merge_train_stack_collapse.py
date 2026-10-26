@@ -17,6 +17,7 @@ from control_plane.contracts.merge_train_effect import (
     StackChildLabelEffect,
     StackChildMergeEffect,
 )
+from control_plane.contracts.text_fields import require_text
 from control_plane.merge_train import MergeTrainStackDiscoveryResult
 
 
@@ -51,14 +52,14 @@ class MergeTrainStackCollapseEntry(BaseModel):
 
     @model_validator(mode="after")
     def _validate_entry(self) -> "MergeTrainStackCollapseEntry":
-        self.head_sha = _normalize_required_value(
+        self.head_sha = require_text(
             self.head_sha, "merge train stack collapse entry requires head_sha"
         )
-        self.head_ref = _normalize_required_value(
+        self.head_ref = require_text(
             self.head_ref, "merge train stack collapse entry requires head_ref"
         )
         self.base_sha = self.base_sha.strip()
-        self.base_ref = _normalize_required_value(
+        self.base_ref = require_text(
             self.base_ref, "merge train stack collapse entry requires base_ref"
         )
         return self
@@ -79,14 +80,14 @@ class MergeTrainStackCollapseMutation(BaseModel):
 
     @model_validator(mode="after")
     def _validate_mutation(self) -> "MergeTrainStackCollapseMutation":
-        self.child_head_sha = _normalize_required_value(
+        self.child_head_sha = require_text(
             self.child_head_sha, "merge train stack collapse mutation requires child_head_sha"
         )
-        self.expected_parent_head_sha = _normalize_required_value(
+        self.expected_parent_head_sha = require_text(
             self.expected_parent_head_sha,
             "merge train stack collapse mutation requires expected_parent_head_sha",
         )
-        self.parent_head_ref = _normalize_required_value(
+        self.parent_head_ref = require_text(
             self.parent_head_ref, "merge train stack collapse mutation requires parent_head_ref"
         )
         self.expected_merge_tree_sha = self.expected_merge_tree_sha.strip()
@@ -110,7 +111,7 @@ class MergeTrainStackChildDisposition(BaseModel):
 
     @model_validator(mode="after")
     def _validate_disposition(self) -> "MergeTrainStackChildDisposition":
-        self.expected_head_sha = _normalize_required_value(
+        self.expected_head_sha = require_text(
             self.expected_head_sha,
             "merge train stack child disposition requires expected_head_sha",
         )
@@ -152,30 +153,30 @@ class MergeTrainStackCollapsePlan(BaseModel):
 
     @model_validator(mode="after")
     def _validate_plan(self) -> "MergeTrainStackCollapsePlan":
-        self.collapse_id = _normalize_required_value(
+        self.collapse_id = require_text(
             self.collapse_id, "merge train stack collapse plan requires collapse_id"
         )
         self.repository = _normalize_repository(self.repository)
-        self.base_branch = _normalize_required_value(
+        self.base_branch = require_text(
             self.base_branch, "merge train stack collapse plan requires base_branch"
         )
-        self.root_initial_head_sha = _normalize_required_value(
+        self.root_initial_head_sha = require_text(
             self.root_initial_head_sha,
             "merge train stack collapse plan requires root_initial_head_sha",
         )
-        self.root_head_ref = _normalize_required_value(
+        self.root_head_ref = require_text(
             self.root_head_ref, "merge train stack collapse plan requires root_head_ref"
         )
-        self.policy_key = _normalize_required_value(
+        self.policy_key = require_text(
             self.policy_key, "merge train stack collapse plan requires policy_key"
         )
-        self.policy_sha256 = _normalize_required_value(
+        self.policy_sha256 = require_text(
             self.policy_sha256, "merge train stack collapse plan requires policy_sha256"
         )
-        self.created_at = _normalize_required_value(
+        self.created_at = require_text(
             self.created_at, "merge train stack collapse plan requires created_at"
         )
-        self.updated_at = _normalize_required_value(
+        self.updated_at = require_text(
             self.updated_at, "merge train stack collapse plan requires updated_at"
         )
         self.entries = _normalize_entries(self.entries)
@@ -200,13 +201,13 @@ class MergeTrainStackCollapsePlanRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainStackCollapsePlanRecord":
-        self.record_id = _normalize_required_value(
+        self.record_id = require_text(
             self.record_id, "merge train stack collapse plan record requires record_id"
         )
-        self.source = _normalize_required_value(
+        self.source = require_text(
             self.source, "merge train stack collapse plan record requires source"
         )
-        self.updated_at = _normalize_required_value(
+        self.updated_at = require_text(
             self.updated_at, "merge train stack collapse plan record requires updated_at"
         )
         return self
@@ -295,7 +296,7 @@ def execute_merge_train_stack_collapse_plan(
     current_status: MergeTrainStackCollapseStatus = "collapsing"
     for mutation_index, mutation in enumerate(plan.mutations):
         if mutation.status == "mutated":
-            merge_commit_sha = _normalize_required_value(
+            merge_commit_sha = require_text(
                 mutation.merge_commit_sha,
                 "mutated stack collapse entry requires merge_commit_sha",
             )
@@ -351,7 +352,7 @@ def execute_merge_train_stack_collapse_plan(
                     update={
                         "child_head_sha": child_head_sha,
                         "expected_parent_head_sha": expected_parent_head_sha,
-                        "expected_merge_tree_sha": _normalize_required_value(
+                        "expected_merge_tree_sha": require_text(
                             expected_tree, "planned stack merge requires expected tree"
                         ),
                     }
@@ -444,13 +445,11 @@ def reconcile_merge_train_stack_children_after_root_landing(
 ) -> MergeTrainStackCollapsePlan:
     if plan.status != "waiting_for_root_checks":
         raise ValueError("merge train stack collapse plan is not ready for child disposition")
-    normalized_root_merge_commit_sha = _normalize_required_value(
+    normalized_root_merge_commit_sha = require_text(
         root_merge_commit_sha,
         "merge train stack child disposition requires root_merge_commit_sha",
     )
-    normalized_label = _normalize_required_value(
-        label, "merge train stack child disposition requires label"
-    )
+    normalized_label = require_text(label, "merge train stack child disposition requires label")
     updated_dispositions: list[MergeTrainStackChildDisposition] = []
     current_status: MergeTrainStackCollapseStatus = "waiting_for_root_checks"
     if checkpoint is not None and any(
@@ -694,16 +693,14 @@ def build_merge_train_stack_collapse_id(
     entry_head_shas: tuple[str, ...],
 ) -> str:
     normalized_repository = _normalize_repository(repository).replace("/", "-")
-    normalized_base_branch = _normalize_required_value(
+    normalized_base_branch = require_text(
         base_branch, "merge train stack collapse id requires base_branch"
     ).replace("/", "-")
     digest = hashlib.sha256(
         json.dumps(
             {
                 "entry_head_shas": [
-                    _normalize_required_value(
-                        sha, "merge train stack collapse id requires head sha"
-                    )
+                    require_text(sha, "merge train stack collapse id requires head sha")
                     for sha in entry_head_shas
                 ],
                 "root_pull_request_number": root_pull_request_number,
@@ -794,23 +791,14 @@ def _child_disposition_comment_body(
 
 
 def _normalize_repository(repository: str) -> str:
-    normalized = _normalize_required_value(
-        repository, "merge train stack collapse requires repository"
-    )
+    normalized = require_text(repository, "merge train stack collapse requires repository")
     if "/" not in normalized:
         raise ValueError("merge train stack collapse repository must be owner/name")
     return normalized
 
 
-def _normalize_required_value(value: str, error_message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(error_message)
-    return normalized_value
-
-
 def _canonical_utc_timestamp(timestamp: str) -> str:
-    normalized_timestamp = _normalize_required_value(
+    normalized_timestamp = require_text(
         timestamp, "merge train stack collapse timestamp is required"
     )
     parseable_timestamp = normalized_timestamp

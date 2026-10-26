@@ -718,20 +718,6 @@ def _administrator_product_evidence_read_state(
     return "legacy" if environment_rule_contexts == ("launchplane",) else "current"
 
 
-def administrator_product_evidence_read_state(
-    policy: LaunchplaneAuthzPolicy,
-    *,
-    github_id: int,
-) -> AuthorizationCandidateState:
-    """Report the candidate's public availability without exposing legacy detail."""
-    state = _administrator_product_evidence_read_state(policy, github_id=github_id)
-    if state == "absent":
-        return "available"
-    if state in ("legacy", "current"):
-        return "active"
-    return "conflict"
-
-
 def compile_administrator_product_evidence_read_candidate(
     *,
     current_policy: LaunchplaneAuthzPolicy,
@@ -948,28 +934,6 @@ def _agent_product_setup_rule_state(
     if grants is None:
         return "conflict", ()
     return "present", grants
-
-
-def agent_product_setup_state(
-    policy: LaunchplaneAuthzPolicy,
-    *,
-    identity: LocalOperatorIdentity | None,
-) -> AuthorizationCandidateState:
-    """Report whether the set is absent, the exact prepared shape, or foreign."""
-    state, grants = _agent_product_setup_rule_state(policy)
-    if state == "absent":
-        return "available"
-    if state == "conflict":
-        return "conflict"
-    if identity is None or grants[0][2:] != (identity.subject, identity.token_label):
-        return "conflict"
-    return "active"
-
-
-def agent_product_setup_products(policy: LaunchplaneAuthzPolicy) -> tuple[str, ...]:
-    """Products the current set covers, or none when it is absent or foreign."""
-    state, grants = _agent_product_setup_rule_state(policy)
-    return tuple(grant[0] for grant in grants) if state == "present" else ()
 
 
 def product_context_owners(record_store: object) -> dict[str, frozenset[str]]:

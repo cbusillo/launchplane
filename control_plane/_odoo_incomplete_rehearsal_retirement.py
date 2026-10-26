@@ -1,6 +1,47 @@
-"""Fixed host disposal for an idle incomplete standalone rehearsal."""
+"""Fixed host disposal for an idle incomplete or completed later-phase standalone rehearsal."""
 
-INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = r"""
+import inspect
+from typing import Any
+
+
+def preserved_rehearsal_abandonment(record: dict[str, Any]) -> bool:
+    archived = record.get("abandoned_validations", [])
+    progress = record.get("incomplete_retirement")
+    if not archived or not progress:
+        return False
+    disposal = progress.get("host_disposal")
+    return bool(
+        record.get("state") in {"retired", "rebuilding"}
+        and disposal
+        and disposal == archived[-1]["host_disposal"]
+        and disposal.get("disposed") is True
+        and disposal.get("recovery_snapshots_preserved") is True
+        and disposal.get("recovery_snapshots") == record.get("copies")
+    )
+
+
+def rehearsal_effect_marker(action: str, attempt: str) -> str:
+    return action + "-" + attempt + ".started"
+
+
+def archived_rehearsal_markers(record: dict[str, Any]) -> set[str]:
+    return {
+        rehearsal_effect_marker(
+            item.get("original", {}).get("provider_effect_phase", "validate-business"),
+            item["attempt_sha256"],
+        )
+        for item in record.get("abandoned_validations", [])
+    }
+
+
+INCOMPLETE_REHEARSAL_RETIREMENT_LIBRARY = (
+    "from typing import Any\n"
+    + inspect.getsource(preserved_rehearsal_abandonment)
+    + "\n"
+    + inspect.getsource(rehearsal_effect_marker)
+    + "\n"
+    + inspect.getsource(archived_rehearsal_markers)
+    + r"""
 def incomplete_initial_snapshot(spec,root,*,allow_partial):
     names=database_names(spec)
     for role in ('upgrade','final_source','final_upgrade'):
@@ -36,11 +77,99 @@ def incomplete_initial_snapshot(spec,root,*,allow_partial):
     return receipt
 
 
+LATER_PHASE_ROLES={'upgraded':('source',),'switched':('source','final_source')}
+
+
+def retaining_final_recovery(spec):
+    return spec['action']=='retire' and spec.get('retain_final_recovery') is True
+
+
+def validate_retained_final_recovery(spec,root,copies):
+    for copy in copies:
+        path=root/copy['database']
+        if not path.is_dir() or path.is_symlink():
+            raise RuntimeError('Retained recovery directory is missing or aliased')
+        for item in (root/'capture.json',path/'receipt.json',path/'database.dump',path/'filestore.tar'):
+            if item.is_symlink() or not item.is_file():
+                raise RuntimeError('Retained recovery custody is missing or aliased')
+        if not same_receipt(json.loads((path/'receipt.json').read_text()),copy):
+            raise RuntimeError('Retained recovery receipt changed')
+    validate_snapshots(spec,root,{},copies,retired=True)
+
+
+def same_receipt(saved,recorded):
+    # Launchplane and the host serialize the same capture instant differently.
+    return (isinstance(saved,dict) and isinstance(recorded,dict)
+        and {key:value for key,value in saved.items() if key!='captured_at'}
+            =={key:value for key,value in recorded.items() if key!='captured_at'}
+        and isinstance(saved.get('captured_at'),str) and isinstance(recorded.get('captured_at'),str)
+        and datetime.fromisoformat(saved['captured_at'])==datetime.fromisoformat(recorded['captured_at']))
+
+
+def later_phase_snapshots(spec,root):
+    # Bind exactly the recorded recovery snapshots of a settled later phase.
+    record=spec['record']
+    names=database_names(spec)
+    copies=record['copies']
+    rebuilding=record['state']=='rebuilding' and spec['action']=='abandon-validation'
+    state='switched' if rebuilding else record['state']
+    roles=(('source','final_source','final_upgrade')
+        if retaining_final_recovery(spec) and state=='retired' else LATER_PHASE_ROLES[state])
+    if [copy['database'] for copy in copies]!=[names[role] for role in roles]:
+        raise RuntimeError('Recorded recovery copies do not match the rehearsal phase')
+    for role,database in names.items():
+        if role not in roles and ((root/database).exists() or (root/database).is_symlink()):
+            raise RuntimeError('An unrecorded recovery snapshot cannot be disposed')
+    if (root/'capture.pending').exists() or (root/'capture.pending').is_symlink():
+        raise RuntimeError('A pending capture is not a settled phase')
+    for copy in copies:
+        path=root/copy['database']
+        for item in (path,root/'capture.json',path/'database.dump',path/'filestore.tar'):
+            if item.is_symlink() or not item.exists():
+                raise RuntimeError('Recovery snapshot custody is missing or aliased')
+    # Witness, lineage and bytes must still be exactly the recorded tuples.
+    validate_snapshots(spec,root,{},copies,retired=True)
+    receipts=[]
+    abandoned_action=spec.get('abandoned_action','validate-business')
+    if (spec['action']=='abandon-validation' and abandoned_action!=
+            {'switched':'validate-business','rebuilding':'rebuild-final'}.get(record['state'])):
+        raise RuntimeError('Abandoned effect does not match its rehearsal phase')
+    abandoned=(rehearsal_effect_marker(abandoned_action,spec['abandoned_attempt_sha256'])
+        if spec['action']=='abandon-validation' else '')
+    archived=archived_rehearsal_markers(record)
+    if abandoned and (not (root/abandoned).is_file() or (root/abandoned).is_symlink()):
+        raise RuntimeError('Missing original validation marker')
+    for marker in root.iterdir():
+        if marker.name.endswith('.started'):
+            if marker.name==abandoned:
+                if any((root/(marker.name[:-len('.started')]+suffix)).exists()
+                        for suffix in ('.json','.outcome.json','.outcome.pending')):
+                    raise RuntimeError('A recorded validation outcome cannot be abandoned')
+                continue
+            if marker.name in archived:
+                continue
+            receipt=root/(marker.name[:-len('.started')]+'.json')
+            if receipt.is_symlink() or not receipt.is_file():
+                raise RuntimeError('Uncertain original effect retains its custody')
+            receipts.append(json.loads(receipt.read_text()))
+    if not any(isinstance(saved,dict) and saved.get('intent_sha256')==record['intent_sha256']
+            and saved.get('state')==state and isinstance(saved.get('copies'),list)
+            and len(saved['copies'])==len(copies)
+            and all(same_receipt(left,right) for left,right in zip(saved['copies'],copies))
+            for saved in receipts):
+        raise RuntimeError('No settled operation published this phase')
+    return copies
+
+
 def incomplete_retirement(spec, root):
     record=spec['record']
     namespace=record['rehearsal_id']
-    if record['state']!='prepared' or record['copies'] or spec['mode'] not in {'dry-run','apply'}:
-        raise RuntimeError('Only an incomplete prepared rehearsal can be disposed')
+    if spec['mode'] not in {'dry-run','apply'} or not (
+            (record['state']=='prepared' and not record['copies'])
+            or (record['state'] in LATER_PHASE_ROLES and record['copies'])
+            or (spec['action']=='abandon-validation' and record['state']=='rebuilding' and record['copies'])
+            or (retaining_final_recovery(spec) and record['state']=='retired' and record['copies'])):
+        raise RuntimeError('Only an incomplete prepared or settled later-phase rehearsal can be disposed')
     if not root.is_dir() or root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Missing private rehearsal custody')
     lock_path=root/'.execution.lock'
@@ -54,10 +183,14 @@ def incomplete_retirement(spec, root):
 def incomplete_retirement_locked(spec,root):
     record=spec['record']
     namespace=record['rehearsal_id']
-    marker=root/'incomplete-retirement.json'
-    refusals=root/'incomplete-retirement-refusals.json'
+    preserve=spec['action']=='abandon-validation'
+    retain=retaining_final_recovery(spec)
+    prefix=('abandon-validation-'+spec['attempt_sha256'] if preserve else 'incomplete-retirement')
+    marker=root/(prefix+'.json')
+    refusals=root/(prefix+'-refusals.json')
     binding={'intent':record['intent_sha256'],'record':spec['record_binding_sha256'],
         'attempt':spec['attempt_sha256'],'resources':spec['resources_binding_sha256']}
+    if retain: binding['retain_final_recovery']=True
     progress=record.get('incomplete_retirement') or {}
     review=progress.get('reviewed_plan_sha256')
     def retirement_save(path,payload):
@@ -90,6 +223,10 @@ def incomplete_retirement_locked(spec,root):
         manifest=admitted['manifest']
         if manifest['binding']!=binding: raise RuntimeError('Disposal belongs to another operation')
         if admitted['reviewed_plan_sha256']!=review: raise RuntimeError('Disposal review changed')
+    elif record['copies']:
+        snapshots=later_phase_snapshots(spec,root)
+        database,image=current(spec)
+        containers=inspection(spec,database,image)
     else:
         if not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists():
             raise RuntimeError('Original execute is not incomplete')
@@ -112,6 +249,7 @@ def incomplete_retirement_locked(spec,root):
         containers=inspection(spec,database,image)
         if containers['web'][1].get('State',{}).get('Running') is not False:
             raise RuntimeError('An active rehearsal writer cannot be retired as incomplete')
+    if not marker.exists():
         own={item[1]['Id'] for item in containers.values()}
         volumes={namespace+suffix for suffix in ('-data','-db','-logs')}
         backings=inspect_volume_backings(volumes,all_containers,own,
@@ -120,8 +258,12 @@ def incomplete_retirement_locked(spec,root):
         network=one_inspection(network_name)
         manifest={'binding':binding,'containers':sorted(own),'volumes':backings,
             'network_name':network_name,'network_id':network['Id'],
-            'root':[root.stat().st_dev,root.stat().st_ino],
-            'initial_source_snapshot':snapshot}
+            'root':[root.stat().st_dev,root.stat().st_ino]}
+        if record['copies']:
+            manifest['initial_source_snapshot']=None
+            manifest['recovery_snapshots']=snapshots
+        else:
+            manifest['initial_source_snapshot']=snapshot
     if manifest['root']!=[root.stat().st_dev,root.stat().st_ino]:
         raise RuntimeError('Custody directory changed')
     binding_sha256=hashlib.sha256(json.dumps(manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -149,6 +291,16 @@ def incomplete_retirement_locked(spec,root):
         for mount in item['Mounts']:
             if mount.get('Name') in manifest['volumes'] and item['Id'] not in remaining:
                 raise RuntimeError('Storage has another consumer')
+    if record['copies']:
+        # Raw custody is untouched until every owned resource is proven absent, so
+        # every attempt, including a resumed manifest, re-proves it first.
+        if (remaining or volumes or network_present) and (
+                later_phase_snapshots(spec,root)!=manifest['recovery_snapshots']):
+            raise RuntimeError('Recovery custody changed after review')
+        # The private web may serve the settled copy; an exec is an unsettled writer.
+        if any('ExecIDs' not in item or item['ExecIDs'] not in (None,[])
+                for item in remaining.values()):
+            raise RuntimeError('An active rehearsal exec cannot be retired')
     if spec['mode']=='apply':
         if progress.get('host_binding_sha256')!=binding_sha256:
             if not marker.exists():
@@ -172,8 +324,13 @@ def incomplete_retirement_locked(spec,root):
                 or set(manifest['volumes']) & set(docker('volume','ls','--format','{{.Name}}').decode().splitlines())
                 or manifest['network_name'] in set(docker('network','ls','--format','{{.Name}}').decode().splitlines())):
             raise RuntimeError('Resource absence is unverified; preserve recovery custody')
-        for path in root.iterdir():
+        paths=([root/'raw-source',root/database_names(spec)['source']] if retain else
+            [root/'raw-source'] if preserve else root.iterdir())
+        if retain:
+            validate_retained_final_recovery(spec,root,manifest['recovery_snapshots'][1:])
+        for path in paths:
             if path.name in {'.execution.lock',marker.name,refusals.name}: continue
+            if not path.exists() and not path.is_symlink(): continue
             if path.is_symlink(): path.unlink()
             elif path.is_dir(): shutil.rmtree(path)
             else: path.unlink()
@@ -183,7 +340,14 @@ def incomplete_retirement_locked(spec,root):
         for item in inventory())
     volumes_absent=not set(manifest['volumes']) & set(docker('volume','ls','--format','{{.Name}}').decode().splitlines())
     network_absent=manifest['network_name'] not in set(docker('network','ls','--format','{{.Name}}').decode().splitlines())
-    raw_absent=all(path.name in {'.execution.lock',marker.name,refusals.name} for path in root.iterdir())
+    raw_absent=(all(not path.exists() and not path.is_symlink() for path in
+        (root/'raw-source',root/database_names(spec)['source'])) if retain else
+        not (root/'raw-source').exists() if preserve else
+        all(path.name in {'.execution.lock',marker.name,refusals.name} for path in root.iterdir()))
+    if preserve:
+        later_phase_snapshots(spec,root)
+    if retain:
+        validate_retained_final_recovery(spec,root,manifest['recovery_snapshots'][1:])
     disposed=containers_absent and volumes_absent and network_absent and raw_absent
     if spec['mode']=='apply' and not disposed: raise RuntimeError('Disposal is incomplete')
     result={'qualified':True,'disposed':disposed,'binding_sha256':binding_sha256,
@@ -192,7 +356,12 @@ def incomplete_retirement_locked(spec,root):
         'containers_absent':containers_absent,'volumes_absent':volumes_absent,
         'network_absent':network_absent,'raw_source_absent':raw_absent,
         'initial_source_snapshot':manifest.get('initial_source_snapshot'),
+        'recovery_snapshots':(manifest['recovery_snapshots'][:1] if retain else
+            manifest.get('recovery_snapshots',[])),
+        'recovery_snapshots_preserved':preserve,
         'public_route':False,'business_host_frozen':False}
+    if retain: result['retained_snapshots']=manifest['recovery_snapshots'][1:]
     emit_rehearsal_result(result)
     return result
 """
+)

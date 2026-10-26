@@ -10,9 +10,10 @@ from sqlalchemy import MetaData, Table, create_engine, inspect, text
 from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as held,
     e8d2f6a0b4c7_drop_preview_enablement as migration,
+    da72490fce13_join_topics_retirement as topics_join,
+    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 from control_plane.storage.schema_migration import (
     SCHEMA_MIGRATION_TARGET_REVISION,
     alembic_config,
@@ -100,10 +101,10 @@ class RetiredPreviewEnablementMigrationTests(unittest.TestCase):
                         connection.execute(text("SELECT version_num FROM alembic_version"))
                         .scalars()
                         .all(),
-                        [EXPECTED_ALEMBIC_HEAD_REVISION],
+                        [archive_retirement_join.revision],
                     )
                 self.assertEqual(
-                    schema_migration_action(current_revision=EXPECTED_ALEMBIC_HEAD_REVISION),
+                    schema_migration_action(current_revision=archive_retirement_join.revision),
                     "compatible_ahead",
                 )
             finally:
@@ -123,5 +124,5 @@ class RetiredPreviewEnablementMigrationTests(unittest.TestCase):
             schema_migration_target(
                 current_revision=migration.revision, target_revision=held.revision
             ),
-            EXPECTED_ALEMBIC_HEAD_REVISION,
+            topics_join.revision,
         )

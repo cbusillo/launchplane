@@ -1,7 +1,16 @@
 from typing import Annotated, Literal, Protocol, cast
 
-from fastapi import Depends, Path, Response
-from pydantic import BaseModel, ConfigDict
+from fastapi import Depends, Path, Query, Response
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import SQLAlchemyError
+
+from control_plane.provider_hold_attention import (
+    PROVIDER_HOLD_ATTENTION_ROUTE,
+    PROVIDER_HOLD_PAGE_LIMIT,
+    ProviderHoldAttentionPage,
+    ProviderHoldAttentionReadStore,
+    parse_provider_hold_cursor,
+)
 
 from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
@@ -15,7 +24,7 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentScope,
 )
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
-from control_plane.contracts.secret_record import SecretScope
+from control_plane.contracts.secret_record import SecretScope, SecretValueOrigin
 from control_plane.http_routes.support import (
     LAUNCHPLANE_SERVICE_CONTEXT,
     ApiRouteRegistrar,
@@ -24,6 +33,7 @@ from control_plane.http_routes.support import (
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 from control_plane.runtime_key_safety import RuntimeKeySafetyPolicyReadStore
 from control_plane.storage.factory import storage_backend_name
+from control_plane.outbox_inspection import OutboxInspection, OutboxInspectionStore, inspect_outbox
 
 
 class DeploymentRecordResponse(BaseModel):
@@ -61,6 +71,22 @@ class RecentOperationsResponse(BaseModel):
     recent_deployments: tuple[DeploymentRecord, ...]
     recent_promotions: tuple[PromotionRecord, ...]
     recent_previews: tuple[PreviewRecord, ...]
+
+
+class ProviderHoldAttentionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    attention: ProviderHoldAttentionPage
+
+
+class OutboxInspectionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    inspection: OutboxInspection
 
 
 class SecretStatusBinding(BaseModel):
@@ -112,6 +138,9 @@ class SecretStatusReadModel(BaseModel):
     updated_by: str
     last_validated_at: str
     current_version_id: str
+    current_version_value_origin: SecretValueOrigin | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
     version_count: int
     current_version_created_at: str
     binding: SecretStatusBinding | None = None
@@ -445,6 +474,62 @@ def register_inventory_operation_read_routes(
     *,
     dependencies: ReadRouteDependencies,
 ) -> None:
+    def read_outbox_inspection(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=5000)] = 1000,
+    ) -> OutboxInspectionResponse:
+        trace_id = dependencies.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="operations.read",
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The caller cannot inspect Launchplane outbox deliveries.",
+            )
+        if not all(
+            callable(getattr(record_store, name, None))
+            for name in (
+                "list_outbox_delivery_records",
+                "list_public_ingress_notification_policy_records",
+                "read_public_ingress_incident_record",
+            )
+        ):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="Outbox inspection requires database-backed records.",
+            )
+        try:
+            inspection = inspect_outbox(cast(OutboxInspectionStore, record_store), limit=limit)
+        except (ValueError, SQLAlchemyError) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="outbox_inspection_unavailable",
+                message="Outbox inspection failed. Delivery counts and destinations remain unknown.",
+            ) from error
+        return OutboxInspectionResponse(trace_id=trace_id, inspection=inspection)
+
+    app.add_api_route(
+        "/v1/outbox/inspection",
+        read_outbox_inspection,
+        methods=["GET"],
+        response_model=OutboxInspectionResponse,
+        operation_id="read_outbox_inspection",
+        summary="Inspect pending outbox delivery kinds and destination references without sending",
+        responses={code: {"model": dependencies.error_response_model} for code in (401, 403, 503)},
+    )
+
     def read_environment_inventory(
         context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
         instance: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
@@ -502,6 +587,72 @@ def register_inventory_operation_read_routes(
                 message="Workflow cannot read inventory for the requested context.",
             )
         return EnvironmentInventoryResponse(trace_id=trace_id, record=inventory)
+
+    def read_provider_hold_attention(
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        response: Response,
+        limit: Annotated[int, Query(ge=1, le=PROVIDER_HOLD_PAGE_LIMIT)] = 50,
+        cursor: Annotated[str | None, Query(max_length=100)] = None,
+    ) -> ProviderHoldAttentionResponse:
+        trace_id = dependencies.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="operations.read",
+            product=LAUNCHPLANE_SERVICE_CONTEXT,
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+            target=AuthorizationTarget(scope="context"),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="The caller cannot read Launchplane service operation attention.",
+            )
+        try:
+            parse_provider_hold_cursor(cursor)
+        except ValueError as error:
+            raise dependencies.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_cursor",
+                message="The operation attention cursor is invalid.",
+            ) from error
+        if not callable(getattr(record_store, "read_provider_hold_attention_page", None)):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="database_storage_required",
+                message="The record store does not support service operation attention.",
+            )
+        try:
+            attention = cast(
+                ProviderHoldAttentionReadStore, record_store
+            ).read_provider_hold_attention_page(
+                limit=limit,
+                cursor=cursor,
+            )
+        except (ValueError, SQLAlchemyError) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="provider_attention_unavailable",
+                message="Retained operation evidence is unavailable. No absence is established.",
+            ) from error
+        return ProviderHoldAttentionResponse(trace_id=trace_id, attention=attention)
+
+    app.add_api_route(
+        PROVIDER_HOLD_ATTENTION_ROUTE,
+        read_provider_hold_attention,
+        methods=["GET"],
+        response_model=ProviderHoldAttentionResponse,
+        operation_id="read_provider_hold_attention",
+        summary="Read a bounded page of retained service operation attention",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 503)
+        },
+    )
 
     def read_recent_operations(
         context: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],

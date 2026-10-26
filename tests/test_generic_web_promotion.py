@@ -1,7 +1,10 @@
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.generic_web_source_qualification import GenericWebSourceSnapshot
 from control_plane.contracts.record_failures import record_failure_summary
 import unittest
-from contextlib import nullcontext
-from collections.abc import Callable
+from contextlib import nullcontext, contextmanager
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -52,7 +55,6 @@ from control_plane.workflows.generic_web_promotion import (
 from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowRequest,
     _latest_workflow_dispatch_run,
-    dispatch_generic_web_promotion_workflow,
 )
 from control_plane.workflows.runtime_identity_health import HealthcheckPass
 from control_plane.workflows.ship import build_deployment_record
@@ -61,9 +63,29 @@ from control_plane.workflows.ship import build_deployment_record
 class _GenericWebPromotionStore:
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
+        self.provider_targets: dict[tuple[str, str], ProviderTargetRecord] = {}
+        self.held_reservations: tuple[LaunchplaneIdempotencyRecord, ...] = ()
         self.deployments: dict[str, DeploymentRecord] = {}
         self.promotions: dict[str, PromotionRecord] = {}
         self.inventories: dict[tuple[str, str], EnvironmentInventory] = {}
+
+    def read_generic_web_source_snapshot(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> GenericWebSourceSnapshot:
+        inventory = self.read_environment_inventory(
+            context_name=context_name, instance_name=instance_name
+        )
+        try:
+            target = self.provider_targets[(context_name, instance_name)]
+        except KeyError as error:
+            raise FileNotFoundError("current provider target") from error
+        return GenericWebSourceSnapshot(
+            self.read_product_profile_record(product),
+            inventory,
+            self.read_deployment_record(inventory.deployment_record_id),
+            target,
+            self.held_reservations,
+        )
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -122,6 +144,19 @@ class _GenericWebPromotionStore:
                     "destination_health": inventory.destination_health,
                 }
             )
+        )
+        target = self.read_deployment_record(inventory.deployment_record_id).deployed_target
+        assert target is not None
+        self.provider_targets[(inventory.context, inventory.instance)] = ProviderTargetRecord(
+            context=inventory.context,
+            instance=inventory.instance,
+            provider_id=target.provider_id,
+            target_category=target.target_category,
+            provider_target_type=target.provider_target_type,
+            target_id=target.target_id,
+            display_name=target.display_name,
+            updated_at="2026-05-01T21:00:00Z",
+            source_label="qualified-test-publication",
         )
         self.write_environment_inventory(inventory)
 
@@ -362,25 +397,47 @@ class GenericWebProdPromotionTests(unittest.TestCase):
     def test_execute_records_source_destination_health_promotion_and_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())
         store.write_qualified_testing_inventory(_testing_inventory())
+        held: list[str] = []
+
+        @contextmanager
+        def serialize(**kwargs: object) -> Iterator[None]:
+            held.append(str(kwargs["preview_id"]))
+            try:
+                yield
+            finally:
+                held.pop()
+
+        def source_health(*args: object, **kwargs: object) -> None:
+            self.assertTrue(held)
+
+        def destination_health(*args: object, **kwargs: object) -> HealthcheckPass:
+            self.assertTrue(held)
+            return HealthcheckPass(payload={"runtime_identity": _runtime_identity_payload()})
+
+        write_inventory = store.write_environment_inventory
+
+        def publish_inventory(record: EnvironmentInventory) -> None:
+            self.assertTrue(held)
+            write_inventory(record)
 
         def fake_deploy(**_kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
             return _deploy_result()
 
         with (
+            patch.object(store, "serialize_preview_refresh", side_effect=serialize, create=True),
+            patch.object(store, "write_environment_inventory", side_effect=publish_inventory),
             patch(
                 "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
                 side_effect=fake_deploy,
             ),
             patch(
                 "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
-                return_value=None,
+                side_effect=source_health,
             ) as healthcheck,
             patch(
                 "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
-                return_value=HealthcheckPass(
-                    payload={"runtime_identity": _runtime_identity_payload()}
-                ),
+                side_effect=destination_health,
             ) as identity_healthcheck,
         ):
             result = execute_generic_web_prod_promotion(
@@ -1076,6 +1133,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
 
 _PREVIOUS_ARTIFACT = f"ghcr.io/cbusillo/sellyouroutboard@sha256:{'f' * 64}"
 _PREVIOUS_DEPLOYMENT = "deployment-syo-prod-previous"
+_FORMER_REPOSITORY_ARTIFACT = f"ghcr.io/cbusillo/sellyouroutboard-app@sha256:{'f' * 64}"
 
 
 class _ProductionProvider:
@@ -1084,8 +1142,11 @@ class _ProductionProvider:
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
 
-    def __init__(self, *, fail_artifact: str = "") -> None:
+    def __init__(
+        self, *, fail_artifact: str = "", healthy_artifact: str = _PREVIOUS_ARTIFACT
+    ) -> None:
         self.fail_artifact = fail_artifact
+        self.healthy_artifact = healthy_artifact
         self.running: RuntimeIdentity | None = None
         self.deployed_artifacts: list[str] = []
 
@@ -1148,18 +1209,20 @@ class _ProductionProvider:
 
     def healthcheck(self, **_kwargs: object) -> HealthcheckPass:
         running = self.running
-        if running is None or running.artifact_id != _PREVIOUS_ARTIFACT:
+        if running is None or running.artifact_id != self.healthy_artifact:
             raise click.ClickException("https://www.sellyouroutboard.com/api/health returned 503")
         return HealthcheckPass(payload={"runtime_identity": running.model_dump(mode="json")})
 
 
 def _store_with_production(
-    *, previous_deploy_reference: str = f"ghcr.io/cbusillo/sellyouroutboard:sha-{'e' * 40}"
+    *,
+    previous_deploy_reference: str = f"ghcr.io/cbusillo/sellyouroutboard:sha-{'e' * 40}",
+    previous_artifact: str = _PREVIOUS_ARTIFACT,
 ) -> _GenericWebPromotionStore:
     store = _GenericWebPromotionStore(_profile())
     store.write_qualified_testing_inventory(_testing_inventory())
     previous = _deployment_record(
-        artifact_id=_PREVIOUS_ARTIFACT, deploy_reference=previous_deploy_reference
+        artifact_id=previous_artifact, deploy_reference=previous_deploy_reference
     ).model_copy(update={"record_id": _PREVIOUS_DEPLOYMENT, "source_git_ref": "previous"})
     store.write_deployment_record(previous)
     store.write_environment_inventory(
@@ -1181,7 +1244,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         from tests.support.lane_builds import LaneBuildGitHub
 
         profile = _profile()
-        transport = LaneBuildGitHub(
+        self.build_history = LaneBuildGitHub(
             profile.repository,
             profile.image.repository,
             {"1" * 40: "sha256:" + "f" * 64, "2" * 40: "sha256:" + "b" * 64},
@@ -1189,7 +1252,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         self.enterContext(
             patch(
                 "control_plane.product_reconcile.resolve_build_provenance_transport",
-                return_value=transport,
+                return_value=self.build_history,
             )
         )
         self.enterContext(
@@ -1379,9 +1442,11 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         executed: list[tuple[str, str]] = []
 
         def upsert(**kwargs: object) -> api.JsonObject:
-            payload = cast(api.JsonObject, kwargs["schedule_payload"])
-            schedules[str(payload["name"])] = dict(payload)
-            return {**payload, "scheduleId": payload["name"]}
+            guard = kwargs.get("provider_mutation_guard")
+            with guard() if callable(guard) else nullcontext():
+                payload = cast(api.JsonObject, kwargs["schedule_payload"])
+                schedules[str(payload["name"])] = dict(payload)
+                return {**payload, "scheduleId": payload["name"]}
 
         def read(**kwargs: object) -> api.JsonObject | None:
             name = str(kwargs["schedule_name"])
@@ -1555,6 +1620,26 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
         self.assertEqual(promotion.rollback.detail, record_failure_summary("rollback_passed"))
         self.assertEqual(promotion.rollback.target_deployment_record_id, _PREVIOUS_DEPLOYMENT)
 
+    def test_failed_promotion_returns_to_a_deployment_from_the_former_image_repository(
+        self,
+    ) -> None:
+        store = _store_with_production(
+            previous_artifact=_FORMER_REPOSITORY_ARTIFACT,
+            previous_deploy_reference=f"ghcr.io/cbusillo/sellyouroutboard-app:sha-{'e' * 40}",
+        )
+        provider = _ProductionProvider(
+            fail_artifact="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64,
+            healthy_artifact=_FORMER_REPOSITORY_ARTIFACT,
+        )
+        self.build_history.run_started_at[2] = "2030-01-01T00:00:00Z"
+
+        result = self._promote(store, provider)
+
+        assert provider.running is not None
+        self.assertEqual(provider.running.artifact_id, _FORMER_REPOSITORY_ARTIFACT)
+        self.assertEqual(result.rollback_status, "pass")
+        self.assertEqual(result.rollback_target_deployment_record_id, _PREVIOUS_DEPLOYMENT)
+
     def test_rollback_health_error_is_not_kept_on_the_promotion(self) -> None:
         store = _store_with_production()
         provider = _ProductionProvider()
@@ -1649,210 +1734,34 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
         self.assertNotIn("previous_run_ids", first.payload)
         self.assertNotIn("dispatch_started_at", first.payload)
 
-    def test_dispatch_accepts_based_driver_product_profile(self) -> None:
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="github-token",
+    def test_observation_refuses_ambiguous_and_predispatch_runs(self) -> None:
+        cases = {
+            "ambiguous": (
+                {"id": 101, "created_at": "2026-10-23T12:01:00Z"},
+                {"id": 102, "created_at": "2026-10-23T12:01:00Z"},
             ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
-                return_value={"workflow_runs": []},
-            ),
-        ):
-            result = dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=_profile(driver_id="odoo"),
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    dry_run=True,
-                    observe_timeout_seconds=0,
+            "predispatch": ({"id": 101, "created_at": "2026-10-23T11:59:00Z"},),
+        }
+        for name, runs in cases.items():
+            with (
+                self.subTest(name),
+                patch(
+                    "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                    return_value={"workflow_runs": list(runs)},
                 ),
-            )
-
-        self.assertEqual(result.repository, "cbusillo/sellyouroutboard")
-        self.assertTrue(result.dry_run)
-
-    def test_dispatch_rejects_unbased_driver_product_profile(self) -> None:
-        with self.assertRaises(click.ClickException):
-            dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=_profile(driver_id="missing-driver"),
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    dry_run=True,
-                    observe_timeout_seconds=0,
-                ),
-            )
-
-    def test_dispatches_product_workflow_and_observes_run(self) -> None:
-        requests: list[tuple[str, str, dict[str, object] | None]] = []
-        listed_once = False
-
-        def fake_github_api_request(
-            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ) -> object:
-            nonlocal listed_once
-            requests.append((method, path, body))
-            if method == "POST":
-                self.assertEqual(token, "github-token")
-                return None
-            if not listed_once:
-                listed_once = True
-                return {
-                    "workflow_runs": [
-                        {
-                            "id": 100,
-                            "html_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/100",
-                            "status": "completed",
-                            "conclusion": "success",
-                        }
-                    ]
-                }
-            return {
-                "workflow_runs": [
-                    {
-                        "id": 25237186636,
-                        "html_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
-                        "status": "queued",
-                        "conclusion": None,
-                        "created_at": "2099-01-01T00:00:00Z",
-                    }
-                ]
-            }
-
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="github-token",
-            ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
-                side_effect=fake_github_api_request,
-            ),
-        ):
-            profile = _profile().model_copy(
-                update={"promotion_workflow": ProductPromotionWorkflowProfile(default_bump="minor")}
-            )
-            result = dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=profile,
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    dry_run=False,
-                    observe_timeout_seconds=0,
-                ),
-            )
-
-        self.assertEqual(result.repository, "cbusillo/sellyouroutboard")
-        self.assertEqual(result.workflow_id, "promote-prod.yml")
-        self.assertEqual(result.ref, "main")
-        self.assertFalse(result.dry_run)
-        self.assertEqual(result.bump, "minor")
-        self.assertEqual(result.run_id, 25237186636)
-        self.assertEqual(result.run_status, "queued")
-        self.assertEqual(requests[1][0], "POST")
-        self.assertEqual(
-            requests[1][1],
-            "/repos/cbusillo/sellyouroutboard/actions/workflows/promote-prod.yml/dispatches",
-        )
-        self.assertEqual(
-            requests[1][2],
-            {"ref": "main", "inputs": {"dry_run": "false", "bump": "minor"}},
-        )
-
-    def test_observation_declines_ambiguous_new_runs(self) -> None:
-        list_count = 0
-
-        def fake_github_api_request(
-            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ) -> object:
-            nonlocal list_count
-            if method == "POST":
-                return None
-            list_count += 1
-            if list_count == 1:
-                return {"workflow_runs": []}
-            return {
-                "workflow_runs": [
-                    {"id": 101, "html_url": "https://github.example/runs/101", "status": "queued"},
-                    {"id": 102, "html_url": "https://github.example/runs/102", "status": "queued"},
-                ]
-            }
-
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="github-token",
-            ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
-                side_effect=fake_github_api_request,
-            ),
-        ):
-            result = dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=_profile(),
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    observe_timeout_seconds=0,
-                ),
-            )
-
-        self.assertEqual(result.run_id, 0)
-        self.assertEqual(result.run_url, "")
-        self.assertEqual(result.run_status, "pending")
-
-    def test_observation_ignores_new_run_created_before_dispatch(self) -> None:
-        list_count = 0
-
-        def fake_github_api_request(
-            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ) -> object:
-            nonlocal list_count
-            if method == "POST":
-                return None
-            list_count += 1
-            if list_count == 1:
-                return {"workflow_runs": []}
-            return {
-                "workflow_runs": [
-                    {
-                        "id": 101,
-                        "html_url": "https://github.example/runs/101",
-                        "status": "queued",
-                        "created_at": "2000-01-01T00:00:00Z",
-                    }
-                ]
-            }
-
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="github-token",
-            ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
-                side_effect=fake_github_api_request,
-            ),
-        ):
-            result = dispatch_generic_web_promotion_workflow(
-                control_plane_root=Path("."),
-                profile=_profile(),
-                request=GenericWebPromotionWorkflowRequest(
-                    product="sellyouroutboard",
-                    context="sellyouroutboard-testing",
-                    observe_timeout_seconds=0,
-                ),
-            )
-
-        self.assertEqual(result.run_id, 0)
-        self.assertEqual(result.run_url, "")
-        self.assertEqual(result.run_status, "pending")
+            ):
+                self.assertEqual(
+                    _latest_workflow_dispatch_run(
+                        owner="example",
+                        repo="site",
+                        workflow_id="promote.yml",
+                        ref="main",
+                        token="fixture-token",
+                        previous_run_ids=set(),
+                        min_created_at=datetime(2026, 10, 23, 12, 0, tzinfo=UTC),
+                    ),
+                    {},
+                )
 
     def test_observation_accepts_run_created_in_same_second_as_dispatch(self) -> None:
         def fake_github_api_request(
@@ -1885,28 +1794,6 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
             )
 
         self.assertEqual(run.get("id"), 101)
-
-    def test_dispatch_requires_managed_github_token(self) -> None:
-        with (
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
-                return_value="",
-            ),
-            patch(
-                "control_plane.workflows.generic_web_promotion_workflow.github_api_request"
-            ) as request,
-        ):
-            with self.assertRaises(click.ClickException):
-                dispatch_generic_web_promotion_workflow(
-                    control_plane_root=Path("."),
-                    profile=_profile(),
-                    request=GenericWebPromotionWorkflowRequest(
-                        product="sellyouroutboard",
-                        context="sellyouroutboard-testing",
-                    ),
-                )
-
-        request.assert_not_called()
 
 
 if __name__ == "__main__":

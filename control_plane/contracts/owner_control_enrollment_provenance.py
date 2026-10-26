@@ -17,6 +17,7 @@ from control_plane.contracts.owner_control_shadow_verifier import (
     OWNER_CONTROL_SHADOW_AUTHORITY_STATE,
     OwnerControlChannelSessionRecord,
 )
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 
 OWNER_CONTROL_ENROLLMENT_PROVENANCE_SCHEMA_VERSION: Final[Literal[1]] = 1
@@ -24,7 +25,6 @@ OWNER_CONTROL_ENROLLMENT_CONTEXT: Final[Literal["postgres_record_store"]] = "pos
 OWNER_CONTROL_SERVER_CORROBORATION: Final[Literal["none"]] = "none"
 OWNER_CONTROL_PROVENANCE_TIER: Final[Literal["self_asserted"]] = "self_asserted"
 _OPAQUE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _CANONICAL_TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$")
 _PUBLISHED_SYNTHETIC_PUBLIC_KEY_SHA256: Final = frozenset(
     {
@@ -128,9 +128,9 @@ class OwnerControlEnrollmentProvenanceRecord(BaseModel):
     channel_session_id: str
     owner_github_id: int = Field(ge=1, le=9_223_372_036_854_775_807)
     binding_json: str = Field(min_length=2, max_length=20_000)
-    binding_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    binding_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     host_principal_claim_json: str = Field(min_length=2, max_length=20_000)
-    host_principal_claim_sha256: str = Field(pattern=_SHA256_PATTERN.pattern)
+    host_principal_claim_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     enrolled_at: str
     enrollment_context: Literal["postgres_record_store"] = OWNER_CONTROL_ENROLLMENT_CONTEXT
     server_observed_corroboration: Literal["none"] = OWNER_CONTROL_SERVER_CORROBORATION

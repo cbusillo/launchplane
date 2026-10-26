@@ -12,22 +12,29 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
-from control_plane.storage.postgres import _build_engine
+from control_plane.storage.postgres import _build_engine, PostgresRecordStore
 from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
     e8d2f6a0b4c7_drop_preview_enablement as retired_preview,
     e9e3a7b1c5d8_join_retirement_paths as retirement_join,
     b81ca763d924_add_discussion_topics as discussion_topics,
+    da72490fce13_join_topics_retirement as topics_join,
+    f0a4c8e2b6d9_canonical_public_host_fences as public_host_fences,
+    f1b5d9a3c7e0_join_public_host_fences as public_host_join,
+    f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
+    f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
+    a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
+    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
+    a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
+    a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
 )
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
-    EXPECTED_ALEMBIC_HEAD_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-# Topics extend the approved preview path. #2437's sibling drop stays held.
-SCHEMA_MIGRATION_TARGET_REVISION = discussion_topics.revision
+SCHEMA_MIGRATION_TARGET_REVISION = profile_archive.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
@@ -35,7 +42,30 @@ SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     retired_delivery.revision,
     retirement_join.revision,
     discussion_topics.revision,
-    EXPECTED_ALEMBIC_HEAD_REVISION,
+    topics_join.revision,
+    profile_archive.revision,
+)
+_RECOGNIZED_SOURCE_REVISIONS = (
+    *SCHEMA_MIGRATION_SUPPORTED_REVISIONS,
+    public_host_fences.revision,
+    public_host_join.revision,
+    topics_hostnames.revision,
+    compatibility_join.revision,
+    archive_retirement_join.revision,
+    archive_hostnames_join.revision,
+    archive_compatibility_join.revision,
+)
+_ARCHIVE_JOIN_BY_SOURCE = {
+    retired_delivery.revision: archive_retirement_join.revision,
+    retirement_join.revision: archive_retirement_join.revision,
+    topics_join.revision: archive_retirement_join.revision,
+    public_host_fences.revision: archive_hostnames_join.revision,
+    topics_hostnames.revision: archive_hostnames_join.revision,
+    public_host_join.revision: archive_compatibility_join.revision,
+    compatibility_join.revision: archive_compatibility_join.revision,
+}
+_HELD_DELIVERY_TARGETS = frozenset(
+    {retired_delivery.revision, retirement_join.revision, topics_join.revision}
 )
 _SCHEMA_MIGRATION_LOCK_KEY = "launchplane:schema-migration"
 SchemaMigrationAction = Literal["current", "upgrade", "compatible_ahead"]
@@ -46,11 +76,10 @@ def schema_migration_action(
     current_revision: str,
     target_revision: str = SCHEMA_MIGRATION_TARGET_REVISION,
 ) -> SchemaMigrationAction:
-    if target_revision not in SCHEMA_MIGRATION_SUPPORTED_REVISIONS:
-        raise ValueError(f"Unsupported Launchplane schema migration target {target_revision!r}.")
+    _require_supported_target(target_revision)
     if current_revision == target_revision:
         return "current"
-    if current_revision in SCHEMA_MIGRATION_SUPPORTED_REVISIONS:
+    if current_revision in _RECOGNIZED_SOURCE_REVISIONS:
         if target_revision in _alembic_predecessor_revisions(current_revision):
             return "compatible_ahead"
     effective_target = schema_migration_target(
@@ -62,11 +91,15 @@ def schema_migration_action(
 
 
 def schema_migration_target(*, current_revision: str, target_revision: str) -> str:
+    if target_revision == profile_archive.revision and current_revision in _ARCHIVE_JOIN_BY_SOURCE:
+        return _ARCHIVE_JOIN_BY_SOURCE[current_revision]
+    if current_revision == profile_archive.revision and target_revision in _HELD_DELIVERY_TARGETS:
+        return archive_retirement_join.revision
     # Only a database that has ALREADY applied the held delivery branch may
     # auto-join it. Explicitly requesting that branch remains the approved-host
     # application path; when preview has applied, join both on that request.
     if {current_revision, target_revision} == {retired_delivery.revision, retired_preview.revision}:
-        return EXPECTED_ALEMBIC_HEAD_REVISION
+        return topics_join.revision
     if (
         current_revision in {retired_delivery.revision, retirement_join.revision}
         and target_revision == discussion_topics.revision
@@ -74,8 +107,23 @@ def schema_migration_target(*, current_revision: str, target_revision: str) -> s
         current_revision == discussion_topics.revision
         and target_revision in {retired_delivery.revision, retirement_join.revision}
     ):
-        return EXPECTED_ALEMBIC_HEAD_REVISION
+        return topics_join.revision
+    if (
+        current_revision == public_host_fences.revision
+        and target_revision == discussion_topics.revision
+    ):
+        return topics_hostnames.revision
+    if current_revision == public_host_join.revision and target_revision in {
+        discussion_topics.revision,
+        topics_join.revision,
+    }:
+        return compatibility_join.revision
     return target_revision
+
+
+def _require_supported_target(target_revision: str) -> None:
+    if target_revision not in SCHEMA_MIGRATION_SUPPORTED_REVISIONS:
+        raise ValueError(f"Unsupported Launchplane schema migration target {target_revision!r}.")
 
 
 def _alembic_predecessor_revisions(target_revision: str) -> frozenset[str]:
@@ -91,6 +139,7 @@ def migrate_schema(
     database_url: str,
     target_revision: str = SCHEMA_MIGRATION_TARGET_REVISION,
 ) -> str:
+    _require_supported_target(target_revision)
     engine = _build_engine(database_url)
     try:
         if engine.url.get_backend_name() != "postgresql":
@@ -131,6 +180,11 @@ def migrate_schema(
                     raise RuntimeError(
                         "Launchplane schema migration did not reach a compatible revision."
                     )
+                store = PostgresRecordStore(database_url=database_url)
+                try:
+                    store.seed_guest_capture_bindings()
+                finally:
+                    store.close()
                 return final_revision
             finally:
                 lock_connection.execute(

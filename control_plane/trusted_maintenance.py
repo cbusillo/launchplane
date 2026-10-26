@@ -118,18 +118,6 @@ class TrustedMaintenanceEvidenceReadStore(Protocol):
     ) -> tuple[TrustedMaintenanceEvidenceRecord, ...]: ...
 
 
-class TrustedMaintenanceEvidenceStore(TrustedMaintenanceEvidenceReadStore, Protocol):
-    def write_trusted_maintenance_evidence_record(
-        self,
-        record: TrustedMaintenanceEvidenceRecord,
-    ) -> Literal["written", "replayed"]: ...
-
-    def read_trusted_maintenance_evidence_record(
-        self,
-        evidence_id: str,
-    ) -> TrustedMaintenanceEvidenceRecord: ...
-
-
 class TrustedMaintenanceAuthorityReadStore(
     TrustedMaintenancePolicyReadStore,
     TrustedMaintenanceEvidenceReadStore,
@@ -361,45 +349,6 @@ def require_trusted_maintenance_policy_store(
             f"{missing_summary}"
         )
     return cast(TrustedMaintenancePolicyStore, record_store)
-
-
-def require_trusted_maintenance_evidence_read_store(
-    record_store: object,
-) -> TrustedMaintenanceEvidenceReadStore:
-    required_methods = ("list_trusted_maintenance_evidence_records",)
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support trusted-maintenance evidence reads: "
-            f"{missing_summary}"
-        )
-    return cast(TrustedMaintenanceEvidenceReadStore, record_store)
-
-
-def require_trusted_maintenance_evidence_store(
-    record_store: object,
-) -> TrustedMaintenanceEvidenceStore:
-    required_methods = (
-        "list_trusted_maintenance_evidence_records",
-        "write_trusted_maintenance_evidence_record",
-    )
-    missing_methods = [
-        method_name
-        for method_name in required_methods
-        if not callable(getattr(record_store, method_name, None))
-    ]
-    if missing_methods:
-        missing_summary = ", ".join(missing_methods)
-        raise TypeError(
-            "Launchplane record store does not support trusted-maintenance evidence writes: "
-            f"{missing_summary}"
-        )
-    return cast(TrustedMaintenanceEvidenceStore, record_store)
 
 
 def normalize_trusted_maintenance_policy_lookup_scope(
@@ -861,34 +810,6 @@ def trusted_maintenance_path_result(
         state="satisfied",
         evidence_id=latest.evidence_id,
         evidence_digest=latest.evidence_digest,
-    )
-
-
-def trusted_maintenance_path_result_from_store(
-    *,
-    store: TrustedMaintenanceAuthorityReadStore,
-    candidate: TenantMergeCandidate,
-    evaluated_at: str,
-) -> TenantAdmissionPathResult | None:
-    current = trusted_maintenance_current_authority(
-        store=store,
-        candidate=candidate,
-        evaluated_at=evaluated_at,
-    )
-    evidence = store.list_trusted_maintenance_evidence_records(
-        repository_id=candidate.repository_id,
-        repository_owner_id=candidate.repository_owner_id,
-        repository=candidate.repository,
-        product=candidate.product,
-        context=candidate.context,
-        pull_request_number=candidate.pull_request_number,
-    )
-    return trusted_maintenance_path_result(
-        candidate=candidate,
-        classification=current.classification,
-        policy_record=current.policy_record,
-        evidence_records=evidence,
-        evaluated_at=evaluated_at,
     )
 
 

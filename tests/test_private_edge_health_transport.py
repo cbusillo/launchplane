@@ -40,7 +40,7 @@ class PrivateEdgeHealthTransportTests(unittest.TestCase):
 
         request_private_edge_health(
             "https://bridge.example.test/health",
-            edge_api_url="http://edge.internal:81",
+            edge_url="http://edge.internal:81",
             timeout_seconds=3,
             resolver=resolve,
             connection_factory=connect,
@@ -57,7 +57,7 @@ class PrivateEdgeHealthTransportTests(unittest.TestCase):
                 with self.assertRaises(PublicHttpDestinationError):
                     request_private_edge_health(
                         "https://bridge.example.test/health",
-                        edge_api_url="http://edge.internal:81",
+                        edge_url="http://edge.internal:81",
                         timeout_seconds=3,
                         resolver=_resolver_for(*ips),
                         connection_factory=connect,
@@ -74,9 +74,7 @@ class PrivateEdgeHealthTransportTests(unittest.TestCase):
             "https://user:password@bridge.example.test/health",
         ):
             with self.subTest(url=url), self.assertRaises((ValueError, PublicHttpDestinationError)):
-                request_private_edge_health(
-                    url, edge_api_url="http://10.77.0.9:81", timeout_seconds=3
-                )
+                request_private_edge_health(url, edge_url="http://10.77.0.9:81", timeout_seconds=3)
         connect = Mock(
             return_value=_FakeConnection(
                 _FakeResponse(
@@ -87,7 +85,7 @@ class PrivateEdgeHealthTransportTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             request_private_edge_health(
                 "https://bridge.example.test/health",
-                edge_api_url="http://edge.internal:81",
+                edge_url="http://edge.internal:81",
                 timeout_seconds=3,
                 resolver=_resolver_for("10.77.0.9"),
                 connection_factory=connect,
@@ -174,7 +172,7 @@ class PrivateEdgeHealthTransportTests(unittest.TestCase):
                         def fetch() -> outbound_http.PublicHttpResponse:
                             return request_private_edge_health(
                                 f"https://{hostname}/health",
-                                edge_api_url="http://edge.internal:81",
+                                edge_url="http://edge.internal:81",
                                 timeout_seconds=3,
                                 resolver=_resolver_for("10.77.0.9"),
                                 connection_factory=connect,

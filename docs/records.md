@@ -487,6 +487,47 @@ completion has the same evidence requirement as restart adoption; completed
 means the provider outcome is durable and replayable, not that the external
 deployment passed.
 
+Fresh reservations for shared physical-parent keys in the
+`generic-web-provider-target:*` namespace also require an original provider
+recipient captured from the same recipient used to compute the existing key.
+Suffixed child-effect keys keep their separate operation-fence semantics. The typed identity contains product, context, instance,
+provider, target type and target ID. Product is captured explicitly because the
+physical key does not include it. Storage verifies the existing key and retains
+that identity with a random operation nonce as the `provider_target_origin`
+sibling in the existing original-mutation-intent receipt, in the acquisition or
+supersession transaction. The family's `original_intent` dictionary and equality
+stay unchanged, including an empty dictionary for origin-only receipts.
+
+Retries, adoption and recovery never replace that capsule or infer it from
+current lane records. A safe release followed by fresh acquisition receives a
+new nonce even when the deterministic reservation ID and database timestamp are
+unchanged. Existing rows without custody remain readable and recoverable through
+their existing guards; they are never backfilled. Internal origin reads require
+the completed receipt, matching request fingerprint and reservation ID, a valid
+capsule and the same physical key. Missing or mismatched evidence is unavailable.
+The capsule is attention identity only: it grants no authorization, exclusion,
+effect-completion, retry, supersession or lane-separation proof.
+
+The common internal held-parent projection retains every operation and groups
+proved origins by captured product/context/instance. Legacy encoded origins
+must include product and rehash to the admitted physical key; they have no
+strong incarnation reference. Missing or corrupt custody remains unavailable.
+The current provider record is separate match metadata and cannot establish
+historical product ownership. Suffixed child effects and other namespaces stay
+outside this projection.
+
+Provider incidents store only opaque reservation-ID/nonce references inside
+`route_authority.target_keys`. Older material without these keys keeps its
+existing parser and canonical hash. Operation-set changes are material;
+ordering, summaries and heartbeats alone are not. Internal primary-key batch
+reads validate the same bound capsule and agreement between indexed row columns
+and the typed payload before accepting a completed reference. Contradictory
+parent projection is unavailable, as with malformed parent records; a corrupt
+receipt remains explicit unavailable custody without changing family-intent reads.
+Absence or a different nonce is never settlement. The projection and source
+witness contain private reservation/physical/configuration data; they are not
+public response models and their hashes must not be exposed.
+
 ## ORM Query Boundary
 
 Launchplane's Postgres storage layer should expose GUI and driver reads through
@@ -600,10 +641,13 @@ an ORM column/table or remains only in the evidence payload.
   After a proven cutover, records should store import/audit/model-version
   evidence rather than remain a second live authorization source.
 - Human session: the DB-backed payload includes the GitHub identity snapshot,
-  creation/expiry timestamps, and CSRF generation. Hosted authorization
-  revalidates roles against the current DB policy on every request and rejects
-  OAuth-derived organization/team claims after 24 hours, forcing a fresh GitHub
-  sign-in before those mutable claims can authorize another hosted request.
+  creation/expiry timestamps, CSRF generation and provider-verification time.
+  When retained, admin/read-only OAuth credentials include provider expiry
+  metadata inside the authenticated ciphertext, bound to the session and GitHub
+  identity; Client sessions hold none.
+  The [human auth/session contract](service-boundary.md#service-route-checklist)
+  owns verification and renewal; [credential retirement](service-boundary.md#human-oauth-credential-retirement)
+  distinguishes local removal from provider validity and historical backups.
 - Merge train stack collapse plan: modeled fields are `record_id`, `status`,
   `source`, `updated_at`, `repository`, `base_branch`, `collapse_id`,
   `root_pull_request_number`, and `plan_status`. The payload carries the typed
@@ -894,6 +938,21 @@ customers see for that product, identified by immutable numeric GitHub id with
 the login kept for mentions and display. A Client can veto a change but never
 merge or deploy one (see [DIRECTION.md](../DIRECTION.md)). The field is optional;
 a product without one reports "No Client set" instead of blocking.
+
+Every product profile is a managed runtime with a driver. A repository that
+Launchplane does not tie to a product needs no record; it has no Client and no
+Client acceptance. Launchplane once recorded such repositories as non-runtime
+profiles; migration `a4c8e0f2b6d3` copied every one into
+`launchplane_product_profile_archive` with its migration source and reason,
+then removed it. Repository inventory records were left in place.
+
+Repository mappings omit active repositories that two products share, naming
+them in `ambiguous_repositories`; other entries stay available.
+
+Full-profile writes cannot transfer standing acceptance to another repository
+or copied repository identity. Hold acceptance through the existing reviewed
+production-use setting before changing repository fields, then have a signed-in
+admin attest standing again for the new identity.
 
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and
@@ -1204,6 +1263,14 @@ product repo authority. It enforces the same fail-closed historical-context
 transition rule as service and manifest writes, so it cannot reactivate a
 retired context.
 
+On creation, omitted driver, lane and preview options use the command's defaults.
+On update, omitted options preserve the stored values; explicitly supplied
+options replace them, including `--preview-disabled` and `--lanes-json '[]'`.
+Preview changes preserve omitted preview fields and validate the combined
+configuration. Fields outside the command's supported options also remain
+unchanged. Each successful write refreshes the timestamp and source unless
+explicit overrides are supplied, and refuses a concurrent profile change.
+
 ### Product Repository Identity
 
 Launchplane's repository inventory is the authority for a product's immutable
@@ -1283,6 +1350,71 @@ and GitHub outbox writes. If monitoring authority changed after target
 discovery, the stale probe is retained as evidence but cannot open, update, or
 resolve an incident; the next monitor cycle reconciles against current
 authority.
+
+Removing a stable lane also reconciles its obsolete health incidents through
+that guarded path, preserving the last observed intent and probe. Delivery and
+deploy-fence incidents still require their own proved recovery.
+
+### Lane health and identity history
+
+`GET /v1/products/{product}/environments/{environment}/health-history` reads
+retained observations using the same lane-scoped `product_environment.read`
+authority as environment detail (or `preview.read` for a preview). It never runs
+a probe or changes an incident. Supply timezone-aware `since` and `until` for
+an increasing window of at most eight days, with `until` no later than now.
+The interval is `[since, until)`. Each page returns at most 500 observations;
+follow `next_cursor` with the same lane and window until it is null. The cursor
+orders equal-time observations by record id, so passing records without any
+incident and records sharing a timestamp remain reachable. URLs, image
+locations, provider details and free-text diagnostics are omitted. Artifact,
+deployment and source references accompany the expected and observed identity
+result. A stored `match` is rechecked against its own expected/observed payloads.
+
+The read includes up to two hours of lookback for evidence covering the start
+of the requested window. Save every response in cursor order and run:
+
+```bash
+uv run launchplane ingress health-history-summary --page first.json --page second.json \
+  --check public_http:health --identity-check public_http:health
+```
+
+The offline command rejects incomplete, mixed or skipped page chains. Its real
+denominator is the requested elapsed seconds for this lane and each of its
+check streams, never scheduler completions or a pooled fleet sample. Each observation
+covers time forward until the next observation or the existing freshness
+deadline, whichever comes first. Failure, missing/expired evidence and verified
+identity time are reported separately. Reconciliation is administrative evidence
+and stops the prior probe's coverage; it cannot contribute a pass. Conflicting
+equal-time records cannot select a pass by record-id spelling. Missing time
+remains in the denominator. No observations means no measured check streams,
+not a healthy lane.
+
+`health_pass_percent` and `health_and_identity_percent` are conservative
+percentages of retained verified time. They do not establish physical outage
+durations. Provider delivery/source-warning streams stay separate from actual
+HTTP health streams. Supply the complete reviewed required check set with
+repeated `--check KIND:NAME`, and the checks that must verify runtime identity
+with `--identity-check KIND:NAME`.
+The latter must be a nonempty subset of the former. Use repeated `--exclude-check KIND:NAME` for diagnostic streams deliberately
+outside the health set. Every observed stream must be required or explicitly
+excluded; an unaccounted-for stream refuses the calculation. Required and
+excluded sets cannot overlap. The report prints all three sets, every stream
+row, and required checks with zero measured pass/fail coverage. Provider
+`monitor-cadence:...` and monitor-source warning streams are event-only
+diagnostics for `--exclude-check`; their incident and cadence qualification
+remains separate. Lane totals intersect required streams in time, so disjoint
+failures cannot hide behind individually passing percentages. A required check
+with no records contributes unknown time, not a pass. TLS or dependency checks
+can belong to the health set without being runtime-identity witnesses. The
+`lane_health_pass_percent` and `lane_health_and_identity_percent` fields use
+those intersections. These observations do not reconstruct past profile
+declarations,
+check applicability, incident-open intervals or the historical Live roster.
+Those qualifications and the no-open-warning closing condition remain separate;
+this read cannot certify the Q419 milestone, reset a clock or retroactively
+declare missing evidence healthy. Pagination is a read of retained rows, not a
+transactional snapshot across requests; use a settled historical cutoff and
+repeat collection if older observations can still be arriving.
 
 ### TLS observation reader compatibility
 
@@ -1453,7 +1585,13 @@ A material change clears acknowledgement and remains immediately deliverable.
 Silenced incidents preserve observations and events but suppress update and
 reminder delivery only until their required `silenced_until`; expiry reactivates
 delivery and the next unchanged failure may emit the current overdue reminder.
-Resolution is always deliverable so external issue sinks can close. A recovery
+Recovery waits for unsettled failure deliveries to the same incident, policy
+and destination without consuming its retry budget. It follows a delivered
+failure and is bound to the exact resolved observation/event, including for
+acknowledged or silenced incidents. Duplicate cleanup, retired refusals and
+undelivered backlogs stay silent. An uncertain direct send is never replayed
+and supplies no delivered-failure proof; an interrupted GitHub create permits
+marker lookup and closure only of the issue actually found. A recovery
 observation resolves only after the health check's configured consecutive-pass
 threshold and writes one `resolved` event with `resolution_reason = recovered`.
 If monitoring authority makes a check ineligible, a typed reconciliation
@@ -1518,49 +1656,74 @@ the original opening effect completed before its attempt record committed.
 Delivery attempts are the idempotency boundary for notifications, while incident
 records remain the source of truth for active public-ingress state.
 
+Discord pages only new critical incidents and material critical changes. Warnings
+and unchanged reminders use a plain-text, mention-free summary grouped by product,
+lane, check kind and failure code. Summaries reuse the notification outbox with
+aggregate type `public_ingress_discord_summary`, one record per policy,
+destination and fixed five-minute send window. A burst queues for its next
+boundary using its database enqueue time, so a slow probe cannot join an already
+sent batch; later observations cannot move that deadline. Overdue windows fold
+into one current window before a send attempt; retries retain their original
+identity, backoff and attempt budget. A new critical condition still pages at once.
+
+Before delivery, both paths re-read current state. Obsolete failure and material
+alerts are superseded. Discord uses the event-bound material state and
+final admission check instead of the old startup-backlog message rewrite. Email
+retains its existing backlog compaction. Summaries render current conditions and compare
+them with the latest posted or provider-started snapshot, ordered by send window.
+An older window cannot post after a newer one starts. Changing the destination
+secret identity starts coverage for that destination; rotating a version under
+the same secret identity does not replay unknown effects.
+An empty, unchanged or subset snapshot sends nothing; clearing a condition alone
+does not re-post those that remain. A returning material state and an expired
+silence can appear in a later window. Silenced and acknowledged
+conditions are excluded. Lane-scoped destinations summarize only the conditions
+their managed secret covers. Routing revisions can retry previously unavailable
+destinations in a later window. The rendered snapshot is persisted atomically
+with its provider marker. Final coverage and current open/active incident-state
+checks run under the existing database write lock and incident row locks to prevent adjacent-window workers duplicating one state. Summary
+receipts live in the outbox independently of per-incident attempt records. Global
+outbox inspection gives active work and newest failures separate bounded slots,
+including their error codes; critical
+delivery failures also remain visible in the owning incident detail.
+An interrupted Discord summary retains its send
+marker and cannot replay an unknown provider effect. DNS and connection failures
+before any request bytes, and explicit rate-limit refusals, may retry. Discord
+reminder cadence no longer repeats the same material state after it was summarized.
+Notification routing never changes measured health, incident
+severity, acknowledgement, resolution or provider-operation fences.
+
 ## Every Code Feedback Resume Evidence
 
-Status: Every Code is retired in [DIRECTION.md](../DIRECTION.md); Codex Lab runs
-agent work. The Every Code records below stay only until their readers move
-(cbusillo/launchplane#1313). Do not extend them.
+Status: Every Code is retired in [DIRECTION.md](../DIRECTION.md). Historical
+records remain readable; do not extend them.
 
-The independent [feedback continuation foundation](every-code-feedback-resume.md)
-stores immutable acceptance, terminal intent, operation, explicit PR closure,
-startup/handoff receipt and recovery evidence in separate SQL tables. Their
+Separate SQL tables retain immutable acceptance, terminal intent, operation,
+explicit PR closure, startup/handoff receipt and recovery evidence. Their
 typed contracts reject malformed immutable identities, inconsistent digests and
 renewed eligibility deadlines. Changed replay conflicts rather than overwriting
 the earlier record. These records remain isolated from the existing feedback
 queue and are not wired into live lifecycle transitions.
 
-The legacy feedback path's repository-login/local-planning trust is not inherited
-by the new request action. Neither a legacy feedback row nor an ordinary worker
-status or rerun intent establishes feedback-resume authority. Persisted receipt
-fixtures and recovery observations do not authorize execution or admin
-resolution; those service-owned transitions remain separately implemented and
-gated as described in the linked contract.
+Persisted receipts and recovery observations do not authorize execution or admin
+resolution. The unwired launch and provider-verification helpers are removed;
+the retained record models and storage checks preserve historical evidence.
+The retired request lease transitions and feedback-intent allocator are also
+removed. Canonical import/restore writers, historical readers, stored models,
+tables and migrations remain; removing the unused algorithms changes no data.
 
 ## Every Code Notification Records
 
 Status: retired with Every Code; see the note under Every Code Feedback Resume
 Evidence.
 
-Every Code notification policy records are DB-backed Launchplane records under
-`launchplane_every_code_notification_policies`. They select enabled
-destinations for Every Code admin events, currently `work_request_blocked`,
-optionally scoped by repository. Policies store routing intent and managed
-secret references only; they must not store Discord webhook URLs or real
-admin destination values as source, workflow defaults, or checked-in config.
-
-Every Code notification attempt records are delivery evidence under
-`launchplane_every_code_notification_attempts`. Each attempt is keyed by the
-work-request id, event, policy, and destination. Attempts record pending,
-delivered, skipped, or failed status plus a bounded, provider-safe action or
-error. Launchplane writes a pending attempt before calling an external Discord
-webhook, then updates it after delivery returns, so retries have durable dispatch
-evidence instead of blindly sending duplicate notifications. When a worker
-reports a request as `blocked`, Launchplane writes the terminal work request
-first and then records each notification attempt so bot-auth or Discord delivery
-failures remain inspectable even when no Every Code session starts.
+Historical notification policy records remain under
+`launchplane_every_code_notification_policies`, and attempt evidence remains
+under `launchplane_every_code_notification_attempts`. Existing routing intent,
+managed-secret references and pending/delivered/skipped/failed evidence remain
+readable and restorable. The retired execution API no longer applies policies
+or sends blocked-request notifications; shared preview notification delivery
+continues independently.
 
 ## Product Review Decision Records
 
@@ -1926,6 +2089,36 @@ provider message or rollback health exception is embedded in the detail.
 
 ## Deployment Record
 
+In-place application testing retains a cumulative typed receipt in
+`post_deploy_update.evidence.generic_web_original_execution`. The original
+deployment and reservation identify its product, lane, artifact, source and
+provider target. The receipt records intent before dispatch, the complete
+pre-dispatch schedule-history identifiers, bounded acknowledgements and
+attributable terminal facts. It also binds the pre-attempt inventory by digest.
+An optional application lifecycle snapshot retains the original schedule
+baseline; executor-only testing does not manufacture a snapshot.
+
+Only the current original provider execution can create or advance these
+facts. Supported deployment-evidence corrections can preserve them exactly and
+correct other evidence, but cannot replace the captured lifecycle baseline or
+turn unknown work into completed work. Cleanup appends evidence; it never
+replaces earlier unresolved effects. Terminal execution and testing
+qualification remain separate: a healthy image with failed product assertions
+can retain its image fact while the original operation settles as failed.
+Receipt-only advances merge against the current row under the original lease
+and authority transaction, so a simultaneous supported evidence correction is
+retained. When post-image maintenance, an executor or schedule activation is
+required, the original publishes exact image success with qualification pending
+before that work and makes it current. Its lease, exact record/inventory CAS and
+current target binding protect that unqualified fact. Current profile and captured
+input qualification are checked again after its commit, before more work.
+That projection contains no previous qualification verdict. The executor receives
+the prior inventory captured before publication, so bounded qualification retries
+retain their prior-attempt count.
+Final publication compares the producer's expected record and inventory;
+it does not adopt a correction as permission to overwrite it. Recorded terminal
+facts survive later cron activity and do not require another history read.
+
 Failed Odoo stable bootstrap and production backup restore deployments use
 `failure` for a code and a fixed Launchplane description. Bootstrap codes
 separate execution, post-deploy and readiness failures; restore codes separate
@@ -2132,6 +2325,13 @@ backfill or authorization change.
   and published, and the active policy still names the caller as administrator;
   otherwise the operation fails with the same code. See
   [Temporary hotfix](release-review.md#temporary-hotfix).
+- A product profile's optional `release_request` holds its latest Director or
+  finish-line request decision. It binds the reviewed checklist and lane versions,
+  repository, Client and preceding Client decision. Same-request retries preserve
+  its actor, reason, agreement reference and timestamp. The existing profile
+  compare-and-write path saves it before invitation delivery. This request is
+  separate from Client acceptance and grants no promotion authority. See
+  [Release review](release-review.md).
 - A release decision's `release_start` (`promote`,
   `promote_with_rollback_drill`, or `rollback`, omitted when empty) records whether
   the decision starts the release, or rolls back a rejected temporary hotfix. It is fixed when the decision is recorded. A
@@ -2864,114 +3064,22 @@ credential, runtime grant, or stored record is changed by this code retirement.
 
 ## Every Code Work Request Record
 
-Status: retired with Every Code; see the note under Every Code Feedback Resume
-Evidence. The local Mac worker below no longer runs agent work.
+Every Code execution is retired by [DIRECTION.md](../DIRECTION.md). Existing
+request, feedback, preview-gate and notification evidence stays readable through
+the historical GET routes. The service no longer creates, claims, heartbeats,
+recovers, restarts or finishes Every Code requests, writes feedback/gates, or
+applies their notification policies.
 
-See [agent-context-boundary.md](agent-context-boundary.md) for the agent-facing
-rules that compose these records into public-safe context and scoped intent
-preflights.
-
-- One durable request per approved Every Code automation trigger.
-- Record the source, repository, issue number and URL, trigger label, trigger
-  actor, optional GitHub delivery id, queue/update timestamps, claim host, run
-  timestamps, PR URL, result summary, and blocked error message.
-- State is `queued`, `claimed`, `running`, `done`, or `blocked`. Workers claim a
-  queued request before reporting progress. Terminal states are immutable through
-  the service status route.
-- Every claim is atomic and sets three lease fields: `lease_expires_at` (ISO
-  timestamp when the lease lapses), `fencing_token` (monotonically increasing
-  integer equal to the cumulative claim count for this request id), and `attempt`
-  (same value, kept separately for readability). The fencing token starts at 1 on
-  the first claim and increments on every subsequent requeue-and-reclaim cycle.
-  Once a record has a non-zero fence, service status updates must carry that
-  exact `fencing_token`; missing and stale tokens are rejected before the row is
-  changed. Heartbeats enforce the same host-and-fence match, preventing
-  stale-holder writes after a lease expires and a new worker reclaims.
-- Workers send periodic heartbeats through `POST /v1/every-code/work-requests/heartbeat`
-  to extend `lease_expires_at` before it lapses. A heartbeat is rejected (409)
-  when the host or fencing token does not match, or when the request is already
-  terminal. Workers that die without heartbeating leave the record with an expired
-  lease and the recovery path handles it.
-- `POST /v1/every-code/work-requests/recover-stale` scans for claimed or running
-  records whose `lease_expires_at` has passed and applies a recovery policy:
-  `safe_requeue` (attempt ≤ 3) resets the record to `queued` with all lease
-  fields cleared so another worker can pick it up; `manual_review` (attempt > 3)
-  marks the record `blocked` with an error message requiring admin inspection
-  before any requeue. Recovery locks and compares the exact stale snapshot, so a
-  concurrent heartbeat or status transition wins cleanly instead of being
-  overwritten by a stale recovery decision.
-- Service-backed workers invoke the same recovery route during their polling
-  loop. Filesystem-backed workers serialize claim, heartbeat, status, and
-  recovery transitions with per-request process locks and publish JSON records
-  through atomic replacement.
-- Requests that were already active before lease fields existed migrate with an
-  expired lease and an exhausted safe-retry attempt. Their first recovery marks
-  them `blocked` for manual review instead of risking duplicate execution.
-- Worker-token claim and rerun requests use a stable synthetic idempotency scope.
-  PostgreSQL claim commits the claimed record and completed replay evidence in
-  one transaction; rerun uses compare-and-write with the completed response in
-  the same transaction. Same-key retries replay the original response, changed
-  payloads conflict, and a lost HTTP response does not permit a second claim or
-  rerun mutation.
-- The local worker handoff is `uv run launchplane every-code run` for polling or
-  `uv run launchplane every-code run-once` for a single scan. Each pass applies
-  trusted PR feedback, routes failed checks back to the owning session, then claims
-  at most one queued request. Request handoff terminates any stale deterministic
-  tmux session before launching a newly claimed attempt, records `running` or
-  immediate `blocked` status, and wraps the visible command so terminal success
-  or failure calls `uv run launchplane every-code finish` with the fencing token
-  captured at launch. A recovered or superseded session therefore cannot read a
-  newer token and finish as the new holder.
-- A Mac host can leave the poller running with
-  `uv run launchplane every-code start`, inspect it with
-  `uv run launchplane every-code status`, and stop it with
-  `uv run launchplane every-code stop`. The supervisor writes a pid file and log
-  under `state/every-code-worker/` by default while the worker-created tmux
-  sessions remain visible and independently attachable.
-- Worker prompts require closeout hygiene, including the Love Gate, before a PR
-  can be merged or an issue can close. After a terminal session is gone, worker
-  maintenance removes clean Every Code worktrees and their local `every-code/*`
-  branches from the source checkout. Dirty or suspicious worktrees are left in
-  place for admin inspection.
-- Admins can reconcile older local cleanup residue with
-  `uv run launchplane every-code reconcile-cleanup`. The command inventories
-  saved session JSON, worker worktree directories, registered Git worktrees, and
-  linked local `every-code/*` branches. It defaults to dry-run/report mode;
-  `--apply` is required before it removes terminal, worker-owned, clean state.
-  Missing records, active tmux sessions, dirty or uninspectable worktrees,
-  unknown source checkouts, unlinked branches, and paths outside the worker
-  state root are preserved and reported with skip reasons.
-- For a remote Launchplane database, run the Mac worker through the service API
-  instead of sharing DB credentials with the local host. Configure the service
-  and worker with the same `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`, then start the
-  worker with `uv run launchplane every-code start --service-url https://...`.
-  The foreground `run`, `run-once`, and `finish` commands support the same
-  `--service-url` mode. Direct `--database-url` and file-backed state remain
-  local/dev fallbacks.
-- Missed or manually inspected issue labels can be reconciled without polling by
-  running `uv run launchplane every-code reconcile-issue` with the known issue
-  repository, number, URL, title, and current labels. Reconciliation creates the
-  same deterministic request id when the trigger label is present, dedupes an
-  existing request without overwriting worker state, and skips issues that do
-  not currently carry the trigger label.
-- Launchplane owns this coordination record so GitHub webhooks, reconciliation,
-  local Mac workers, and the future Launchplane UI share one inspectable source of
-  truth instead of relying on GitHub API polling or local shell lock files.
-- The retired `POST /v1/every-code/github-webhook` route is removed. Label,
-  feedback, and close deliveries cannot change these records through it.
-  Existing persisted records are retained until the separately authorized
-  storage retirement; #1313 tracks the remaining retired domain code.
-
-- Historical Every Code feedback records retain their actor and source-issue
-  provenance. The removed webhook no longer ingests PR or issue comments.
-
-- Agent callers should prefer `GET /v1/every-code/summary` over raw work-request
-  reads when they only need status. The summary projection links back to the
-  issue and result PR, reports whether work is active, stuck, complete, or
-  rerunnable, and includes safe rerun guidance without exposing webhook delivery
-  ids, blocked error messages, issue bodies, prompt text, local checkout paths,
-  or local worker hostnames. Summary entries include compact agent-context
-  provenance and evidence for the source issue and recorded work-request state.
+Stored requests retain source and repository/issue provenance, timestamps,
+historical state, host, lease/fencing fields, result PR and completion evidence.
+Schemas, migrations, record decoders and restore/import paths remain intact.
+Removing the execution API does not delete or rewrite stored requests, saved
+workspaces, credentials or backups. Advisory engineering review and shared
+preview readiness/feedback continue through their existing supported routes.
+The retired runner, daemon, session launchers, reconciliation and completion
+commands are removed. `launchplane every-code review-run-once` remains the
+advisory engineering-review entrypoint; historical workspace paths and preview
+branch matching stay compatible.
 
 ## Agent Context, Authorization, and Merge Train Records
 
@@ -2982,8 +3090,8 @@ preflights.
   fields are bounded and redacted so provider-only internals, local paths, and
   secret-shaped values are not copied into agent context payloads.
 - Agent callers can use `GET /v1/agent/context` for a single read-only preflight
-  context. It aggregates the existing repo-product mapping, work graph snapshot,
-  Every Code summary, and preview readiness projections, then reports each
+  context. It aggregates the existing repo-product mapping,
+  preview readiness and optional exact tenant-admission projections, then reports each
   section as available, unauthorized, or unavailable. It is not a persisted
   record and must not fetch or store issue bodies.
 - Agent-consumer authorization diagnostics use a compact subject model for
@@ -3011,9 +3119,9 @@ preflights.
   Execution routes treat these records as provenance, not credentials: they must
   perform their normal route-specific authorization and fail closed when the
   linked record is denied, stale, the wrong intent family, or mismatched on
-  product, context, route action, source, or idempotency binding. The first
-  consumer is Every Code rerun, which requires approved `every_code_rerun`
-  evidence before requeueing a terminal work request.
+  product, context, route action, source, or idempotency binding. Historical
+  Every Code rerun evidence remains readable; its retired execution route
+  no longer consumes that evidence.
 - Merge train repository policy is persisted as
   `launchplane_merge_train_policies` records. The active policy record is the
   Launchplane-owned authority for supported repository/base branch pairs,

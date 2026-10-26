@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 import json
 from datetime import datetime, timedelta, timezone
 from email.message import Message
@@ -23,9 +24,9 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubError,
-    RecordingMergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
 )
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.test_merge_train_github import _github_branch, _github_commit, _github_pull_request
@@ -89,7 +90,7 @@ class MergeTrainReadCostTests(unittest.TestCase):
         policy = build_test_merge_train_policy()
         target = policy.policies[0]
         target.enqueue.trusted_automation_github_user_ids = (1001,)
-        target.enqueue.dependency_update_github_user_ids = (1001,)
+        target.enqueue.dependency_update_bots = (dependency_bot_policy(1001),)
         provider.pulls = [
             dict(
                 _github_pull_request(n),
@@ -128,7 +129,7 @@ class MergeTrainReadCostTests(unittest.TestCase):
     def test_dependency_classification_preserves_quota_deadline_failures(self) -> None:
         provider = _Provider()
         policy = build_test_merge_train_policy().policies[0]
-        policy.enqueue.dependency_update_github_user_ids = (1001,)
+        policy.enqueue.dependency_update_bots = (dependency_bot_policy(1001),)
         provider.pulls = [
             dict(
                 _github_pull_request(1),
@@ -286,7 +287,7 @@ class MergeTrainReadCostTests(unittest.TestCase):
 
     def test_label_free_dependency_and_permissive_policy_are_still_enriched(self) -> None:
         policy = build_test_merge_train_policy().policies[0]
-        policy.enqueue.dependency_update_github_user_ids = (1001,)
+        policy.enqueue.dependency_update_bots = (dependency_bot_policy(1001),)
         provider = _Provider()
         provider.pulls = [
             dict(

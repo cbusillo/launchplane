@@ -85,12 +85,19 @@ def register_testing_private_ingress_routes(
                 adapter.plan if body.mode == "dry-run" else adapter.readback
             )
             return accepted_evidence_response(trace_id=trace, records={}, result=result)
-        except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
-            refuse(
-                409,
-                "testing_private_ingress_unverified",
-                "Testing private ingress is unverified; preserve the current generation, reviewed plan and original key.",
-            )
+        except (
+            ValueError,
+            FileNotFoundError,
+            RuntimeError,
+            OSError,
+            click.ClickException,
+        ) as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code="testing_private_ingress_unverified",
+                message="Testing private ingress is unverified; preserve the current generation, reviewed plan and original key.",
+            ) from error
 
     app.add_api_route(
         ROUTE,

@@ -6,7 +6,13 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.runtime_setting_removal import RuntimeSettingRemovalRequest, REVIEW_ROUTE, ROUTE
+from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.runtime_setting_removal import (
+    RuntimeSettingRemovalRequest,
+    RuntimeSettingRemovalPlan,
+    REVIEW_ROUTE,
+    ROUTE,
+)
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LocalAdminIdentity,
@@ -20,6 +26,7 @@ from tests.test_authz_administration_read import (
     _browser_headers,
 )
 from tests.support.http import lifespan_client
+from tests.support.stored_profiles import persist_historical_preview_transport
 
 
 def admin() -> GitHubHumanIdentity:
@@ -93,7 +100,7 @@ class RuntimeRemovalTests(unittest.TestCase):
     def call(self, body: RuntimeSettingRemovalRequest, key: str = "") -> dict[str, object]:
         return self.store.runtime_setting_removal(
             request=body, identity=admin(), trace_id="trace", idempotency_key=key
-        )
+        ).model_dump(mode="json", exclude_none=True)
 
     def reviewed(self, **changes: object) -> RuntimeSettingRemovalRequest:
         dry = self.call(request(**changes))
@@ -126,6 +133,9 @@ class RuntimeRemovalTests(unittest.TestCase):
         self.assertFalse(
             self.call(body.model_copy(update={"mode": "readback"}))["readback_matches"]
         )
+        replay = self.call(body, "original-key")
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(self.store.list_runtime_environment_records()[0].env, {"KEEP": "drift"})
 
     def test_previews_use_private_nonces_instead_of_a_value_guessing_digest(self) -> None:
         first = self.call(request())
@@ -185,6 +195,9 @@ class RuntimeRemovalTests(unittest.TestCase):
             retired_provider_keys=["OLD_PROVIDER_KEY"],
         )
         self.store.write_runtime_environment_record(record)
+        persist_historical_preview_transport(
+            self.store, "site", seed_command="", migration_command=""
+        )
         body = self.reviewed(product="site", scope="instance", context="cm", instance="testing")
         self.call(body, "last-with-intent")
         after = self.store.list_runtime_environment_records(
@@ -230,6 +243,73 @@ class RuntimeRemovalTests(unittest.TestCase):
                 self.call(body, "atomic")
         self.assertEqual(self.store.list_runtime_environment_records(), (self.before,))
         self.assertNotIn("replayed", self.call(body, "atomic"))
+
+    def test_result_validation_failure_rolls_back_values_and_completion_receipt(self) -> None:
+        body = self.reviewed()
+        validate = RuntimeSettingRemovalPlan.model_validate
+
+        def reject_completion(value: object) -> RuntimeSettingRemovalPlan:
+            if isinstance(value, dict) and value.get("applied") is True:
+                raise ValueError("invalid completion result")
+            return validate(value)
+
+        with patch.object(
+            RuntimeSettingRemovalPlan, "model_validate", side_effect=reject_completion
+        ):
+            with self.assertRaises(ValueError):
+                self.call(body, "invalid-result")
+        self.assertEqual(self.store.list_runtime_environment_records(), (self.before,))
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=idempotency_scope(admin()),
+                route_path=ROUTE,
+                idempotency_key="invalid-result",
+            )
+        )
+
+    def test_completed_receipt_remains_denied_after_authority_revocation(self) -> None:
+        body = self.reviewed()
+        self.call(body, "completed")
+        after = self.store.list_runtime_environment_records()
+        payload = policy().model_dump(mode="json")
+        payload["github_humans"][0]["github_ids"] = [202]
+        self.store.compare_and_write_authz_policy_record(
+            expected_record=self.active,
+            replacement_record=_record(
+                policy=LaunchplaneAuthzPolicy.model_validate(payload), revision=2
+            ),
+        )
+        with self.assertRaises(PermissionError):
+            self.call(body, "completed")
+        self.assertEqual(self.store.list_runtime_environment_records(), after)
+
+    def test_replay_rechecks_authority_after_reservation_collision_rollback(self) -> None:
+        body = self.reviewed()
+        self.call(body, "completed")
+        after = self.store.list_runtime_environment_records()
+        begin_write = self.store._begin_serialized_write
+        calls = 0
+
+        def revoke_before_replay_lock(session: object) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                payload = policy().model_dump(mode="json")
+                payload["github_humans"][0]["github_ids"] = [202]
+                self.store.compare_and_write_authz_policy_record(
+                    expected_record=self.active,
+                    replacement_record=_record(
+                        policy=LaunchplaneAuthzPolicy.model_validate(payload), revision=2
+                    ),
+                )
+            begin_write(session)
+
+        with patch.object(
+            self.store, "_begin_serialized_write", side_effect=revoke_before_replay_lock
+        ):
+            with self.assertRaises(PermissionError):
+                self.call(body, "completed")
+        self.assertEqual(self.store.list_runtime_environment_records(), after)
 
     def test_policy_drift_and_nonhuman_apply_fail_closed(self) -> None:
         body = self.reviewed()
@@ -323,6 +403,50 @@ class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(applied.json()["result"]["applied"])
                 self.assertNotIn("private-value", applied.text)
 
+    async def test_stale_apply_reports_rolled_back_attempt_and_allows_fresh_review(self) -> None:
+        sessions, _ = _human_session_manager()
+        with _database_app(policy(), human_session_manager=sessions) as (store, _, app):
+            store.write_runtime_environment_record(runtime())
+            async with lifespan_client(app) as client:
+                dry = await client.post(
+                    ROUTE,
+                    json=request().model_dump(mode="json"),
+                    headers=_browser_headers(sessions, admin())[0],
+                )
+                plan = dry.json()["result"]
+                changed = runtime(env={"KEEP": "changed-survivor"})
+                store.write_runtime_environment_record(changed)
+                body = request(
+                    mode="apply",
+                    review_id=plan["review_id"],
+                    reviewed_plan_sha256=plan["plan_sha256"],
+                )
+                rejected = await client.post(
+                    ROUTE,
+                    json=body.model_dump(mode="json"),
+                    headers={
+                        **_browser_headers(sessions, admin())[0],
+                        "Idempotency-Key": "stale-attempt",
+                    },
+                )
+                self.assertEqual(rejected.status_code, 409, rejected.text)
+                self.assertEqual(rejected.json()["error"]["code"], "runtime_setting_removal_stale")
+                self.assertEqual(store.list_runtime_environment_records(), (changed,))
+                self.assertIsNone(
+                    store.read_idempotency_record(
+                        scope=idempotency_scope(admin()),
+                        route_path=ROUTE,
+                        idempotency_key="stale-attempt",
+                    )
+                )
+                fresh = await client.post(
+                    ROUTE,
+                    json=request(keys=["KEEP"]).model_dump(mode="json"),
+                    headers=_browser_headers(sessions, admin())[0],
+                )
+                self.assertEqual(fresh.status_code, 200, fresh.text)
+                self.assertFalse(fresh.json()["result"]["applied"])
+
 
 class RuntimeRemovalPostgresScenarios:
     """Invoked by the PostgreSQL integration gate, using its isolated database."""
@@ -333,7 +457,9 @@ class RuntimeRemovalPostgresScenarios:
         from threading import Barrier
 
         gate = Barrier(2)
-        dry = store.runtime_setting_removal(request=request(), identity=admin(), trace_id="dry")
+        dry = store.runtime_setting_removal(
+            request=request(), identity=admin(), trace_id="dry"
+        ).model_dump(mode="json", exclude_none=True)
         body = request(
             mode="apply", review_id=dry["review_id"], reviewed_plan_sha256=dry["plan_sha256"]
         )
@@ -342,7 +468,7 @@ class RuntimeRemovalPostgresScenarios:
             gate.wait(timeout=30)
             return store.runtime_setting_removal(
                 request=body, identity=admin(), trace_id="concurrent", idempotency_key="shared-key"
-            )
+            ).model_dump(mode="json", exclude_none=True)
 
         with ThreadPoolExecutor(max_workers=2) as workers:
             results = list(workers.map(lambda _: apply(), range(2)))

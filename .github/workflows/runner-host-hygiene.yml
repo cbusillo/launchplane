@@ -360,7 +360,7 @@ jobs:
             audit_artifact_file="$RUNNER_TEMP/"
             audit_artifact_file+="runner-host-hygiene-audit-evidence-${artifact_suffix}.json"
 
-            uv run launchplane work-graph runner-host-hygiene-executor \
+            uv run launchplane runner-host-hygiene-executor \
               --action "$action" \
               --host-name "$RUNNER_HOST_NAME" \
               --execution-lane "$RUNNER_EXECUTION_LANE" \
@@ -526,6 +526,7 @@ jobs:
             "${target_generated_cache_args[@]}"
 
       - name: Summarize report delivery and maintenance qualification
+        id: qualification
         if: always() && steps.executor.outcome != 'skipped'
         shell: bash
         run: |
@@ -536,8 +537,9 @@ jobs:
               artifact_args+=(--audit-file "$RUNNER_TEMP/runner-host-hygiene-audit-evidence-$suffix.json")
             done < "$RUNNER_TEMP/runner-host-hygiene-expected.txt"
           fi
-          uv run launchplane work-graph runner-host-hygiene-qualify \
-            "${artifact_args[@]}" --report-only \
+          uv run launchplane runner-host-hygiene-qualify \
+            "${artifact_args[@]}" --require-qualified \
+            --maximum-age-seconds 10800 \
             --summary-file "$GITHUB_STEP_SUMMARY"
 
       - name: Upload executor result

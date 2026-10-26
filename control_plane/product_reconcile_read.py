@@ -12,7 +12,7 @@ validated key names, and a plan blocker can name dozens of keys.
 """
 
 import re
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -21,6 +21,7 @@ from control_plane.contracts.product_reconcile import (
     ProductReconcileRequestRecord,
     ProductReconcileRequestState,
     ProductReconcileTargetKind,
+    product_reconcile_target_key,
 )
 
 _MAX_TEXT_LENGTH = 400
@@ -39,9 +40,55 @@ _REDACTED = "[redacted]"
 
 
 class ProductReconcileRequestReader(Protocol):
+    def read_product_reconcile_request(self, target_key: str) -> ProductReconcileRequestRecord: ...
+
     def list_product_reconcile_requests(
-        self, *, product: str
+        self, *, product: str, limit: int | None
     ) -> tuple[ProductReconcileRequestRecord, ...]: ...
+
+
+def product_preview_request(
+    store: object, *, product: str, pull_request_number: int
+) -> ProductReconcileRequestRecord | None:
+    if not callable(getattr(store, "read_product_reconcile_request", None)):
+        return None
+    try:
+        return cast(ProductReconcileRequestReader, store).read_product_reconcile_request(
+            product_reconcile_target_key(
+                product=product, target_kind="preview", pull_request_number=pull_request_number
+            )
+        )
+    except FileNotFoundError:
+        return None
+
+
+def product_preview_requests(
+    store: object, *, product: str
+) -> tuple[ProductReconcileRequestRecord, ...]:
+    if not callable(getattr(store, "list_product_reconcile_requests", None)):
+        return ()
+    return tuple(
+        request
+        for request in cast(ProductReconcileRequestReader, store).list_product_reconcile_requests(
+            product=product, limit=None
+        )
+        if request.product == product
+        and request.target_kind == "preview"
+        and request.last_plan.get("action") != "destroy"
+        and request.last_plan.get("reason") != "pull_request_not_open"
+        and request.last_plan.get("feedback_recovery_closed_observed") is not True
+    )
+
+
+def preview_refresh_failure(request: ProductReconcileRequestRecord) -> str:
+    if request.last_plan.get("action") == "destroy" or (
+        "action" not in request.last_plan and "destroy_retry_key" in request.last_plan
+    ):
+        return ""
+    summary = request.last_plan.get(_FAILURE_SUMMARY_KEY) or request.last_error
+    if not isinstance(summary, str) or not summary.strip():
+        return ""
+    return _safe_text(summary, maximum_length=140)
 
 
 class ProductReconcileRequestView(BaseModel):

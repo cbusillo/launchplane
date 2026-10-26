@@ -1,6 +1,8 @@
 """A private candidate uses the current build and only testing-local passwords."""
 
 import os
+import hashlib
+import base64
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -8,6 +10,7 @@ from unittest.mock import Mock
 import unittest
 from unittest.mock import patch
 
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane import secrets
 from control_plane import testing_candidate_application as application
 from control_plane.dokploy import api, source as provider_source, post_deploy
@@ -24,6 +27,7 @@ from control_plane.contracts.testing_candidate_application import TestingCandida
 from control_plane.contracts.odoo_testing_source import (
     NativeOdooTestingSource,
     NativeOdooSourceAuthority,
+    NativeTestingCopyCapture,
 )
 from control_plane import testing_candidate_runtime as compiler
 from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
@@ -85,7 +89,7 @@ class CandidateApplicationTests(unittest.TestCase):
         )
         self.artifact = ArtifactIdentityManifest(
             artifact_id="candidate-build",
-            source_commit="new-source",
+            source_commit="e" * 40,
             enterprise_base_digest="sha256:" + "b" * 64,
             odoo_install_modules=LAUNCHPLANE_REQUIRED_ODOO_MODULES,
             image=ArtifactImageReference(
@@ -138,9 +142,11 @@ class CandidateApplicationTests(unittest.TestCase):
         self.store.write_product_profile_record(self.profile)
         self.fixture.before = self.fixture.authority()
         self.execution()
+        self.provider_state["appName"] = self.allocation.namespace + "-abc123"
 
         def remote(**kwargs: Any) -> None:
             self.assertEqual(kwargs["payload"]["http_port"], self.profile.runtime_port)
+            self.assertEqual(kwargs["payload"]["compose_project"], self.provider_state["appName"])
             kwargs["receive"]({"type": "complete", "private_readiness_verified": True})
 
         with (
@@ -150,10 +156,67 @@ class CandidateApplicationTests(unittest.TestCase):
             result = self.prepare_application()
         assert result.application is not None and result.application.prepared is not None
         self.assertEqual(
+            result.application.prepared.compose_project, self.provider_state["appName"]
+        )
+        self.assertEqual(
             result.application.prepared.private_endpoint,
             f"http://{result.namespace}:{self.profile.runtime_port}",
         )
         self.fixture.assert_serving_unchanged()
+
+    def test_private_project_must_belong_to_the_original_namespace_before_probe(self) -> None:
+        real_readiness = application.candidate_private_readiness
+        self.execution()
+        allocation = self.prepare_application()
+        assert allocation.application is not None
+        self.provider_state["appName"] = "foreign-project"
+        with patch.object(application, "_read_remote") as remote:
+            with self.assertRaises(ValueError):
+                real_readiness(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    allocation=allocation,
+                    inputs=self.inputs(allocation),
+                    deployment_id=allocation.application.deployment_id,
+                )
+            remote.assert_not_called()
+
+    def test_prepared_project_preserves_legacy_wire_and_rejects_foreign_custody(self) -> None:
+        self.execution()
+        allocation = self.prepare_application()
+        assert allocation.application is not None
+        legacy = allocation.application.model_dump(mode="json")
+        assert legacy["prepared"] is not None
+        legacy["prepared"].pop("compose_project", None)
+        self.assertEqual(
+            TestingCandidateApplication.model_validate(legacy).model_dump(mode="json"), legacy
+        )
+        assert legacy["prepared"] is not None
+        for project in ("foreign-project", allocation.namespace + "-too-long"):
+            with self.subTest(project=project):
+                legacy["prepared"]["compose_project"] = project
+                with self.assertRaises(ValueError):
+                    TestingCandidateApplication.model_validate(legacy)
+
+    def test_prepared_project_cannot_be_replaced_by_a_fresh_readiness_probe(self) -> None:
+        real_readiness = application.candidate_private_readiness
+        self.execution()
+        allocation = self.prepare_application()
+        assert allocation.application is not None
+        self.provider_state["appName"] = allocation.namespace + "-def456"
+        with patch.object(application, "_read_remote") as remote:
+            remote.side_effect = lambda **kwargs: kwargs["receive"](
+                {"type": "complete", "private_readiness_verified": True}
+            )
+            with self.assertRaises(application.CandidateObservationUnavailable):
+                real_readiness(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    allocation=allocation,
+                    inputs=self.inputs(allocation),
+                    deployment_id=allocation.application.deployment_id,
+                )
+            remote.assert_not_called()
 
     def test_private_probe_distinguishes_returned_failure_from_transport_or_denial(self) -> None:
         from control_plane.dokploy.native_copy_stream import (
@@ -182,7 +245,7 @@ class CandidateApplicationTests(unittest.TestCase):
                 self.subTest(error=type(error).__name__),
                 patch.object(application, "_read_remote", side_effect=error),
             ):
-                with self.assertRaises(expected):
+                with self.assertRaises(expected) as raised:
                     real_readiness(
                         host="https://provider.invalid",
                         token="fixture",
@@ -190,6 +253,9 @@ class CandidateApplicationTests(unittest.TestCase):
                         inputs=inputs,
                         deployment_id=allocation.application.deployment_id,
                     )
+                if isinstance(error, NativeProgramFailed):
+                    assert isinstance(raised.exception, application.CandidatePrivateReadinessFailed)
+                    self.assertEqual(raised.exception.evidence, error.evidence)
 
     def test_private_build_preserves_the_serving_address_and_generated_passwords(self) -> None:
         allocation = self.allocate()
@@ -232,6 +298,17 @@ class CandidateApplicationTests(unittest.TestCase):
             self.inputs(allocation, "upstream")
         self.fixture.assert_serving_unchanged()
 
+    def test_snapshot_hold_without_budget_refuses_before_source_probe(self) -> None:
+        self.profile.preview.clean_testing_snapshot = True
+        self.store.write_product_profile_record(self.profile)
+        self.fixture.before = self.fixture.authority()
+        allocation = self.allocate("production")
+        with patch.object(compiler, "resolve_native_testing_source") as probe:
+            with self.assertRaises(compiler.CandidateRuntimeInputsChanged):
+                self.inputs(allocation, "production")
+        probe.assert_not_called()
+        self.fixture.assert_serving_unchanged()
+
     def execution(self, source: CandidateSource = "empty") -> None:
         self.allocation = self.allocate(source)
         self.compiled = self.inputs(self.allocation, source)
@@ -244,7 +321,7 @@ class CandidateApplicationTests(unittest.TestCase):
             "composeFile": "",
             "env": "",
             "autoDeploy": False,
-            "appName": self.allocation.namespace,
+            "appName": self.allocation.namespace + "-abc123",
         }
         self.deployments: list[dict[str, Any]] = []
         self.restore_deployments: list[dict[str, Any]] = []
@@ -340,6 +417,7 @@ class CandidateApplicationTests(unittest.TestCase):
             runtime_identity=self.compiled.plan.runtime_identity,
             private_endpoint="http://" + self.allocation.namespace + ":8069",
             deployment_id="candidate-deployment",
+            compose_project=str(self.provider_state["appName"]),
             source_witness="fixture-restored",
             integration_isolation_verified=True,
             credentials_verified=True,
@@ -456,6 +534,60 @@ class CandidateApplicationTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.prepare_application()
         self.restore_deployments[0]["status"] = "error"
+        restoring = self.store.read_testing_candidate(self.allocation.namespace)
+        assert restoring is not None
+        for predicate in (
+            ReadbackPredicate.ATTACHMENTS,
+            ReadbackPredicate.INTEGRATIONS,
+            ReadbackPredicate.ISOLATION,
+        ):
+            for kind in ("refused", "unavailable"):
+                with self.subTest(predicate=predicate, kind=kind):
+                    self.restore_deployments[0]["logs"] = [
+                        f"readback_failed_predicate={predicate}",
+                        f"readback_failure_kind={kind}",
+                        "private attachment detail",
+                    ]
+                    evidence = application.candidate_restore_terminal(
+                        host="fixture",
+                        token="fixture",
+                        record=restoring,
+                        require_success=False,
+                    )
+                    self.assertIn(f":{predicate}_{kind}:", evidence)
+                    self.assertTrue(evidence.endswith(":" + self.restore_deployments[0]["status"]))
+                    self.assertNotIn("private", evidence)
+        for invalid_predicate, invalid_kind in (
+            ("private-value", "refused"),
+            (ReadbackPredicate.ATTACHMENTS, "private-value"),
+        ):
+            self.restore_deployments[0]["logs"] = [
+                f"readback_failed_predicate={invalid_predicate}",
+                f"readback_failure_kind={invalid_kind}",
+            ]
+            generic = application.candidate_restore_terminal(
+                host="fixture", token="fixture", record=restoring, require_success=False
+            )
+            self.assertNotIn("private", generic)
+            self.assertNotIn("refused", generic)
+        self.restore_deployments[0]["logs"] = []
+        with patch.object(
+            api,
+            "fetch_dokploy_deployment_logs",
+            side_effect=post_deploy.OdooPostDeployReadbackFailure(
+                "private unavailable", evidence={}
+            ),
+        ):
+            self.assertEqual(
+                application.candidate_restore_terminal(
+                    host="fixture", token="fixture", record=restoring, require_success=False
+                ),
+                generic,
+            )
+        self.restore_deployments[0]["logs"] = [
+            f"readback_failed_predicate={ReadbackPredicate.ATTACHMENTS}",
+            "readback_failure_kind=refused",
+        ]
         with self.assertRaises(ValueError):
             self.prepare_application()
         abandoned = application.abandon_candidate_application(
@@ -467,6 +599,9 @@ class CandidateApplicationTests(unittest.TestCase):
         )
         assert abandoned.application is not None
         self.assertEqual(abandoned.application.phase, "abandoned")
+        self.assertIn(
+            f":{ReadbackPredicate.ATTACHMENTS}_refused:", abandoned.application.abandonment_evidence
+        )
         self.assertEqual(abandoned.compose_id, self.allocation.compose_id)
         self.assertEqual(
             abandoned.resources_binding_sha256, self.allocation.resources_binding_sha256
@@ -597,6 +732,131 @@ class CandidateApplicationTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             self.inputs(persisted, "production")
+        self.fixture.assert_serving_unchanged()
+
+    def test_prepared_native_copy_removes_raw_cache_and_recovers_a_lost_cleanup_reply(self) -> None:
+        from control_plane import odoo_testing_native_source as native
+        from control_plane.odoo_testing_restore import generation_binding
+        from tests.test_odoo_testing_native_source import descriptor
+
+        source = descriptor().model_copy(
+            update={
+                "product": self.profile.product,
+                "context": next(
+                    lane.context for lane in self.profile.lanes if lane.instance == "prod"
+                ),
+            }
+        )
+        authority = NativeOdooSourceAuthority.model_validate(
+            source.model_dump(include=set(NativeOdooSourceAuthority.model_fields))
+        )
+        with (
+            patch.object(compiler, "native_testing_source_authority", return_value=authority),
+            patch.object(compiler, "resolve_native_testing_source", return_value=source),
+        ):
+            self.execution("production")
+        generation = self.compiled.plan.generation
+        assert generation is not None
+        serving_generation = self.store.read_fresh_odoo_testing_generation(
+            generation.product, generation.context
+        )
+        cache = (self.root / "source-cache").resolve()
+        cache.mkdir()
+        captures: list[NativeTestingCopyCapture] = []
+        restore = self.restore
+
+        def stream(**kwargs: Any) -> None:
+            receipts = {}
+            for part in ("database", "filestore"):
+                data = f"private {part} fixture".encode()
+                kwargs["receive"](
+                    {"type": "data", "part": part, "data": base64.b64encode(data).decode()}
+                )
+                receipts[part] = {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+            kwargs["receive"]({"type": "complete", **receipts})
+
+        def restore_with_capture(**kwargs: Any) -> dict[str, str]:
+            captures.append(
+                native.capture_native_testing_source(
+                    self.store, root=self.root, generation=generation, descriptor=source
+                )
+            )
+            for context, instance in (
+                (self.allocation.namespace, "testing-candidate"),
+                (self.allocation.context, "testing"),
+            ):
+                original = self.store.read_provider_target_record(
+                    context_name=context, instance_name=instance
+                )
+                self.store.write_provider_target_record(
+                    original.model_copy(update={"target_id": "foreign-custody-fixture"})
+                )
+                try:
+                    with self.assertRaises(ValueError):
+                        self.store.write_native_testing_copy_capture(
+                            captures[0], candidate_namespace=self.allocation.namespace
+                        )
+                finally:
+                    self.store.write_provider_target_record(original)
+            for namespace, receipt in (
+                ("foreign-candidate", captures[0]),
+                (
+                    self.allocation.namespace,
+                    captures[0].model_copy(update={"generation_binding_sha256": "0" * 64}),
+                ),
+                (
+                    self.allocation.namespace,
+                    captures[0].model_copy(update={"capture_id": "0" * 32}),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    self.store.write_native_testing_copy_capture(
+                        receipt, candidate_namespace=namespace
+                    )
+            return restore(**kwargs)
+
+        remove = native.remove_completed_native_capture_cache
+
+        def lost_reply(saved: NativeTestingCopyCapture) -> None:
+            remove(saved)
+            raise TimeoutError("Fixture lost cleanup reply")
+
+        with (
+            patch.object(native, "_cache_directory", return_value=cache),
+            patch.object(native, "read_native_source", side_effect=stream),
+            patch.object(
+                post_deploy, "run_compose_post_deploy_update", side_effect=restore_with_capture
+            ),
+        ):
+            with (
+                patch.object(
+                    native, "remove_completed_native_capture_cache", side_effect=lost_reply
+                ),
+                self.assertRaises(TimeoutError),
+            ):
+                self.prepare_application()
+            capture = captures[0]
+            directory = cache / capture.capture_id
+            self.assertFalse(directory.exists())
+            prepared = self.store.read_testing_candidate(self.allocation.namespace)
+            assert prepared is not None and prepared.application is not None
+            self.assertEqual(prepared.application.phase, "prepared")
+            with patch.object(
+                compiler,
+                "resolve_native_testing_source",
+                side_effect=AssertionError("A prepared copy reuses its original capture receipt"),
+            ):
+                self.compiled = self.inputs(prepared, "production")
+                self.assertEqual(self.prepare_application(), prepared)
+        self.assertEqual(
+            self.store.read_native_testing_copy_capture(generation_binding(generation)), capture
+        )
+        self.assertEqual(captures, [capture])
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(generation.product, generation.context),
+            serving_generation,
+        )
+        self.assertEqual(self.effects, ["configure", "deploy", "restore"])
         self.fixture.assert_serving_unchanged()
 
     def test_undelivered_global_change_does_not_rebind_or_block_candidate(self) -> None:

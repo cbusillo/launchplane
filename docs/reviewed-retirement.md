@@ -64,7 +64,12 @@ returns the original result; it does not reapply. `mode: readback` uses the
 same review binding and compares fresh stored survivors/absence and retirement
 intent, returning `readback_matches`; false means drift or incomplete removal,
 not success. The commit receipt identifies historical completion; readback is
-the separate current-state proof.
+the separate current-state proof. A 409 `runtime_setting_removal_stale` means
+this exact attempt acquired its reservation but refused changed state before
+writing, and the transaction rolled back. The browser may settle that attempt
+and request a fresh review. The generic `runtime_setting_removal_unverified`
+response does not prove that outcome and preserves continuity on a retry after
+an uncertain reply.
 
 Rollback custody stays inside the service's private database in the saved
 review's original record. The preview preimage is not an HTTP response and has
@@ -109,3 +114,78 @@ is checked again after planning so a concurrent change invalidates the result.
 This route has **no apply mode** (`apply_supported: false`). A later Director
 access-removal decision needs this exact plan and a supported reviewed admin
 policy operation; a plan digest never grants execution authority.
+
+### Reviewed workflow-rule removal
+
+The existing `managed-authz-policy-set` privileged-operation proposal accepts
+an optional `workflow_rule_retirement` containing that exact snapshot and selection
+with `mode: plan`. For this contraction, `managed_set_id` is empty and
+`desired_policy` is an empty schema-v2 or schema-v3 fragment. No managed set is
+reconciled. Schema migration, adoption, quorum changes and nonempty desired rules
+are rejected. The active schema, settings and every unselected rule remain exact.
+Only unmanaged selections are accepted. Contract a managed rule through its own
+reviewed managed set so its independent source cannot silently restore it.
+
+Prepare a private `managed-authz-policy-set` envelope with that request, a stable
+`source_event_id`, `reason` and optional `related_issue`. Submit it through the
+installed Launchplane helper's `privileged-policy-propose --payload-file` command.
+The helper keeps its existing private admin transport, response validation and
+full review URL. It never approves or applies. Keep the identical envelope and
+source event after an uncertain submission; inspect or replay that proposal
+rather than creating another. Older installed clients need the companion
+[helper update](https://github.com/cbusillo/codex-skills/issues/2633) before
+they accept this optional request field.
+
+The existing proposer grant and signed-in Director approval govern the request;
+no new grant or operation descriptor is installed. The Director's review shows
+each selected workflow's full scope and permissions, including unmanaged rules.
+The ordinary managed-reconcile HTTP route rejects this contraction: execution
+belongs to the existing approved-operation worker. Approval binds the selection,
+reason, original active policy and candidate digest. The worker replans against
+fresh state, writes through the existing locked policy CAS and audit transaction,
+and verifies the resulting complete policy digest. An interrupted execution uses
+the same operation's existing completion receipt and recovery path.
+
+The inspect/plan route remains inert. Delivering this source performs no
+retirement. After approval, read the active inventory again and compare it with
+the reviewed candidate; a proposal or historical worker receipt alone does not
+prove current absence or unchanged survivors.
+
+After the first proposal containing this request is persisted, retain a rollback
+image with this request reader. Older strict readers cannot load that new proposal;
+rolling back the service image never restores removed authorization data.
+
+## Signed-in removal page
+
+Engineering Ops → **Remove stored settings** (`/ui/engineering/runtime-setting-removal`)
+uses the existing removal endpoint. Enter the product, exact stored scope,
+context/lane when applicable, selected names and reason. **Review removal** saves
+a fresh service review and shows the exact selected names, survivors, retirement
+intent and reader/rollback requirement. Changing any field invalidates that review.
+No stored values, secret bindings or rollback preimages are displayed.
+
+Before confirming, qualify the actual runtime consumers and the effective value
+that would be inherited from broader scopes. A context removal can change every
+lane without a more specific override; a global removal can reach other products.
+The page does not discover or attest those dependencies. Follow the live-site and
+Client boundaries in DIRECTION.md before approving the exact change.
+
+**Remove reviewed settings** uses the signed-in administrator's existing authority,
+CSRF protection and one retained operation key. The original request stays in that
+browser tab's session storage for same-request recovery after a lost reply or
+reload. Recovery is keyed by the administrator and the physical stored record
+(scope, context and instance), independently of product ownership. The record
+selector stays usable after uncertainty so other records can be reviewed;
+returning to the same record restores its original request and key. An uncertain
+outcome locks that record's setting names, reason and new reviews; **Retry original removal**
+reuses the request and key. Missing recovery storage blocks submission. A stale
+attempt that is proven rolled back requires a fresh review, including after
+an uncertain reply. An unverified reservation keeps the original operation locked.
+A committed removal is followed by an independent readback, and its local saved
+request is cleared. Historical completion remains in service custody. An unavailable or
+mismatched readback stays unverified. **Check current record**
+can repeat that read, including while an Apply is uncertain. A shown current
+match or mismatch never settles the original Apply. After a confirmed
+commit, a fresh review can inspect the current record even if another writer
+has changed it; the historical receipt does not promise current agreement.
+Runtime sync, deployment and production acceptance remain separate operations.

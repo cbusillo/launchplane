@@ -1024,16 +1024,6 @@ def _promotion_evidence_fingerprint(
     )
 
 
-def _immutable_artifact_digest(value: str) -> str:
-    normalized = value.strip().lower()
-    if re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
-        return normalized
-    _repository, separator, digest = normalized.partition("@sha256:")
-    if separator and re.fullmatch(r"[0-9a-f]{64}", digest):
-        return f"sha256:{digest}"
-    return ""
-
-
 def _canonical_sha256(payload: dict[str, object]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

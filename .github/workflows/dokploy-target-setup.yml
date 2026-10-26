@@ -12,6 +12,15 @@ name: Dokploy Target Setup
         options:
           - dry-run
           - apply
+          - readback
+      allocation_control:
+        description: >-
+          Closed JSON for ordinary testing allocation: idempotency_key,
+          retain_allocation (boolean), expected_allocation_custody_sha256.
+          Reuse the original key and unchanged setup inputs for recovery.
+        required: false
+        default: ""
+        type: string
       operation:
         description: Target setup operation.
         required: true
@@ -44,7 +53,7 @@ name: Dokploy Target Setup
         default: ""
         type: string
       target_name:
-        description: Dokploy target display name.
+        description: Target display name; ordinary testing applications use service-generated names.
         required: false
         default: ""
         type: string
@@ -54,7 +63,7 @@ name: Dokploy Target Setup
         default: ""
         type: string
       project_name:
-        description: Dokploy project name to create or record.
+        description: Project name; new ordinary testing placement uses service-generated names.
         required: false
         default: ""
         type: string
@@ -64,7 +73,7 @@ name: Dokploy Target Setup
         default: ""
         type: string
       environment_name:
-        description: Dokploy environment name to create.
+        description: Environment name; new ordinary testing placement uses a service-generated name.
         required: false
         default: ""
         type: string
@@ -74,7 +83,7 @@ name: Dokploy Target Setup
         default: ""
         type: string
       app_name:
-        description: Optional provider app name.
+        description: Provider app name; ordinary testing applications use a service-generated name.
         required: false
         default: ""
         type: string
@@ -148,6 +157,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      ALLOCATION_CONTROL: ${{ inputs.allocation_control }}
       MODE: ${{ inputs.mode }}
       OPERATION: ${{ inputs.operation }}
       CONTEXT: ${{ inputs.context }}
@@ -245,6 +255,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          control="${ALLOCATION_CONTROL:-}"
+          if [ -z "$control" ]; then
+            control='{}'
+          fi
+          jq -e '
+            type == "object"
+            and (keys - ["idempotency_key", "retain_allocation", "expected_allocation_custody_sha256"] | length == 0)
+            and ((.idempotency_key // "") | type == "string" and (length == 0 or all(explode[]; . >= 32 and . != 127)))
+            and ((.retain_allocation // false) | type == "boolean")
+            and ((.expected_allocation_custody_sha256 // "") | type == "string")
+          ' <<< "$control" >/dev/null
+          idempotency_key="$(jq -r '.idempotency_key // ""' <<< "$control")"
+          retain="$(jq -r '.retain_allocation // false' <<< "$control")"
+          custody="$(jq -r '.expected_allocation_custody_sha256 // ""' <<< "$control")"
+          if [ "$OPERATION:$INSTANCE" = "create-application:testing" ]; then
+            if [ "$MODE" != "dry-run" ] && [ -z "$idempotency_key" ]; then
+              echo "Ordinary testing allocation requires its original idempotency_key." >&2
+              exit 1
+            fi
+          elif [ "$control" != "{}" ] || [ "$MODE" = "readback" ]; then
+            echo "Allocation controls apply only to ordinary testing applications." >&2
+            exit 1
+          fi
+          if [ "$retain" = "true" ]; then
+            if [ "$MODE" != "apply" ] || ! [[ "$custody" =~ ^[a-f0-9]{64}$ ]]; then
+              echo "Retention requires apply and the reviewed custody digest." >&2
+              exit 1
+            fi
+          elif [ -n "$custody" ]; then
+            echo "A custody digest requires retain_allocation." >&2
+            exit 1
+          fi
           domains_json="$({
             jq -Rsc '
               split(",")
@@ -329,9 +371,15 @@ jobs:
                 <<< "$payload"
             )"
           fi
-          idempotency_key="dokploy-target-setup:${OPERATION}:"
-          idempotency_key+="${CONTEXT}:${INSTANCE}:"
-          idempotency_key+="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          if [ "$OPERATION:$INSTANCE" = "create-application:testing" ]; then
+            if [ "$retain" = true ]; then
+              payload="$(jq --argjson retain "$retain" --arg custody "$custody" '
+              .retain_allocation=$retain | .expected_allocation_custody_sha256=$custody
+              ' <<< "$payload")"
+            fi
+          else
+            idempotency_key="dokploy-target-setup:${OPERATION}:${CONTEXT}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          fi
           printf '%s\n' "$payload" > dokploy-target-setup-payload.json
           printf 'idempotency_key=%s\n' "$idempotency_key" >> "$GITHUB_OUTPUT"
 

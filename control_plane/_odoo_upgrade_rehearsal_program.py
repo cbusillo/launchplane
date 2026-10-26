@@ -11,6 +11,8 @@ from control_plane._odoo_rehearsal_business_validation import (
     BUSINESS_VALIDATION_COMMAND_TIMEOUT_SECONDS,
     BUSINESS_VALIDATION_OUTPUT_MAX_BYTES,
 )
+from control_plane._filestore_capture import FILESTORE_TAR_WARNING_LIBRARY
+from control_plane._odoo_snapshot_files import SNAPSHOT_FILES_LIBRARY
 from control_plane._odoo_rehearsal_source_reader import REHEARSAL_SOURCE_READER_LIBRARY
 from control_plane._odoo_rehearsal_attachment_validation import (
     ATTACHMENT_MISMATCH_LIBRARY,
@@ -18,12 +20,17 @@ from control_plane._odoo_rehearsal_attachment_validation import (
 )
 from control_plane._odoo_rehearsal_capture_comparison import REHEARSAL_CAPTURE_COMPARISON_LIBRARY
 from control_plane._odoo_rehearsal_diagnostics import REHEARSAL_DIAGNOSTICS_LIBRARY
+from control_plane.contracts.odoo_rehearsal_timing import REHEARSAL_TIMING_MARKER
 
 ODOO_UPGRADE_REHEARSAL_PROGRAM = (
-    REHEARSAL_SOURCE_READER_LIBRARY
+    FILESTORE_TAR_WARNING_LIBRARY
+    + SNAPSHOT_FILES_LIBRARY
+    + REHEARSAL_SOURCE_READER_LIBRARY
     + REHEARSAL_CAPTURE_COMPARISON_LIBRARY
     + ATTACHMENT_MISMATCH_LIBRARY
     + REHEARSAL_DIAGNOSTICS_LIBRARY
+    + "\nREHEARSAL_TIMING_MARKER = "
+    + repr(REHEARSAL_TIMING_MARKER)
     + "\nBUSINESS_VALIDATION_ENTRYPOINT = "
     + repr(BUSINESS_VALIDATION_ENTRYPOINT)
     + "\nBUSINESS_VALIDATION_RECEIPT_MAX_BYTES = "
@@ -67,7 +74,7 @@ def command(arguments, *, stdin=None, stdout=None, environment=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, env=environment, check=False)
     if result.returncode:
-        diagnostic=command_diagnostic(arguments,result,environment)
+        diagnostic=command_diagnostic(result)
         raise RehearsalCommandFailure(diagnostic)
     return result.stdout if stdout is None else b''
 
@@ -84,49 +91,16 @@ def one_inspection(identifier):
 
 
 def digest(path):
-    value=hashlib.sha256()
-    with path.open('rb') as stream:
-        for chunk in iter(lambda:stream.read(1024*1024),b''):
-            value.update(chunk)
-    return value.hexdigest()
+    return snapshot_file_digest(path)
 
 
-def bounded_capture(arguments,path,bound):
-    process=subprocess.Popen(arguments,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-    errors=b''
-    try:
-        size=0
-        with path.open('xb') as output:
-            os.chmod(path,0o600)
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout,selectors.EVENT_READ,'capture')
-                selector.register(process.stderr,selectors.EVENT_READ,'error')
-                while selector.get_map():
-                    for event,_ in selector.select():
-                        chunk=os.read(event.fd,65536)
-                        if not chunk:
-                            selector.unregister(event.fileobj)
-                        elif event.data=='error':
-                            errors=(errors+chunk)[-65536:]
-                        else:
-                            size+=len(chunk)
-                            if size>bound: raise RuntimeError('Source copy exceeds its reviewed storage bound')
-                            output.write(chunk)
-        status=process.wait(timeout=30)
-        if status:
-            diagnostic=command_diagnostic(arguments,subprocess.CompletedProcess(
-                arguments,status,stdout=b'',stderr=errors),None)
-            raise RehearsalCommandFailure(diagnostic)
-        if not size:
-            raise RuntimeError('Incomplete source copy')
-    finally:
-        process.stdout.close()
-        process.stderr.close()
-        if process.poll() is None:
-            process.terminate()
-            try: process.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                process.kill();process.wait()
+def bounded_capture(arguments,path,bound,*,filestore=False):
+    status,errors,truncated=capture_snapshot_file(arguments,path,bound,DIAGNOSTIC_TAIL_LIMIT+1)
+    if status and not (filestore and filestore_tar_warning_only(status,errors,truncated)):
+        diagnostic=command_diagnostic(subprocess.CompletedProcess(arguments,status))
+        raise RehearsalCommandFailure(diagnostic)
+    if not path.stat().st_size:
+        raise RuntimeError('Incomplete source copy')
 
 
 def save(path,payload):
@@ -139,23 +113,64 @@ def save(path,payload):
     os.replace(temporary,path)
 
 
-def compose(spec,root,*,image,database):
+def phase_stamp(spec,boundary,*,at=None):
+    if spec.get('action') not in {'execute','simulate-final','rebuild-final','validate-business'}:
+        return
+    timing=spec.setdefault('phase_timing',{'action':spec['action'],
+        'attempt_sha256':spec['attempt_sha256'],'observed':{}})
+    timing['observed'].setdefault(boundary,at or datetime.now(timezone.utc).isoformat())
+
+
+def pre_switch_timing(spec,root):
+    path=root/(spec.get('receipt_action',spec['action'])+'.pre-switch.json')
+    if not path.exists() and not path.is_symlink():
+        return None
+    metadata=path.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode)!=0o600
+            or metadata.st_uid!=os.getuid() or metadata.st_size>65536):
+        raise RuntimeError('Invalid pre-switch timing custody')
+    saved=json.loads(path.read_text())
+    if (set(saved)!={'intent_sha256','record_binding_sha256','attempt_sha256','phase_timing'}
+            or saved['intent_sha256']!=spec['record']['intent_sha256']
+            or any(saved[key]!=spec[key] for key in ('record_binding_sha256','attempt_sha256'))):
+        raise RuntimeError('Pre-switch timing binding changed')
+    timing=saved['phase_timing']
+    if (timing['action']!=spec['action'] or timing['attempt_sha256']!=spec['attempt_sha256']
+            or 'pre_switch_verified' not in timing['observed']):
+        raise RuntimeError('Pre-switch boundary is unverified')
+    validation=checked_business_receipt(timing['pre_switch_validation'],spec['business_validation_identity'])
+    if validation['passed'] is not True:
+        raise RuntimeError('Pre-switch business verification failed')
+    return timing
+
+
+def runtime_identity(spec,image):
+    record=spec['record']
+    return {'product':record['product'],'context':record['rehearsal_id'],'instance':'rehearsal',
+        'environment_kind':'rehearsal','deployment_record_id':record['rehearsal_id'],
+        'artifact_id':record['target_artifact']['artifact_id'],
+        'source_git_ref':record['target_artifact']['source_commit'],'image_reference':image}
+
+
+def compose(spec,root,*,image,database,candidate=False):
     version=spec['record']['source_odoo_version'] if database.endswith('_source') else spec['versions'][image]
     environment={**spec['environment'],'ODOO_DB_NAME':database,'ODOO_VERSION':version}
-    environment['LAUNCHPLANE_RUNTIME_IDENTITY_JSON']=json.dumps({'product':spec['record']['product'],'context':spec['record']['rehearsal_id'],'instance':'rehearsal','environment_kind':'rehearsal','deployment_record_id':spec['record']['rehearsal_id'],'artifact_id':spec['artifacts'][image],'source_git_ref':spec['refs'][image],'image_reference':image})
+    environment['LAUNCHPLANE_RUNTIME_IDENTITY_JSON']=json.dumps(runtime_identity(spec,image))
     (root/'compose.yml').write_text(spec['compose'][image])
     os.chmod(root/'compose.yml',0o600)
     # Environment belongs only to this subprocess; no ambient product settings.
-    command(['docker','compose','--project-directory',str(root),'--env-file','/dev/null','-p',spec['record']['rehearsal_id'],'-f',str(root/'compose.yml'),'up','-d'],
+    services=['pre-switch-web'] if candidate else ['web','database','script-runner']
+    command(['docker','compose','--project-directory',str(root),'--env-file','/dev/null','-p',spec['record']['rehearsal_id'],'-f',str(root/'compose.yml'),'up','-d','--no-deps',*services],
         environment={'PATH':os.environ['PATH'],'HOME':os.environ['HOME'],**environment})
 
 
-def inspection(spec,database,image):
+def inspection(spec,database,image,*,candidate_may_run=False):
     namespace=spec['record']['rehearsal_id']
     return inspect_copy_runtime({
         'generation':{'namespace':namespace,'instance':'rehearsal','resources_binding_sha256':spec['resources_binding_sha256']},
         'compose_project':namespace,'database_name':database,'image_reference':image,
         'database_data_directory':spec['database_data_directory'],'storage_maintenance':True,
+        'candidate_may_run':candidate_may_run or spec.get('action') in {'retire','retire-incomplete','abandon-validation'},
     },expected_instance='rehearsal')
 
 
@@ -188,7 +203,7 @@ def stamp(spec,containers,database):
 
 
 def snapshot(spec,root,containers,database):
-    validations=spec['record'].get('business_validations',[])
+    validations=business_validation_history(spec['record'])
     if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
         raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
@@ -209,10 +224,7 @@ def snapshot(spec,root,containers,database):
         'database_sha256':digest(path/'database.dump'),'filestore_sha256':digest(path/'filestore.tar'),
         'source_capture_sha256':digest(root/'capture.json'),
         'sanitized':True,'odoo_version':version,'captured_at':datetime.now(timezone.utc).isoformat()}
-    validations=spec['record'].get('business_validations',[])
     if database.endswith('_final_upgrade') and validations:
-        if validations[-1].get('passed') is not True:
-            raise RuntimeError('Product validation has not passed')
         receipt['business_validation_sha256']=hashlib.sha256(
             json.dumps(validations,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
     save(path/'receipt.json',receipt)
@@ -241,7 +253,7 @@ def clone(spec,containers,source_database,destination):
         raise RuntimeError('Clone destination appeared; never overwrite a copy')
     sql(containers,'CREATE DATABASE "'+destination+'" TEMPLATE "'+source_database+'"')
     sql(containers,'ALTER DATABASE "'+destination+'" SET default_transaction_read_only=off')
-    docker('exec',containers['script-runner'][0],'cp','-a','/volumes/data/filestore/'+source_database,
+    docker('exec',containers['script-runner'][0],'cp','-a','--reflink=auto','/volumes/data/filestore/'+source_database,
         '/volumes/data/filestore/'+destination)
     stamp(spec,containers,destination)
 
@@ -263,12 +275,17 @@ def restore_preserved_snapshot(spec,root,containers,source_database,destination)
                 archive.extract(member,path=temporary,filter='data')
         docker('exec','-u','root',containers['script-runner'][0],'mkdir','-p','/volumes/data/filestore/'+destination)
         docker('cp',str(Path(temporary)/source_database)+'/.',containers['script-runner'][0]+':/volumes/data/filestore/'+destination)
+    prepare_runner_storage(containers)
+    stamp(spec,containers,destination)
+
+
+def prepare_runner_storage(containers,*additional):
     uid=docker('exec',containers['script-runner'][0],'id','-u').decode().strip()
     gid=docker('exec',containers['script-runner'][0],'id','-g').decode().strip()
     if not uid.isdigit() or not gid.isdigit():
         raise RuntimeError('Unknown copy runner user')
-    docker('exec','-u','root',containers['script-runner'][0],'chown','-R',uid+':'+gid,'/volumes/data/filestore/'+destination)
-    stamp(spec,containers,destination)
+    docker('exec','-u','root',containers['script-runner'][0],'chown','-R',uid+':'+gid,
+        '/volumes/data','/volumes/logs',*additional)
 
 
 def copy_runner(spec,containers,database,*,fresh,dump_path=None,sanitize_only=False):
@@ -288,22 +305,59 @@ def copy_runner(spec,containers,database,*,fresh,dump_path=None,sanitize_only=Fa
         required+=['odoo_module_update_completed','odoo_module_update_modules_configured']
     if any(markers.get(key)!='true' for key in required):
         raise RuntimeError('Copy lacks its sanitization or upgrade proof')
+    for line in result.splitlines():
+        if line.startswith(REHEARSAL_TIMING_MARKER):
+            boundary,at=line.removeprefix(REHEARSAL_TIMING_MARKER).split('=',1)
+            if boundary in {'sql_sanitized','module_update_completed'}:
+                phase_stamp(spec,boundary,at=at)
 
 
-def before_web(spec,containers,database):
+def connection_readback(spec,containers,database):
     result=docker('exec','-i','-e','ODOO_DB_NAME='+database,containers['script-runner'][0],'python3','-',database,
         spec['readback_spec'],stdin=spec['readback_program'].encode()).decode()
     if 'integration_readback_ok=true' not in result.splitlines():
         raise RuntimeError('Before-web connection readback failed')
+
+
+def before_web(spec,containers,database,*,start=True):
+    connection_readback(spec,containers,database)
+    phase_stamp(spec,'before_web')
     docker('exec',containers['script-runner'][0],'python3','-c',
         "import hashlib,os;from pathlib import Path;Path("+repr(spec['web_gate_path'])+").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+chr(10)+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
-    docker('start',containers['web'][0])
+    if start:
+        docker('start',containers['web'][0])
+        phase_stamp(spec,'web_started')
 
 
-def private_health(spec,containers):
-    expected=spec['record']['target_artifact']['source_commit']
-    program="import json,sys,time,urllib.request\nfor attempt in range(60):\n try:\n  response=urllib.request.urlopen('http://web:8069/launchplane/health',timeout=5); body=json.load(response); identity=body.get('runtime_identity',body.get('launchplane_runtime_identity',{})); assert identity.get('source_git_ref',identity.get('source_revision'))==sys.argv[1]; assert identity.get('instance')=='rehearsal'; assert identity.get('context')==sys.argv[2]; assert identity.get('artifact_id')==sys.argv[3]; break\n except Exception:\n  if attempt==59: raise\n  time.sleep(1)\nresponse=urllib.request.urlopen('http://web:8069/web/login',timeout=5); assert response.status==200\n"
-    docker('exec',containers['script-runner'][0],'python3','-c',program,expected,spec['record']['rehearsal_id'],spec['record']['target_artifact']['artifact_id'])
+def private_health(spec,containers,*,hostname='web'):
+    expected=json.dumps(runtime_identity(spec,spec['target_image']))
+    program='''
+import json,sys,time,urllib.request
+class PrivateRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs):
+        raise RuntimeError('Private probe cannot follow redirects')
+opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),PrivateRedirects())
+expected=json.loads(sys.argv[1])
+assert sys.argv[2] in {'web','pre-switch-web'}
+base='http://'+sys.argv[2]+':8069'
+for attempt in range(60):
+    try:
+        with opener.open(base+'/launchplane/health',timeout=5) as response:
+            assert response.status==200
+            body=json.load(response)
+        identity=body.get('runtime_identity',body.get('launchplane_runtime_identity',{}))
+        if 'source_revision' in identity:
+            assert identity.get('source_git_ref',identity['source_revision'])==identity['source_revision']
+            identity['source_git_ref']=identity.pop('source_revision')
+        assert all(identity.get(key)==value for key,value in expected.items())
+        break
+    except Exception:
+        if attempt==59: raise
+        time.sleep(1)
+with opener.open(base+'/web/login',timeout=5) as response:
+    assert response.status==200
+'''
+    docker('exec',containers['script-runner'][0],'python3','-c',program,expected,hostname)
 
 
 def business_validation_precheck(spec,containers):
@@ -322,9 +376,8 @@ def business_validation_precheck(spec,containers):
 
 
 def product_command(arguments, *, stdin=None):
-    # Discard product stderr and failed stdout, which can contain Client data.
     process=subprocess.Popen(arguments,stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE)
     deadline=time.monotonic()+PRODUCT_COMMAND_TIMEOUT_SECONDS
     output=bytearray()
     try:
@@ -332,26 +385,31 @@ def product_command(arguments, *, stdin=None):
             process.stdin.write(stdin)
             process.stdin.close()
         with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout,selectors.EVENT_READ)
-            while True:
+            selector.register(process.stdout,selectors.EVENT_READ,'output')
+            selector.register(process.stderr,selectors.EVENT_READ,'error')
+            while selector.get_map():
                 remaining=deadline-time.monotonic()
-                if remaining<=0 or not selector.select(remaining):
+                events=selector.select(max(0,remaining))
+                if remaining<=0 or not events:
                     raise subprocess.TimeoutExpired('product validation',PRODUCT_COMMAND_TIMEOUT_SECONDS)
-                chunk=os.read(process.stdout.fileno(),65536)
-                if not chunk:
-                    break
-                if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
-                    raise ValueError('Product output exceeds its bound')
-                output.extend(chunk)
+                for event,_ in events:
+                    chunk=os.read(event.fd,65536)
+                    if not chunk:
+                        selector.unregister(event.fileobj)
+                    elif event.data=='output':
+                        if len(output)+len(chunk)>PRODUCT_COMMAND_OUTPUT_MAX_BYTES:
+                            raise ValueError('Product output exceeds its bound')
+                        output.extend(chunk)
         status=process.wait(timeout=max(0.1,deadline-time.monotonic()))
         if status:
             raise ValueError('Product validation failed')
         return bytes(output)
     except (ValueError,OSError,subprocess.TimeoutExpired):
-        raise RehearsalCommandFailure({'step':'business_validation',
-            'exit_status':process.returncode or -1,'error_text':'Product validation unavailable'}) from None
+        diagnostic=command_diagnostic(subprocess.CompletedProcess(arguments,process.returncode or -1))
+        raise RehearsalCommandFailure({**diagnostic,'step':'business_validation'}) from None
     finally:
         process.stdout.close()
+        process.stderr.close()
         if process.stdin is not None and not process.stdin.closed:
             process.stdin.close()
         if process.poll() is None:
@@ -359,8 +417,10 @@ def product_command(arguments, *, stdin=None):
         process.wait()
 
 
-def business_validation(spec,containers):
+def business_validation(spec,containers,*,timed=True):
     expected=spec['business_validation_identity']
+    if timed:
+        phase_stamp(spec,'product_started')
     output=product_command(['docker','exec','-i','-e','ODOO_DB_NAME='+expected['database'],
         containers['script-runner'][0],'python3',BUSINESS_VALIDATION_ENTRYPOINT],
         stdin=json.dumps(expected,separators=(',',':')).encode())
@@ -370,7 +430,10 @@ def business_validation(spec,containers):
         raise RuntimeError('Validation evidence is unavailable')
     try:
         result=json.loads(bytes.fromhex(markers[0].decode()))
-        return checked_business_receipt(result,expected)
+        checked=checked_business_receipt(result,expected)
+        if timed:
+            phase_stamp(spec,'receipt_observed')
+        return checked
     except (ValueError,TypeError,KeyError):
         # Do not attach a parser exception or its input to provider logs.
         raise RuntimeError('Invalid product validation receipt') from None
@@ -390,7 +453,7 @@ def pending_business_outcome(spec,root,receipt,lock_held):
             or saved['intent_sha256']!=spec['record']['intent_sha256']):
         raise RuntimeError('Validation outcome binding changed')
     result=saved['result']
-    if (set(result)!={'intent_sha256','state','copies','elapsed_seconds','resources_preserved',
+    if (set(result)-{'phase_timing'}!={'intent_sha256','state','copies','elapsed_seconds','resources_preserved',
             'public_route','business_host_frozen','business_validation'}
             or result['intent_sha256']!=saved['intent_sha256'] or result['state']!='switched'
             or result['copies']!=spec['record']['copies'] or result['resources_preserved'] is not True
@@ -412,6 +475,7 @@ def pending_business_outcome(spec,root,receipt,lock_held):
         return result
     return {'intent_sha256':saved['intent_sha256'],'state':'switched',
         'copies':result['copies'],'elapsed_seconds':result['elapsed_seconds'],
+        **({'phase_timing':result['phase_timing']} if result.get('phase_timing') else {}),
         'resources_preserved':True,'public_route':False,'business_host_frozen':False,
         'completed':False,'business_validation_postcheck_verified':False,'diagnostics_private':True,
         'pending_business_validation':{key:saved[key] for key in
@@ -422,11 +486,7 @@ def sanitize_capture(spec,containers,database,raw):
     try:
         docker('cp',str(raw/'database.dump'),containers['script-runner'][0]+':/tmp/rehearsal.dump')
         docker('exec','-u','root',containers['script-runner'][0],'chmod','644','/tmp/rehearsal.dump')
-        uid=docker('exec',containers['script-runner'][0],'id','-u').decode().strip()
-        gid=docker('exec',containers['script-runner'][0],'id','-g').decode().strip()
-        if not uid.isdigit() or not gid.isdigit():
-            raise RuntimeError('Unknown copy runner user')
-        docker('exec','-u','root',containers['script-runner'][0],'chown','-R',uid+':'+gid,'/volumes/data','/volumes/logs','/tmp/rehearsal.dump')
+        prepare_runner_storage(containers,'/tmp/rehearsal.dump')
         copy_runner(spec,containers,database,fresh=True,dump_path='/tmp/rehearsal.dump',sanitize_only=True)
     finally:
         docker('exec','-u','root',containers['script-runner'][0],'rm','-f','/tmp/rehearsal.dump')
@@ -443,8 +503,8 @@ def capture(spec,root,containers,database):
     remote=shlex.join(['sudo','-u',values['ODOO_UPSTREAM_DB_USER'],'pg_dump','-Fc','--',values['ODOO_UPSTREAM_DB_NAME']])
     budget=spec['record']['storage']
     bounded_capture([*ssh,destination,remote],raw/'database.dump',budget['database_bytes'])
-    remote=shlex.join(['tar','-cf','-','-C',filestore,'.'])
-    bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'])
+    remote=shlex.join(['env','LC_ALL=C','tar','-cf','-','-C',filestore,'.'])
+    bounded_capture([*ssh,destination,remote],raw/'filestore.tar',budget['filestore_bytes'],filestore=True)
     (raw/'filestore').mkdir(mode=0o700)
     unpacked=0
     with tarfile.open(raw/'filestore.tar','r:') as archive:
@@ -458,19 +518,19 @@ def capture(spec,root,containers,database):
     save(root/'capture.json',{'source_binding_sha256':spec['record']['source_binding_sha256'],
         'database_sha256':digest(raw/'database.dump'),'filestore_sha256':digest(raw/'filestore.tar')})
     spec.setdefault('phase_elapsed',{})['source-capture']=time.monotonic()-started
+    phase_stamp(spec,'source_captured')
     docker('exec','-u','root',containers['script-runner'][0],'mkdir','-p','/volumes/data/filestore/'+database)
     docker('cp',str(raw/'filestore')+'/.',containers['script-runner'][0]+':/volumes/data/filestore/'+database)
     started=time.monotonic()
     sanitize_capture(spec,containers,database,raw)
     spec['phase_elapsed']['source-sanitization']=time.monotonic()-started
+    phase_stamp(spec,'source_sanitized')
     validations=spec['record'].get('business_validations',[])
     if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
         raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     if version.split('.')[0] != spec['record']['source_odoo_version'].split('.')[0]:
         raise RuntimeError('Captured source version differs from the selected source version')
-    # Check the dump's attachment set against the copied bytes, so a concurrent
-    # source deletion or incomplete rsync cannot be called a consistent capture.
     validation=attachment_validation_payload(containers,database,'validate')
     reason=validation['reason']
     if reason!='verified':
@@ -489,12 +549,14 @@ def rehearsal_storage_capacity(spec, root, containers, action):
     database=budget['database_bytes']; filestore=budget['filestore_bytes']
     # Free space already excludes every completed phase's working/recovery
     # copies. Charge only this phase's new allocations, including transients.
-    working=2 if action in {'execute','simulate-final'} else 0
+    working=3 if action=='rebuild-final' else 2 if action in {'execute','simulate-final'} else 0
     host=database+filestore+budget['staging_bytes']
     if action=='execute':
         # Raw dump + tar + extracted filestore remain until upgrade succeeds,
         # overlapping the sanitized source snapshot and both working copies.
         host+=database+2*filestore
+    elif action=='rebuild-final':
+        host=filestore+budget['staging_bytes']
     elif action=='simulate-final':
         # Restoring the retained source extracts on the host and copies its
         # dump into the database container, not the runner's writable layer.
@@ -506,7 +568,7 @@ def rehearsal_storage_capacity(spec, root, containers, action):
         containers,{**budget,'database_bytes':working*database,'filestore_bytes':working*filestore},
         runner_staging_bytes=database if action=='execute' else 0,
         host_staging_bytes=host,
-        database_staging_bytes=database if action=='simulate-final' else 0)
+        database_staging_bytes=database if action in {'simulate-final','rebuild-final'} else 0)
 
 
 def refusal_receipt(spec, root, code):
@@ -515,6 +577,8 @@ def refusal_receipt(spec, root, code):
     if not all(re.fullmatch(r'[a-f0-9]{64}',value) for value in (attempt,binding)):
         return None
     kind={'rehearsal_storage_capacity_insufficient':'capacity',
+        'rehearsal_rebuild_capacity_insufficient':'rebuild-capacity',
+        'rehearsal_rebuild_precheck_refused':'rebuild-precheck',
         'rehearsal_precheck_refused':'precheck'}[code]
     return root/(spec['action']+'.refused-'+attempt+'-'+binding+'-'+kind)
 
@@ -549,7 +613,7 @@ def emit_refusal(spec,root,code):
 
 def read_refusal(spec, root):
     result=None
-    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_precheck_refused'):
+    for code in ('rehearsal_storage_capacity_insufficient','rehearsal_rebuild_capacity_insufficient','rehearsal_rebuild_precheck_refused','rehearsal_precheck_refused'):
         path=refusal_receipt(spec,root,code)
         if path is None:
             continue
@@ -695,22 +759,17 @@ def observe(spec, root, receipt, lock_held=False):
             'business_host_frozen':False,'completed':False,'raw_source_retained':raw.is_dir(),
             'prepare_not_started':prepare_not_started,
             'custody':custody_observation(spec,root,spec.get('receipt_action',action))}
+        if action in {'simulate-final','rebuild-final'}:
+            timing=pre_switch_timing(spec,root)
+            if timing is not None:
+                result['phase_timing']=timing
         custody=result['custody']
         if lock_held and spec.get('inspect_capture') is True and custody['effect_started']:
+            result['retained_upgrade_logs_unavailable']=True
             failure=read_command_failure(spec,root)
             if failure is not None:
                 result['child_failure']=failure
-            names=database_names(spec)
-            if (action=='execute' and record['state']=='prepared'
-                    and {copy['database'] for copy in copies}=={names['source']}):
-                try:
-                    containers=inspection(spec,names['upgrade'],spec['target_image'])
-                    if containers['web'][1].get('State',{}).get('Running') is not False:
-                        raise RuntimeError('Failed upgrade writer is active')
-                    result['retained_upgrade_logs']=retained_upgrade_logs(spec,containers,root)
-                except (RuntimeError,OSError,ValueError,KeyError):
-                    result['retained_upgrade_logs_unavailable']=True
-            if result.get('child_failure') is not None or result.get('retained_upgrade_logs') is not None:
+            if result.get('child_failure') is not None:
                 result['diagnostics_private']=True
         mismatch=None
         if (lock_held and spec.get('inspect_capture') is True and action=='execute'
@@ -734,7 +793,7 @@ def observe(spec, root, receipt, lock_held=False):
     result=json.loads(receipt.read_text())
     if result['intent_sha256']!=record['intent_sha256']:
         raise RuntimeError('Another rehearsal owns this receipt')
-    states=['planned','prepared','upgraded','switched','verified','retired']
+    states=['planned','prepared','upgraded','rebuilding','switched','verified','retired']
     historical=states.index(record['state'])>states.index(result['state'])
     observed_state=record['state'] if historical else result['state']
     database,image=current({**spec,'record':{**record,'state':observed_state}})
@@ -749,9 +808,118 @@ def observe(spec, root, receipt, lock_held=False):
     return
 
 
+def prepare_runtime(spec,root,database):
+    compose(spec,root,image=spec['source_image'],database=database)
+    deadline=time.monotonic()+120
+    while True:
+        try:
+            containers=inspection(spec,database,spec['source_image'])
+            sql(containers,'SELECT 1')
+            break
+        except Exception:
+            if time.monotonic()>deadline: raise
+            time.sleep(1)
+    docker('stop',containers['web'][0])
+    docker('exec',containers['script-runner'][0],'python3','-c',"import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,k,None)) for k in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
+    return containers
+
+
+class RebuildPrecheckRefused(RuntimeError):
+    pass
+
+
+def prepared_rebuild_runtime(spec,root,database):
+    generation=spec['record']['abandoned_validations'][-1]['attempt_sha256']
+    if not re.fullmatch(r'[a-f0-9]{64}',generation):
+        raise RuntimeError('Rebuild generation is unverified')
+    marker=root/rehearsal_effect_marker('rebuild-prepared',generation)
+    receipt=marker.with_suffix('.json')
+    pending=receipt.with_suffix('.pending')
+    expected={key:spec[key] for key in ('record_binding_sha256','resources_binding_sha256')}
+    expected.update(intent_sha256=spec['record']['intent_sha256'],generation=generation)
+    archived=archived_rehearsal_markers(spec['record'])
+    for path in root.glob('rebuild-final-*.started'):
+        if path.is_symlink() or (path.name not in archived and not path.with_suffix('.json').is_file()):
+            raise RebuildPrecheckRefused('Uncertain FINAL restoration retains its custody')
+    if receipt.is_symlink() or marker.is_symlink() or pending.exists() or pending.is_symlink():
+        raise RebuildPrecheckRefused('Rebuild preparation custody is unverified')
+    if receipt.exists():
+        try:
+            metadata=receipt.stat()
+            if (not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode)!=0o600
+                    or metadata.st_size>4096 or json.loads(receipt.read_text())!=expected):
+                raise RuntimeError('Rebuild preparation binding is unverified')
+            containers=inspection(spec,database,spec['source_image'])
+            if (containers['web'][1].get('State',{}).get('Running') is not False
+                    or any(item[1].get('ExecIDs') for item in containers.values())):
+                raise RuntimeError('Prepared rebuild runtime is active')
+            sql(containers,'SELECT 1')
+        except Exception as error:
+            raise RebuildPrecheckRefused('Rebuild reuse precheck refused') from error
+        return containers
+    if marker.exists():
+        raise RebuildPrecheckRefused('Uncertain rebuild preparation retains its custody')
+    marker.touch(mode=0o600)
+    containers=prepare_runtime(spec,root,database)
+    save(receipt,expected)
+    return containers
+
+
+def stop_pre_switch_candidate(spec):
+    identifiers=docker('ps','-aq','--filter','label=com.docker.compose.project='+spec['record']['rehearsal_id'],
+        '--filter','label=com.docker.compose.service=pre-switch-web').decode().splitlines()
+    if any(not re.fullmatch('[a-f0-9]{12,64}',identifier) for identifier in identifiers):
+        raise RuntimeError('Candidate stop inventory is unverified')
+    if identifiers:
+        docker('stop',*identifiers)
+
+
+def verify_before_switch(spec,root,containers,database):
+    before_web(spec,containers,database,start=False)
+    try:
+        compose(spec,root,image=spec['target_image'],database=database,candidate=True)
+        containers=inspection(spec,database,spec['target_image'],candidate_may_run=True)
+        if (containers['web'][1].get('State',{}).get('Running') is not False
+                or containers['pre-switch-web'][1].get('State',{}).get('Running') is not True):
+            raise RuntimeError('Private switch endpoint is not held')
+        private_health(spec,containers,hostname='pre-switch-web')
+        validation=business_validation(spec,containers,timed=False)
+        if validation['passed'] is not True or validation['committed'] is not True:
+            raise RuntimeError('Pre-switch business verification failed')
+        connection_readback(spec,containers,database)
+        spec['phase_timing']['pre_switch_validation']=validation
+        phase_stamp(spec,'pre_switch_verified')
+        save(root/(spec.get('receipt_action',spec['action'])+'.pre-switch.json'),{
+            'intent_sha256':spec['record']['intent_sha256'],
+            'record_binding_sha256':spec['record_binding_sha256'],
+            'attempt_sha256':spec['attempt_sha256'],'phase_timing':spec['phase_timing']})
+    finally:
+        stop_pre_switch_candidate(spec)
+    return inspection(spec,database,spec['target_image'])
+
+
+def upgrade_final(spec,root,containers):
+    names=database_names(spec)
+    clone(spec,containers,names['final_source'],names['final_upgrade'])
+    compose(spec,root,image=spec['target_image'],database=names['final_upgrade'])
+    containers=inspection(spec,names['final_upgrade'],spec['target_image'])
+    docker('stop',containers['web'][0])
+    sql(containers,'ALTER DATABASE "'+names['final_upgrade']+'" SET default_transaction_read_only=off')
+    upgrade_started=time.monotonic()
+    copy_runner(spec,containers,names['final_upgrade'],fresh=False)
+    spec['phase_elapsed']['final-upgrade']=time.monotonic()-upgrade_started
+    verification_started=time.monotonic()
+    containers=verify_before_switch(spec,root,containers,names['final_upgrade'])
+    spec['phase_elapsed']['pre-switch-verification']=time.monotonic()-verification_started
+    switch_started=time.monotonic()
+    docker('start',containers['web'][0])
+    phase_stamp(spec,'web_started')
+    private_health(spec,containers)
+    phase_stamp(spec,'private_switch_verified')
+    spec['phase_elapsed']['private-switch']=time.monotonic()-switch_started
+
+
 def main():
-    global COMMAND_FAILURE_CONTEXT
-    COMMAND_FAILURE_CONTEXT=None
     spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
     record=spec['record']
     namespace=record['rehearsal_id']
@@ -761,13 +929,11 @@ def main():
     if root.is_symlink() or root.resolve()!=root.absolute():
         raise RuntimeError('Rehearsal custody path is aliased')
     action=spec['action']
-    if action=='retire-incomplete':
+    if action in {'retire-incomplete','abandon-validation'} or retaining_final_recovery(spec):
         incomplete_retirement(spec,root)
         return
-    if action=='validate-business':
-        # Each original operation has its own effect marker and receipt. A
-        # later reviewed attempt cannot replay or adopt an earlier attempt.
-        action+='-'+spec['attempt_sha256']
+    if action in {'rebuild-final','validate-business'}:
+        action=rehearsal_effect_marker(action,spec['attempt_sha256']).removesuffix('.started')
     receipt=root/(action+'.json')
     spec['receipt_action']=action
     if spec['mode']=='observe':
@@ -805,23 +971,40 @@ def main():
         names=database_names(spec)
         action=spec['action']
         database,image=current(spec)
-        if action=='prepare':
-            (root/(action+'.started')).touch(mode=0o600)
-            compose(spec,root,image=spec['source_image'],database=names['source'])
-            deadline=time.monotonic()+120
-            while True:
+        if action in {'prepare','rebuild-final'}:
+            if action=='rebuild-final':
                 try:
-                    containers=inspection(spec,names['source'],spec['source_image'])
-                    sql(containers,'SELECT 1')
-                    break
+                    if not preserved_rehearsal_abandonment(record):
+                        raise RuntimeError('A current preserving abandonment is required')
+                    validate_snapshots(spec,root,{},record['copies'],retired=True)
                 except Exception:
-                    if time.monotonic()>deadline: raise
-                    time.sleep(1)
-            docker('stop',containers['web'][0])
-            # Prove both the native SQL-before-registry boundary and the source
-            # modules exist before reading any business data.
-            docker('exec',containers['script-runner'][0],'python3','-c',"import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,k,None)) for k in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
-            state='prepared'; copies=[]
+                    emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+            selected=names['final_upgrade'] if action=='rebuild-final' else names['source']
+            if action=='prepare':
+                (root/(spec['receipt_action']+'.started')).touch(mode=0o600)
+                containers=prepare_runtime(spec,root,selected)
+                state='prepared'; copies=[]
+            else:
+                try:
+                    containers=prepared_rebuild_runtime(spec,root,selected)
+                except RebuildPrecheckRefused:
+                    emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+                try:
+                    capacity=rehearsal_storage_capacity(spec,root,containers,'rebuild-final')
+                except Exception:
+                    emit_refusal(spec,root,'rehearsal_rebuild_precheck_refused')
+                    return
+                if not capacity:
+                    emit_refusal(spec,root,'rehearsal_rebuild_capacity_insufficient')
+                    return
+                (root/(spec['receipt_action']+'.started')).touch(mode=0o600)
+                for role in ('source','final_source'):
+                    restore_preserved_snapshot(spec,root,containers,names[role],names[role])
+                    sql(containers,'ALTER DATABASE "'+names[role]+'" SET default_transaction_read_only=on')
+                upgrade_final(spec,root,containers)
+                state='switched'; copies=list(record['copies'])
         else:
             code=''
             try:
@@ -863,23 +1046,14 @@ def main():
                 # Freeze/capture/switch affects the already sanitized source
                 # copy only. No second read or fence touches the business host.
                 docker('stop',containers['web'][0])
+                phase_stamp(spec,'simulated_quiescent')
                 restore_preserved_snapshot(spec,root,containers,names['source'],names['final_source'])
                 sql(containers,'ALTER DATABASE "'+names['final_source']+'" SET default_transaction_read_only=off')
                 copies.append(snapshot(spec,root,containers,names['final_source']))
-                clone(spec,containers,names['final_source'],names['final_upgrade'])
+                spec['phase_timing']['final_source_witness_sha256']=copies[-1]['witness_sha256']
                 spec['phase_elapsed']['final-capture-simulation']=time.monotonic()-started
                 sql(containers,'ALTER DATABASE "'+names['final_source']+'" SET default_transaction_read_only=on')
-                compose(spec,root,image=spec['target_image'],database=names['final_upgrade'])
-                containers=inspection(spec,names['final_upgrade'],spec['target_image'])
-                docker('stop',containers['web'][0])
-                sql(containers,'ALTER DATABASE "'+names['final_upgrade']+'" SET default_transaction_read_only=off')
-                upgrade_started=time.monotonic()
-                copy_runner(spec,containers,names['final_upgrade'],fresh=False)
-                spec['phase_elapsed']['final-upgrade']=time.monotonic()-upgrade_started
-                switch_started=time.monotonic()
-                before_web(spec,containers,names['final_upgrade'])
-                private_health(spec,containers)
-                spec['phase_elapsed']['private-switch']=time.monotonic()-switch_started
+                upgrade_final(spec,root,containers)
                 state='switched'
             elif action=='validate-business':
                 validation=business_validation(spec,containers)
@@ -899,6 +1073,8 @@ def main():
         elapsed={**record['elapsed_seconds'],**spec.get('phase_elapsed',{}),action:time.monotonic()-started}
         result={'intent_sha256':record['intent_sha256'],'state':state,'copies':copies,'elapsed_seconds':elapsed,
             'resources_preserved':True,'public_route':False,'business_host_frozen':False}
+        if spec.get('phase_timing'):
+            result['phase_timing']=spec['phase_timing']
         if action=='validate-business':
             result['business_validation']=validation
             save(root/(spec['receipt_action']+'.outcome.json'),{

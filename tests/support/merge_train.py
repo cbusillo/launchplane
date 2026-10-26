@@ -1,4 +1,5 @@
 from __future__ import annotations
+from control_plane.github_required_checks import CheckRequirement
 
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -43,6 +44,7 @@ from control_plane.merge_train import (
     discover_merge_train_stack,
 )
 from control_plane.merge_train_github import (
+    MergeTrainBaseCheckObservation,
     GitHubMergeTrainClient,
     MergeTrainGitHubTransport,
     LegacyMergeTrainEffectExecutor,
@@ -103,10 +105,12 @@ class _FakeMergeTrainGitHubClient:
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
         branch_refresh_recorder: object | None = None,
         branch_refresh_store: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport: MergeTrainGitHubTransport = _LegacyCandidateTransport(transport)
         self.branch_refresh_recorder = branch_refresh_recorder
         self._branch_refresh_store = branch_refresh_store
+        self._source_screening = source_screening
         self._snapshot_policy = None
         self._reuse_snapshots = False
         self._snapshots: dict[tuple[str, str], MergeTrainDryRunSnapshot] = {}
@@ -118,6 +122,9 @@ class _FakeMergeTrainGitHubClient:
 
     begin_snapshot_pass = GitHubMergeTrainClient.begin_snapshot_pass
     end_snapshot_pass = GitHubMergeTrainClient.end_snapshot_pass
+
+    def target_setting_gaps(self, *, repository_policy: object) -> tuple[str, ...]:
+        return ()
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -218,7 +225,7 @@ class _FakeMergeTrainGitHubClient:
         # Existing controller fixtures model legacy PR-by-PR landing records.
         return None
 
-    def close_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate) -> None:
+    def close_batch_pull_request(self, *, candidate: MergeTrainBatchCandidate, reason: str) -> None:
         pass
 
     def land_batch_candidate(
@@ -358,10 +365,13 @@ class _FakeMergeTrainGitHubClient:
 class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
     labels_added: list[tuple[int, str]] = []
 
-    def read_base_check_status(
-        self, *, candidate: MergeTrainBatchCandidate, failed_check_names: tuple[str, ...]
-    ) -> str:
-        return "pass"
+    def read_base_check_observation(
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        attribution_requirements: tuple[CheckRequirement, ...],
+    ) -> MergeTrainBaseCheckObservation:
+        return MergeTrainBaseCheckObservation("pass")
 
     def observe_batch_candidate_checks(
         self, *, candidate: MergeTrainBatchCandidate
@@ -372,6 +382,7 @@ class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
         self, *, candidate: MergeTrainBatchCandidate
     ) -> CandidateCheckFailures:
         return CandidateCheckFailures(
+            attribution_requirements=(CheckRequirement("ci-gate"),),
             checks=(
                 CandidateCheckFailure(
                     name="test_shard (0)",
@@ -379,7 +390,7 @@ class _FakeFailingMergeTrainGitHubClient(_FakeMergeTrainGitHubClient):
                     url="https://github.com/cbusillo/sellyouroutboard/actions/runs/1/job/2",
                     failed_tests=("tests.test_widget.WidgetTests.test_renders",),
                 ),
-            )
+            ),
         )
 
     def add_pull_request_label(
@@ -648,8 +659,10 @@ class _FakeMergeTrainSnapshotReader:
         transport: object,
         branch_refresh_store: object | None = None,
         repository_policy: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
+        self.source_screening = source_screening
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -720,6 +733,7 @@ class _FakeEmptyMergeTrainSnapshotReader:
         transport: object,
         branch_refresh_store: object | None = None,
         repository_policy: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
 
@@ -741,6 +755,7 @@ class _FakeStackedMergeTrainSnapshotReader:
         transport: object,
         branch_refresh_store: object | None = None,
         repository_policy: object | None = None,
+        source_screening: bool = False,
     ) -> None:
         self.transport = transport
 

@@ -39,10 +39,6 @@ _ROUTE = "service:preview-lifecycle-scheduler"
 _LOGGER = logging.getLogger(__name__)
 
 
-def sweep_slot(now: float) -> int:
-    return int((now - SWEEP_SLOT_OFFSET_SECONDS) // SWEEP_INTERVAL_SECONDS)
-
-
 def _timestamp(now: float) -> str:
     return datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -238,13 +234,19 @@ class PreviewLifecycleScheduler(_PreviewScheduler):
             control_plane_root=control_plane_root,
             clock=clock,
         )
+        from control_plane.preview_idle import PreviewIdleScheduler
+
+        self.idle_scheduler = PreviewIdleScheduler(store, control_plane_root=control_plane_root)
 
     def start(self) -> None:
+        self.idle_scheduler.start()
         self.inventory_scheduler.start()
         super().start()
 
     def stop(self) -> None:
+        self.idle_scheduler._stop.set()
         self._stop.set()
         self.inventory_scheduler._stop.set()
         self.inventory_scheduler.stop()
+        self.idle_scheduler.stop()
         super().stop()

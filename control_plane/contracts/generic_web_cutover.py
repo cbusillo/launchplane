@@ -4,7 +4,13 @@ from datetime import datetime
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import (
+    Field,
+    ValidationInfo,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_validator,
+)
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.artifact_release_compatibility import ReleaseDatabaseCompatibility
@@ -92,8 +98,10 @@ class GenericWebCutoverPlan(FrozenRecord):
     new: WebSlot
 
     @model_validator(mode="after")
-    def exact_pair(self) -> Self:
-        if self.compatibility != classify_release_database_compatibility(
+    def exact_pair(self, info: ValidationInfo) -> Self:
+        if not (info.context or {}).get(
+            "stored_cutover"
+        ) and self.compatibility != classify_release_database_compatibility(
             production=self.production, candidate=self.candidate
         ):
             raise ValueError("classification differs from the exact verified artifact pair")
@@ -186,3 +194,11 @@ class GenericWebCutoverRecord(FrozenRecord):
     # Traffic completion precedes outer deployment/inventory persistence. Keep
     # the lane held until those records are committed, including after rollback.
     records_committed: bool = False
+
+    @field_validator("plan", mode="wrap")
+    @classmethod
+    def read_admitted_plan(
+        cls, value: object, handler: ValidatorFunctionWrapHandler
+    ) -> GenericWebCutoverPlan:
+        payload = value.model_dump() if isinstance(value, GenericWebCutoverPlan) else value
+        return GenericWebCutoverPlan.model_validate(payload, context={"stored_cutover": True})

@@ -19,7 +19,7 @@ class _IncompleteCodeOwnerEvidence(ValueError):
     """Changed-file evidence cannot justify batching this pull request."""
 
 
-_CODEOWNERS_PATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+CODEOWNERS_PATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 
 
 def individual_landing_snapshots(
@@ -56,7 +56,7 @@ def individual_landing_snapshots(
                 raise _IncompleteCodeOwnerEvidence(
                     "Code-owner routing head changed during file reads."
                 )
-            individual = _paths_require_individual_landing(paths, patterns)
+            individual = paths_require_individual_landing(paths, patterns)
         except _IncompleteCodeOwnerEvidence:
             # With ownership rules, incomplete evidence cannot transfer this
             # PR's approval to a batch. Without them it withholds grouping only.
@@ -113,12 +113,12 @@ def carried_change_requires_individual_landing(
             if not isinstance(previous, str) or not previous:
                 return True
             paths.append(previous)
-    return _paths_require_individual_landing(tuple(paths), patterns)
+    return paths_require_individual_landing(tuple(paths), patterns)
 
 
-def _paths_require_individual_landing(paths: tuple[str, ...], patterns: tuple[str, ...]) -> bool:
+def paths_require_individual_landing(paths: tuple[str, ...], patterns: tuple[str, ...]) -> bool:
     return any(
-        path in _CODEOWNERS_PATHS or any(_may_match(path, pattern) for pattern in patterns)
+        path in CODEOWNERS_PATHS or any(_may_match(path, pattern) for pattern in patterns)
         for path in paths
     )
 
@@ -165,7 +165,7 @@ def _read_patterns(
 ) -> tuple[str, ...]:
     from control_plane.merge_train_github import MergeTrainGitHubError
 
-    for path in _CODEOWNERS_PATHS:
+    for path in CODEOWNERS_PATHS:
         try:
             payload = transport.request(
                 method="GET",
@@ -189,14 +189,16 @@ def _read_patterns(
             raise MergeTrainGitHubError(
                 "Code-owner routing received invalid CODEOWNERS content."
             ) from error
-        # Keep every owned pattern, including ones later overridden. This may
-        # route an unowned change individually; it cannot drop an owner rule.
-        return tuple(
-            line.split()[0]
-            for raw_line in content.splitlines()
-            if (line := raw_line.strip()) and not line.startswith("#") and len(line.split()) > 1
-        )
+        return parse_codeowner_patterns(content)
     return ()
+
+
+def parse_codeowner_patterns(content: str) -> tuple[str, ...]:
+    return tuple(
+        words[0]
+        for raw_line in content.lstrip("\ufeff").splitlines()
+        if (words := raw_line.split()) and not words[0].startswith("#") and len(words) > 1
+    )
 
 
 def _may_match(path: str, pattern: str) -> bool:

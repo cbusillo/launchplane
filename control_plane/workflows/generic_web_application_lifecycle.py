@@ -1,9 +1,10 @@
 """Declared application maintenance and schedules under the deploy effect fence."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable
-from typing import Protocol, runtime_checkable, cast
+from collections.abc import Callable, Iterator
+from typing import Literal, Protocol, runtime_checkable, cast
 from uuid import uuid4
 
 import click
@@ -15,8 +16,13 @@ from control_plane.contracts.generic_web_extensions import (
 )
 from control_plane.dokploy import api, source
 from control_plane.dokploy.post_deploy import DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION
+from control_plane.workflows.generic_web_execution import (
+    ExecutionRecorder,
+    RecordedScheduleExecution,
+)
 from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
+    ApplicationLifecycleBaselineChanged,
     application_snapshot_for_deploy,
     recorded_application_lifecycle,
 )
@@ -52,7 +58,7 @@ class GenericWebApplicationLifecycle(Protocol):
     snapshot: ApplicationLifecycleSnapshot
     effect_attempted: bool
 
-    def capture(self) -> None: ...
+    def capture(self, *, require_unchanged_baseline: bool = False) -> None: ...
     def prepare(self) -> None: ...
     def maintain(self) -> dict[str, str]: ...
     def complete(self) -> dict[str, str]: ...
@@ -67,7 +73,7 @@ class RecordedApplicationLifecycle:
     snapshot: ApplicationLifecycleSnapshot
     effect_attempted: bool = False
 
-    def capture(self) -> None:
+    def capture(self, *, require_unchanged_baseline: bool = False) -> None:
         pass
 
     def prepare(self) -> None:
@@ -110,6 +116,7 @@ class DokployApplicationLifecycle:
     effect_started: Callable[[], None]
     effect_attempted: bool = False
     observed: dict[str, api.JsonObject | None] = field(default_factory=dict)
+    execution_recorder: ExecutionRecorder | None = None
 
     def _mutate(self, phase: str) -> None:
         self.checkpoint(phase)
@@ -131,31 +138,64 @@ class DokployApplicationLifecycle:
             raise click.ClickException("Application schedule has no exact target/state readback.")
         return {key: observed.get(key) for key in api._DOKPLOY_APPLICATION_SCHEDULE_READBACK_FIELDS}
 
-    def _upsert(self, payload: api.JsonObject, phase: str) -> api.JsonObject:
+    @contextmanager
+    def _schedule_write(
+        self,
+        kind: Literal["schedule_write", "schedule_delete"],
+        name: str,
+        payload: api.JsonObject,
+        phase: str,
+    ) -> Iterator[None]:
         self._mutate(phase)
+        index = (
+            self.execution_recorder.begin(kind, name, self.application_id, payload)
+            if self.execution_recorder
+            else -1
+        )
+        yield
+        if self.execution_recorder is not None:
+            self.execution_recorder.update(
+                index, acknowledgement="completed", terminal="write_completed"
+            )
+
+    def _upsert(self, payload: api.JsonObject, phase: str) -> api.JsonObject:
         return api.upsert_dokploy_application_schedule(
             host=self.host,
             token=self.token,
             application_id=self.application_id,
             schedule_payload=payload,
+            provider_mutation_guard=lambda: self._schedule_write(
+                "schedule_write", str(payload["name"]), payload, phase
+            ),
         )
 
     def _delete(self, name: str) -> None:
         observed = self._read(name)
         if observed is not None:
-            self._mutate("application_schedule_remove")
             api.delete_dokploy_application_schedule(
                 host=self.host,
                 token=self.token,
                 application_id=self.application_id,
                 schedule_payload=observed,
+                provider_mutation_guard=lambda: self._schedule_write(
+                    "schedule_delete", name, observed, "application_schedule_remove"
+                ),
             )
 
-    def capture(self) -> None:
+    def capture(self, *, require_unchanged_baseline: bool = False) -> None:
         # Capture every baseline before the first provider mutation. The caller
         # durably writes this artifact-bound receipt before prepare().
         for name in self.snapshot.managed_names:
             observed = self._read(name)
+            if (require_unchanged_baseline and name not in self.snapshot.originals) or (
+                self.snapshot.mode == "deploy"
+                and require_unchanged_baseline
+                and name in self.snapshot.originals
+                and observed != self.snapshot.originals[name]
+            ):
+                raise ApplicationLifecycleBaselineChanged(
+                    "The original's application schedule baseline changed.",
+                )
             self.observed[name] = observed
             if self.snapshot.mode == "rollback" and name not in self.snapshot.current_originals:
                 self.snapshot.current_originals[name] = observed
@@ -204,12 +244,25 @@ class DokployApplicationLifecycle:
         return evidence
 
     def _run_schedule(self, schedule: api.JsonObject, timeout_seconds: int) -> None:
+        observer: api.ScheduleExecutionOptions = (
+            {
+                "execution_observer": RecordedScheduleExecution(
+                    self.execution_recorder,
+                    str(schedule.get("name", "")),
+                    api.schedule_key(schedule),
+                    schedule,
+                )
+            }
+            if self.execution_recorder
+            else {}
+        )
         api.run_dokploy_schedule(
             host=self.host,
             token=self.token,
             schedule_id=api.schedule_key(schedule),
             timeout_seconds=timeout_seconds,
             before_trigger=lambda: self._mutate("application_schedule_canary"),
+            **observer,
         )
 
     def _run_command(self, definition: GenericWebMaintenanceCommand) -> None:
@@ -224,12 +277,22 @@ class DokployApplicationLifecycle:
             schedule_payload(definition, self.application_id, enabled=False),
             "application_maintenance_prepare",
         )
+        observer: api.ScheduleExecutionOptions = (
+            {
+                "execution_observer": RecordedScheduleExecution(
+                    self.execution_recorder, definition.name, api.schedule_key(schedule), schedule
+                )
+            }
+            if self.execution_recorder
+            else {}
+        )
         api.run_dokploy_schedule(
             host=self.host,
             token=self.token,
             schedule_id=api.schedule_key(schedule),
             timeout_seconds=definition.timeout_seconds,
             before_trigger=lambda: self._mutate("application_maintenance_execute"),
+            **observer,
         )
 
     def restore(self) -> None:
@@ -354,8 +417,8 @@ class RecordedPreviewApplicationLifecycle(DokployApplicationLifecycle):
                 "Preview application lifecycle receipt storage failed."
             ) from error
 
-    def capture(self) -> None:
-        super().capture()
+    def capture(self, *, require_unchanged_baseline: bool = False) -> None:
+        super().capture(require_unchanged_baseline=require_unchanged_baseline)
         # Persist ownership and the full baseline before pausing any job.
         self._save()
 

@@ -130,6 +130,153 @@ class ComposeQualificationTests(unittest.TestCase):
 
 
 class ActivationTests(unittest.TestCase):
+    def test_nested_source_sites_keep_each_exception_raise_location(self) -> None:
+        from traceback import walk_tb
+        from control_plane import http_error_evidence
+        from control_plane.contracts import canonical_json
+
+        payload: object = 0.5
+        for _ in range(12):
+            payload = [payload]
+        try:
+            canonical_json.canonical_json_bytes(payload)
+        except ValueError as root:
+            root_line = list(walk_tb(root.__traceback__))[-1][1]
+            try:
+                canonical_json.canonical_json_bytes(object())
+            except TypeError as error:
+                outer_line = list(walk_tb(error.__traceback__))[-1][1]
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(error, "nested-source-test")
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(
+            evidence["sites"],
+            [
+                {"module": canonical_json.__name__, "line": outer_line},
+                {"module": canonical_json.__name__, "line": root_line},
+            ],
+        )
+
+    def test_dependency_refusal_logs_source_sites_without_private_error_data(self) -> None:
+        import asyncio
+        from control_plane import http_error_evidence
+        from control_plane import npmplus
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+        from tests.test_npmplus import _Opener, _credentials
+
+        private = "private-provider-diagnostic-sentinel"
+
+        def fail_dependency() -> None:
+            opener = _Opener()
+            opener.host_details["certificate_id"] = private
+            opener.host_details["meta"] = {private: private}
+            npmplus.NpmplusClient(credentials=_credentials(), opener=opener).get_proxy_host(78)
+
+        bearer_config = _local_operator_bearer_config(token_label="local-owner-write")
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=bearer_config,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        body = self.request.model_copy(
+            update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+        ).model_dump(mode="json")
+        with (
+            patch.object(TestingActivationAdapter, "current", side_effect=fail_dependency),
+            self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs,
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={"Authorization": f"Bearer {bearer_config.local_operator_token}"},
+                    payload=body,
+                )
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            TestingActivationRefusalCode.DEPENDENCY_UNVERIFIED.value,
+        )
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
+        self.assertTrue(
+            any(site["module"] == npmplus.__name__ for site in evidence["sites"]),
+            evidence,
+        )
+        self.assertTrue(evidence["validation"])
+        self.assertTrue(
+            all(type(site["line"]) is int and site["line"] > 0 for site in evidence["sites"])
+        )
+        self.assertNotIn(private, response.text + str(logs.output))
+        self.assertNotIn(bearer_config.local_operator_token, str(logs.output))
+        self.assertTrue(
+            all(record.exc_info is None and record.stack_info is None for record in logs.records)
+        )
+        self.assertEqual(self.writes, [])
+
+    def test_native_external_refusal_keeps_backoff_through_http(self) -> None:
+        import asyncio
+        from control_plane.discord_identity import DiscordIdentityResult
+        from control_plane.contracts.testing_external_resources import (
+            DiscordBotResourceObservation,
+            DiscordRateLimitEvidence,
+        )
+        from control_plane.testing_external_capabilities import ExternalCapabilityReadRefusal
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        result = DiscordIdentityResult(
+            observation=DiscordBotResourceObservation(
+                started_at="2026-10-23T00:00:00Z",
+                finished_at="2026-10-23T00:00:01Z",
+                http_status=429,
+                rate_limits=(
+                    DiscordRateLimitEvidence(phase="guilds", retry_after=120, global_limit=True),
+                ),
+            )
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with patch.object(
+            TestingActivationAdapter, "current", side_effect=ExternalCapabilityReadRefusal(result)
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "external-refusal",
+                    },
+                    payload=self.request.model_copy(
+                        update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+                    ).model_dump(mode="json"),
+                )
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        body = response.json()
+        self.assertEqual(
+            body["error"]["code"], TestingActivationRefusalCode.EXTERNAL_CAPABILITY_UNVERIFIED
+        )
+        self.assertEqual(
+            DiscordIdentityResult.model_validate_json(body["records"]["discord_identity"]), result
+        )
+
     database_url = ""
     private_product = True
     local_credential_fixture = False
@@ -642,6 +789,26 @@ class ActivationTests(unittest.TestCase):
         versions = local.store.list_secret_versions(secret_id="testing-password")
         local.assertEqual(local.run_activation().response_status_code, 202)
         local.assertEqual(local.store.list_secret_versions(secret_id="testing-password"), versions)
+
+    def test_private_source_network_survives_unused_provider_metadata(self) -> None:
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        document: dict[str, Any] = deepcopy(COMPOSE)
+        document["networks"] = {"backend": {"internal": True}}
+        document["services"]["web"]["networks"] = ["backend"]
+        with patch(
+            "control_plane.testing_activation.read_product_compose",
+            return_value=json.dumps(document),
+        ):
+            self.adapter.request = self.request.model_copy(
+                update={"reviewed_plan_sha256": self.adapter.current().plan_sha256}
+            )
+            self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
+            production,
+        )
 
     def test_activation_and_original_key_replay_preserve_production_old_target_hold_and_fence(
         self,
@@ -1307,6 +1474,51 @@ class ActivationTests(unittest.TestCase):
                         )
         self.assertEqual(self.writes, [])
 
+    def test_new_staff_use_correction_refuses_initial_custody(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from control_plane.contracts.disposable_lane import DisposableLaneSafety
+        from control_plane.disposable_lanes import resolve_disposable_observation_binding
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        second = PostgresRecordStore(
+            database_url=self.store._engine.url.render_as_string(hide_password=False)
+        )
+        self.addCleanup(second.close)
+        write = self.store.write_testing_activation
+        observed: list[DisposableLaneSafety] = []
+
+        def correction(**kwargs: Any) -> None:
+            if kwargs["expected"] is None and not observed:
+                binding = resolve_disposable_observation_binding(
+                    second, product=self.product, context=self.context, instance="testing"
+                )
+                now = datetime.now(timezone.utc)
+                record = DisposableLaneSafety(
+                    product=self.product,
+                    context=self.context,
+                    instance="testing",
+                    observed_by=self.actor,
+                    observer_kind="director_agent",
+                    binding_sha256=binding.binding_sha256,
+                    usage="in_use",
+                    usage_evidence="A fresh staff-use correction.",
+                    observed_at=now,
+                    expires_at=now + timedelta(minutes=5),
+                )
+                self.assertTrue(second.publish_collected_disposable_lane_safety(record))
+                observed.append(record)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=correction):
+            result = self.run_activation()
+        self.assertTrue(observed)
+        self.assertEqual(result.response_status_code, 409)
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.assertFalse(self.writes)
+        self.assertEqual(
+            second.read_disposable_lane_safety(self.product, self.context, "testing"), observed[0]
+        )
+
     def test_hold_continuation_requires_exact_caller_and_preserves_later_staff_hold(self) -> None:
         from control_plane.testing_activation import require_activation_hold_lift
         from control_plane.testing_lane_hold import TestingHoldApplyRequest
@@ -1370,6 +1582,61 @@ class ActivationTests(unittest.TestCase):
         target.env[self.request.port_keys[0]] = "3307"
         self.store.write_dokploy_target_record(target)
         self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+
+    def test_provider_monitor_source_recheck_refuses_published_separation_drift(self) -> None:
+        from dataclasses import replace
+        from unittest.mock import Mock
+        from control_plane.workflows.public_ingress_monitor import (
+            _deploy_fence_monitor_target,
+            check_public_ingress_target,
+        )
+
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
+        profile = self.store.read_product_profile_record(self.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        snapshot = self.store.read_provider_hold_snapshot(
+            product=self.product,
+            context=self.context,
+            instance="testing",
+        )
+        self.assertEqual(snapshot.holds, ())
+        target = replace(
+            _deploy_fence_monitor_target(profile=profile, lane=lane, fence=None),
+            provider_hold_snapshot=snapshot,
+        )
+        observation = check_public_ingress_target(
+            target=target,
+            checked_at=self.preparation.fixture.now(),
+            timeout_seconds=1,
+            http_get=Mock(),
+            tls_get=Mock(),
+        )
+        self.assertEqual(observation.status, "pass")
+        current = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        current.env[self.request.port_keys[0]] = "3307"
+        self.store.write_dokploy_target_record(current)
+        self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+        result = self.store.write_public_ingress_transition_with_outbox(
+            observation=observation,
+            incidents=(),
+            expected_provider_hold_snapshot=snapshot,
+        )
+        self.assertEqual(result.status, "provider_source_changed")
+        self.assertEqual(self.store.list_public_ingress_observation_records(), ())
+        self.assertEqual(
+            tuple(
+                hold.reservation
+                for hold in self.store.read_provider_hold_snapshot(
+                    product=self.product,
+                    context=self.context,
+                    instance="testing",
+                ).holds
+            ),
+            (self.preparation.original,),
+        )
 
     def test_supported_http_lift_replays_and_requests_only_testing_reconcile(self) -> None:
         import asyncio
@@ -1465,9 +1732,13 @@ class ActivationTests(unittest.TestCase):
             self.store.list_held_provider_target_reservations(), (self.preparation.original,)
         )
         self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
-        self.assertNotIn(
-            (self.context, "testing"), _held_generic_web_deploy_fences(self.store) or {}
+        snapshots = _held_generic_web_deploy_fences(
+            self.store,
+            profiles=self.store.list_product_profile_records(),
+            incidents=(),
         )
+        assert snapshots is not None
+        self.assertEqual(snapshots[(self.product, self.context, "testing")].holds, ())
         from control_plane.workflows.generic_web_deploy_provider import (
             build_generic_web_provider_reconciliation_key,
         )
@@ -1476,23 +1747,43 @@ class ActivationTests(unittest.TestCase):
         record = activation_record(self.store, self.product, self.context)
         assert record is not None
         target.resolved_target.target_id = record.target_id
-        current_fence = self.preparation.original.model_copy(
-            update={
-                "idempotency_key": "new-recipient-outcome-unknown",
-                "reconciliation_key": build_generic_web_provider_reconciliation_key(
-                    target, product=self.product
-                ),
-            }
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.workflows.generic_web_deploy_provider import (
+            build_generic_web_provider_target_key,
         )
-        with patch.object(
+
+        current_fence = self.store.reserve_mutation(
+            scope=self.preparation.original.scope,
+            route_path=self.preparation.original.route_path,
+            idempotency_key="new-recipient-outcome-unknown",
+            request_fingerprint="new-recipient",
+            lease_owner="new-recipient",
+            reconciliation_key=build_generic_web_provider_reconciliation_key(
+                target, product=self.product
+            ),
+            provider_target_key=build_generic_web_provider_target_key(target),
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.product,
+                context=self.context,
+                instance="testing",
+                provider_id=target.ship_request.provider_id,
+                target_type=target.resolved_target.target_type,
+                target_id=target.resolved_target.target_id,
+            ),
+        ).record
+        snapshots = _held_generic_web_deploy_fences(
             self.store,
-            "list_held_provider_target_reservations",
-            return_value=(self.preparation.original, current_fence),
-        ):
-            self.assertEqual(
-                (_held_generic_web_deploy_fences(self.store) or {})[(self.context, "testing")],
-                current_fence,
-            )
+            profiles=self.store.list_product_profile_records(),
+            incidents=(),
+        )
+        assert snapshots is not None
+        self.assertEqual(
+            tuple(
+                hold.reservation
+                for hold in snapshots[(self.product, self.context, "testing")].holds
+            ),
+            (current_fence,),
+        )
 
     def reconcile_target_key(self) -> str:
         from control_plane.contracts.product_reconcile import ProductReconcileTarget
@@ -1656,6 +1947,8 @@ class ActivationTests(unittest.TestCase):
         aliased_network["networks"]["default"] = {"name": "dokploy-network"}
         changed_network = deepcopy(converted)
         changed_network["networks"]["dokploy-network"]["name"] = "foreign-network"
+        malformed_network = deepcopy(converted)
+        malformed_network["networks"]["dokploy-network"]["external"] = 1
         foreign_network = deepcopy(converted)
         foreign_network["networks"]["foreign-network"] = {"external": True}
         code = TestingActivationRefusalCode
@@ -1674,6 +1967,7 @@ class ActivationTests(unittest.TestCase):
             ({}, interpolated_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, aliased_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, changed_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, malformed_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, foreign_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, "null", code.RECIPIENT_SOURCE_UNMATERIALIZED),
             ({}, "services: [" + private, code.RECIPIENT_RENDER_UNVERIFIED),

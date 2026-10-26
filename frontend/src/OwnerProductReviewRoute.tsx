@@ -18,8 +18,9 @@ import { loadDevFixtures } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { productReviewLookupFromSearch } from "./route-model";
 import { AppLink, productTopicsPath, useAppSearchParams } from "./router";
+import { needsNothingFromClient, untestedReason } from "./release-review-model";
 import { safeExternalUrl } from "./url";
-import { OwnerReleaseReviewRoute } from "./OwnerReleaseReviewRoute";
+import { ClientTestNotes, OwnerReleaseReviewRoute } from "./OwnerReleaseReviewRoute";
 
 import type {
   GitHubHumanIdentityResponse,
@@ -120,7 +121,7 @@ export function OwnerProductReviewRoute({
   const searchParams = useAppSearchParams();
   const product = searchParams.get("product");
   return product ? <>
-    <p><AppLink to={productTopicsPath(product)}>Topics to discuss</AppLink></p>
+    <p className="owner-review-topics"><AppLink to={productTopicsPath(product)}>Topics to discuss</AppLink></p>
     <OwnerReleaseReviewRoute key={product} product={product} fixtureMode={fixtureMode} />
   </> : <OwnerPreviewReviewRoute fixtureMode={fixtureMode} />;
 }
@@ -209,7 +210,7 @@ function OwnerPreviewReviewRoute({
         </>
       ) : review ? (
         <>
-        <p><AppLink to={productTopicsPath(review.product)}>Topics to discuss</AppLink></p>
+        <p className="owner-review-topics"><AppLink to={productTopicsPath(review.product)}>Topics to discuss</AppLink></p>
         <ProductReviewCard
           historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
@@ -262,6 +263,7 @@ function ProductReviewCard({
         <p className="eyebrow">Product</p>
         <h2>{review.display_name || review.product}</h2>
       </header>
+      {review.pull_request_title ? <h3>{review.pull_request_title}</h3> : null}
       <div className="owner-review-links">
         {previewUrl ? (
           <a
@@ -290,6 +292,7 @@ function ProductReviewCard({
           Preview version {review.head_sha.slice(0, 7)}
         </p>
       ) : null}
+      <ProductReviewNotes review={review} />
       {review.latest_decision ? (
         <LatestDecision
           key={review.latest_decision.record_id}
@@ -319,6 +322,23 @@ function ProductReviewCard({
   );
 }
 
+function ProductReviewNotes({ review }: { review: ProductReviewResponse }) {
+  if (!review.pull_request_title) {
+    return <OwnerReviewState>The test notes could not be loaded. Open the pull request to read them.</OwnerReviewState>;
+  }
+  const reason = untestedReason(review.client_test_notes);
+  return (
+    <section aria-label="What to check">
+      <h4>What to check</h4>
+      {needsNothingFromClient(review.client_test_notes) && !review.client_test_notes_error ? (
+        <p>{reason ? `Nothing for you to test: ${reason}` : "Nothing for you to test."}</p>
+      ) : (
+        <ClientTestNotes notes={review.client_test_notes} />
+      )}
+    </section>
+  );
+}
+
 function cannotDecideMessage(review: ProductReviewResponse): string {
   if (!review.owner_set) {
     return "No Client set for this product. Ask an admin to name one before this change can be reviewed.";
@@ -342,13 +362,13 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
     setFailure("");
     try {
       const response = fixtureMode
-        ? { ...review, latest_decision: { ...decision, feedback_requested: true, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
+        ? { ...review, pull_request_title: "", client_test_notes: "", client_test_notes_error: "Notes were not included in this response.", latest_decision: { ...decision, feedback_requested: true, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
         : await retryProductReviewFeedback({
             repository: review.repository,
             pull_request: review.pull_request_number,
             decision_id: decision.record_id,
           });
-      onDecided(response);
+      onDecided({ ...response, pull_request_title: review.pull_request_title, client_test_notes: review.client_test_notes, client_test_notes_error: review.client_test_notes_error });
       if (!response.latest_decision?.feedback_url) {
         setFailure("Delivery is still pending. Your saved decision has not changed.");
       }
@@ -370,7 +390,7 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       </p>
       <p>
         {!decision.head_sha ? "The reviewed version was not recorded." : <>
-          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : decision.carried_from ? "Applies to preview version" : "Reviewed preview version"}{" "}
+          {currentHead && decision.head_sha !== currentHead ? "Earlier preview version" : decision.carried_from ? "Recorded carried version" : "Reviewed preview version"}{" "}
           {decision.head_sha.slice(0, 7)}
           {!currentHead ? ". No preview is currently ready for comparison." : decision.head_sha !== currentHead ? ". This decision does not apply to the current preview." : ""}
         </>}
@@ -378,8 +398,8 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
       {decision.carried_from ? (
         <p data-carry-reason={decision.carried_from.reason}>
           Carried from version {decision.carried_from.head_sha.slice(0, 7)}: {decision.carried_from.reason === "client_impact_none"
-            ? "later commits were marked as having no Client-visible changes. Your acceptance still applies."
-            : "the base was updated, and the change itself is identical."}
+            ? "later commits were marked as having no Client-visible changes."
+            : "the base was updated, and the change itself was identical."}
         </p>
       ) : null}
       {decision.reason ? <blockquote>{decision.reason}</blockquote> : null}
@@ -487,7 +507,7 @@ function ProductReviewDecisionForm({
         <button
           className="button button-primary"
           type="button"
-          disabled={busy || stale}
+          disabled={busy || stale || Boolean(review.client_test_notes_error)}
           onClick={() => void record("accepted")}
         >
           Accept
@@ -501,6 +521,7 @@ function ProductReviewDecisionForm({
           Request changes
         </button>
       </div>
+      {review.client_test_notes_error ? <p className="owner-review-alert" role="alert">{review.client_test_notes_error}</p> : null}
       {busy ? <p className="owner-review-state" role="status">Recording…</p> : null}
       {failure ? <p className="owner-review-alert" role="alert">{failure}</p> : null}
       {stale ? <button className="button" type="button" disabled={busy} onClick={async () => {

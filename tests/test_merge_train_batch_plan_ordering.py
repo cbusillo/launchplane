@@ -7,7 +7,7 @@ from unittest.mock import patch
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train_controller_feedback import build_feedback_payloads
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import _post_merge_train_batch_candidate_run_once
 from tests.support.auth import _StubVerifier

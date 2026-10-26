@@ -79,23 +79,6 @@ def prepare_provider_target_from_dokploy_records(
     return provider_target_record
 
 
-def write_provider_target_from_dokploy_records(
-    *,
-    record_store: ProviderTargetDualWriteStore,
-    target_record: DokployTargetRecord,
-    target_id_record: DokployTargetIdRecord,
-    expected_current_provider_target: DeployedTargetReference | None = None,
-) -> ProviderTargetRecord:
-    provider_target_record = prepare_provider_target_from_dokploy_records(
-        record_store=record_store,
-        target_record=target_record,
-        target_id_record=target_id_record,
-        expected_current_provider_target=expected_current_provider_target,
-    )
-    record_store.write_provider_target_record(provider_target_record)
-    return provider_target_record
-
-
 def _find_current_provider_target_record(
     *, record_store: ProviderTargetDualWriteStore, context: str, instance: str
 ) -> ProviderTargetRecord | None:

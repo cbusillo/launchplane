@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
-import { openUrgentReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
+import { requestReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
 import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem, OdooWebsiteSettings } from "./generated/openapi.ts";
 import { groupReleaseItems, untestedReason } from "./release-review-model";
@@ -85,6 +85,19 @@ function ReleaseRunProgress({ run, refreshFailed }: { run: ClientReleaseRunView;
   </section>;
 }
 
+export function ClientTestNotes({ notes }: { notes: string }) {
+  return <div className="release-review-notes"><Markdown skipHtml urlTransform={url => safeExternalUrl(url)?.toString() ?? ""} components={{
+    h1: ({ children }) => <h5>{children}</h5>,
+    h2: ({ children }) => <h5>{children}</h5>,
+    h3: ({ children }) => <h5>{children}</h5>,
+    h4: ({ children }) => <h5>{children}</h5>,
+    h5: ({ children }) => <h5>{children}</h5>,
+    h6: ({ children }) => <h5>{children}</h5>,
+    a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <>{children}</>,
+    img: ({ alt }) => <>{alt}</>,
+  }}>{notes.trim() || "Test notes are missing for this change."}</Markdown></div>;
+}
+
 function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull request changes between these versions." }: { items: readonly ReleaseReviewItem[]; viewerIsOwner: boolean; emptyMessage?: string }) {
   const grouped = groupReleaseItems(items);
   function changeTitle(item: ReleaseReviewItem) {
@@ -94,16 +107,7 @@ function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull req
   return <>
         {grouped.checks.length ? <ol className="release-review-checklist">{grouped.checks.map(item => <li key={item.url}>
           <h4>{changeTitle(item)}</h4>
-          <div className="release-review-notes"><Markdown skipHtml urlTransform={url => safeExternalUrl(url)?.toString() ?? ""} components={{
-            h1: ({ children }) => <h5>{children}</h5>,
-            h2: ({ children }) => <h5>{children}</h5>,
-            h3: ({ children }) => <h5>{children}</h5>,
-            h4: ({ children }) => <h5>{children}</h5>,
-            h5: ({ children }) => <h5>{children}</h5>,
-            h6: ({ children }) => <h5>{children}</h5>,
-            a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <>{children}</>,
-            img: ({ alt }) => <>{alt}</>,
-          }}>{item.owner_test_notes.trim() || "Test notes are missing for this change."}</Markdown></div>
+          <ClientTestNotes notes={item.owner_test_notes} />
             {!viewerIsOwner && item.preview_era_notes ? <span data-testid={`release-notes-adjustment-${item.pull_request_number}`}>PR #{item.pull_request_number}: test notes adjusted for the testing site.</span> : null}
             {item.already_reviewed ? <span>{`${viewerIsOwner ? "You" : "The Client"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
         </li>)}</ol> : <p>{items.length ? "No changes from this repository need you to test them." : emptyMessage}</p>}
@@ -123,8 +127,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const [reason, setReason] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
   const [hotfixReason, setHotfixReason] = useState("");
-  const [urgentReason, setUrgentReason] = useState("");
-  const [urgentSent, setUrgentSent] = useState(false);
+  const [requestReason, setRequestReason] = useState("");
+  const [requestSent, setRequestSent] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [recorded, setRecorded] = useState(false);
@@ -138,8 +142,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     setReason("");
     setOverrideReason("");
     setHotfixReason("");
-    setUrgentReason("");
-    setUrgentSent(false);
+    setRequestReason("");
+    setRequestSent(false);
     setRecorded(false);
     setRefreshFailed(false);
     const request = fixtureMode
@@ -200,12 +204,12 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     if (!response?.review.checklist || busy) return;
     setBusy(true);
     setError("");
-    setUrgentSent(false);
+    setRequestSent(false);
     try {
       if (!fixtureMode) {
-        setResponse(await openUrgentReleaseReview({ product, checklist_digest: response.review.checklist_digest, reason: urgentReason }));
+        setResponse(await requestReleaseReview({ product, checklist_digest: response.review.checklist_digest, reason: requestReason }));
       }
-      setUrgentSent(true);
+      setRequestSent(true);
     } catch {
       setError("The release review could not be confirmed. Reload this page before trying again; a request may already be open.");
     } finally {
@@ -225,7 +229,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   // The Director keeps the current testing checklist so a further hotfix can
   // bind it; other viewers review the already-live fix's saved checklist.
   const reviewingHotfix = activeHotfix && !response?.can_start_temporary_hotfix;
-  const incomplete = !checklist || !(reviewingHotfix || testingUrl) || response?.review.checklist_complete !== true;
+  const incomplete = !checklist || response?.review.checklist_complete !== true;
   const hasChanges = !!checklist && (
     checklist.production.artifact_id !== checklist.candidate.artifact_id
     || checklist.production.source_commit !== checklist.candidate.source_commit
@@ -314,12 +318,12 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && hasChanges && !activeHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
         <h3>Ask {client} to review this release now</h3>
-        <p>A release with only engineering changes waits for the next release that has something for {client} to check. If this one must go live sooner, such as a security or reliability fix, say why in plain words. Launchplane sends {client} a release review with your reason; nothing goes live until {client} accepts it. If {client} was already asked about this release, nothing new is sent.</p>
-        <label><span>Why this release cannot wait</span><textarea value={urgentReason} maxLength={1000} disabled={busy} onChange={event => setUrgentReason(event.target.value)} /></label>
+        <p>Ask {client} to review when you decide this release is needed. Include your reason in plain words; nothing goes live until {client} accepts it. If this review is unchanged, the existing request and its reason stay unchanged.</p>
+        <label><span>Why this release is needed</span><textarea value={requestReason} maxLength={1000} disabled={busy} onChange={event => setRequestReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
-          <button className="button" type="button" disabled={busy || incomplete || !urgentReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
+          <button className="button" type="button" disabled={busy || incomplete || !requestReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
         </div>
-        {urgentSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
+        {requestSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
       </section> : null}
       {checklist && !noNewRelease && response.can_override && !activeHotfix ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
         <h3>Admin Approval Override</h3>

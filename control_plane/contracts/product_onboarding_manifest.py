@@ -158,7 +158,7 @@ class ProductOnboardingManifest(BaseModel):
     image_repository: str = ""
     runtime_port: int = Field(default=0, ge=0, le=65535)
     health_path: str = ""
-    lanes: tuple[ProductOnboardingLaneManifest, ...]
+    lanes: tuple[ProductOnboardingLaneManifest, ...] = ()
     historical_contexts: tuple[str, ...] = ()
     preview: ProductOnboardingPreviewManifest = Field(
         default_factory=ProductOnboardingPreviewManifest
@@ -177,7 +177,7 @@ class ProductOnboardingManifest(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _normalize_provider_targets(cls, data: object) -> object:
+    def _normalize_manifest(cls, data: object) -> object:
         if not isinstance(data, dict):
             return data
         updated = dict(data)

@@ -18,7 +18,7 @@ _GRANT = re.compile(
 )
 
 
-def classify_grants(rows: object) -> GrantStatus:
+def classify_grants(rows: object, *, mariadb_authentication: bool = False) -> GrantStatus:
     if not isinstance(rows, (list, tuple)) or not 0 < len(rows) <= 128:
         return "unknown"
     unknown = False
@@ -29,6 +29,10 @@ def classify_grants(rows: object) -> GrantStatus:
         text = row[0]
         if len(text) > 8192:
             return "unknown"
+        if mariadb_authentication:
+            text = re.sub(
+                r" IDENTIFIED BY PASSWORD '\*[A-F0-9]{40}'(?= WITH GRANT OPTION$|$)", "", text
+            )
         match = _GRANT.fullmatch(text)
         if match is None:
             unknown = True

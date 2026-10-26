@@ -13,6 +13,8 @@ from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from control_plane.config_authority_audit import (
     ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT,
     ALLOW_REASON_SCHEMA_ONLY,
+    PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_PREFIX,
+    WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES,
 )
 from control_plane.config_authority_audit import build_config_authority_audit
 from control_plane.config_authority_audit import evaluate_config_authority_gate
@@ -1074,6 +1076,71 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(by_key["launchplane.lanes.testing.url"]["allow_reason"], "")
         self.assertEqual(by_key["launchplane.lanes.testing.deployRoute"]["allow_reason"], "")
 
+    def test_renovate_config_is_repo_metadata(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _init_repo(root)
+            (root / "renovate.json").write_text(
+                json.dumps(
+                    {
+                        "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+                        "extends": ["github>example-owner/shared-config//renovate/default"],
+                        "packageRules": [
+                            {"matchPackageNames": ["eslint", "@eslint/js"], "enabled": False},
+                            {
+                                "matchDatasources": ["docker"],
+                                "replacementNameTemplate": (
+                                    "registry.production.example.com/team/{{{packageName}}}"
+                                ),
+                            },
+                        ],
+                        "customManagers": [
+                            {
+                                "autoReplaceStringTemplate": (
+                                    "API_BASE_URL=https://api.production.example.com"
+                                ),
+                                "matchStrings": [
+                                    '"registryUrl": "https://registry.production.example.com"'
+                                ],
+                            }
+                        ],
+                        "registryAliases": {
+                            "registry.description": "https://registry.production.example.com"
+                        },
+                        "postUpgradeTasks": {
+                            "commands": ["curl https://deploy.production.example.com"]
+                        },
+                        "env": {"API_BASE_URL": "https://api.production.example.com"},
+                        "registryUrls": ["https://registry.production.example.com"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            _commit_all(root)
+
+            payload = build_config_authority_audit(control_plane_root=root)
+
+        allow_reasons = {
+            finding["key"]: finding["allow_reason"]
+            for finding in _findings(payload)
+            if finding["path"] == "renovate.json"
+        }
+        self.assertEqual(
+            allow_reasons,
+            {
+                "$schema": "repo_metadata_ergonomics",
+                "extends[0]": "repo_metadata_ergonomics",
+                "packageRules[0].matchPackageNames[1]": "repo_metadata_ergonomics",
+                "packageRules[1].replacementNameTemplate": "",
+                "customManagers[0].autoReplaceStringTemplate": "",
+                "customManagers[0].matchStrings[0]": "",
+                "registryAliases.registry.description": "",
+                "postUpgradeTasks.commands[0]": "",
+                "env.API_BASE_URL": "",
+                "registryUrls[0]": "",
+            },
+        )
+
     def test_codeowners_and_local_filesystem_paths_are_repo_mechanics(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1510,77 +1577,36 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
 
     def test_workflow_input_mechanic_defaults_are_path_scoped(self) -> None:
-        mechanic_defaults = (
-            (
-                ".github/workflows/public-ingress-monitor.yml",
-                "inputs.timeout_seconds.default",
-                "10",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.action.default",
-                "prune_docker_cache",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.minimum_free_disk_bytes.default",
-                "0",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.prune_until.default",
-                "168h",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.timeout_seconds.default",
-                "300",
-            ),
-        )
-        for path, key, value in mechanic_defaults:
-            with self.subTest(path=path, key=key, value=value):
-                self.assertEqual(
-                    _allow_reason(path=path, key=key, value=value),
-                    "thin_connector_input",
-                )
-
-        for path, key, value in (
-            (
-                ".github/workflows/generic-workflow.yml",
-                "inputs.timeout_seconds.default",
-                "10",
-            ),
-            (
-                ".github/workflows/public-ingress-monitor.yml",
-                "inputs.runtime_port.default",
-                "10",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.action.default",
-                "remove_buildkit_state_volumes",
-            ),
-            (
-                ".github/workflows/runner-host-hygiene.yml",
-                "inputs.timeout_seconds.default",
-                "600",
-            ),
-            (
-                ".github/workflows/provider-target-operations.yml",
-                "inputs.provider_id.default",
-                "auto",
-            ),
-            (
-                ".github/workflows/provider-target-operations.yml",
-                "inputs.context.default",
-                "single",
-            ),
-        ):
-            with self.subTest(path=path, key=key, value=value):
-                self.assertEqual(
-                    _allow_reason(path=path, key=key, value=value),
-                    "",
-                )
+        self.assertTrue(WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES)
+        for path, keys in WORKFLOW_INPUT_MECHANIC_DEFAULT_PATH_VALUES.items():
+            for key, values in keys.items():
+                for value in sorted(values):
+                    with self.subTest(path=path, key=key, value=value):
+                        self.assertEqual(
+                            _allow_reason(path=path, key=key, value=value),
+                            "thin_connector_input",
+                        )
+                        self.assertEqual(
+                            _allow_reason(
+                                path=".github/workflows/generic-workflow.yml",
+                                key=key,
+                                value=value,
+                            ),
+                            "",
+                        )
+                        # Reusable product-driver workflows allow input defaults by their own rule.
+                        if not path.startswith(PRODUCT_DRIVER_REUSABLE_WORKFLOW_PATH_PREFIX):
+                            self.assertEqual(
+                                _allow_reason(
+                                    path=path, key="inputs.unlisted_input.default", value=value
+                                ),
+                                "",
+                            )
+                with self.subTest(path=path, key=key, value="unlisted-value"):
+                    self.assertEqual(
+                        _allow_reason(path=path, key=key, value="unlisted-value"),
+                        "",
+                    )
 
     def test_workflow_runs_on_list_items_are_scanned(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -2302,7 +2328,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
 
         service_env_payload = (
-            ("GHCR_USERNAME", "${{ secrets.GHCR_USERNAME }}"),
             ("LAUNCHPLANE_GITHUB_CLIENT_ID", "$github_client_id,"),
             ("LAUNCHPLANE_GITHUB_CLIENT_SECRET", "$github_client_secret,"),
             ("LAUNCHPLANE_PUBLIC_URL", "$public_url,"),
@@ -2332,6 +2357,8 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         for key, value in (
+            ("GHCR_USERNAME", "${{ secrets.GHCR_USERNAME }}"),
+            ("GHCR_TOKEN", "${{ secrets.GHCR_TOKEN }}"),
             ("GH_TOKEN", "$work_graph_gh_token"),
             ("LAUNCHPLANE_WORK_GRAPH_GH_TOKEN", "${{ secrets.LAUNCHPLANE_WORK_GRAPH_GH_TOKEN }}"),
         ):
@@ -3001,22 +3028,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 )
 
         for key, value in (
-            ("audience", "${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}"),
-            ("fail-result-paths", '""'),
-            ("method", "GET"),
-            ("response-output-file", "launchplane-work-graph-snapshot.json"),
-        ):
-            with self.subTest(work_graph_snapshot_mechanic=key):
-                self.assertEqual(
-                    _allow_reason(
-                        path=".github/workflows/work-graph-snapshot-validate.yml",
-                        key=key,
-                        value=value,
-                    ),
-                    "thin_connector_input",
-                )
-
-        for key, value in (
             ("fail-result-paths", "result.operation_status"),
             ("idempotency-key", "${{ steps.request.outputs.idempotency_key }}"),
             ("idempotency-key", "${{ steps.onboarding.outputs.idempotency_key }}"),
@@ -3025,7 +3036,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("response-output-file", "dokploy-target-inspect-response.json"),
             ("response-output-file", "ingress-route-audit-read-raw.json"),
             ("response-output-file", "launchplane-preview-lifecycle-sweep-response.json"),
-            ("response-output-file", "launchplane-work-graph-snapshot.json"),
         ):
             with self.subTest(path_scoped_provider_target_mechanic=key):
                 self.assertEqual(

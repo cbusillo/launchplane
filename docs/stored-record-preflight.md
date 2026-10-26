@@ -49,6 +49,14 @@ can still refuse visibly. Retaining full copies in the authority store supports
 audit and historical readers; the export neither deletes history nor changes
 policy writes, rollback or privileged-operation records. Identical proposals
 and unchanged managed reconciliation do not write new policy revisions.
+Because each revision repeats most rules of the one before, an array item such
+as a rule is scrubbed once per export and reused wherever the same source item
+recurs under the same schema; the cache key is a digest, not the source text.
+Scrubbing cost therefore follows distinct content rather than revision count.
+The cache stops growing once its items' source reaches the 16 MiB row cap, so
+it never accumulates history beyond one maximum row.
+Every row is still exported, and its source digest check and scrubbed digest
+recomputation still run per row.
 
 Managed-secret, runtime-value, provider, session, worker and all other tables
 are excluded, including encrypted secret values. Identity strings and numbers,
@@ -59,9 +67,16 @@ pseudonymized too. The salt is discarded.
 
 Dictionary keys, absent fields, booleans, schema-defined numeric data, valid
 timestamps, schema enum/constant values, code action/driver names and required
-format markers such as `{number}` survive. Known code protocol fields can mark
-`x-launchplane-snapshot-protocol` in their schema. Arbitrary free text is never
-retained because it looks like protocol. Train run dictionaries use their
+format markers such as `{number}` survive. A schema field that marks
+`x-launchplane-snapshot-protocol` keeps a value only when the value is in that
+field's own list, for example lane kinds (`testing`, `prod`) at every
+lane-instance reference, the `runtime_environment` secret integration, bump
+levels, and the default preview slug template and promotion workflow names.
+Every lane-instance site shares one list, so references still agree; the six
+workflow input fields share one list, so a duplicate input name stays a
+duplicate. The same word in any other field, such as an override environment
+value, is pseudonymized. Arbitrary free text is never retained because it looks
+like protocol. Train run dictionaries use their
 producer schemas, and a valid repository/base-branch policy-key relationship
 survives. Raw payloads are not reserialized through current models: an old
 policy's absent `instances` stays absent and historical keys remain for the
@@ -69,10 +84,15 @@ candidate's supported readers. Source policy digests are validated first;
 scrubbed digests are recomputed and attest only rehearsal data. This private
 fixture is not a backup, restore or authorization artifact.
 
-Declared cron expressions and preview app-name suffixes receive salted,
-format-valid substitutes so a valid source profile remains readable. Invalid
-historical values remain invalid; scrubbing does not repair them. Arbitrary
-map values with those names receive no format exemption.
+Declared cron expressions, preview app-name suffixes, preview transport
+database prefixes, DNS expectation names and public addresses receive salted,
+format-valid substitutes so a valid source profile remains readable. A DNS name
+is pseudonymized after normalization, so names that collide in the source still
+collide. Fixed-position array items use their position's schema. An invalid
+value in one of these formats gets an ordinary pseudonym, so it still fails.
+Other free text always gets an ordinary pseudonym, which can hide some invalid
+history, such as a blank or too-long value, or two values that differ only in
+case. Arbitrary map values with those names receive no format exemption.
 
 ## Candidate rehearsal
 
@@ -108,7 +128,10 @@ credential helper. Qualification and the mandatory gate use the same temporary j
 authentication file and fresh Docker context; the existing image-build login is unchanged. Verify
 that this context reaches the actual deployment runner's intended Docker daemon.
 A passing rehearsal on a different daemon cannot qualify that runner. The job
-summary retains the safe result, never the snapshot.
+summary retains the safe result, never the snapshot. When the export refuses,
+its value-free `records.snapshot_failure` projection (reason, family and budget
+counters) is mapped to a step output before cleanup deletes the response file,
+and the retention step prints it to the job log and summary.
 
 Snapshots expire after five minutes. The shared workflow wrapper bounds image
 pulls and the complete rehearsal to 240 seconds, then allows 15 seconds before
@@ -126,25 +149,34 @@ default branch with `stored_record_preflight_only=true` and an immutable
 `image_reference`, using the installed protected-workflow helper. This read-only
 job authenticates the existing image read, fetches the supported scrubbed export
 and runs the rehearsal on the actual deploy runner. Both deployment jobs are
-excluded in this mode. Verify its per-family counts, bounds and successful
+excluded in this mode. Read-only qualification has its own workflow concurrency
+group, so a later self-deploy run cannot displace its pending run. Replacements
+retain their existing serialized group. Verify its per-family counts, bounds and successful
 runner result before routing the mandatory deploy gate PR. Qualification and
 manual deploys validate the same bootstrap image repository and immutable digest. A refused read is
 reported as missing standing authority; this mode creates no new grant. Landing both in one batch would require a route the old service lacks.
 This ordered capability rollout supplies a supported way to keep deploying.
 
 The version-2 producer and dual-format consumer land together before their
-read-only qualification workflow requests version 2. Qualify with that landed
-candidate image, then refresh the held mandatory-gate PR to request the same
-format. Never activate the gate on source evidence alone. Older candidate images
-can still request version 1, which can refuse its existing size limit; emergency
-recovery remains separately governed. If preview holds refuse normal installation,
-the Supervisor obtains approval for the existing manual break-glass path and
-installs the immutable image built from this producer's landed main commit.
+read-only qualification requests version 2. The mandatory gate requests the same
+format, and it is activated only after that qualification passes on the
+installed candidate image, never on source evidence alone. Older candidate
+images can still request version 1, which can refuse its existing size limit;
+emergency recovery remains separately governed. If preview holds refuse normal
+installation, the Supervisor obtains approval for the existing manual
+break-glass path and installs the immutable image built from this producer's
+landed main commit.
 
-The gate change on #3413 runs after immutable image resolution and before
+The mandatory Deploy Launchplane gate runs after immutable image resolution and before
 rendering or requesting self-deploy. It deletes snapshot material after every
 attempt and retains only counts, revision and pass/fail evidence. The existing
 Director-gated emergency rollback remains governed by operations.
+
+The PostgreSQL test image is read from CI's canonical pin. The workflow first
+requires a successful authenticated export, then runs the isolated candidate
+under the bounded timeout. Its normal failure propagation stops before even
+rendering a self-deploy request; no provider effect or replacement is possible
+on a preflight failure. The gate has no continue-on-error or missing-route skip.
 
 After a rollback, verify that the running service still exports the required
 format and that the candidate supports its database revision. A missing route

@@ -1,7 +1,6 @@
 import hashlib
 import json
 from collections.abc import Callable
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
@@ -14,9 +13,6 @@ from jwt import InvalidTokenError
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.agent_write_intent import (
     AgentWriteIntentRecord,
-    AgentWriteIntentRequest,
-    build_agent_write_intent_record_id,
-    evaluate_agent_write_intent,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -31,8 +27,6 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationAttemptRecord,
-    EveryCodeNotificationDestination,
-    EveryCodeNotificationPolicyRecord,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
@@ -40,9 +34,7 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.merge_train_controller_reply import (
-    validate_merge_train_controller_reply,
-)
+from tests.support.merge_train_controller_reply import validate_merge_train_controller_reply
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
 )
@@ -130,7 +122,6 @@ from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
-    agent_authz_audit,
 )
 from control_plane.service_human_credentials import GitHubOAuthCredential
 from control_plane.service_human_auth import (
@@ -382,61 +373,6 @@ def _product_environment_read_policy(
     )
 
 
-def _work_graph_read_policy(
-    *,
-    products: tuple[str, ...] = ("launchplane", "example-site"),
-    contexts: tuple[str, ...] = ("launchplane", "example-site"),
-) -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "github_actions": [
-                {
-                    "repository": "every/verireel",
-                    "workflow_refs": [
-                        "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
-                    ],
-                    "event_names": ["pull_request"],
-                    "products": list(products),
-                    "contexts": list(contexts),
-                    "actions": ["work_graph.rank", "product_environment.read"],
-                }
-            ],
-        }
-    )
-
-
-def _github_human_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "github_humans": [
-                {
-                    "logins": ["example-operator"],
-                    "roles": ["admin"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["work_graph.rank"],
-                }
-            ],
-        }
-    )
-
-
-def _terminal_agent_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "terminal_agents": [
-                {
-                    "subjects": ["local-owner-agent"],
-                    "token_labels": ["local-owner-read"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["work_graph.rank"],
-                }
-            ],
-        }
-    )
-
-
 def _terminal_agent_merge_train_pr_feedback_policy() -> LaunchplaneAuthzPolicy:
     return LaunchplaneAuthzPolicy.model_validate(
         {
@@ -465,38 +401,6 @@ def _terminal_agent_merge_train_run_once_policy() -> LaunchplaneAuthzPolicy:
                     "actions": ["merge_train.run_once"],
                 }
             ],
-        }
-    )
-
-
-def _local_operator_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "local_operators": [
-                {
-                    "subjects": ["local-owner-agent"],
-                    "token_labels": ["local-owner-read"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["work_graph.rank"],
-                }
-            ],
-        }
-    )
-
-
-def _local_admin_work_graph_rank_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "local_admins": [
-                {
-                    "subjects": ["local-owner-agent"],
-                    "token_labels": ["local-owner-admin"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["work_graph.rank"],
-                }
-            ]
         }
     )
 
@@ -1858,12 +1762,6 @@ def _seed_dokploy_target_inspect_records(database_url: str) -> None:
         store.close()
 
 
-def _seed_empty_agent_context_read_store(database_url: str) -> None:
-    store = PostgresRecordStore(database_url=database_url)
-    store.ensure_schema()
-    store.close()
-
-
 def _seed_agent_context_read_records(database_url: str) -> None:
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
@@ -2037,24 +1935,6 @@ def _seed_every_code_read_records(store: Any) -> dict[str, str]:
     }
 
 
-def _seed_every_code_claim_request(store: Any) -> EveryCodeWorkRequestRecord:
-    record = EveryCodeWorkRequestRecord(
-        request_id="every-code-cbusillo-code-123-test",
-        source="manual",
-        state="queued",
-        repository="cbusillo/code",
-        issue_number=123,
-        issue_url="https://github.com/cbusillo/code/issues/123",
-        issue_title="Wire local automation",
-        trigger_label="every-code",
-        trigger_actor="cbusillo",
-        queued_at="2026-05-05T22:00:00Z",
-        updated_at="2026-05-05T22:00:00Z",
-    )
-    store.write_every_code_work_request_record(record)
-    return record
-
-
 def _every_code_read_policy() -> LaunchplaneAuthzPolicy:
     return _record_read_policy(
         action="every_code_work_request.read",
@@ -2065,34 +1945,6 @@ def _every_code_read_policy() -> LaunchplaneAuthzPolicy:
             "every_code_notification_attempt.read",
             "preview_pr_feedback_notification_attempt.read",
         ),
-    )
-
-
-def _every_code_work_request_write_policy() -> LaunchplaneAuthzPolicy:
-    return _record_read_policy(
-        action="every_code_work_request.write",
-        context="launchplane",
-    )
-
-
-def _every_code_work_request_claim_policy() -> LaunchplaneAuthzPolicy:
-    return _record_read_policy(
-        action="every_code_work_request.claim",
-        context="launchplane",
-    )
-
-
-def _every_code_work_request_status_policy() -> LaunchplaneAuthzPolicy:
-    return _record_read_policy(
-        action="every_code_work_request.update",
-        context="launchplane",
-    )
-
-
-def _every_code_work_request_rerun_policy() -> LaunchplaneAuthzPolicy:
-    return _record_read_policy(
-        action="every_code_work_request.rerun",
-        context="launchplane",
     )
 
 
@@ -2114,22 +1966,6 @@ def _agent_write_intent_policy(
                     "products": [product],
                     "contexts": [context],
                     "actions": list(actions),
-                }
-            ]
-        }
-    )
-
-
-def _terminal_agent_write_intent_policy() -> LaunchplaneAuthzPolicy:
-    return LaunchplaneAuthzPolicy.model_validate(
-        {
-            "terminal_agents": [
-                {
-                    "subjects": ["local-owner-agent"],
-                    "token_labels": ["local-owner-read"],
-                    "products": ["launchplane"],
-                    "contexts": ["launchplane"],
-                    "actions": ["every_code_work_request.rerun"],
                 }
             ]
         }
@@ -2191,109 +2027,6 @@ def _seed_agent_write_intent_secret_binding(store: Any, *, binding_instance: str
             updated_at="2026-05-05T20:00:00Z",
         )
     )
-
-
-def _seed_every_code_rerun_intent(
-    store: Any,
-    *,
-    source_url: str = "https://github.com/cbusillo/code/issues/123",
-    context: str = "launchplane",
-    idempotency_key: str = "",
-    recorded_at: str = "",
-    authorized: bool = True,
-) -> AgentWriteIntentRecord:
-    resolved_recorded_at = recorded_at or datetime.now(timezone.utc).replace(
-        microsecond=0
-    ).isoformat().replace("+00:00", "Z")
-    request = AgentWriteIntentRequest(
-        intent="every_code_rerun",
-        mode="apply",
-        product="launchplane",
-        context=context,
-        source_url=source_url,
-        idempotency_key=idempotency_key,
-        reason="Approved rerun for blocked Every Code request.",
-    )
-    audit = agent_authz_audit(
-        identity=_identity(),
-        action="every_code_work_request.rerun",
-        product="launchplane",
-        context=context,
-        decision="allowed" if authorized else "denied",
-        reason_code="authorized" if authorized else "authorization_denied",
-        policy_source="test",
-        policy_sha256="test-policy-sha256",
-    )
-    evaluation = evaluate_agent_write_intent(
-        request=request,
-        authorized=authorized,
-        audit=audit,
-    )
-    record = AgentWriteIntentRecord(
-        record_id=build_agent_write_intent_record_id(
-            recorded_at=resolved_recorded_at,
-            trace_id="launchplane_req_every_code_rerun_test",
-            request=request,
-            evaluation=evaluation,
-        ),
-        recorded_at=resolved_recorded_at,
-        trace_id="launchplane_req_every_code_rerun_test",
-        idempotency_key=idempotency_key,
-        request=request,
-        evaluation=evaluation,
-    )
-    store.write_agent_write_intent_record(record)
-    return record
-
-
-def _every_code_work_request_create_payload(*, issue_number: int = 123) -> dict[str, object]:
-    return {
-        "repository": "cbusillo/code",
-        "issue_number": issue_number,
-        "issue_url": f"https://github.com/cbusillo/code/issues/{issue_number}",
-        "issue_title": "Wire local automation",
-        "trigger_label": "every-code",
-        "trigger_actor": "cbusillo",
-        "source": "manual",
-        "queued_at": "2026-05-05T22:00:00Z",
-    }
-
-
-def _every_code_pr_feedback_payload() -> dict[str, object]:
-    return {
-        "feedback_id": "every-code-pr-feedback-cbusillo-code-31-review-1",
-        "request_id": "every-code-cbusillo-code-123-test",
-        "repository": "cbusillo/code",
-        "pr_number": 31,
-        "pr_url": "https://github.com/cbusillo/code/pull/31",
-        "feedback_kind": "pull_request_review_comment",
-        "github_delivery_id": "delivery-feedback-1",
-        "github_node_id": "PRRC_kwDOTest123",
-        "actor": "reviewer",
-        "author_association": "MEMBER",
-        "body": "Please tighten the FastAPI write route coverage.",
-        "html_url": "https://github.com/cbusillo/code/pull/31#discussion_r1",
-        "received_at": "2026-06-18T12:07:00Z",
-        "status": "pending",
-    }
-
-
-def _every_code_preview_gate_payload() -> dict[str, object]:
-    return {
-        "gate_id": "every-code-preview-gate-cbusillo-code-31-test",
-        "request_id": "every-code-cbusillo-code-123-test",
-        "repository": "cbusillo/code",
-        "issue_number": 123,
-        "issue_url": "https://github.com/cbusillo/code/issues/123",
-        "pr_number": 31,
-        "pr_url": "https://github.com/cbusillo/code/pull/31",
-        "head_sha": "abcdef1234567890",
-        "status": "ready",
-        "created_at": "2026-06-18T12:05:00Z",
-        "updated_at": "2026-06-18T12:06:00Z",
-        "ready_at": "2026-06-18T12:06:00Z",
-        "last_checked_at": "2026-06-18T12:06:00Z",
-    }
 
 
 def _notification_policy_apply_policy(
@@ -2433,26 +2166,6 @@ def _public_ingress_notification_policy_record(
         source="test",
         destinations=(
             PublicIngressNotificationDestination(
-                destination_id="discord",
-                kind="discord",
-                discord_webhook_secret="secret-discord-webhook",
-            ),
-        ),
-    )
-
-
-def _every_code_notification_policy_record(
-    *, policy_id: str = "every-code-notification-launchplane"
-) -> EveryCodeNotificationPolicyRecord:
-    return EveryCodeNotificationPolicyRecord(
-        policy_id=policy_id,
-        repository="cbusillo/code",
-        status="enabled",
-        created_at="2026-06-14T18:00:00Z",
-        updated_at="2026-06-14T18:00:00Z",
-        source="test",
-        destinations=(
-            EveryCodeNotificationDestination(
                 destination_id="discord",
                 kind="discord",
                 discord_webhook_secret="secret-discord-webhook",
@@ -3089,81 +2802,6 @@ def _local_operator_bearer_config(*, token_label: str = "local-owner-read") -> B
 type _AsgiResponse = Response
 
 
-async def _get_work_graph_snapshot(
-    app: FastAPI,
-    *,
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_get(app, "/v1/work-graph/snapshot", headers=headers)
-
-
-async def _post_work_graph_rank(
-    app: FastAPI,
-    *,
-    payload: dict[str, object],
-    authorization: str = "Bearer valid-token",
-    headers: dict[str, str] | None = None,
-) -> _AsgiResponse:
-    request_headers = dict(headers or {})
-    if authorization:
-        request_headers["Authorization"] = authorization
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/work-graph/rank",
-        headers=request_headers,
-        payload=payload,
-    )
-
-
-async def _get_work_graph_issue_inbox(
-    app: FastAPI,
-    *,
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_get(app, "/v1/work-graph/github/issues", headers=headers)
-
-
-async def _post_work_graph_issue_inbox_reconcile(
-    app: FastAPI,
-    *,
-    payload: dict[str, object],
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/work-graph/github/issues/reconcile",
-        headers=headers,
-        payload=payload,
-    )
-
-
-async def _get_every_code_summary(
-    app: FastAPI,
-    *,
-    repository: str = "",
-    issue_number: str = "",
-    state: str = "",
-    limit: str = "",
-    offset: str = "",
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    params = _query_params(
-        repository=repository,
-        issue_number=issue_number,
-        state=state,
-        limit=limit,
-        offset=offset,
-    )
-    suffix = f"?{urlencode(params)}" if params else ""
-    return await _asgi_get(app, f"/v1/every-code/summary{suffix}", headers=headers)
-
-
 async def _get_preview_readiness(
     app: FastAPI,
     *,
@@ -3242,94 +2880,6 @@ async def _post_agent_write_intent_evaluate(
     )
 
 
-async def _post_every_code_work_request_create(
-    app: FastAPI,
-    payload: dict[str, object],
-    *,
-    authorization: str = "Bearer valid-token",
-    idempotency_key: str = "",
-    headers: dict[str, str] | None = None,
-) -> _AsgiResponse:
-    request_headers = dict(headers or {})
-    if authorization:
-        request_headers["Authorization"] = authorization
-    if idempotency_key:
-        request_headers["Idempotency-Key"] = idempotency_key
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/every-code/work-requests/create",
-        headers=request_headers,
-        payload=payload,
-    )
-
-
-async def _post_every_code_work_request_claim(
-    app: FastAPI,
-    payload: dict[str, object],
-    *,
-    authorization: str = "Bearer valid-token",
-    idempotency_key: str = "",
-    headers: dict[str, str] | None = None,
-) -> _AsgiResponse:
-    request_headers = dict(headers or {})
-    if authorization:
-        request_headers["Authorization"] = authorization
-    if idempotency_key:
-        request_headers["Idempotency-Key"] = idempotency_key
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/every-code/work-requests/claim",
-        headers=request_headers,
-        payload=payload,
-    )
-
-
-async def _post_every_code_work_request_status(
-    app: FastAPI,
-    payload: dict[str, object],
-    *,
-    authorization: str = "Bearer valid-token",
-    idempotency_key: str = "",
-    headers: dict[str, str] | None = None,
-) -> _AsgiResponse:
-    request_headers = dict(headers or {})
-    if authorization:
-        request_headers["Authorization"] = authorization
-    if idempotency_key:
-        request_headers["Idempotency-Key"] = idempotency_key
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/every-code/work-requests/status",
-        headers=request_headers,
-        payload=payload,
-    )
-
-
-async def _post_every_code_work_request_rerun(
-    app: FastAPI,
-    payload: dict[str, object],
-    *,
-    authorization: str = "Bearer valid-token",
-    idempotency_key: str = "",
-    headers: dict[str, str] | None = None,
-) -> _AsgiResponse:
-    request_headers = dict(headers or {})
-    if authorization:
-        request_headers["Authorization"] = authorization
-    if idempotency_key:
-        request_headers["Idempotency-Key"] = idempotency_key
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/every-code/work-requests/rerun",
-        headers=request_headers,
-        payload=payload,
-    )
-
-
 async def _get_every_code_pr_feedback(
     app: FastAPI,
     *,
@@ -3354,38 +2904,6 @@ async def _get_every_code_pr_feedback(
     return await _asgi_get(app, f"/v1/every-code/pr-feedback{suffix}", headers=headers)
 
 
-async def _post_every_code_pr_feedback(
-    app: FastAPI,
-    payload: dict[str, object],
-    *,
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/every-code/pr-feedback",
-        headers=headers,
-        payload=payload,
-    )
-
-
-async def _post_every_code_pr_feedback_status(
-    app: FastAPI,
-    payload: dict[str, object],
-    *,
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/every-code/pr-feedback/status",
-        headers=headers,
-        payload=payload,
-    )
-
-
 async def _get_every_code_preview_gates(
     app: FastAPI,
     *,
@@ -3408,22 +2926,6 @@ async def _get_every_code_preview_gates(
     )
     suffix = f"?{urlencode(params)}" if params else ""
     return await _asgi_get(app, f"/v1/every-code/preview-gates{suffix}", headers=headers)
-
-
-async def _post_every_code_preview_gate(
-    app: FastAPI,
-    payload: dict[str, object],
-    *,
-    authorization: str = "Bearer valid-token",
-) -> _AsgiResponse:
-    headers = {"Authorization": authorization} if authorization else {}
-    return await _asgi_request(
-        app,
-        "POST",
-        "/v1/every-code/preview-gates",
-        headers=headers,
-        payload=payload,
-    )
 
 
 async def _get_every_code_notification_attempts(
@@ -3625,6 +3127,7 @@ async def _get_dokploy_target_inspect(
     instance: str = "",
     target_type: str = "",
     target_id: str = "",
+    expected_image: str = "",
     authorization: str = "Bearer valid-token",
     headers: dict[str, str] | None = None,
 ) -> _AsgiResponse:
@@ -3636,6 +3139,7 @@ async def _get_dokploy_target_inspect(
         instance=instance,
         target_type=target_type,
         target_id=target_id,
+        expected_image=expected_image,
     )
     suffix = f"?{urlencode(params)}" if params else ""
     return await _asgi_get(app, f"/v1/dokploy-targets/inspect{suffix}", headers=request_headers)
@@ -4979,214 +4483,6 @@ class _ProductProfileReplayOnlyStore:
         raise AssertionError("idempotent replay must not write a new record")
 
 
-class _EveryCodeClaimReplayOnlyStore:
-    def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
-        self.read_idempotency_calls = 0
-        self.claim_calls = 0
-        self._payload = payload
-        self._idempotency_key = idempotency_key
-
-    def read_idempotency_record(
-        self,
-        *,
-        scope: str,
-        route_path: str,
-        idempotency_key: str,
-    ) -> LaunchplaneIdempotencyRecord | None:
-        self.read_idempotency_calls += 1
-        if (
-            route_path != "/v1/every-code/work-requests/claim"
-            or idempotency_key != self._idempotency_key
-        ):
-            return None
-        return LaunchplaneIdempotencyRecord(
-            record_id="idempotency-launchplane_req_original",
-            scope=scope,
-            route_path=route_path,
-            idempotency_key=idempotency_key,
-            request_fingerprint=hashlib.sha256(
-                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest(),
-            response_status_code=202,
-            response_trace_id="launchplane_req_original",
-            recorded_at="2026-05-29T12:00:00Z",
-            response_payload={
-                "status": "accepted",
-                "trace_id": "launchplane_req_original",
-                "records": {
-                    "request_id": "every-code-cbusillo-code-123-test",
-                    "state": "claimed",
-                },
-                "result": {
-                    "request": {
-                        "request_id": "every-code-cbusillo-code-123-test",
-                        "state": "claimed",
-                        "claimed_by_host": "Runner-Host",
-                    }
-                },
-            },
-        )
-
-    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
-        raise AssertionError("idempotent replay must not write a new record")
-
-    def claim_every_code_work_request_record(
-        self,
-        *,
-        request_id: str,
-        host: str,
-        claimed_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        del request_id, host, claimed_at
-        self.claim_calls += 1
-        raise AssertionError("idempotent replay must not claim a record")
-
-
-class _EveryCodeStatusReplayOnlyStore:
-    def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
-        self.read_idempotency_calls = 0
-        self.read_calls = 0
-        self.write_calls = 0
-        self._payload = payload
-        self._idempotency_key = idempotency_key
-
-    def read_idempotency_record(
-        self,
-        *,
-        scope: str,
-        route_path: str,
-        idempotency_key: str,
-    ) -> LaunchplaneIdempotencyRecord | None:
-        self.read_idempotency_calls += 1
-        if (
-            route_path != "/v1/every-code/work-requests/status"
-            or idempotency_key != self._idempotency_key
-        ):
-            return None
-        return LaunchplaneIdempotencyRecord(
-            record_id="idempotency-launchplane_req_original",
-            scope=scope,
-            route_path=route_path,
-            idempotency_key=idempotency_key,
-            request_fingerprint=hashlib.sha256(
-                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest(),
-            response_status_code=202,
-            response_trace_id="launchplane_req_original",
-            recorded_at="2026-05-29T12:00:00Z",
-            response_payload={
-                "status": "accepted",
-                "trace_id": "launchplane_req_original",
-                "records": {
-                    "request_id": "every-code-cbusillo-code-123-test",
-                    "state": "done",
-                },
-                "result": {
-                    "request": {
-                        "request_id": "every-code-cbusillo-code-123-test",
-                        "state": "done",
-                        "result_pr_url": "https://github.com/cbusillo/code/pull/26",
-                    },
-                    "notifications": [],
-                },
-            },
-        )
-
-    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
-        raise AssertionError("idempotent replay must not write a new record")
-
-    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
-        del request_id
-        self.read_calls += 1
-        raise AssertionError("idempotent replay must not read a work request")
-
-    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> None:
-        del record
-        self.write_calls += 1
-        raise AssertionError("idempotent replay must not write a work request")
-
-
-class _EveryCodeRerunReplayOnlyStore:
-    def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
-        self.read_idempotency_calls = 0
-        self.read_calls = 0
-        self.write_calls = 0
-        self._payload = payload
-        self._idempotency_key = idempotency_key
-
-    def read_idempotency_record(
-        self,
-        *,
-        scope: str,
-        route_path: str,
-        idempotency_key: str,
-    ) -> LaunchplaneIdempotencyRecord | None:
-        self.read_idempotency_calls += 1
-        if (
-            route_path != "/v1/every-code/work-requests/rerun"
-            or idempotency_key != self._idempotency_key
-        ):
-            return None
-        return LaunchplaneIdempotencyRecord(
-            record_id="idempotency-launchplane_req_original",
-            scope=scope,
-            route_path=route_path,
-            idempotency_key=idempotency_key,
-            request_fingerprint=hashlib.sha256(
-                json.dumps(self._payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest(),
-            response_status_code=202,
-            response_trace_id="launchplane_req_original",
-            recorded_at="2026-05-29T12:00:00Z",
-            response_payload={
-                "status": "accepted",
-                "trace_id": "launchplane_req_original",
-                "records": {
-                    "request_id": "every-code-cbusillo-code-123-test",
-                    "state": "queued",
-                    "agent_write_intent_record_id": "agent-write-intent-test",
-                },
-                "result": {
-                    "request": {
-                        "request_id": "every-code-cbusillo-code-123-test",
-                        "state": "queued",
-                        "trigger_actor": "cbusillo",
-                    }
-                },
-            },
-        )
-
-    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
-        del record
-        raise AssertionError("idempotent replay must not write a new record")
-
-    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
-        del request_id
-        self.read_calls += 1
-        raise AssertionError("idempotent replay must not read a work request")
-
-    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> None:
-        del record
-        self.write_calls += 1
-        raise AssertionError("idempotent replay must not write a work request")
-
-    def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord:
-        del record_id
-        raise AssertionError("idempotent replay must not read write-intent evidence")
-
-    def list_agent_write_intent_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        status: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[AgentWriteIntentRecord, ...]:
-        del product, context_name, status, limit, offset
-        raise AssertionError("idempotent replay must not list write-intent evidence")
-
-
 class _AgentWriteIntentEvaluateReplayOnlyStore:
     def __init__(self, *, payload: dict[str, object], idempotency_key: str) -> None:
         self.read_idempotency_calls = 0
@@ -5224,7 +4520,7 @@ class _AgentWriteIntentEvaluateReplayOnlyStore:
                 "result": {
                     "intent": {
                         "status": "allowed",
-                        "intent": "every_code_rerun",
+                        "intent": "preview_refresh",
                     },
                     "record": {
                         "record_id": "agent-write-intent-original",

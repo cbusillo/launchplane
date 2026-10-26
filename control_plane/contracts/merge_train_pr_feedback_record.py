@@ -5,6 +5,7 @@ import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.text_fields import require_text
 
 
 MergeTrainPrFeedbackEvent = Literal[
@@ -52,23 +53,19 @@ class MergeTrainPrFeedbackRecord(BaseModel):
         if not self.feedback_id.strip():
             raise ValueError("merge train PR feedback requires feedback_id")
         self.repository = _normalize_repository(self.repository)
-        self.base_branch = _normalize_required_value(
+        self.base_branch = require_text(
             self.base_branch, "merge train PR feedback requires base_branch"
         )
-        self.pull_request_url = _normalize_required_value(
+        self.pull_request_url = require_text(
             self.pull_request_url, "merge train PR feedback requires pull_request_url"
         )
-        self.marker = _normalize_required_value(
-            self.marker, "merge train PR feedback requires marker"
-        )
-        self.comment_markdown = _normalize_required_value(
+        self.marker = require_text(self.marker, "merge train PR feedback requires marker")
+        self.comment_markdown = require_text(
             self.comment_markdown,
             "merge train PR feedback requires comment_markdown",
         )
-        self.source = _normalize_required_value(
-            self.source, "merge train PR feedback requires source"
-        )
-        self.recorded_at = _normalize_required_value(
+        self.source = require_text(self.source, "merge train PR feedback requires source")
+        self.recorded_at = require_text(
             self.recorded_at, "merge train PR feedback requires recorded_at"
         )
         self.policy_key = self.policy_key.strip()
@@ -115,7 +112,7 @@ def merge_train_pr_feedback_marker(
         json.dumps(
             {
                 "repository": _normalize_repository(repository),
-                "base_branch": _normalize_required_value(base_branch, "base_branch"),
+                "base_branch": require_text(base_branch, "base_branch"),
                 "pull_request_number": pull_request_number,
             },
             sort_keys=True,
@@ -139,11 +136,11 @@ def _feedback_identity_digest(
         json.dumps(
             {
                 "repository": _normalize_repository(repository),
-                "base_branch": _normalize_required_value(base_branch, "base_branch"),
+                "base_branch": require_text(base_branch, "base_branch"),
                 "pull_request_number": pull_request_number,
                 "event": event.strip(),
                 "marker": marker.strip(),
-                "recorded_at": _normalize_required_value(recorded_at, "recorded_at"),
+                "recorded_at": require_text(recorded_at, "recorded_at"),
                 "response_trace_id": response_trace_id.strip(),
             },
             sort_keys=True,
@@ -156,13 +153,6 @@ def _normalize_repository(repository: str) -> str:
     normalized = repository.strip()
     if not normalized or "/" not in normalized:
         raise ValueError("merge train PR feedback requires owner/name repository")
-    return normalized
-
-
-def _normalize_required_value(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
     return normalized
 
 

@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from pathlib import Path as FilePath
 from typing import Annotated, Iterator, Literal, cast
 
@@ -9,6 +10,12 @@ from fastapi import Depends, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
+from control_plane.odoo_runtime_source_prerequisites import (
+    PrerequisiteStore,
+    SourcePrerequisiteResult,
+    diagnose_source_prerequisites,
+)
+from control_plane import odoo_shopify_identity as shopify
 from control_plane.odoo_import_diagnostics import (
     DiagnosticStore,
     ImportDiagnosticResult,
@@ -29,6 +36,8 @@ from control_plane.odoo_product_driver_http import (
 )
 from control_plane.preview_serving_evidence import PreviewServingEvidenceError
 from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +90,22 @@ class OdooImportDiagnosticResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     result: ImportDiagnosticResult
+
+
+class ShopifyIdentityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    result: shopify.ShopifyIdentityResult
+
+
+class OdooSourcePrerequisiteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    result: SourcePrerequisiteResult
 
 
 def register_odoo_runtime_read_routes(
@@ -384,7 +409,128 @@ def register_odoo_runtime_read_routes(
             product, environment, request, identity, record_store, response, runtime_only=True
         )
 
+    def read_source_prerequisites(
+        product: str,
+        environment: str,
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> OdooSourcePrerequisiteResponse:
+        trace_id = common.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if environment != "testing" or request.query_params:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Source prerequisites require testing and accept no overrides.",
+            )
+        with errors(trace_id):
+            try:
+                profile = resolve_odoo_product_route(
+                    record_store=record_store, product=product, instance="testing"
+                )
+            except OdooProductMismatchError as error:
+                raise reads.OdooRuntimeReadError(
+                    "invalid_odoo_environment",
+                    "The product does not own an Odoo testing lane.",
+                    400,
+                ) from error
+            lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+            if not common.authorization_allows(
+                identity=identity,
+                action="operations.read",
+                product=profile.product,
+                context=lane.context,
+                target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+            ):
+                raise common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The caller cannot read this product's testing prerequisites.",
+                )
+            return OdooSourcePrerequisiteResponse(
+                trace_id=trace_id,
+                result=diagnose_source_prerequisites(
+                    store=cast(PrerequisiteStore, record_store),
+                    product=profile.product,
+                    control_plane_root=dependencies.control_plane_root,
+                    database_url=dependencies.database_url,
+                ),
+            )
+
+    def read_shopify_identity(
+        product: str,
+        environment: str,
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> ShopifyIdentityResponse:
+        trace_id = common.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if environment != "testing" or request.query_params:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Shopify identity reads require testing and accept no overrides.",
+            )
+        with errors(trace_id):
+            profile = resolve_odoo_product_route(
+                record_store=record_store, product=product, instance="testing"
+            )
+            for lane in profile.lanes:
+                if lane.instance not in {"testing", "prod"}:
+                    continue
+                if not common.authorization_allows(
+                    identity=identity,
+                    action="operations.read",
+                    product=profile.product,
+                    context=lane.context,
+                    target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+                ):
+                    raise common.http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message="The caller cannot read both store identities.",
+                    )
+            result = shopify.compare_identity(
+                store=cast(shopify.ShopifyIdentityStore, record_store),
+                profile=profile,
+                control_plane_root=dependencies.control_plane_root,
+                database_url=dependencies.database_url,
+            )
+            if result.stage != "complete":
+                _logger.warning(
+                    "Shopify identity unavailable: trace=%s stage=%s reason=%s",
+                    trace_id,
+                    result.stage,
+                    result.reason,
+                )
+            return ShopifyIdentityResponse(
+                trace_id=trace_id,
+                result=result,
+            )
+
     for path, endpoint, model, operation_id, summary in (
+        (
+            "/v1/products/{product}/environments/{environment}/odoo-source-prerequisites",
+            read_source_prerequisites,
+            OdooSourcePrerequisiteResponse,
+            "read_odoo_source_prerequisites",
+            "Read value-free installed importer options in testing without a source connection",
+        ),
+        (
+            shopify.ROUTE,
+            read_shopify_identity,
+            ShopifyIdentityResponse,
+            "read_odoo_shopify_identity",
+            "Compare held testing Shopify identity with current production store authority read-only",
+        ),
         (
             "/v1/products/{product}/environments/{environment}/odoo-source-grants",
             read_runtime_source_grants,

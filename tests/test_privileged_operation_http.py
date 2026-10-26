@@ -78,6 +78,7 @@ from control_plane.storage.postgres import (
 )
 from tests.support.http import lifespan_client
 from tests.support.stores import _sqlite_database_url
+from tests.support.activation_history import seed_activation_history
 from tests.test_ordinary_agent_activation_storage import (
     _event as _activation_event,
     _record as _activation_record,
@@ -391,6 +392,14 @@ def _merge_train_policy_plan_payload(source_event_id: str) -> dict[str, object]:
 
 
 class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.setting_gaps = self.enterContext(
+            patch(
+                "control_plane.privileged_operation_registry.merge_train_target_setting_gaps",
+                return_value=(),
+            )
+        )
+
     def _app(
         self,
         *,
@@ -426,8 +435,9 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             code: str,
             message: str,
             authz: dict[str, object] | None = None,
+            records: dict[str, str] | None = None,
         ) -> HTTPException:
-            _ = trace_id, authz
+            _ = trace_id, authz, records
             return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
         register_privileged_operation_routes(
@@ -476,7 +486,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 "managed_set_id": "review.non-administrator",
                 "managed_rule_id": "human-reader",
                 "github_ids": [999],
-                "roles": ["admin"],
+                "roles": ["admin", "read_only"],
                 "actions": [AUTHZ_POLICY_OPERATION_READ_ACTION],
                 "products": ["launchplane"],
                 "contexts": ["launchplane"],
@@ -503,7 +513,7 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 database_url=_sqlite_database_url(Path(directory) / "review.sqlite3")
             )
             store.ensure_schema()
-            store.seed_authz_policy_if_absent(_policy_record(policy))
+            active = store.seed_authz_policy_if_absent(_policy_record(policy))
             try:
                 async with lifespan_client(
                     self._app(
@@ -533,25 +543,82 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("fixture-affected-person", json.dumps(access))
                     self.assertEqual(access["rules"][0]["role_effects"][0]["state"], "lost")
                     self.assertNotIn("sensitive-value-sentinel", json.dumps(access))
-                # Both the semantic detail and list must omit private principal display.
-                for identity, expected_status in (
-                    (operator, 200),
-                    (replace(_human(), role="read_only"), 403),
-                    (replace(_human(), github_id=999, login="fixture-policy-reader"), 200),
-                ):
-                    async with lifespan_client(
-                        self._app(
-                            store=store, policy=policy, human_reader=Mock(return_value=identity)
-                        )
-                    ) as client:
-                        for path in (
-                            review_path,
-                            "/v1/privileged-operations/plans?descriptor_id=managed-authz-policy-set",
-                        ):
-                            response = await client.get(path)
-                            self.assertEqual(response.status_code, expected_status, response.text)
-                            self.assertNotIn("access_policy", response.text)
-                            self.assertNotIn("fixture-affected-person", response.text)
+
+                async def check_redacted_reads(*, stale: bool) -> None:
+                    for identity, expected_status in (
+                        (operator, 200),
+                        (replace(_human(), role="read_only"), 403),
+                        (replace(_human(), github_id=999, login="fixture-policy-reader"), 200),
+                        (
+                            replace(
+                                _human(),
+                                github_id=999,
+                                login="fixture-policy-reader",
+                                role="read_only",
+                            ),
+                            200,
+                        ),
+                    ):
+                        async with lifespan_client(
+                            self._app(
+                                store=store, policy=policy, human_reader=Mock(return_value=identity)
+                            )
+                        ) as client:
+                            for path in (
+                                review_path,
+                                "/v1/privileged-operations/plans?descriptor_id=managed-authz-policy-set",
+                            ):
+                                response = await client.get(path)
+                                self.assertEqual(
+                                    response.status_code, expected_status, response.text
+                                )
+                                if expected_status == 200:
+                                    data = response.json()
+                                    projected = (
+                                        data["review"] if "review" in data else data["reviews"][0]
+                                    )
+                                    self.assertEqual(projected["can_approve"], not stale)
+                                    if stale:
+                                        self.assertIn(
+                                            "privileged_operation_plan_stale",
+                                            projected["blockers"]["codes"],
+                                        )
+                                self.assertNotIn("access_policy", response.text)
+                                self.assertNotIn("fixture-affected-person", response.text)
+                            if (
+                                isinstance(identity, GitHubHumanIdentity)
+                                and identity.role == "read_only"
+                            ):
+                                for action in ("approve", "cancel"):
+                                    refused = await client.post(
+                                        f"/v1/privileged-operations/plans/{operation_id}/{action}",
+                                        json={
+                                            "source_event_id": f"reader-{action}-{stale}",
+                                            "reason": "A read rule does not authorize transitions.",
+                                        },
+                                    )
+                                    self.assertEqual(refused.status_code, 403, refused.text)
+
+                await check_redacted_reads(stale=False)
+                revised = policy.model_copy(update={"administrator_quorum": 2})
+                digest = authz_policy_sha256(revised)
+                self.assertEqual(
+                    store.compare_and_write_authz_policy_record(
+                        expected_record=active,
+                        replacement_record=active.model_copy(
+                            update={
+                                "record_id": build_authz_policy_record_id(
+                                    revision=active.revision + 1, policy_sha256=digest
+                                ),
+                                "revision": active.revision + 1,
+                                "policy_sha256": digest,
+                                "policy": revised,
+                            }
+                        ),
+                    ).status,
+                    "written",
+                )
+                await check_redacted_reads(stale=True)
                 record = store.read_privileged_operation_record(operation_id)
                 self.assertEqual(record.status, "planned")
                 self.assertIsNone(record.approval)
@@ -1202,7 +1269,8 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 installed_at="2026-09-12T12:00:00Z",
                 expires_at="2026-09-13T12:00:00Z",
             )
-            store.install_ordinary_agent_delivery_activation(
+            seed_activation_history(
+                store,
                 activation,
                 _activation_event(
                     activation,
@@ -1650,7 +1718,8 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 installed_at="2026-09-12T12:00:00Z",
                 expires_at="2026-09-13T12:00:00Z",
             )
-            store.install_ordinary_agent_delivery_activation(
+            seed_activation_history(
+                store,
                 activation,
                 _activation_event(
                     activation,
@@ -1684,7 +1753,8 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         "activation_sha256": "",
                     }
                 )
-                store.revoke_ordinary_agent_delivery_activation(
+                seed_activation_history(
+                    store,
                     revoked,
                     _activation_event(
                         revoked,
@@ -1903,10 +1973,18 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             current_policy=policy, identity=identity, intent="add"
         )
         assert grant is not None
-        policy = policy.model_copy(update={"local_operators": grant.desired_policy.local_operators})
+        from tests.test_reviewed_workflow_rule_retirement import retirement_policy
+
+        policy = policy.model_copy(
+            update={
+                "local_operators": grant.desired_policy.local_operators,
+                "github_actions": retirement_policy().github_actions,
+            }
+        )
         for descriptor, payload_builder in (
             ("managed-authz-policy-set", _managed_authz_plan_payload),
             ("managed-merge-train-policy-import", _merge_train_policy_plan_payload),
+            ("managed-authz-policy-set", None),
         ):
             with self.subTest(descriptor=descriptor), TemporaryDirectory() as directory:
                 store = PostgresRecordStore(
@@ -1929,7 +2007,32 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 try:
                     async with lifespan_client(app) as client:
-                        payload = payload_builder("local-proposal")
+                        payload: dict[str, object]
+                        if payload_builder is None:
+                            from tests.test_reviewed_workflow_rule_retirement import (
+                                retirement_proposal,
+                            )
+
+                            proposal = retirement_proposal(policy)
+                            assert proposal.workflow_rule_retirement is not None
+                            proposal = proposal.model_copy(
+                                update={
+                                    "workflow_rule_retirement": proposal.workflow_rule_retirement.model_copy(
+                                        update={
+                                            "policy_record_id": active.record_id,
+                                            "policy_revision": active.revision,
+                                            "policy_sha256": active.policy_sha256,
+                                        }
+                                    )
+                                }
+                            )
+                            payload = {
+                                "descriptor_id": descriptor,
+                                "source_event_id": "local-workflow-retirement",
+                                "request": proposal.model_dump(mode="json"),
+                            }
+                        else:
+                            payload = payload_builder("local-proposal")
                         proposed = await client.post(
                             "/v1/agent/privileged-operations/plans", json=payload
                         )
@@ -2255,6 +2358,27 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("GH_TOKEN", evidence_json)
         self.assertNotIn("launchplane-merge-train", evidence_json)
 
+    async def test_enrollment_refusal_tells_the_proposer_what_to_add(self) -> None:
+        self.setting_gaps.return_value = ("Require status checks on main.",)
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(
+                build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard",
+                    record_id="merge-train-policy-active",
+                )
+            )
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                response = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json=_merge_train_policy_plan_payload("browser-merge-train-refused"),
+                )
+            self.assertFalse(store.list_privileged_operation_records())
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("Require status checks on main.", response.json()["detail"]["message"])
+
     async def test_merge_train_policy_approval_reports_history_drift_as_stale(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             store = FilesystemRecordStore(Path(temporary_directory))
@@ -2279,6 +2403,16 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                     ).model_copy(update={"status": "superseded"})
                 )
 
+                review = await client.get(f"/v1/privileged-operations/plans/{operation_id}/review")
+                listing = await client.get(
+                    "/v1/privileged-operations/plans",
+                    params={"descriptor_id": "managed-merge-train-policy-import"},
+                )
+                self.assertEqual(review.status_code, 200, review.text)
+                self.assertEqual(listing.status_code, 200, listing.text)
+                for projected in (review.json()["review"], listing.json()["reviews"][0]):
+                    self.assertFalse(projected["can_approve"])
+                    self.assertIn("privileged_operation_plan_stale", projected["blockers"]["codes"])
                 approval = await client.post(
                     f"/v1/privileged-operations/plans/{operation_id}/approve",
                     json={
@@ -2793,6 +2927,13 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                         )
                     self.assertEqual(planned.status_code, 200, planned.text)
                     operation_id = planned.json()["record"]["operation_id"]
+                    path = f"/v1/privileged-operations/plans/{operation_id}"
+                    initial_review = await client.get(f"{path}/review")
+                    self.assertTrue(initial_review.json()["review"]["can_approve"])
+                    original_record = store.read_privileged_operation_record(operation_id)
+                    original_events = store.list_privileged_operation_event_records(
+                        operation_id=operation_id, limit=10
+                    )
                     revised_policy = policy.model_copy(update={"administrator_quorum": 2})
                     revised_digest = authz_policy_sha256(revised_policy)
                     revised_record = current_record.model_copy(
@@ -2813,6 +2954,28 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                             replacement_record=revised_record,
                         ).status,
                         "written",
+                    )
+                    review = await client.get(f"{path}/review")
+                    listing = await client.get(
+                        "/v1/privileged-operations/plans",
+                        params={"descriptor_id": "managed-authz-policy-set"},
+                    )
+                    self.assertEqual(review.status_code, 200, review.text)
+                    self.assertEqual(listing.status_code, 200, listing.text)
+                    for projected in (review.json()["review"], listing.json()["reviews"][0]):
+                        self.assertFalse(projected["can_approve"])
+                        self.assertEqual(projected["lifecycle"]["status"], "planned")
+                        self.assertIn(
+                            "privileged_operation_plan_stale", projected["blockers"]["codes"]
+                        )
+                    self.assertEqual(
+                        store.read_privileged_operation_record(operation_id), original_record
+                    )
+                    self.assertEqual(
+                        store.list_privileged_operation_event_records(
+                            operation_id=operation_id, limit=10
+                        ),
+                        original_events,
                     )
                     stale_approval = await client.post(
                         f"/v1/privileged-operations/plans/{operation_id}/approve",
@@ -2841,6 +3004,229 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current_plan.status_code, 200, current_plan.text)
         self.assertEqual(current_approval.status_code, 200, current_approval.text)
         self.assertEqual(current_approval.json()["record"]["status"], "approved")
+
+    async def test_unavailable_policy_planning_blocks_only_pending_review_and_preserves_withdrawal(
+        self,
+    ) -> None:
+        from sqlalchemy import delete
+        from control_plane.storage.postgres import LaunchplaneAuthzPolicyRow
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            policy = _policy()
+            active = store.seed_authz_policy_if_absent(_policy_record(policy))
+            app = self._app(store=store, policy=policy, policy_record_reader=lambda: active)
+            async with lifespan_client(app) as client:
+                for approved in (False, True):
+                    with self.subTest(approved=approved):
+                        planned = await client.post(
+                            "/v1/privileged-operations/plans",
+                            json=_managed_authz_plan_payload(f"planning-unavailable-{approved}"),
+                        )
+                        self.assertEqual(planned.status_code, 200, planned.text)
+                        operation_id = planned.json()["record"]["operation_id"]
+                        path = f"/v1/privileged-operations/plans/{operation_id}"
+                        if approved:
+                            approval = await client.post(
+                                f"{path}/approve",
+                                json={
+                                    "source_event_id": "approve-before-read-failure",
+                                    "reason": "Review current plan",
+                                },
+                            )
+                            self.assertEqual(approval.status_code, 200, approval.text)
+                        original = store.read_privileged_operation_record(operation_id)
+                        events = store.list_privileged_operation_event_records(
+                            operation_id=operation_id, limit=10
+                        )
+                        if not approved:
+                            with patch(
+                                "control_plane.access_policy_review.plan_managed_authz_policy_reconcile",
+                                side_effect=ValueError(
+                                    "Current detailed policy evidence became unavailable"
+                                ),
+                            ):
+                                raced_review = await client.get(f"{path}/review")
+                                raced_listing = await client.get(
+                                    "/v1/privileged-operations/plans",
+                                    params={"descriptor_id": "managed-authz-policy-set"},
+                                )
+                            self.assertEqual(raced_review.status_code, 200, raced_review.text)
+                            self.assertEqual(raced_listing.status_code, 200, raced_listing.text)
+                            for projected in (
+                                raced_review.json()["review"],
+                                raced_listing.json()["reviews"][0],
+                            ):
+                                self.assertEqual(projected["access_policy"]["state"], "unavailable")
+                                self.assertFalse(projected["can_approve"])
+                                self.assertIn(
+                                    "privileged_operation_planning_unavailable",
+                                    projected["blockers"]["codes"],
+                                )
+                        if not approved:
+                            with store._engine.begin() as connection:
+                                connection.execute(delete(LaunchplaneAuthzPolicyRow))
+                            conflicting = await client.get(f"{path}/review")
+                            self.assertEqual(conflicting.status_code, 200, conflicting.text)
+                            projected = conflicting.json()["review"]
+                            self.assertFalse(projected["can_approve"])
+                            self.assertIn(
+                                "privileged_operation_plan_stale", projected["blockers"]["codes"]
+                            )
+                            self.assertEqual(projected["access_policy"]["state"], "unavailable")
+                            self.assertEqual(projected["access_policy"]["rules"], [])
+                            refused = await client.post(
+                                f"{path}/approve",
+                                json={
+                                    "source_event_id": "approve-without-current-policy",
+                                    "reason": "Current evidence cannot be verified.",
+                                },
+                            )
+                            self.assertEqual(refused.status_code, 409, refused.text)
+                            self.assertEqual(
+                                refused.json()["detail"]["code"], "privileged_operation_plan_stale"
+                            )
+                            store.seed_authz_policy_if_absent(active)
+                            restored = await client.get(f"{path}/review")
+                            self.assertEqual(restored.status_code, 200, restored.text)
+                            self.assertTrue(restored.json()["review"]["can_approve"])
+                        with patch.object(store, "list_authz_policy_records", None):
+                            review = await client.get(f"{path}/review")
+                            listing = await client.get(
+                                "/v1/privileged-operations/plans",
+                                params={"descriptor_id": "managed-authz-policy-set"},
+                            )
+                            self.assertEqual(review.status_code, 200, review.text)
+                            self.assertEqual(listing.status_code, 200, listing.text)
+                            listed = next(
+                                item
+                                for item in listing.json()["reviews"]
+                                if item["operation_id"] == operation_id
+                            )
+                            for projected in (review.json()["review"], listed):
+                                self.assertFalse(projected["can_approve"])
+                                self.assertEqual(projected["can_revoke"], approved)
+                                self.assertEqual(projected["lifecycle"]["status"], original.status)
+                                if approved:
+                                    self.assertEqual(projected["blockers"]["state"], "clear")
+                                else:
+                                    self.assertEqual(projected["blockers"]["state"], "error")
+                                    self.assertIn(
+                                        "privileged_operation_planning_unavailable",
+                                        projected["blockers"]["codes"],
+                                    )
+                            self.assertEqual(
+                                store.read_privileged_operation_record(operation_id), original
+                            )
+                            self.assertEqual(
+                                store.list_privileged_operation_event_records(
+                                    operation_id=operation_id, limit=10
+                                ),
+                                events,
+                            )
+                            if not approved:
+                                approval = await client.post(
+                                    f"{path}/approve",
+                                    json={
+                                        "source_event_id": "approve-without-planner",
+                                        "reason": "Attempt unavailable plan",
+                                    },
+                                )
+                                self.assertEqual(approval.status_code, 503, approval.text)
+                            action = "revoke" if approved else "cancel"
+                            withdrawal = await client.post(
+                                f"{path}/{action}",
+                                json={
+                                    "source_event_id": f"withdraw-{approved}",
+                                    "reason": "Withdraw unavailable review",
+                                },
+                            )
+                            self.assertEqual(withdrawal.status_code, 200, withdrawal.text)
+                            historical = await client.get(f"{path}/review")
+                            self.assertEqual(historical.status_code, 200, historical.text)
+                            self.assertEqual(
+                                historical.json()["review"]["lifecycle"]["status"],
+                                "revoked" if approved else "cancelled",
+                            )
+                            self.assertNotIn(
+                                "privileged_operation_planning_unavailable",
+                                historical.json()["review"]["blockers"]["codes"],
+                            )
+
+    async def test_policy_storage_fault_keeps_pending_reviews_readable(self) -> None:
+        from sqlalchemy import Table
+        from sqlalchemy.exc import OperationalError
+        from control_plane.storage.postgres import (
+            LaunchplaneAuthzPolicyRow,
+            LaunchplaneMergeTrainPolicyRow,
+        )
+
+        for database, authz in ((False, False), (True, False), (True, True)):
+            with self.subTest(database=database, authz=authz), TemporaryDirectory() as directory:
+                store = (
+                    PostgresRecordStore(
+                        database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+                    )
+                    if database
+                    else FilesystemRecordStore(Path(directory))
+                )
+                if isinstance(store, PostgresRecordStore):
+                    store.ensure_schema()
+                    self.addCleanup(store.close)
+                active = build_test_merge_train_policy_record(
+                    repository="cbusillo/sellyouroutboard", record_id="merge-train-policy-active"
+                )
+                if authz:
+                    assert isinstance(store, PostgresRecordStore)
+                    store.seed_authz_policy_if_absent(_policy_record(_policy()))
+                else:
+                    store.write_merge_train_policy_record(active)
+                descriptor = (
+                    "managed-authz-policy-set" if authz else "managed-merge-train-policy-import"
+                )
+                payload = _managed_authz_plan_payload if authz else _merge_train_policy_plan_payload
+                app = self._app(store=store, policy=_policy())
+                async with lifespan_client(app, raise_server_exceptions=False) as client:
+                    planned = await client.post(
+                        "/v1/privileged-operations/plans",
+                        json=payload(f"storage-fault-{database}-{authz}"),
+                    )
+                    self.assertEqual(planned.status_code, 200, planned.text)
+                    operation_id = planned.json()["record"]["operation_id"]
+                    original = store.read_privileged_operation_record(operation_id)
+                    expected_error: type[Exception]
+                    if isinstance(store, PostgresRecordStore):
+                        row = LaunchplaneAuthzPolicyRow if authz else LaunchplaneMergeTrainPolicyRow
+                        cast(Table, row.__table__).drop(store._engine)
+                        expected_error = OperationalError
+                    else:
+                        policy_file = next(Path(directory).rglob(f"{active.record_id}.json"))
+                        policy_file.rename(policy_file.with_suffix(".retained"))
+                        policy_file.mkdir()
+                        expected_error = IsADirectoryError
+                    with self.assertRaises(expected_error):
+                        if authz:
+                            store.list_authz_policy_records(status="active", limit=2)
+                        else:
+                            store.list_merge_train_policy_records(status="active", limit=2)
+                    path = f"/v1/privileged-operations/plans/{operation_id}"
+                    detail = await client.get(f"{path}/review")
+                    listing = await client.get(
+                        "/v1/privileged-operations/plans",
+                        params={"descriptor_id": descriptor},
+                    )
+                    self.assertEqual(detail.status_code, 200, detail.text)
+                    self.assertEqual(listing.status_code, 200, listing.text)
+                    for review in (detail.json()["review"], listing.json()["reviews"][0]):
+                        self.assertFalse(review["can_approve"])
+                        self.assertIn(
+                            "privileged_operation_planning_unavailable", review["blockers"]["codes"]
+                        )
+                    self.assertEqual(store.read_privileged_operation_record(operation_id), original)
 
     async def test_approval_requires_an_explicit_github_id_selector(self) -> None:
         with (

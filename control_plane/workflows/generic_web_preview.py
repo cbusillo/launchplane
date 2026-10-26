@@ -53,9 +53,11 @@ from control_plane.workflows.preview_resource_destroy import (
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane import runtime_platform_credentials
+from control_plane.dokploy import memory_capacity
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
-from control_plane.dokploy.api import JsonObject, JsonValue
+from control_plane.dokploy.application_endpoint import application_endpoint_spec
+from control_plane.dokploy.api import JsonObject
 
 
 _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
@@ -508,6 +510,7 @@ def _ensure_application(
     app_name: str,
     description: str,
     template_application: JsonObject,
+    record_store: GenericWebPreviewProfileStore | None = None,
 ) -> tuple[JsonObject, bool]:
     existing = _find_application_by_name(host=host, token=token, application_name=application_name)
     if existing is not None:
@@ -532,6 +535,9 @@ def _ensure_application(
     }
     if server_id:
         application_payload["serverId"] = server_id
+    memory_capacity.require_preview_host_memory_capacity(
+        host=host, token=token, server_id=server_id, record_store=record_store
+    )
     created = dokploy_api.dokploy_request(
         host=host,
         token=token,
@@ -546,10 +552,6 @@ def _ensure_application(
             f"Dokploy did not return an applicationId for preview app {application_name!r}."
         )
     return _fetch_application(host=host, token=token, application_id=created_application_id), True
-
-
-def _preview_endpoint_spec_swarm(template_application: JsonObject) -> JsonValue:
-    return template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
 
 
 def _configure_application(
@@ -580,7 +582,7 @@ def _configure_application(
             "sourceType": "docker",
             "autoDeploy": True,
             "replicas": template_application.get("replicas"),
-            "endpointSpecSwarm": _preview_endpoint_spec_swarm(template_application),
+            "endpointSpecSwarm": application_endpoint_spec(template_application),
             "createEnvFile": template_application.get("createEnvFile"),
             "triggerType": template_application.get("triggerType"),
             "enabled": template_application.get("enabled"),
@@ -1548,6 +1550,7 @@ def _execute_generic_web_preview_refresh_unserialized(
             runtime_identity=preview_runtime_identity,
         )
         application, created_application = _ensure_application(
+            record_store=record_store,
             host=host,
             token=token,
             application_name=application_name,
@@ -1888,6 +1891,9 @@ def _execute_generic_web_preview_destroy_unserialized(
             ),
         )
     destroy_result = destroy_dokploy_preview_resource(
+        record_store=record_store,
+        context=resolved_profile.preview.context,
+        instance=request.preview_slug,
         host=host,
         token=token,
         resource_type="application",

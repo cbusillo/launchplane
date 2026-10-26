@@ -148,7 +148,7 @@ class OdooCutoverActivationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "persisted cutover"):
                 resolve_profile_cutover_plan(store, **arguments)
 
-    def test_native_reconciliation_claim_is_exclusive_bounded_and_never_replays_maintenance(
+    def test_native_forward_reconciliation_is_exclusive_charged_and_retains_phase_history(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary:
@@ -232,14 +232,33 @@ class OdooCutoverActivationTests(unittest.TestCase):
                     lease_owner=owner,
                     lease_expires_at="2026-10-10T21:05:00Z",
                     claimed_at="2026-10-10T21:00:00Z",
-                    max_attempts=3,
                 )
 
             self.assertIsNone(claim("worker-a"))
-            for step, error in (("maintaining", "TimeoutError"), ("switching", "ValueError")):
+            for step in ("preparing", "prepared"):
+                with self.subTest(step=step):
+                    deployment.odoo_cutover = progress.model_copy(update={"step": step})
+                    store.write_deployment_record(deployment)
+                    prepared_claim = claim("preparation-worker")
+                    self.assertIsNotNone(
+                        prepared_claim, "original preparation must remain resumable"
+                    )
+                    assert prepared_claim is not None
+                    self.assertEqual(prepared_claim.attempt, held.attempt + 1)
+                    self.assertEqual(prepared_claim.phase, held.phase)
+                    self.assertEqual(prepared_claim.checkpoints, held.checkpoints)
+                    store.write_odoo_prod_promotion_operation_record(held)
+            for step, error in (("maintaining", "TimeoutError"),):
                 deployment.odoo_cutover = progress.model_copy(update={"step": step, "error": error})
                 store.write_deployment_record(deployment)
                 self.assertIsNone(claim("worker-a"))
+            deployment.odoo_cutover = progress.model_copy(update={"error": "ValueError"})
+            store.write_deployment_record(deployment)
+            self.assertIsNotNone(claim("worker-a"))
+            store.write_odoo_prod_promotion_operation_record(held)
+            deployment.odoo_cutover = progress.model_copy(update={"step": "rolled_back"})
+            store.write_deployment_record(deployment)
+            self.assertIsNone(claim("unreachable-promotion-inverse"))
             deployment.odoo_cutover = progress
             store.write_deployment_record(deployment)
             with ThreadPoolExecutor(max_workers=2) as workers:
@@ -250,7 +269,9 @@ class OdooCutoverActivationTests(unittest.TestCase):
             self.assertIsNone(claim("worker-c"))
             assert claimed is not None
             self.assertIn(claimed.lease_owner, {"worker-a", "worker-b"})
-            self.assertEqual(claimed.attempt, 2)
+            self.assertEqual(claimed.attempt, held.attempt + 1)
+            self.assertEqual(claimed.phase, held.phase)
+            self.assertEqual(claimed.checkpoints, held.checkpoints)
 
             # A denied resume retains its lane and provider budget. Its update
             # time is durable, so a fresh worker cannot immediately reclaim it.
@@ -266,7 +287,6 @@ class OdooCutoverActivationTests(unittest.TestCase):
                         lease_owner="restarted",
                         lease_expires_at=(at + timedelta(minutes=5)).isoformat(),
                         claimed_at=at.isoformat(),
-                        max_attempts=3,
                     )
 
                 self.assertIsNone(retry(denied_at))
@@ -276,8 +296,161 @@ class OdooCutoverActivationTests(unittest.TestCase):
                 resumed = retry(denied_at + ODOO_CUTOVER_RECONCILIATION_DELAY)
                 assert resumed is not None
                 self.assertEqual(resumed.attempt, denied.attempt + 1)
-            store.write_odoo_prod_promotion_operation_record(held.model_copy(update={"attempt": 3}))
+                self.assertEqual(resumed.phase, denied.phase)
+                self.assertEqual(resumed.checkpoints, denied.checkpoints)
+            from control_plane.workflows.odoo_stable_operation_worker import (
+                DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+            )
+
+            exhausted = held.model_copy(update={"attempt": DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS})
+            store.write_odoo_prod_promotion_operation_record(exhausted)
             self.assertIsNone(claim("worker-b"))
+            self.assertEqual(
+                store.read_odoo_prod_promotion_operation_record(exhausted.operation_id), exhausted
+            )
+            configured_limit = 1
+            store.write_odoo_prod_promotion_operation_record(
+                exhausted.model_copy(update={"attempt": configured_limit})
+            )
+            with (
+                patch.object(
+                    store,
+                    "claim_odoo_cutover_reconciliation_record",
+                    wraps=store.claim_odoo_cutover_reconciliation_record,
+                ) as forward_claim,
+                patch.object(
+                    store,
+                    "claim_odoo_cutover_rollback_reconciliation_record",
+                    wraps=store.claim_odoo_cutover_rollback_reconciliation_record,
+                ) as inverse_claim,
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker._execute_prod_promotion_operation"
+                ) as execute,
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.run_product_reconcile_once",
+                    return_value=None,
+                ),
+            ):
+                result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=Path(temporary),
+                    lease_owner="configured-worker",
+                    max_attempts=configured_limit,
+                    cutover_provider_factory=Mock(),
+                )
+            self.assertEqual(result.status, "idle")
+            execute.assert_not_called()
+            self.assertEqual(forward_claim.call_args.kwargs["max_attempts"], configured_limit)
+            self.assertEqual(inverse_claim.call_args.kwargs["max_attempts"], configured_limit)
+
+    def test_bad_rollback_provenance_holds_only_its_row_and_preserves_infrastructure_errors(
+        self,
+    ) -> None:
+        for error in (ValueError("invalid provenance"), FileNotFoundError("missing original")):
+            with self.subTest(error=type(error).__name__), TemporaryDirectory() as temporary:
+                store = self.store(temporary)
+                bad = _rollback_operation("bad").model_copy(
+                    update={
+                        "status": "reconciliation_required",
+                        "error_code": "operation_reconciliation_required",
+                        "error_message": "Original outcome unknown.",
+                    }
+                )
+                store.create_odoo_prod_rollback_operation_record_if_no_active_lane(bad)
+                with (
+                    patch(
+                        "control_plane.odoo_cutover_recovery.rollback_operation_cutover",
+                        side_effect=error,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_operation_worker.run_product_reconcile_once",
+                        return_value=None,
+                    ) as reconcile,
+                ):
+                    result = run_odoo_stable_operation_worker_once(
+                        record_store=store,
+                        control_plane_root_path=Path(temporary),
+                        lease_owner="worker",
+                        cutover_provider_factory=Mock(),
+                    )
+                self.assertEqual(result.status, "idle")
+                reconcile.assert_called_once()
+                self.assertEqual(
+                    store.read_odoo_prod_rollback_operation_record(bad.operation_id), bad
+                )
+                valid = _rollback_operation("valid").model_copy(
+                    update={
+                        "product": "another-product",
+                        "created_at": "2026-10-01T00:00:00Z",
+                        "updated_at": "2026-10-01T00:00:00Z",
+                        "status": "reconciliation_required",
+                        "error_code": "operation_reconciliation_required",
+                        "error_message": "Original outcome unknown.",
+                    }
+                )
+                valid = valid.model_copy(
+                    update={
+                        "authorization": valid.authorization.model_copy(
+                            update={"product": valid.product}
+                        )
+                    }
+                )
+                store.create_odoo_prod_rollback_operation_record_if_no_active_lane(valid)
+                provider = IsolatedCutoverProvider(Path(temporary) / "fixture")
+                self.addCleanup(provider.engine.dispose)
+                plan = provider.cutover
+                plan = plan.model_copy(
+                    update={
+                        name: slot.model_copy(
+                            update={
+                                "binding": slot.binding.model_copy(
+                                    update={
+                                        "product_id": valid.product,
+                                        "environment_id": valid.instance,
+                                    }
+                                ),
+                                "runtime_identity": slot.runtime_identity.model_copy(
+                                    update={
+                                        "product": valid.product,
+                                        "context": valid.context,
+                                        "instance": valid.instance,
+                                    }
+                                ),
+                            }
+                        )
+                        for name, slot in (("old", plan.old), ("new", plan.new))
+                    }
+                )
+                progress = OdooCutoverRecord(
+                    record_id="valid",
+                    plan=plan,
+                    began_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                    step="complete",
+                )
+                with patch(
+                    "control_plane.odoo_cutover_recovery.rollback_operation_cutover",
+                    side_effect=[error, progress],
+                ):
+                    claimed = store.claim_odoo_cutover_rollback_reconciliation_record(
+                        lease_owner="worker",
+                        claimed_at="2026-10-27T00:00:00Z",
+                        lease_expires_at="2026-10-27T00:05:00Z",
+                    )
+                assert claimed is not None
+                self.assertEqual(claimed.operation_id, valid.operation_id)
+                with (
+                    patch(
+                        "control_plane.odoo_cutover_recovery.rollback_operation_cutover",
+                        side_effect=RuntimeError("storage unavailable"),
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "storage unavailable"),
+                ):
+                    store.claim_odoo_cutover_rollback_reconciliation_record(
+                        lease_owner="worker",
+                        claimed_at="2026-10-27T00:00:00Z",
+                        lease_expires_at="2026-10-27T00:05:00Z",
+                    )
 
     def test_pending_rollback_precedes_held_reconciliation(self) -> None:
         with TemporaryDirectory() as temporary:

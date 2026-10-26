@@ -24,8 +24,12 @@ from control_plane.contracts.product_retirement import (
     provider_identifier_sha256,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.secret_record import SecretRecord, SecretBinding, SecretAuditEvent
+from control_plane.guest_capture_credentials import SSH_PRIVATE_KEY
+from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
 from control_plane.dokploy import api as dokploy_api
 from control_plane.product_retirement import (
+    redacted_product_retirement_response,
     BoundProductRetirement,
     DokployProductRetirementAdapter,
     ProductRetirementBlockedError,
@@ -104,6 +108,11 @@ class _Store:
             ),
         )
         self.previews: tuple[PreviewRecord, ...] = ()
+        self.secret_records: tuple[SecretRecord, ...] = ()
+        self.secret_bindings: tuple[SecretBinding, ...] = ()
+        self.guest_secret_ids: frozenset[str] = frozenset()
+        self.disabled_secret_ids: list[str] = []
+        self.secret_events: list[SecretAuditEvent] = []
         self.records: dict[str, object] = {}
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
@@ -145,8 +154,38 @@ class _Store:
     def list_runtime_environment_records(self, **_: str) -> tuple[RuntimeEnvironmentRecord, ...]:
         return self.runtime_records
 
-    def list_secret_records(self, **_: object) -> tuple[object, ...]:
-        return ()
+    def list_secret_records(self, **_: object) -> tuple[SecretRecord, ...]:
+        return self.secret_records
+
+    def guest_capture_secret_ids(self) -> frozenset[str]:
+        return self.guest_secret_ids
+
+    def list_secret_bindings(self, **_: object) -> tuple[SecretBinding, ...]:
+        return self.secret_bindings
+
+    def disable_product_retirement_secret(
+        self, *, expected_record: SecretRecord, updated_at: str, updated_by: str
+    ) -> bool:
+        self.disabled_secret_ids.append(expected_record.secret_id)
+        self.secret_records = tuple(
+            record.model_copy(update={"status": "disabled", "updated_at": updated_at})
+            if record.secret_id == expected_record.secret_id
+            else record
+            for record in self.secret_records
+        )
+        return True
+
+    def write_secret_binding(self, binding: SecretBinding) -> None:
+        self.secret_bindings = tuple(
+            binding if record.binding_id == binding.binding_id else record
+            for record in self.secret_bindings
+        )
+
+    def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:
+        return tuple(event for event in self.secret_events if event.secret_id == secret_id)
+
+    def create_product_retirement_secret_audit_event(self, event: SecretAuditEvent) -> None:
+        self.secret_events.append(event)
 
     def list_preview_records(self, **_: object) -> tuple[PreviewRecord, ...]:
         return self.previews
@@ -553,8 +592,61 @@ class ProductRetirementTests(unittest.TestCase):
 
     def test_apply_transitions_before_effect_and_retires_authority(self) -> None:
         store = _Store()
+        guest_key = SecretRecord(
+            secret_id="guest-key",
+            scope="context_instance",
+            integration=LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+            name=SSH_PRIVATE_KEY,
+            context="example-site",
+            instance="prod",
+            current_version_id="guest-version",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        binding = SecretBinding(
+            binding_id="guest-binding",
+            secret_id=guest_key.secret_id,
+            integration=guest_key.integration,
+            binding_key=SSH_PRIVATE_KEY,
+            context=guest_key.context,
+            instance=guest_key.instance,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        application_key = guest_key.model_copy(
+            update={"secret_id": "application-key", "integration": "application", "name": "TOKEN"}
+        )
+        application_binding = binding.model_copy(
+            update={
+                "binding_id": "application-binding",
+                "secret_id": application_key.secret_id,
+                "integration": application_key.integration,
+                "binding_key": application_key.name,
+            }
+        )
+        store.secret_records = (guest_key, application_key)
+        store.secret_bindings = (binding, application_binding)
+        store.guest_secret_ids = frozenset((guest_key.secret_id,))
         observation = _observation(domains=("domain-1",))
         plan = _plan(store, observation)
+        retained = redacted_product_retirement_response(plan)["result"]
+        assert isinstance(retained, dict)
+        self.assertEqual(
+            retained["retained_guest_capture_credentials"],
+            [provider_identifier_sha256(guest_key.secret_id)],
+        )
+        review = redacted_product_retirement_response(
+            plan.model_copy(update={"profile_record": store.profile})
+        )["result"]
+        assert isinstance(review, dict)
+        effects = review["testing_plan"]
+        assert isinstance(effects, dict)
+        self.assertFalse(
+            any(
+                provider_identifier_sha256(guest_key.secret_id) in reference
+                for reference in effects["affected_records"]
+            )
+        )
         request = _request(
             mode="apply",
             reviewed_plan_record_id=plan.record_id,
@@ -605,6 +697,23 @@ class ProductRetirementTests(unittest.TestCase):
         self.assertFalse(store.profile.preview.enabled)
         self.assertEqual(store.runtime_records, ())
         self.assertIsNone(store.provider_target)
+        self.assertEqual(store.disabled_secret_ids, [application_key.secret_id])
+        self.assertEqual(
+            {
+                record.secret_id
+                for record in store.list_secret_records()
+                if record.status == "configured"
+            },
+            {guest_key.secret_id},
+        )
+        self.assertEqual(
+            {
+                item.secret_id
+                for item in store.list_secret_bindings()
+                if item.status == "configured"
+            },
+            {guest_key.secret_id},
+        )
 
     def test_partial_domain_failure_leaves_retiring_profile_for_reconciliation(self) -> None:
         store = _Store()
