@@ -405,6 +405,11 @@ def _evaluate_binding(
         binding=binding,
         target=target,
         extra_integration_key_markers=extra_integration_key_markers,
+    ) and not (
+        target.environment_class == "preview"
+        and is_integration_runtime_key(
+            binding.binding_key, extra_markers=extra_integration_key_markers
+        )
     ):
         return _evaluate_declared_secret_class(target=target, binding=binding)
     return (
@@ -438,7 +443,11 @@ def _binding_stored_for_exact_settings_scope(
     return (
         (
             target.environment_class in _LANE_CLASSIFIED_ENVIRONMENT_CLASSES
-            or (target.instance == "preview" and binding.declared_secret_class is not None)
+            or (
+                target.environment_class == "preview"
+                and target.instance == "preview"
+                and binding.declared_secret_class is not None
+            )
         )
         and bool(binding.context)
         and bool(binding.instance)

@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import provider_key_adoption, runtime_platform_credentials
 from control_plane import product_secret_copy
-from control_plane.preview_settings import validate_preview_plain_settings
+from control_plane.preview_settings import validate_preview_scope
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.public_hosts import normalize_public_hosts
@@ -300,23 +300,6 @@ def plan_product_config_authority_bundle(
     runtime_input = cast(_ProductConfigRuntimeInput, normalized_payload["runtime_env"])
     runtime_env = cast(dict[str, ScalarValue], runtime_input["env"])
     secrets = tuple(cast(list[dict[str, object]], normalized_payload["secrets"]))
-    if instance_name == "preview":
-        try:
-            validate_preview_plain_settings(runtime_env, context=context_name)
-        except ValueError as error:
-            raise ProductConfigError(str(error), code="runtime_setting_refused") from error
-        secret_keys = {
-            binding.binding_key
-            for binding in record_store.list_secret_bindings(
-                integration="runtime_environment", context_name=context_name, limit=None
-            )
-            if binding.context == context_name and binding.instance in {"", "preview"}
-        }
-        if secret_keys & runtime_env.keys():
-            raise ProductConfigError(
-                "Preview secret bindings cannot be stored as plain settings.",
-                code="runtime_setting_refused",
-            )
     _require_product_config_master_key_if_needed(secrets)
     copy_sources: dict[int, SecretVersion] = {}
     copy_contexts: set[tuple[str, str]] = set()
@@ -439,6 +422,33 @@ def plan_product_config_authority_bundle(
         retired_provider_keys=retired_provider_keys,
         source_label=source_label,
     )
+    if instance_name == "preview":
+        secret_keys = {
+            binding.binding_key
+            for binding in record_store.list_secret_bindings(
+                integration="runtime_environment", context_name=context_name, limit=None
+            )
+            if binding.context == context_name and binding.instance == "preview"
+        } | {
+            str(secret["binding_key"])
+            for secret in secrets
+            if secret["integration"] == "runtime_environment" and secret["instance"] == "preview"
+        }
+        current_preview_record = _find_runtime_environment_record(
+            existing_records=existing_runtime_records,
+            scope="instance",
+            context_name=context_name,
+            instance_name="preview",
+        )
+        plain = (
+            runtime_record.env
+            if runtime_record is not None
+            else (current_preview_record.env if current_preview_record else {})
+        )
+        try:
+            validate_preview_scope(plain, context=context_name, secret_keys=frozenset(secret_keys))
+        except ValueError as error:
+            raise ProductConfigError(str(error), code="runtime_setting_refused") from error
     secret_summaries: list[dict[str, object]] = list(disabled_summaries)
     runtime_key_safety_summary = _evaluate_product_config_runtime_key_safety(
         record_store=record_store,
@@ -1071,6 +1081,8 @@ def _product_config_secret_inputs(
             instance_name=secret_instance,
             index=index,
         )
+        if instance_name == "preview" and validated_scope != "context_instance":
+            raise ProductConfigError("Preview secrets require the exact preview instance scope.")
         context_scope_uses_instance_safety_target = (
             validated_scope == "context" and expected_scope == "context_instance"
         )

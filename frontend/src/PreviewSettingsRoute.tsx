@@ -30,7 +30,7 @@ export function PreviewSettingsRoute({ product, view, refreshToken }: {
   const secrets = view === "managed-secrets";
   return <article className="environment-workspace" data-lane="preview">
     <h1 tabIndex={-1} data-route-heading>Preview {secrets ? "secrets" : "settings"}</h1>
-    <p>These settings apply to every preview of this product. Preview values take precedence over the testing template. Changes apply on the next preview refresh.</p>
+    <p>These settings apply to every preview of this product. Preview values take precedence over the template lane. Changes apply on the next preview refresh.</p>
     <nav className="environment-view-nav" aria-label="Preview settings">
       <AppLink to={productEnvironmentPath(product, "preview", "runtime-settings")} aria-current={!secrets ? "page" : undefined}>Runtime settings</AppLink>
       <AppLink to={productEnvironmentPath(product, "preview", "managed-secrets")} aria-current={secrets ? "page" : undefined}>Managed secrets</AppLink>

@@ -22,6 +22,7 @@ from control_plane.contracts.odoo_import_parameters import config_parameter_runt
 from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.preview_settings import validate_preview_scope
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.odoo_addon_settings_override import (
     OdooAddonSettingsStore,
@@ -1470,14 +1471,11 @@ def _merge_preview_addon_settings(
     if not encoded_preview.strip():
         return
     try:
-        preview = OdooPostDeployPayload.model_validate_json(
-            base64.b64decode(encoded_preview, validate=True)
-        )
+        preview = validate_preview_scope({key: encoded_preview}, context=profile.preview.context)
+        if preview is None:
+            return
         if not preview.addon_settings:
             return
-        pairs = [(item.addon, item.setting) for item in preview.addon_settings]
-        if len(pairs) != len(set(pairs)):
-            raise ValueError("Conflicting preview addon settings")
         if any(item.addon == "shopify" for item in preview.addon_settings):
             if control_plane_odoo_instance_overrides.odoo_instance_is_production(
                 profile.preview.template_instance
@@ -1500,15 +1498,6 @@ def _merge_preview_addon_settings(
                         shop_url_key=item.value.value.strip().lower(),
                         protected_store_keys=protected,
                     )
-        for item in preview.addon_settings:
-            if (
-                item.value.source == "secret_binding"
-                and item.value.environment_variable
-                != control_plane_odoo_instance_overrides.addon_setting_secret_env_key(
-                    addon_name=item.addon, setting_name=item.setting
-                )
-            ):
-                raise ValueError("Preview addon secret requires canonical transport")
         if any(
             not environment.get(name, "").strip()
             for name in preview.required_container_environment_keys

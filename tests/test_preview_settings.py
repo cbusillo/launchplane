@@ -203,3 +203,59 @@ class PreviewSettingsTests(unittest.TestCase):
                 migrate_preview_settings(connection, recorded_at="2026-10-26T01:00:00Z")
             self.assertEqual(store.read_product_profile_record(profile.product), profile)
             self.assertEqual(store.list_runtime_environment_records(), (existing,))
+
+    def test_preview_boundary_rejects_keyword_credentials_and_nonaddon_payloads(self) -> None:
+        import base64
+        import json
+        from control_plane.preview_settings import validate_preview_scope
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+
+        payload = base64.b64encode(
+            json.dumps(
+                {
+                    "context": "site",
+                    "instance": "preview",
+                    "config_parameters": [
+                        {
+                            "key": "shopify.shop_url_key",
+                            "value": {"source": "literal", "value": "live-shop"},
+                        }
+                    ],
+                }
+            ).encode()
+        ).decode()
+        for values in (
+            {"CONNECTION": "host=x password=private"},
+            {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: payload},
+        ):
+            with self.assertRaises(ValueError):
+                validate_preview_scope(values, context="site")
+        with self.assertRaises(ValueError):
+            validate_preview_scope(
+                {}, context="site", secret_keys=frozenset({ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY})
+            )
+        validate_preview_scope({"SMTP_HOST": "mail-sink.invalid"}, context="site")
+
+    def test_historical_invalid_preview_record_returns_a_sanitized_render_refusal(self) -> None:
+        import click
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/records.db")
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="site",
+                    instance="preview",
+                    env={"CONNECTION": "host=x password=private-fixture"},
+                    updated_at="2026-10-26T00:00:00Z",
+                )
+            )
+            with self.assertRaises(click.ClickException) as refusal:
+                resolve_preview_runtime_environment_from_store(
+                    record_store=store, context_name="site", template_values={}
+                )
+            self.assertNotIn("private-fixture", str(refusal.exception))

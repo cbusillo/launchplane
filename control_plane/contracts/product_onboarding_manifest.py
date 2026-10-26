@@ -13,6 +13,7 @@ from control_plane.contracts.product_profile_record import (
     ProductPromotionWorkflowProfile,
 )
 from control_plane.contracts.runtime_environment_record import ScalarValue
+from control_plane.preview_settings import validate_preview_scope
 from control_plane.contracts.secret_record import SecretStatus
 
 
@@ -311,9 +312,21 @@ class ProductOnboardingManifest(BaseModel):
                 historical_contexts.append(context)
         self.historical_contexts = tuple(historical_contexts)
         config_routes = set(lane_routes)
-        if self.preview.enabled and self.preview.context.strip():
+        if self.preview.context.strip():
             config_routes.add((self.preview.context.strip(), "preview"))
+        preview_secret_keys = frozenset(
+            binding.binding_key
+            for binding in self.secret_bindings
+            if binding.context == self.preview.context
+            and binding.instance == "preview"
+            and binding.integration == "runtime_environment"
+        )
+        validate_preview_scope({}, context=self.preview.context, secret_keys=preview_secret_keys)
         for record in self.runtime_environments:
+            if record.scope == "instance" and record.instance == "preview":
+                validate_preview_scope(
+                    record.env, context=record.context, secret_keys=preview_secret_keys
+                )
             if record.scope == "global":
                 if record.context.strip() or record.instance.strip():
                     raise ValueError(

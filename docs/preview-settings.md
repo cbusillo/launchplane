@@ -55,3 +55,14 @@ provider name `Authentik`. This implicit consumer has no client-secret input.
 Website-bootstrap and import-source composition preserve explicitly managed
 preview addon settings; template addon settings remain excluded. The artifact
 must support the runtime setting.
+
+This payload is an addon-settings manifest only: it must match the preview
+context, instance `preview`, and deploy intent. Config parameters, website
+settings and website bootstrap belong to the generated runtime payload and are
+not accepted here. Store the manifest as a plain setting, with canonical managed
+secret references for credential-valued addon settings; do not store the whole
+encoded payload as a secret. Plain integration endpoints such as `SMTP_HOST`
+are accepted, but credentials, including password-bearing connection strings,
+require managed bindings. Integration credentials still need a matching existing
+runtime key-safety rule that permits preview use. A rule cannot override a
+binding declared production-only or testing-only.

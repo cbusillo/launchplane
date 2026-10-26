@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import sqlalchemy as sa
 
-from control_plane.preview_settings import validate_preview_plain_settings
+from control_plane.preview_settings import validate_preview_scope
 
 from control_plane.storage.site_setting_migration import _RUNTIME_ENVIRONMENTS
 
@@ -30,7 +30,6 @@ def migrate_preview_settings(connection: sa.Connection, *, recorded_at: str) -> 
         if not context or context in destinations:
             raise ValueError("Preview settings migration requires distinct configured contexts.")
         destinations.add(context)
-        validate_preview_plain_settings(values, context=context)
         owners = {
             other["product"]
             for other in profiles
@@ -60,6 +59,7 @@ def migrate_preview_settings(connection: sa.Connection, *, recorded_at: str) -> 
         if conflicts or retired.intersection(values):
             raise ValueError("Preview settings conflict with existing managed preview settings.")
         env.update(values)
+        validate_preview_scope(env, context=context)
         updated = {
             **(existing or {}),
             "schema_version": (existing or {}).get("schema_version", 1),

@@ -190,6 +190,48 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.store.list_runtime_environment_records(instance_name="testing"))
         self.assertFalse(self.store.list_runtime_environment_records(instance_name="prod"))
 
+    def test_preview_config_refuses_opaque_payloads_collisions_and_shared_destinations(
+        self,
+    ) -> None:
+        from control_plane.product_config import ProductConfigError
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+
+        for additions in (
+            {
+                "secrets": [
+                    {
+                        "binding_key": ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+                        "value": "opaque",
+                        "secret_class": "preview",
+                    }
+                ]
+            },
+            {
+                "runtime_env": {"env": {"SETTING": "public"}},
+                "secrets": [
+                    {"binding_key": "SETTING", "value": "private", "secret_class": "preview"}
+                ],
+            },
+            {"secrets": [{"binding_key": "APP_PASSWORD", "scope": "context", "value": "private"}]},
+        ):
+            with self.subTest(additions=additions), self.assertRaises(ProductConfigError):
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={
+                        "product": self.profile.product,
+                        "context": self.profile.preview.context,
+                        "instance": "preview",
+                        **additions,
+                    },
+                    mode="apply",
+                    actor="fixture",
+                    source_label="test",
+                )
+            self.assertFalse(self.store.list_secret_records(instance_name="preview"))
+            self.assertFalse(self.store.list_runtime_environment_records(instance_name="preview"))
+
     def make_app(self, *, source_read: bool = True, standing_read: bool = False) -> FastAPI:
         actions: tuple[str, ...] = (
             "product_config.plan",
