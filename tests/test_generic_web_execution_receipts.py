@@ -2072,6 +2072,10 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 "control_plane.generic_web_deploy_provider_adapter.generic_web_post_deploy_executor_for_profile",
                 return_value=executor,
             ),
+            patch(
+                "control_plane.generic_web_testing_abandonment.generic_web_post_deploy_executor_for_profile",
+                return_value=executor,
+            ),
         ):
             status, result = _invoke_recovery(
                 self.app,

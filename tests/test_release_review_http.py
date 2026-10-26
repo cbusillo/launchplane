@@ -130,6 +130,34 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
+    async def test_review_access_uses_existing_scope_without_building_a_checklist(self) -> None:
+        with patch(
+            "control_plane.http_app.current_release_review",
+            side_effect=AssertionError("Checklist must not load"),
+        ):
+            for actor, github_id, status, owner in (
+                ("site-owner", 9001, 200, True),
+                ("operator", 9003, 200, False),
+                ("other", 9999, 403, False),
+            ):
+                with self.subTest(actor=actor):
+                    session = self.sessions.issue(_human(login=actor, github_id=github_id))
+                    result = await _asgi_get(
+                        self.app,
+                        "/v1/release-review/access?product=example-site",
+                        headers={"Cookie": self.sessions.session_cookie_header(session)},
+                    )
+                    self.assertEqual(result.status_code, status, result.text)
+                    if status == 200:
+                        self.assertEqual(
+                            result.json(),
+                            {
+                                "product": profile().product,
+                                "display_name": profile().display_name,
+                                "viewer_is_owner": owner,
+                            },
+                        )
+
     async def test_client_review_hides_internal_request_provenance(self) -> None:
         with patch("control_plane.release_request.publish_release_invitation", return_value=True):
             opened = await self.request_release(reason="Release the agreed work.")
