@@ -121,6 +121,7 @@ class SourceMeasurementTests(unittest.TestCase):
             sum(item.st_blocks * 512 for item in before.values()),
         )
         self.assertEqual({self.filestore, *self.filestore.rglob("*")}, set(paths))
+
         def write_metadata(item: os.stat_result) -> tuple[int, ...]:
             return (item.st_size, item.st_mtime_ns, item.st_ctime_ns, item.st_ino, item.st_mode)
 
