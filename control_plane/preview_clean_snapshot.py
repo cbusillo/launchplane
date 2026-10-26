@@ -114,47 +114,18 @@ def wait_for_idle_preview_runner(containers):
 def restore_preview_snapshot(containers, source_lock):
     wait_for_idle_preview_runner(containers)
     snapshot = spec['snapshot']
-    binding = preview_attempt_binding(spec['compose_project'], spec['database_name'], spec['preview_volumes'], snapshot)
-
-    attempt_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
-    attempts = clean_snapshot_root(snapshot['snapshot_id']).parent / 'preview-attempts'
-    attempts.mkdir(mode=0o700, exist_ok=True)
-    attempt_path = attempts / (attempt_id + '.json')
-    previous_attempt = None
-    if attempt_path.exists():
-        if attempt_path.is_symlink() or attempt_path.stat().st_size > 8192:
-            raise RuntimeError('Preview snapshot attempt custody is invalid')
-        previous_attempt = json.loads(attempt_path.read_text())
-        if previous_attempt['binding'] != binding:
-            raise RuntimeError('Preview snapshot attempt belongs to another target')
-        snapshot = previous_attempt['snapshot']
-    witness = hashlib.sha256(json.dumps(['preview-restore-v1', attempt_id, snapshot['snapshot_id']]).encode()).hexdigest()
-    owned_unreleased = bool(previous_attempt and previous_attempt.get('restore_witness') == witness and previous_attempt.get('completed') is False)
+    attempt = preview_restore_attempt(spec['compose_project'], spec['database_name'],
+        spec['preview_volumes'], snapshot, clean_snapshot_root(snapshot['snapshot_id']).parent)
+    binding, attempt_path = attempt['binding'], attempt['path']
+    attempt_path.parent.mkdir(mode=0o700, exist_ok=True)
+    previous_attempt, snapshot, witness = (attempt[key] for key in ('previous', 'snapshot', 'witness'))
+    owned_unreleased = previous_attempt is not None and previous_attempt.get('completed') is False
     database = spec['database_name']
-    if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}', database):
-        raise RuntimeError('Invalid preview database identity')
-    present = docker('exec', '-i', containers['database'][0], 'sh', '-c',
-        'psql -X -qAt -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
-        '_', database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
-    if present not in {'0', '1'} or (present == '1' and previous_attempt is None):
-        raise RuntimeError('An existing preview database cannot be overwritten by a snapshot')
-    restart = False
-    if present == '1':
-        probe = ['exec', '-i', containers['database'][0], 'sh', '-c',
-            'psql -X -qAt -v ON_ERROR_STOP=1 -v marker="$2" -U "$POSTGRES_USER" -d "$1"',
-            '_', database, spec['copy_witness_parameter']]
-        table = docker(*probe, stdin=b"SELECT to_regclass('public.ir_config_parameter') IS NOT NULL;\n").decode().strip()
-        if table not in {'t', 'f'}:
-            raise RuntimeError('Preview restore witness inspection is ambiguous')
-        stored = docker(*probe, stdin=b"SELECT value FROM ir_config_parameter WHERE key=:'marker';\n").decode().strip() if table == 't' else ''
-        if stored != witness:
-            if not owned_unreleased or stored not in {'', snapshot['snapshot_id']}:
-                raise RuntimeError('Preserve preview data without this attempt restore witness')
-            restart = True
+    custody = preview_restore_database_custody(containers['database'][0], database,
+        spec['copy_witness_parameter'], attempt)
+    present, restart = custody['present'], custody['restart']
     path = clean_snapshot_root(snapshot['snapshot_id'])
     if present == '0' or restart:
-        if previous_attempt is not None and previous_attempt.get('completed'):
-            raise RuntimeError('A completed preview lost its database; preserve its retained data')
         path, receipt = verified_clean_snapshot(snapshot['snapshot_id'])
         if any(receipt[key] != snapshot[key] for key in ('database_sha256', 'filestore_sha256')):
             raise RuntimeError('The clean snapshot differs from its service receipt')

@@ -1169,6 +1169,7 @@ def odoo_preview_supersession_is_quiescent(
     request: OdooPreviewApplyEnvelope,
     database_url: str | None,
     schedule_binding: object = None,
+    require_snapshot_custody: bool = False,
 ) -> bool:
     from control_plane.dokploy.post_deploy import ComposeDataWorkflowBinding
 
@@ -1182,6 +1183,7 @@ def odoo_preview_supersession_is_quiescent(
         request=request.apply,
         database_url=database_url,
         schedule_binding=binding,
+        require_snapshot_custody=require_snapshot_custody,
     )
 
 

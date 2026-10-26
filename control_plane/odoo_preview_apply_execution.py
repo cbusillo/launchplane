@@ -265,6 +265,11 @@ class OdooPreviewProviderMutationAdapter:
             return ProviderObservation(
                 outcome=cast(ProviderObservationOutcome, observation_outcome),
                 retry_safe=retry_safe,
+                preserve_effect_checkpoint=(
+                    observation_outcome == "absent"
+                    and retry_safe
+                    and provider_effect_phase != "rollback_complete"
+                ),
             )
         self.execution_check()
         driver_result.pop("provider_effect_attempted", None)
@@ -479,25 +484,6 @@ class OdooPreviewApplyOperation:
     disposable_cleanup: bool = False
     route_path: str = ODOO_PREVIEW_APPLY_ROUTE
 
-    def require_refresh_lifecycle(self) -> None:
-        plan = self.adapter._issued_plan
-        if plan.operation != "refresh" or plan.dry_run_plan.compose_ref.startswith("${created."):
-            return
-        preview = find_preview_record(
-            record_store=cast(LaunchplaneMutationStore, self.adapter._record_store),
-            context_name=self.adapter._profile.preview.context,
-            anchor_repo=self.adapter._profile.repository.partition("/")[2],
-            anchor_pr_number=plan.plan_request.pr_number,
-        )
-        if preview is None:
-            raise OdooPreviewPlanProvenanceError(
-                code="odoo_preview_lifecycle_unavailable",
-                message=(
-                    "The existing preview has no lifecycle authority. Preserve its original "
-                    "operation and data before rebuilding it."
-                ),
-            )
-
     def require_original_preservation(self) -> None:
         reference = self.adapter._apply_request.preserve_original_reservation_id
         if not reference:
@@ -646,7 +632,6 @@ class OdooPreviewApplyOperation:
                 )
                 is None
             ):
-                self.require_refresh_lifecycle()
                 self.require_original_preservation()
             return run_durable_provider_operation(
                 store=store,
@@ -842,11 +827,25 @@ def _original_supersession_is_quiescent(
             return False
         if not resolved_id or resolved_id != new_plan.compose_ref:
             return False
+    custody_check: dict[str, object] = {}
+    if (
+        request.apply.dry_run_plan.operation == "refresh"
+        and profile.preview.clean_testing_snapshot
+        and find_preview_record(
+            record_store=store,
+            context_name=profile.preview.context,
+            anchor_repo=profile.repository.partition("/")[2],
+            anchor_pr_number=original.issued_plan.plan_request.pr_number,
+        )
+        is None
+    ):
+        custody_check["require_snapshot_custody"] = True
     return check(
         control_plane_root_path=root,
         request=original.apply_request,
         database_url=database_url,
         schedule_binding=store.read_original_mutation_intent(reservation).get("schedule_binding"),
+        **custody_check,
     )
 
 

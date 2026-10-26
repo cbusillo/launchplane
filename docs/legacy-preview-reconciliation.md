@@ -191,9 +191,11 @@ This feature creates no grant, new caller identity or policy exception.
 
 ## Unrecorded Odoo resources with retained original intent
 
-An interrupted Odoo preview can have a provider compose and original durable
-reservation without a preview lifecycle record. A new refresh refuses before
-reservation or supersession. Keep that original key and its retained intent.
+An interrupted snapshot Odoo preview can have a provider compose and original
+durable reservation without a preview lifecycle record. A new refresh leaves
+the original held when its native restore receipt, physical storage binding
+and database witness cannot prove custody. Completed operation status alone
+does not prove data ownership. Keep that original key and its retained intent.
 
 For this case, request a service-issued Odoo destroy plan for the exact existing
 preview. Submit it through the ordinary preview-apply service operation with

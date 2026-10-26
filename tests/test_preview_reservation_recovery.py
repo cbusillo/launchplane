@@ -23,7 +23,6 @@ from control_plane.odoo_preview_apply_execution import (
 )
 from control_plane.odoo_preview_apply_http import (
     OdooPreviewApplyEnvelope,
-    OdooPreviewPlanProvenanceError,
     ODOO_PREVIEW_APPLY_ROUTE,
 )
 from control_plane.preview_reservation_recovery import (
@@ -1083,16 +1082,18 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 )
                 schedules.assert_not_called()
 
-    def test_unrecorded_existing_refresh_preserves_original_before_reservation(self) -> None:
+    def test_unowned_snapshot_refresh_preserves_original_before_reservation(self) -> None:
         from control_plane.odoo_preview_apply_http import issue_odoo_preview_apply_plan
 
         request = self.request.model_copy(deep=True)
+        self.profile.preview.clean_testing_snapshot = True
         request.apply.dry_run_plan.compose_ref = "retained-compose"
         issued = issue_odoo_preview_apply_plan(
             result=_issued_plan(request), plan_id="new-existing-preview-plan"
         )
         assert issued.plan_provenance is not None
         execute = Mock(return_value={"status": "fail", "provider_effect_attempted": True})
+        quiescence = Mock(return_value=False)
         operation = prepare_odoo_preview_apply_operation(
             control_plane_root=self.root,
             record_store=self.store,
@@ -1104,7 +1105,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             request_fingerprint="new-existing-preview",
             trace_id="new-existing-preview",
             execute_apply=execute,
-            supersession_is_quiescent=Mock(return_value=True),
+            supersession_is_quiescent=quiescence,
         )
         original = self.store.read_idempotency_record_by_id(self.reservation.record_id)
         with (
@@ -1112,12 +1113,17 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
                 return_value="retained-compose",
             ),
-            self.assertRaises(OdooPreviewPlanProvenanceError),
         ):
-            operation.run(self.store)
+            result = operation.run(self.store)
+        self.assertEqual(result.status, "target_busy")
+        self.assertTrue(quiescence.call_args.kwargs["require_snapshot_custody"])
         execute.assert_not_called()
+        current = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+        assert current is not None and original is not None
+        self.assertEqual(current.state, "reconcile_required")
         self.assertEqual(
-            self.store.read_idempotency_record_by_id(self.reservation.record_id), original
+            current.model_dump(exclude={"state", "updated_at"}),
+            original.model_dump(exclude={"state", "updated_at"}),
         )
         self.assertIsNone(
             self.store.read_idempotency_record(

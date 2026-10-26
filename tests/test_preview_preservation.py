@@ -1,7 +1,8 @@
+import argparse
 import hashlib
 import io
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 from collections.abc import Iterator
 from pathlib import Path
@@ -292,6 +293,89 @@ class SnapshotCaptureDeadlineTests(unittest.TestCase):
             self.assertTrue(all(process.poll() is not None for process in processes))
 
 
+class _PreservationVerifierEngine:
+    def __init__(self, restore_succeeds: bool) -> None:
+        self.restore_succeeds = restore_succeeds
+        self.final_server = False
+        self.environment: dict[str, str] = {}
+        self.network = "bridge"
+        self.restored_bytes = b""
+        self.writable_volumes: set[str] = set()
+        self.created_volumes: set[str] = set()
+        self.host_mounts: list[str] = []
+        self.published_ports: list[str] = []
+        self.privileged = False
+        self.image = ""
+
+    def can_contact_external_service(self) -> bool:
+        return self.network != "none"
+
+    def docker(self, *arguments: str, stdin: bytes | None = None) -> bytes:
+        result = self.command(["docker", *arguments], input=stdin)
+        if result.returncode:
+            raise RuntimeError("Preview preservation Docker operation failed")
+        return result.stdout
+
+    def command(self, arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        output = b""
+        status = 0
+        if arguments[1:3] == ["volume", "create"]:
+            self.created_volumes.add(arguments[-1])
+        elif arguments[1] == "run":
+            parser = argparse.ArgumentParser(add_help=False)
+            for option in (
+                "--pull",
+                "--name",
+                "--memory",
+                "--memory-swap",
+                "--cpus",
+                "--security-opt",
+            ):
+                parser.add_argument(option)
+            parser.add_argument("--label", action="append")
+            parser.add_argument("--network", default="bridge")
+            parser.add_argument("--env", "-e", action="append", default=[])
+            parser.add_argument("--mount", action="append", default=[])
+            parser.add_argument("--volume", "-v", action="append", default=[])
+            parser.add_argument("--publish", "-p", action="append", default=[])
+            parser.add_argument("--privileged", action="store_true")
+            parser.add_argument("-d", "--detach", action="store_true")
+            parser.add_argument("image")
+            run = parser.parse_args(arguments[2:])
+            self.environment = dict(item.split("=", 1) for item in run.env)
+            self.network, self.image = run.network, run.image
+            self.published_ports, self.privileged = run.publish, run.privileged
+            self.host_mounts = run.volume
+            for mount in run.mount:
+                fields = dict(item.split("=", 1) for item in mount.split(","))
+                source: str = fields.get("source") or fields.get("src") or ""
+                if fields.get("type") == "volume":
+                    self.writable_volumes.add(source)
+                else:
+                    self.host_mounts.append(source)
+            output = b"owned-verifier"
+        elif arguments[1] == "exec":
+            command = arguments[4:] if arguments[2] == "-i" else arguments[3:]
+            if command[0] == "pg_isready":
+                parser = argparse.ArgumentParser(add_help=False)
+                parser.add_argument("-h", "--host", default="")
+                parser.add_argument("-U", "--username")
+                probe = parser.parse_args(command[1:])
+                status = 0 if self.final_server or not probe.host else 1
+                if status:
+                    self.final_server = True
+            elif not self.final_server:
+                status = 1
+            elif command[0] == "pg_restore":
+                self.restored_bytes = kwargs["stdin"].read()
+                status = 0 if self.restore_succeeds else 1
+            elif command[0] == "sh":
+                user = self.environment.get("POSTGRES_USER") or "root"
+                status = 0 if user == "postgres" else 1
+                output = b"3" if status == 0 else b""
+        return subprocess.CompletedProcess(arguments, status, output, b"")
+
+
 class PreviewPreservationVerifierCustodyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
@@ -359,55 +443,38 @@ class PreviewPreservationVerifierCustodyTests(unittest.TestCase):
             removals, [("rm", "-f", self.container["Id"]), ("volume", "rm", self.name)]
         )
 
-    def test_restore_stream_uses_only_isolated_owned_verifier_and_cleans_up_on_failure(
-        self,
-    ) -> None:
-        with TemporaryDirectory() as temporary:
-            dump = Path(temporary) / "database.dump"
-            dump.write_bytes(b"captured database")
-            cleanup = Mock()
-            calls: list[tuple[str, ...]] = []
-
-            def docker(*arguments: str) -> bytes:
-                calls.append(arguments)
-                return b"owned-verifier" if arguments[0] == "run" else b""
-
-            def restore(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-                self.assertEqual(kwargs["stdin"].read(), dump.read_bytes())
-                self.assertEqual(arguments[:4], ["docker", "exec", "-i", "owned-verifier"])
-                return subprocess.CompletedProcess(arguments, 1, b"", b"invalid dump")
-
-            self.namespace.update(
-                docker=docker,
-                verification_resources=cleanup,
-                wait_database=Mock(),
-                deadline=time.monotonic() + 60,
-            )
-            with patch.object(subprocess, "run", side_effect=restore):
-                with self.assertRaisesRegex(RuntimeError, "restore verification failed"):
-                    self.namespace["restore_verification"](dump, self.image)
-            run = next(call for call in calls if call[0] == "run")
-            self.assertEqual(run[run.index("--network") + 1], "none")
-            mount = run[run.index("--mount") + 1]
-            self.assertIn("src=lp-preview-preserve-" + self.identifier[:32], mount)
-            self.assertNotIn("--privileged", run)
-            self.assertNotIn("-p", run)
-            self.assertNotIn("--volume", run)
-            self.assertEqual(run[-1], self.image)
-            self.assertIn("POSTGRES_USER=postgres", run)
-            self.assertEqual(cleanup.call_count, 2)
-
-    def test_verifier_readiness_uses_final_server_instead_of_init_socket(self) -> None:
-        self.namespace["deadline"] = time.monotonic() + 60
-
-        def readiness(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-            del kwargs
-            self.assertIn("-h", arguments)
-            self.assertEqual(arguments[arguments.index("-h") + 1], "127.0.0.1")
-            return subprocess.CompletedProcess(arguments, 0)
-
-        with patch.object(subprocess, "run", side_effect=readiness):
-            self.namespace["wait_database"]("owned-verifier")
+    def test_verifier_restores_with_final_server_identity_and_isolated_storage(self) -> None:
+        for succeeds in (True, False):
+            with self.subTest(succeeds=succeeds), TemporaryDirectory() as temporary:
+                dump = Path(temporary) / "database.dump"
+                dump.write_bytes(b"captured database")
+                cleanup = Mock()
+                engine = _PreservationVerifierEngine(succeeds)
+                self.namespace.update(
+                    docker=engine.docker,
+                    verification_resources=cleanup,
+                    deadline=time.monotonic() + 60,
+                )
+                with (
+                    patch.object(subprocess, "run", side_effect=engine.command),
+                    patch.object(time, "sleep"),
+                ):
+                    if succeeds:
+                        self.assertGreater(
+                            self.namespace["restore_verification"](dump, self.image), 0
+                        )
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "restore verification failed"):
+                            self.namespace["restore_verification"](dump, self.image)
+                self.assertEqual(engine.restored_bytes, dump.read_bytes())
+                self.assertFalse(engine.can_contact_external_service())
+                self.assertTrue(engine.created_volumes)
+                self.assertEqual(engine.writable_volumes, engine.created_volumes)
+                self.assertFalse(engine.host_mounts)
+                self.assertFalse(engine.published_ports)
+                self.assertFalse(engine.privileged)
+                self.assertEqual(engine.image, self.image)
+                self.assertEqual(cleanup.call_count, 2)
 
     def test_transient_exec_must_finish_and_persistent_exec_remains_held(self) -> None:
         active = {"Id": "fixture-database", "ExecIDs": ["active-exec"]}
@@ -560,6 +627,167 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             trace_id="fixture-preserving-destroy",
             observe_apply=Mock(return_value=("unknown", None, False)),
         ).adapter
+
+    def test_retry_refusal_keeps_surviving_effects_and_releases_completed_rollback(self) -> None:
+        self.complete_original()
+        for phase, preserving in (
+            ("domain_delete", True),
+            ("domain_delete", False),
+            ("compose_update", False),
+            ("rollback_complete", False),
+        ):
+            with self.subTest(phase=phase, preserving=preserving):
+                request = self.destroy.model_copy(deep=True)
+                if not preserving:
+                    request.preserve_original_reservation_id = ""
+                if phase != "domain_delete":
+                    request.apply.dry_run_plan.operation = "refresh"
+                key = f"retry-{phase}-{preserving}"
+                request.apply.dry_run_plan.compose_name += "-" + key.lower()
+                guard = Mock()
+
+                def interrupted(**kwargs: Any) -> dict[str, object]:
+                    kwargs["provider_effect_checkpoint"](phase)
+                    return {"status": "fail", "provider_effect_attempted": True}
+
+                operation = prepare_odoo_preview_apply_operation(
+                    control_plane_root=self.root,
+                    record_store=self.store,
+                    profile=self.profile,
+                    apply_request=request,
+                    issued_plan=_issued_plan(request),
+                    reservation_scope=key,
+                    idempotency_key=key,
+                    request_fingerprint=key,
+                    trace_id=key,
+                    execute_apply=interrupted,
+                    observe_apply=Mock(return_value=("absent", None, True)),
+                    pre_mutation_guard=guard,
+                )
+                with patch(
+                    "control_plane.preview_preservation.require_preview_preservation_admission"
+                ):
+                    first = operation.run(self.store)
+                    self.assertEqual(first.status, "reconcile_required")
+                    assert first.record is not None
+                    guard.side_effect = ValueError("current admission refused")
+                    if phase == "rollback_complete":
+                        with self.assertRaisesRegex(ValueError, "current admission refused"):
+                            operation.run(self.store)
+                        self.assertIsNone(
+                            self.store.read_idempotency_record_by_id(first.record.record_id)
+                        )
+                    else:
+                        retried = operation.run(self.store)
+                        self.assertEqual(retried.status, "reconcile_required")
+                        assert retried.record is not None
+                        self.assertEqual(
+                            retried.record.provider_effect_started_at,
+                            first.record.provider_effect_started_at,
+                        )
+                        self.assertEqual(retried.record.provider_effect_phase, phase)
+
+    def test_snapshot_supersession_requires_positive_custody(self) -> None:
+        original = self.store.read_original_mutation_intent(self.original)
+        request = OdooPreviewApplyEnvelope.model_validate(original["apply_request"])
+        self.profile.preview.clean_testing_snapshot = True
+        future = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat()
+        for owned in (False, True):
+            with self.subTest(owned=owned):
+                execute = Mock(
+                    return_value={
+                        "status": "pass",
+                        "operation": "refresh",
+                        "product": self.profile.product,
+                        "repository": self.profile.repository,
+                        "preview_slug": self.issued.preview_slug,
+                        "preview_url": self.issued.preview_url,
+                        "compose_id": "fixture-provider-target",
+                        "domain_host": self.issued.preview_url.removeprefix("https://"),
+                        "compose_name": self.issued.dry_run_plan.compose_name,
+                    }
+                )
+                quiescence = Mock(return_value=owned)
+                operation = prepare_odoo_preview_apply_operation(
+                    control_plane_root=self.root,
+                    record_store=self.store,
+                    profile=self.profile,
+                    apply_request=request,
+                    issued_plan=_issued_plan(request),
+                    reservation_scope="new-refresh",
+                    idempotency_key="new-refresh",
+                    request_fingerprint="new-refresh",
+                    trace_id="new-refresh",
+                    execute_apply=execute,
+                    supersession_is_quiescent=quiescence,
+                )
+                with patch.object(self.store, "_database_mutation_timestamp", return_value=future):
+                    result = operation.run(self.store)
+                self.assertTrue(quiescence.call_args.kwargs["require_snapshot_custody"])
+                current = self.store.read_idempotency_record_by_id(self.original.record_id)
+                assert current is not None
+                if owned:
+                    self.assertEqual(result.status, "completed")
+                    self.assertEqual(current.state, "completed")
+                    execute.assert_called_once()
+                else:
+                    self.assertEqual(result.status, "target_busy")
+                    self.assertNotEqual(current.state, "completed")
+                    self.assertIsNone(
+                        self.store.read_idempotency_record(
+                            scope="new-refresh",
+                            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                            idempotency_key="new-refresh",
+                        )
+                    )
+                    execute.assert_not_called()
+
+    def test_preserving_destroy_can_supersede_an_unowned_snapshot_original(self) -> None:
+        self.profile.preview.clean_testing_snapshot = True
+        future = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat()
+        execute = Mock(
+            return_value={
+                "status": "pass",
+                "operation": "destroy",
+                "product": self.profile.product,
+                "repository": self.profile.repository,
+                "preview_slug": self.issued.preview_slug,
+                "preview_url": self.issued.preview_url,
+                "domain_host": self.issued.preview_url.removeprefix("https://"),
+                "compose_id": "fixture-provider-target",
+                "compose_name": self.issued.dry_run_plan.compose_name,
+            }
+        )
+        quiescence = Mock(return_value=True)
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="preserving-destroy",
+            idempotency_key="preserving-destroy",
+            request_fingerprint="preserving-destroy",
+            trace_id="preserving-destroy",
+            execute_apply=execute,
+            supersession_is_quiescent=quiescence,
+        )
+        with (
+            patch.object(self.store, "_database_mutation_timestamp", return_value=future),
+            patch("control_plane.preview_preservation.run_preview_preservation") as preservation,
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                return_value="fixture-provider-target",
+            ),
+        ):
+            result = operation.run(self.store)
+        self.assertEqual(result.status, "completed")
+        self.assertFalse(quiescence.call_args.kwargs.get("require_snapshot_custody", False))
+        self.assertEqual(preservation.call_args.kwargs["mode"], "verify")
+        execute.assert_called_once()
+        current = self.store.read_idempotency_record_by_id(self.original.record_id)
+        assert current is not None
+        self.assertEqual(current.state, "completed")
 
     def test_only_qualified_preservation_phase_can_resume_original_execution(self) -> None:
         from control_plane.preview_preservation import PREVIEW_PRESERVATION_CAPTURE_PHASE

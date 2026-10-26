@@ -115,6 +115,53 @@ def preview_attempt_binding(project, database, volumes, snapshot):
         binding['volume_backings'][role] = {'created_at': created, 'path': str(backing),
             'device': metadata.st_dev, 'inode': metadata.st_ino}
     return binding
+
+
+def preview_restore_attempt(project, database, volumes, snapshot, root):
+    binding = preview_attempt_binding(project, database, volumes, snapshot)
+    attempt_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
+    path = root / 'preview-attempts' / (attempt_id + '.json')
+    previous = None
+    if path.exists() or path.is_symlink():
+        if (path.is_symlink() or not path.is_file() or path.stat().st_size > 8192
+            or path.parent.resolve(strict=True) != path.parent.absolute()):
+            raise RuntimeError('Preview restore attempt custody is invalid')
+        previous = json.loads(path.read_text())
+        if previous.get('binding') != binding or type(previous.get('completed')) is not bool:
+            raise RuntimeError('Preview restore attempt belongs to another target')
+        snapshot = previous['snapshot']
+    witness = hashlib.sha256(json.dumps(['preview-restore-v1', attempt_id, snapshot['snapshot_id']]).encode()).hexdigest()
+    if previous is not None and previous.get('restore_witness') != witness:
+        raise RuntimeError('Preview restore attempt witness differs')
+    return {'binding': binding, 'attempt_id': attempt_id, 'path': path, 'previous': previous,
+        'snapshot': snapshot, 'witness': witness}
+
+
+def preview_restore_database_custody(container, database, parameter, attempt):
+    if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}', database):
+        raise RuntimeError('Invalid preview database identity')
+    present = docker('exec', '-i', container, 'sh', '-c',
+        'psql -X -qAt -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
+        '_', database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
+    previous = attempt['previous'] if attempt is not None else None
+    if present not in {'0', '1'} or present == '1' and previous is None:
+        raise RuntimeError('An existing preview database cannot be overwritten by a snapshot')
+    restart = False
+    if present == '1':
+        probe = ['exec', '-i', container, 'sh', '-c',
+            'psql -X -qAt -v ON_ERROR_STOP=1 -v marker="$2" -U "$POSTGRES_USER" -d "$1"',
+            '_', database, parameter]
+        table = docker(*probe, stdin=b"SELECT to_regclass('public.ir_config_parameter') IS NOT NULL;\n").decode().strip()
+        if table not in {'t', 'f'}:
+            raise RuntimeError('Preview restore witness inspection is ambiguous')
+        stored = docker(*probe, stdin=b"SELECT value FROM ir_config_parameter WHERE key=:'marker';\n").decode().strip() if table == 't' else ''
+        if stored != attempt['witness']:
+            if previous.get('completed') is not False or stored not in {'', attempt['snapshot']['snapshot_id']}:
+                raise RuntimeError('Preserve preview data without this attempt restore witness')
+            restart = True
+    if present == '0' and previous is not None and previous.get('completed'):
+        raise RuntimeError('A completed preview lost its database; preserve its retained data')
+    return {'present': present, 'restart': restart}
 """
 )
 
@@ -135,8 +182,13 @@ def prepare_preview_filestore(
     dispatch_guard: Callable[[Callable[[], None]], None],
 ) -> dict[str, object] | None:
     from control_plane.dokploy import native_copy_stream
+    from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
     from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 
+    if snapshot is not None and snapshot.server_id != server_id:
+        raise click.ClickException(
+            "The preview and clean snapshot require the same execution server."
+        )
     frames: list[dict[str, object]] = []
     native_copy_stream._read_remote(
         host=host,
@@ -148,6 +200,7 @@ def prepare_preview_filestore(
             "data_volume": data_volume,
             "volumes": {"data": data_volume, "database": database_volume, "logs": logs_volume},
             "database_name": database_name,
+            "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
             "snapshot": snapshot.model_dump(mode="json") if snapshot else None,
             "apply": apply,
             "require_existing": require_existing,
@@ -186,8 +239,8 @@ import sys
 inherited_lock_descriptors = ()
 
 
-def docker(*arguments):
-    result = subprocess.run(['docker', *arguments], capture_output=True, check=True, timeout=30,
+def docker(*arguments, stdin=None):
+    result = subprocess.run(['docker', *arguments], input=stdin, capture_output=True, check=True, timeout=30,
         pass_fds=inherited_lock_descriptors)
     return result.stdout
 
@@ -225,33 +278,6 @@ def prepare(spec):
             inherited_lock_descriptors = ()
 
 
-def read_prepared_attempt(spec, root, names):
-    if not set(spec['volumes'].values()) <= names:
-        return None
-    binding = preview_attempt_binding(spec['project'], spec['database_name'], spec['volumes'], spec['snapshot'])
-    attempt_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
-    path = root / 'preview-attempts' / (attempt_id + '.json')
-    if not path.exists():
-        return None
-    if path.is_symlink() or path.stat().st_size > 8192 or path.parent.resolve(strict=True) != path.parent.absolute():
-        raise RuntimeError('Preview restore attempt custody is invalid')
-    previous = json.loads(path.read_text())
-    if previous.get('binding') != binding:
-        raise RuntimeError('Preview restore attempt belongs to another target')
-    snapshot = previous['snapshot']
-    witness = hashlib.sha256(json.dumps(['preview-restore-v1', attempt_id, snapshot['snapshot_id']]).encode()).hexdigest()
-    if previous.get('restore_witness') != witness:
-        raise RuntimeError('Preview restore attempt witness differs')
-    return previous
-
-
-def preview_database_value(container, database, parameter, sql):
-    result = subprocess.run(['docker', 'exec', '-i', container, 'sh', '-c',
-        'psql -X -qAt -v ON_ERROR_STOP=1 -v marker="$2" -v database_name="$3" -U "$POSTGRES_USER" -d "$1"',
-        '_', database, parameter, database], input=sql, capture_output=True, check=True, timeout=30,
-        pass_fds=inherited_lock_descriptors)
-    return result.stdout.decode().strip()
-
 
 def prepare_locked(spec, root):
     project, data_name, database = (spec[key] for key in ('project', 'data_volume', 'database_name'))
@@ -259,15 +285,19 @@ def prepare_locked(spec, root):
     name = data_name + '-filestore'
     with (root / 'snapshot.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_SH)
+        declaration = None
         if name in names:
             volume, _, _, _ = inspect_preview_filestore(data_name, project)
-            return {'name': name, 'driver': 'local', 'driver_opts': volume['Options'],
+            declaration = {'name': name, 'driver': 'local', 'driver_opts': volume['Options'],
                 'labels': {'io.launchplane.preview-snapshot': volume['Labels']['io.launchplane.preview-snapshot']}}
-        previous = read_prepared_attempt(spec, root, names)
+            if spec['snapshot'] is None:
+                return declaration
+        attempt = preview_restore_attempt(project, database, spec['volumes'], spec['snapshot'], root) if set(spec['volumes'].values()) <= names else None
+        previous = attempt['previous'] if attempt is not None else None
         owned = previous is not None and previous.get('completed') is False
-        if previous is not None and previous.get('completed'):
+        if declaration is None and previous is not None and previous.get('completed'):
             raise RuntimeError('Retained preview overlay is missing')
-        snapshot = previous['snapshot'] if owned else spec['snapshot']
+        snapshot = attempt['snapshot'] if attempt is not None else spec['snapshot']
         identifiers = preview_docker_text('ps', '-aq', '--no-trunc').splitlines()
         containers = []
         if identifiers:
@@ -281,35 +311,40 @@ def prepare_locked(spec, root):
                 or not set(found).issubset(identifiers)
                 or not result.returncode and set(found) != set(identifiers)):
                 raise RuntimeError('Preview container inventory is incomplete')
+        databases = []
         for container in containers:
             labels = container.get('Config', {}).get('Labels') or {}
             if any(mount.get('Name') in spec['volumes'].values() for mount in container.get('Mounts', [])) and labels.get('com.docker.compose.project') != project:
                 raise RuntimeError('Preview backing has another consumer')
-            if labels.get('com.docker.compose.project') != project or labels.get('com.docker.compose.service') != 'database':
-                continue
-            result = subprocess.run(['docker', 'exec', '-i', container['Id'], 'sh', '-c',
-                'psql -X -qAt -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres', '_', database],
-                input=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n", capture_output=True, check=True, timeout=30,
-                pass_fds=inherited_lock_descriptors)
-            present = result.stdout.decode().strip()
-            if present == '1':
-                if not owned:
-                    if spec.get('require_existing'):
-                        raise RuntimeError('Retained preview overlay is missing')
-                    return None
-                table = preview_database_value(container['Id'], database, '', b"SELECT to_regclass('public.ir_config_parameter') IS NOT NULL;\n")
-                if table not in {'t', 'f'}:
-                    raise RuntimeError('Preview witness custody is unavailable')
-                witness = preview_database_value(container['Id'], database, spec['copy_witness_parameter'],
-                    b"SELECT value FROM ir_config_parameter WHERE key=:'marker';\n") if table == 't' else ''
-                if witness not in {'', snapshot['snapshot_id'], previous['restore_witness']}:
-                    raise RuntimeError('Preserve a foreign preview database witness')
-                if witness == previous['restore_witness']:
-                    if spec.get('require_existing'):
-                        raise RuntimeError('Retained preview overlay is missing')
-                    return None
-            elif present != '0':
+            if labels.get('com.docker.compose.project') == project and labels.get('com.docker.compose.service') == 'database':
+                databases.append(container)
+        if len(databases) > 1:
+            raise RuntimeError('Preview database custody is ambiguous')
+        if databases:
+            mounts = databases[0].get('Mounts', [])
+            if (len(mounts) != 1 or mounts[0].get('Type') != 'volume'
+                or mounts[0].get('Name') != spec['volumes']['database']
+                or mounts[0].get('Destination') != spec['database_data_directory']
+                or spec['volumes']['database'] not in names
+                or attempt is not None and mounts[0].get('Source') != attempt['binding']['volume_backings']['database']['path']):
+                raise RuntimeError('Preview database physical binding differs')
+            custody = preview_restore_database_custody(databases[0]['Id'], database,
+                spec['copy_witness_parameter'], attempt)
+            if declaration is None and custody['present'] == '1' and not custody['restart']:
+                if spec.get('require_existing'):
+                    raise RuntimeError('Retained preview overlay is missing')
+                return None
+        elif previous is not None and previous.get('completed'):
+            raise RuntimeError('A completed preview lost its database; preserve its retained data')
+        elif spec['volumes']['database'] in names:
+            backing = json.loads(docker('volume', 'inspect', spec['volumes']['database']))[0]
+            if any(Path(backing['Mountpoint']).iterdir()):
                 raise RuntimeError('Preview database custody is unavailable')
+        if declaration is not None:
+            if previous is None:
+                _, _, _, private = inspect_preview_filestore(data_name, project)
+                require_unused_preview_upper(private)
+            return declaration
         data, lower, private, options = preview_filestore_layout(data_name, project, snapshot['snapshot_id'], allow_missing=True)
         filestore = Path(data['Mountpoint']) / 'filestore'
         if filestore.is_symlink() or filestore.exists() and any(filestore.iterdir()) and not owned:

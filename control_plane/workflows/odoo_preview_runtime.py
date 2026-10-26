@@ -1311,6 +1311,7 @@ def odoo_preview_target_is_quiescent(
     request: OdooPreviewDokployApplyRequest,
     database_url: str | None,
     schedule_binding: dokploy_post_deploy.ComposeDataWorkflowBinding | None = None,
+    require_snapshot_custody: bool = False,
 ) -> bool:
     plan = request.dry_run_plan
     if not plan.compose_ref:
@@ -1361,6 +1362,29 @@ def odoo_preview_target_is_quiescent(
             )
         ):
             return False
+        if require_snapshot_custody:
+            if plan.clean_snapshot is None:
+                return False
+            from control_plane.preview_filestore import prepare_preview_filestore
+            from control_plane.odoo_preview_resources import preview_resource_environment
+
+            target = dokploy_api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type="compose", target_id=compose_id
+            )
+            environment = preview_resource_environment(plan.compose_name)
+            prepare_preview_filestore(
+                host=host,
+                token=token,
+                server_id=str(target.get("serverId") or ""),
+                project=str(target.get("appName") or ""),
+                data_volume=environment["ODOO_DATA_VOLUME"],
+                database_volume=environment["ODOO_DB_VOLUME"],
+                logs_volume=environment["ODOO_LOG_VOLUME"],
+                database_name=environment["ODOO_DB_NAME"],
+                snapshot=plan.clean_snapshot,
+                apply=False,
+                dispatch_guard=lambda dispatch: dispatch(),
+            )
         if schedule_binding is not None:
             current_binding = dokploy_post_deploy.compose_data_workflow_binding(
                 host=host,
