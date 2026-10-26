@@ -940,8 +940,11 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     observe_apply=Mock(return_value=("absent", None, True)),
                     pre_mutation_guard=guard,
                 )
-                with patch(
-                    "control_plane.preview_preservation.require_preview_preservation_admission"
+                with (
+                    patch(
+                        "control_plane.preview_preservation.require_preview_preservation_admission"
+                    ),
+                    patch("control_plane.preview_preservation.run_preview_preservation"),
                 ):
                     first = operation.run(self.store)
                     self.assertEqual(first.status, "reconcile_required")
@@ -1101,21 +1104,26 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
 
         assert self.issued.plan_provenance is not None
         after_expiry = self.issued.plan_provenance.expires_at + timedelta(seconds=1)
-        for phase, changed in (
-            (None, False),
-            ("domain_delete", False),
-            (PREVIEW_PRESERVATION_CAPTURE_PHASE, False),
-            (PREVIEW_PRESERVATION_CAPTURE_PHASE, True),
+        for phase, changed, safe_retry in (
+            (None, False, False),
+            ("domain_delete", False, False),
+            ("domain_delete", False, True),
+            (PREVIEW_PRESERVATION_CAPTURE_PHASE, False, False),
+            (PREVIEW_PRESERVATION_CAPTURE_PHASE, True, False),
         ):
-            inspected = phase == PREVIEW_PRESERVATION_CAPTURE_PHASE
-            with self.subTest(phase=phase, changed=changed):
+            inspected = phase == PREVIEW_PRESERVATION_CAPTURE_PHASE or safe_retry
+            with self.subTest(phase=phase, changed=changed, safe_retry=safe_retry):
                 adapter = self.adapter()
+                if safe_retry:
+                    adapter._observe_apply = Mock(return_value=("absent", None, True))
                 current = self.issued.model_copy(deep=True)
                 if changed:
                     current.dry_run_plan.compose_ref = "changed-provider-target"
                 reached_execution = RuntimeError("current authority accepted")
                 with (
-                    patch("control_plane.preview_preservation.run_preview_preservation"),
+                    patch(
+                        "control_plane.preview_preservation.run_preview_preservation"
+                    ) as preservation,
                     patch.object(preview_http, "datetime", wraps=datetime) as clock,
                     patch.object(
                         preview_http, "_build_odoo_preview_apply_inputs", return_value=current
@@ -1134,6 +1142,11 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                             "fixture-reconciliation",
                         )
                         self.assertEqual(observation.retry_safe, inspected)
+                        if inspected:
+                            self.assertEqual(
+                                preservation.call_args.kwargs["mode"],
+                                "verify" if safe_retry else "inspect",
+                            )
                     if inspected and not changed:
                         with self.assertRaises(RuntimeError) as raised:
                             adapter.apply("fixture-key", Mock(spec=ProviderOperationLease))

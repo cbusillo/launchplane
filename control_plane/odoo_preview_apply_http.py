@@ -398,10 +398,6 @@ def refresh_odoo_preview_issued_plan(
     observed_at: datetime | None = None,
     continuing_preservation: bool = False,
 ) -> OdooPreviewApplyEnvelope:
-    if continuing_preservation and (
-        not request.preserve_original_reservation_id or issued_plan.operation != "destroy"
-    ):
-        raise ValueError("Only an inspected original preservation can continue its plan.")
     provenance = issued_plan.plan_provenance
     if provenance is None:
         raise OdooPreviewPlanProvenanceError(

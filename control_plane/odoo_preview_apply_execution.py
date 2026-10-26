@@ -245,10 +245,13 @@ class OdooPreviewProviderMutationAdapter:
             )
             from control_plane.storage.postgres import PostgresRecordStore
 
-            if (
-                self._apply_request.preserve_original_reservation_id
-                and provider_effect_phase in PREVIEW_PRESERVATION_PHASES
+            capture_retry = (
+                provider_effect_phase in PREVIEW_PRESERVATION_PHASES
                 and observation_outcome != "present"
+            )
+            verified_retry = observation_outcome == "absent" and retry_safe
+            if self._apply_request.preserve_original_reservation_id and (
+                capture_retry or verified_retry
             ):
                 run_preview_preservation(
                     store=cast(PostgresRecordStore, self._record_store),
@@ -257,7 +260,7 @@ class OdooPreviewProviderMutationAdapter:
                     original_reservation_id=self._apply_request.preserve_original_reservation_id,
                     operation_record_id=self._deployment_record_id,
                     control_plane_root=self._control_plane_root,
-                    mode="inspect",
+                    mode="inspect" if capture_retry else "verify",
                     timeout_seconds=self._apply_request.apply.timeout_seconds,
                     check=self.execution_check,
                 )
