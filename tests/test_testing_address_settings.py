@@ -3,6 +3,7 @@ from contextlib import redirect_stdout
 import io
 import itertools
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -549,6 +550,25 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         status, frame = self.run_program()
         self.assertEqual(status, 0, frame)
         self.assertTrue(frame["canonical_settings_verified"])
+
+    def test_gate_replaces_a_retained_readonly_marker_before_independent_readback(self) -> None:
+        self.gate.write_text("retained-payload")
+        original_open = Path.open
+
+        def open_marker(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+            if path == self.gate and any(flag in mode for flag in ("w", "a", "+", "x")):
+                raise PermissionError("The retained marker belongs to another user")
+            return original_open(path, mode, *args, **kwargs)
+
+        with patch.object(Path, "open", open_marker):
+            status, frame = self.run_program()
+        self.assertEqual(status, 0, frame)
+        self.native.spec["inspection_only"] = True
+        self.native.spec["canonical_settings"]["mode"] = "observe"
+        status, frame = self.run_program()
+        self.assertEqual(status, 0, frame)
+        self.assertTrue(frame["canonical_gate_released"])
+        self.assertFalse(frame["canonical_settings_verified"])
 
     def test_unqualified_copy_or_connections_never_release_the_gate(self) -> None:
         for refusal in ("network", "integration", "copy", "website", "read-route"):
