@@ -917,6 +917,8 @@ OutboxDeliveryCompletionStatus = Literal[
     "not_running",
     "owner_mismatch",
     "lease_expired",
+    "summary_already_covered",
+    "notification_state_changed",
 ]
 
 
@@ -8316,6 +8318,53 @@ class PostgresRecordStore(HumanSessionStore):
             filters=(LaunchplaneOutboxDeliveryRow.delivery_id == delivery_id,),
         )
 
+    def _latest_discord_summary(
+        self,
+        session: Session,
+        *,
+        policy_id: str,
+        destination_id: str,
+        exclude_delivery_id: str = "",
+    ) -> OutboxDeliveryRecord | None:
+        from control_plane.discord_incident_summary import SUMMARY_AGGREGATE_TYPE
+
+        row = session.scalar(
+            select(LaunchplaneOutboxDeliveryRow)
+            .where(
+                LaunchplaneOutboxDeliveryRow.kind == "public_ingress_notification",
+                LaunchplaneOutboxDeliveryRow.aggregate_type == SUMMARY_AGGREGATE_TYPE,
+                LaunchplaneOutboxDeliveryRow.aggregate_id == policy_id,
+                LaunchplaneOutboxDeliveryRow.delivery_id != exclude_delivery_id,
+                LaunchplaneOutboxDeliveryRow.payload["payload"]["destination_id"].as_string()
+                == destination_id,
+                or_(
+                    LaunchplaneOutboxDeliveryRow.action == "posted_discord_summary",
+                    LaunchplaneOutboxDeliveryRow.provider_operation_key != "",
+                ),
+            )
+            .order_by(
+                LaunchplaneOutboxDeliveryRow.payload["payload"]["send_window"].as_integer().desc(),
+                LaunchplaneOutboxDeliveryRow.delivery_id.desc(),
+            )
+            .limit(1)
+        )
+        return (
+            self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
+            if row
+            else None
+        )
+
+    def read_latest_discord_summary(
+        self, *, policy_id: str, destination_id: str, exclude_delivery_id: str = ""
+    ) -> OutboxDeliveryRecord | None:
+        with self._session_factory() as session:
+            return self._latest_discord_summary(
+                session,
+                policy_id=policy_id,
+                destination_id=destination_id,
+                exclude_delivery_id=exclude_delivery_id,
+            )
+
     def list_outbox_delivery_records(
         self,
         *,
@@ -8324,6 +8373,7 @@ class PostgresRecordStore(HumanSessionStore):
         aggregate_type: str = "",
         aggregate_id: str = "",
         limit: int | None = None,
+        newest_first: bool = False,
     ) -> tuple[OutboxDeliveryRecord, ...]:
         filters: list[object] = []
         if states:
@@ -8339,8 +8389,12 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneOutboxDeliveryRow,
             filters=filters,
             order_by=(
-                LaunchplaneOutboxDeliveryRow.created_at.asc(),
-                LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
+                LaunchplaneOutboxDeliveryRow.updated_at.desc()
+                if newest_first
+                else LaunchplaneOutboxDeliveryRow.created_at.asc(),
+                LaunchplaneOutboxDeliveryRow.delivery_id.desc()
+                if newest_first
+                else LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
             ),
             limit=limit,
         )
@@ -8388,7 +8442,7 @@ class PostgresRecordStore(HumanSessionStore):
             destination = record.payload.get("destination")
             if not isinstance(attempt, dict) or not isinstance(destination, dict):
                 continue
-            if destination.get("kind") not in {"email", "discord"}:
+            if destination.get("kind") != "email":
                 continue
             group_key = (
                 record.aggregate_id,
@@ -8593,6 +8647,65 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             if current_record.lease_expires_at <= observed_at:
                 return OutboxDeliveryCompletionResult(status="lease_expired", record=current_record)
+            if not require_terminal and updates.get("provider_operation_key"):
+                from control_plane.discord_incident_summary import (
+                    SUMMARY_AGGREGATE_TYPE,
+                    summary_covers,
+                )
+
+                if record.aggregate_type == SUMMARY_AGGREGATE_TYPE:
+                    previous = self._latest_discord_summary(
+                        session,
+                        policy_id=record.aggregate_id,
+                        destination_id=str(record.payload["destination_id"]),
+                        exclude_delivery_id=record.delivery_id,
+                    )
+                    if summary_covers(previous, record):
+                        session.commit()
+                        return OutboxDeliveryCompletionResult(
+                            status="summary_already_covered", record=current_record
+                        )
+            if (
+                not require_terminal
+                and updates.get("provider_operation_key")
+                and updates.get("provider_id") == "discord"
+                and record.kind == "public_ingress_notification"
+            ):
+                states = record.payload.get("incident_states")
+                if not isinstance(states, list) or not states:
+                    raise ValueError("Discord admission requires rendered incident states.")
+                incident_statement = (
+                    select(LaunchplanePublicIngressIncidentRow)
+                    .where(
+                        LaunchplanePublicIngressIncidentRow.incident_id.in_(
+                            [value[0] for value in states]
+                        )
+                    )
+                    .order_by(LaunchplanePublicIngressIncidentRow.incident_id)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    incident_statement = incident_statement.with_for_update()
+                current = [
+                    PublicIngressIncidentRecord.model_validate(value.payload)
+                    for value in session.scalars(incident_statement)
+                ]
+                active_states = [
+                    [value.incident_id, value.material_fingerprint_sha256]
+                    for value in current
+                    if value.status == "open" and value.notification_state == "active"
+                ]
+                attempt = record.payload.get("attempt")
+                event_id = attempt.get("incident_event_id") if isinstance(attempt, dict) else None
+                stale_event = record.aggregate_type == "public_ingress_incident" and any(
+                    value.latest_material_event in {"opened", "updated"}
+                    and value.latest_material_event_id != event_id
+                    for value in current
+                )
+                if stale_event or any(value not in active_states for value in states):
+                    session.commit()
+                    return OutboxDeliveryCompletionResult(
+                        status="notification_state_changed", record=current_record
+                    )
             next_updates = dict(updates)
             if not _string_value(next_updates.get("updated_at") or "").strip():
                 next_updates["updated_at"] = observed_at
@@ -30582,14 +30695,24 @@ class PostgresRecordStore(HumanSessionStore):
         expected_route_binding_sha256: str = "",
         expected_provider_hold_snapshot: ProviderHoldLaneSnapshot | None = None,
     ) -> PublicIngressTransitionWriteResult:
+        from control_plane.discord_incident_summary import (
+            SUMMARY_AGGREGATE_TYPE,
+            build_discord_incident_summary_delivery,
+        )
+
         check_token = canonical_health_check_record_token(observation.check_name)
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if expected_provider_hold_snapshot is not None:
-                if not self.database_url.startswith("sqlite"):
-                    from control_plane.service_deploy_drain import lock
+            if not self.database_url.startswith("sqlite") and (
+                expected_provider_hold_snapshot is not None
+                or any(
+                    value.aggregate_type == SUMMARY_AGGREGATE_TYPE for value in outbox_deliveries
+                )
+            ):
+                from control_plane.service_deploy_drain import lock
 
-                    lock(self, session)
+                lock(self, session)
+            if expected_provider_hold_snapshot is not None:
                 if not self._lock_odoo_stable_lane(
                     session,
                     product=observation.product,
@@ -30774,6 +30897,17 @@ class PostgresRecordStore(HumanSessionStore):
                 session.merge(observation_row)
                 session.commit()
                 return PublicIngressTransitionWriteResult(status="incident_changed")
+            enqueued_at = self._database_mutation_timestamp(session)
+            outbox_deliveries = tuple(
+                build_discord_incident_summary_delivery(
+                    policy_id=delivery.aggregate_id,
+                    destination_id=str(delivery.payload["destination_id"]),
+                    created_at=enqueued_at,
+                )
+                if delivery.aggregate_type == SUMMARY_AGGREGATE_TYPE
+                else delivery
+                for delivery in outbox_deliveries
+            )
             self._lock_outbox_dedupe_keys(
                 session,
                 dedupe_keys=tuple(delivery.dedupe_key for delivery in outbox_deliveries),

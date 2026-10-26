@@ -1,4 +1,5 @@
 import asyncio
+from control_plane.contracts.secret_record import SecretRecord
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -1157,6 +1158,17 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             kind="discord",
             discord_webhook_secret="existing-channel",
         )
+        self.store.write_secret_record(
+            SecretRecord(
+                secret_id="existing-channel",
+                scope="global",
+                integration="discord",
+                name="monitor",
+                current_version_id="test-version",
+                created_at=self.reservation.created_at,
+                updated_at=self.reservation.updated_at,
+            )
+        )
         self.store.write_public_ingress_notification_policy_record(
             PublicIngressNotificationPolicyRecord(
                 policy_id="existing-notifications",
@@ -1196,7 +1208,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             record=queued[0],
             drivers=drivers,
             record_store=self.store,
-            mark_provider_started=lambda _key, _provider: None,
+            mark_provider_started=lambda _record, _key, _provider: None,
         )
         self.assertEqual(delivery.state, "delivered")
         self.assertTrue(posts)

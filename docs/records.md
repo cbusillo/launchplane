@@ -1647,6 +1647,43 @@ the original opening effect completed before its attempt record committed.
 Delivery attempts are the idempotency boundary for notifications, while incident
 records remain the source of truth for active public-ingress state.
 
+Discord pages only new critical incidents and material critical changes. Warnings
+and unchanged reminders use a plain-text, mention-free summary grouped by product,
+lane, check kind and failure code. Summaries reuse the notification outbox with
+aggregate type `public_ingress_discord_summary`, one record per policy,
+destination and fixed five-minute send window. A burst queues for its next
+boundary using its database enqueue time, so a slow probe cannot join an already
+sent batch; later observations cannot move that deadline. Overdue windows fold
+into one current window before a send attempt; retries retain their original
+identity, backoff and attempt budget. A new critical condition still pages at once.
+
+Before delivery, both paths re-read current state. Cleared incidents and obsolete
+material alerts are superseded. Discord uses the event-bound material state and
+final admission check instead of the old startup-backlog message rewrite. Email
+retains its existing backlog compaction. Summaries render current conditions and compare
+them with the latest posted or provider-started snapshot, ordered by send window.
+An older window cannot post after a newer one starts. Changing the destination
+secret identity starts coverage for that destination; rotating a version under
+the same secret identity does not replay unknown effects.
+An empty, unchanged or subset snapshot sends nothing; clearing a condition alone
+does not re-post those that remain. A returning material state and an expired
+silence can appear in a later window. Silenced and acknowledged
+conditions are excluded. Lane-scoped destinations summarize only the conditions
+their managed secret covers. Routing revisions can retry previously unavailable
+destinations in a later window. The rendered snapshot is persisted atomically
+with its provider marker. Final coverage and current open/active incident-state
+checks run under the existing database write lock and incident row locks to prevent adjacent-window workers duplicating one state. Summary
+receipts live in the outbox independently of per-incident attempt records. Global
+outbox inspection gives active work and newest failures separate bounded slots,
+including their error codes; critical
+delivery failures also remain visible in the owning incident detail.
+An interrupted Discord summary retains its send
+marker and cannot replay an unknown provider effect. DNS and connection failures
+before any request bytes, and explicit rate-limit refusals, may retry. Discord
+reminder cadence no longer repeats the same material state after it was summarized.
+Notification routing never changes measured health, incident
+severity, acknowledgement, resolution or provider-operation fences.
+
 ## Every Code Feedback Resume Evidence
 
 Status: Every Code is retired in [DIRECTION.md](../DIRECTION.md). Historical
