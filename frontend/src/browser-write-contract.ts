@@ -1,4 +1,6 @@
 import type {
+  ApplyPromotionRecoveryData,
+  DryRunPromotionRecoveryData,
   RuntimeSettingRemovalData,
   ApplyTestingHoldData,
   SetupDokployTargetData,
@@ -43,6 +45,8 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  promotionRecoveryReview: "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/dry-run" satisfies DryRunPromotionRecoveryData["url"],
+  promotionRecoveryApply: "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/apply" satisfies ApplyPromotionRecoveryData["url"],
   runtimeSettingRemoval: "/v1/admin/runtime-settings/removal" satisfies RuntimeSettingRemovalData["url"],
   testingHoldApply: "/v1/product-config/testing-hold/apply" satisfies ApplyTestingHoldData["url"],
   domainAuthorityRepair: "/v1/dokploy-targets/setup" satisfies SetupDokployTargetData["url"],

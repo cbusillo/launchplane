@@ -1204,3 +1204,30 @@ export async function removeRuntimeSettings(
   );
   return validateRemovalResponse(response, payload);
 }
+
+export interface PromotionRecoveryTarget {
+  product: string;
+  decisionRecordId: string;
+  attempt: 1 | 2;
+  step: "promote" | "rollback";
+}
+
+function promotionRecoveryPath(target: PromotionRecoveryTarget, path = "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}"): string {
+  return path.replace("{product}", encodeURIComponent(target.product)).replace("{decision_record_id}", encodeURIComponent(target.decisionRecordId));
+}
+
+function promotionRecoveryQuery(target: PromotionRecoveryTarget): string {
+  return `?${new URLSearchParams({ attempt: String(target.attempt), step: target.step })}`;
+}
+
+export function readPromotionRecovery(target: PromotionRecoveryTarget): Promise<import("./generated/openapi.ts").PromotionRecoveryPlan> {
+  return requestJson(promotionRecoveryPath(target) + promotionRecoveryQuery(target));
+}
+
+export function reviewPromotionRecovery(target: PromotionRecoveryTarget, reason: string): Promise<import("./generated/openapi.ts").PromotionRecoveryPlan> {
+  return requestJson(promotionRecoveryPath(target, BROWSER_WRITE_ROUTES.promotionRecoveryReview) + promotionRecoveryQuery(target), "POST", { reason });
+}
+
+export function applyPromotionRecovery(target: PromotionRecoveryTarget, body: import("./generated/openapi.ts").PromotionRecoveryApply): Promise<import("./generated/openapi.ts").PromotionRecoveryApplied> {
+  return requestJson(promotionRecoveryPath(target, BROWSER_WRITE_ROUTES.promotionRecoveryApply) + promotionRecoveryQuery(target), "POST", body);
+}
