@@ -35,6 +35,35 @@ def _is_red(payload: dict[str, object]) -> bool:
 
 
 class DirectNotificationOutboxTests(unittest.TestCase):
+    def test_recovery_waits_for_inflight_failure_without_consuming_its_budget(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            store.write_public_ingress_notification_policy_record(
+                _notification_policy(self._destination("email"))
+            )
+            sent: list[object] = []
+
+            def send(_destination: object, message: object) -> None:
+                if not sent:
+                    self._probe(store, 200, "2026-05-29T12:00:02Z")
+                    result = self._work(store, drivers, "2026-05-29T12:00:03Z")
+                    self.assertEqual(result.status, "idle")
+                    pending = store.list_outbox_delivery_records(states=("pending",))
+                    self.assertTrue(pending)
+                    self.assertTrue(all(row.attempt == 0 for row in pending))
+                sent.append(message)
+
+            drivers = PublicIngressNotificationDriverSet(
+                email_sender=send, secret_resolver=lambda _name: "mock-credential"
+            )
+            self._probe(store, 503, "2026-05-29T12:00:00Z")
+            self._work(store, drivers, "2026-05-29T12:00:01Z")
+            self._work(store, drivers, "2026-05-29T12:00:04Z")
+            self.assertEqual(len(sent), 2)
+
     def test_startup_keeps_critical_alert_and_deduplicates_unchanged_reminder_summary(self) -> None:
         store = self._backlog_store()
         self._probe(store, 503, "2026-05-29T12:00:00Z")
@@ -267,6 +296,19 @@ class DirectNotificationOutboxTests(unittest.TestCase):
                 self.assertEqual(len(attempts), 1)
                 self.assertEqual(attempts[0].delivery_status, "delivered")
                 self.assertEqual(store.list_public_ingress_incident_records()[0].status, "open")
+                incident = store.list_public_ingress_incident_records()[0]
+                store.write_public_ingress_incident_record(
+                    incident.model_copy(update={"notification_state": "acknowledged"})
+                )
+                self._probe(store, 200, "2026-05-29T12:04:00Z")
+                self.assertEqual(
+                    self._work(store, drivers, "2026-05-29T12:04:01Z").status, "delivered"
+                )
+                self.assertEqual(len(sent), 2)
+                resolved = store.list_public_ingress_notification_attempt_records(event="resolved")
+                self.assertEqual(len(resolved), 1)
+                self.assertEqual(resolved[0].delivery_status, "delivered")
+                self.assertEqual(self._work(store, drivers, "2026-05-29T12:05:01Z").status, "idle")
                 store.close()
 
     def test_interrupted_send_is_explicitly_uncertain_and_not_resent(self) -> None:

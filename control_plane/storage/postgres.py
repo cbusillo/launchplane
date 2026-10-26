@@ -5763,6 +5763,14 @@ class PostgresRecordStore(HumanSessionStore):
                     json.dumps(preview_material, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest()
             )
+        active_profiles = {profile.product: profile for profile in profiles}
+        for incident in self.list_public_ingress_incident_records(status="open"):
+            active_profile = active_profiles.get(incident.product)
+            if active_profile is not None and incident.instance in {"prod", "testing"}:
+                revisions.setdefault(
+                    (incident.product, incident.context, incident.instance),
+                    product_profile_record_sha256(active_profile),
+                )
         return revisions
 
     def __del__(self) -> None:
@@ -8499,9 +8507,35 @@ class PostgresRecordStore(HumanSessionStore):
                 observed_at=observed_at,
                 lease_seconds=lease_seconds,
             )
+            predecessor = aliased(LaunchplaneOutboxDeliveryRow)
+            notification_payload = LaunchplaneOutboxDeliveryRow.payload["payload"]
+            predecessor_payload = predecessor.payload["payload"]
+            unsettled_failure = (
+                select(predecessor.delivery_id)
+                .where(
+                    predecessor.kind == "public_ingress_notification",
+                    predecessor.aggregate_type == "public_ingress_incident",
+                    predecessor.aggregate_id == LaunchplaneOutboxDeliveryRow.aggregate_id,
+                    predecessor.state.in_(("pending", "running", "reconcile_required")),
+                    predecessor_payload["attempt"]["event"].as_string() != "resolved",
+                    predecessor_payload["attempt"]["policy_id"].as_string()
+                    == notification_payload["attempt"]["policy_id"].as_string(),
+                    predecessor_payload["destination"]["destination_id"].as_string()
+                    == notification_payload["destination"]["destination_id"].as_string(),
+                    predecessor_payload["destination"]["kind"].as_string()
+                    == notification_payload["destination"]["kind"].as_string(),
+                )
+                .exists()
+            )
+            recovery_notification = and_(
+                LaunchplaneOutboxDeliveryRow.kind == "public_ingress_notification",
+                LaunchplaneOutboxDeliveryRow.aggregate_type == "public_ingress_incident",
+                notification_payload["attempt"]["event"].as_string() == "resolved",
+            )
             statement = (
                 select(LaunchplaneOutboxDeliveryRow)
                 .where(
+                    or_(~recovery_notification, ~unsettled_failure),
                     LaunchplaneOutboxDeliveryRow.state.in_(
                         ("pending", "running", "reconcile_required")
                     ),
@@ -8689,12 +8723,21 @@ class PostgresRecordStore(HumanSessionStore):
                     PublicIngressIncidentRecord.model_validate(value.payload)
                     for value in session.scalars(incident_statement)
                 ]
+                from control_plane.workflows.public_ingress_monitor import (
+                    is_matching_incident_resolution,
+                )
+
+                attempt = record.payload.get("attempt")
                 active_states = [
                     [value.incident_id, value.material_fingerprint_sha256]
                     for value in current
-                    if value.status == "open" and value.notification_state == "active"
+                    if (value.notification_state == "active" and value.status == "open")
+                    or (
+                        record.aggregate_type == "public_ingress_incident"
+                        and isinstance(attempt, dict)
+                        and is_matching_incident_resolution(value, attempt)
+                    )
                 ]
-                attempt = record.payload.get("attempt")
                 event_id = attempt.get("incident_event_id") if isinstance(attempt, dict) else None
                 stale_event = record.aggregate_type == "public_ingress_incident" and any(
                     value.latest_material_event in {"opened", "updated"}
