@@ -120,7 +120,7 @@ to refresh evidence on an exclusively owned declared lane, including production,
 without granting `route_binding.apply`. The request must name the current record
 digest. The server must derive a ready refresh or unchanged plan from its source
 records, with no findings and identical route, target, domains, ingress and TLS
-authority. Creating a binding, replacing operator-owned authority and accepting
+authority. Creating a binding, replacing admin-owned authority and accepting
 an external-authority handoff still require the existing explicit authority.
 The transaction rechecks all five source records, lane ownership and current
 binding before writing the observation and its idempotency receipt atomically.
