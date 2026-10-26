@@ -21,6 +21,7 @@ from control_plane.contracts.testing_address import (
     ADDRESS_SCOPE,
     TestingAddressRecord,
     TestingAddressPlan,
+    retained_address_custody_sha256,
 )
 from control_plane.contracts.testing_publication import (
     TestingPublicationRecord,
@@ -110,7 +111,7 @@ def check_testing_address_sources(
     ):
         raise ValueError("The original testing copy changed before address publication.")
     profile = session.get(db.LaunchplaneProductProfileRow, plan.product, with_for_update=True)
-    if profile is None or store._read_product_profile_payload(profile.payload) != plan.profile:
+    if profile is None or store.read_product_profile_payload(profile.payload) != plan.profile:
         raise ValueError("The original testing profile changed before address publication.")
     publication = session.scalar(
         store._idempotency_statement(
@@ -149,7 +150,7 @@ def check_testing_address_retained_custody(
         if operation is None:
             raise ValueError("An original retained operation is unavailable.")
         original = OdooStableTargetReplacementOperationRecord.model_validate(operation.payload)
-        if canonical_json_sha256(store._payload_dict(original)) != digest:
+        if retained_address_custody_sha256(original) != digest:
             raise ValueError("An original retained operation's custody changed.")
         if not store.testing_replacement_execution_is_excluded(key):
             raise ValueError("An original retained executor is not excluded.")
@@ -161,7 +162,7 @@ def check_testing_address_retained_custody(
     if retirement is None:
         raise ValueError("The original retained testing generation is unavailable.")
     retained = RetainedTestingGeneration.model_validate(retirement.payload)
-    if canonical_json_sha256(store._payload_dict(retained)) != plan.retirement_sha256:
+    if retained_address_custody_sha256(retained) != plan.retirement_sha256:
         raise ValueError("The original retained testing generation changed.")
     reservations = tuple(
         item
