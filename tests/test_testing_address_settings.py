@@ -553,6 +553,7 @@ class CanonicalAddressProgramTests(unittest.TestCase):
 
     def test_gate_replaces_a_retained_readonly_marker_before_independent_readback(self) -> None:
         self.gate.write_text("retained-payload")
+        previous_directories = {path for path in self.gate.parent.iterdir() if path.is_dir()}
         original_open = Path.open
 
         def open_marker(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
@@ -563,6 +564,10 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         with patch.object(Path, "open", open_marker):
             status, frame = self.run_program()
         self.assertEqual(status, 0, frame)
+        self.assertEqual(
+            {path for path in self.gate.parent.iterdir() if path.is_dir()}, previous_directories
+        )
+        self.assertEqual(self.gate.stat().st_mode & 0o777, 0o644)
         self.native.spec["inspection_only"] = True
         self.native.spec["canonical_settings"]["mode"] = "observe"
         status, frame = self.run_program()
