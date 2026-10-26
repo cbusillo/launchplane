@@ -2112,10 +2112,13 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         )
         self.assertEqual(failed.status, "fail")
         deployed = list(self.provider.deployed_artifacts)
-        self.assertEqual(self.advance(), ())
+        self.assertEqual(len(self.advance()), 1)
         self.assertEqual(self.provider.deployed_artifacts, deployed)
+        fresh = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.assertNotEqual(fresh.record_id, first.record_id)
+        self.assertEqual(fresh.release_start, "promote_with_rollback_drill")
         self.assertEqual(
-            self.store.list_release_review_decision_records(product=self.profile.product), (first,)
+            read_client_release_run(store=self.store, profile=self.profile, decision=first), run
         )
         self.assertEqual(
             release_start_for_acceptance(
@@ -2391,30 +2394,79 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         self.assertNotEqual(accepted.checklist_digest, previous.checklist_digest)
         self.assertEqual(accepted.checklist.candidate.source_commit, "d" * 40)
 
-    def test_profile_metadata_change_does_not_retry_failed_standing_release(self) -> None:
+    def test_fresh_ready_standing_release_after_failure_keeps_failed_attempt_immutable(
+        self,
+    ) -> None:
         self.switch("director_standing")
         self.advance()
+        failed = self.store.list_release_review_decision_records(product=self.profile.product)[0]
         self.capture()
         with patch(
             "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
             side_effect=click.ClickException("Testing is unhealthy"),
         ):
             self.advance()
-        profile = self.store.read_product_profile_record(self.profile.product)
-        self.store.write_product_profile_record(
-            profile.model_copy(
-                update={
-                    "updated_at": datetime.now(UTC).isoformat(),
-                    "source": "metadata update",
-                }
-            )
+        failed_run = read_client_release_run(
+            store=self.store, profile=self.profile, decision=failed
         )
+        assert failed_run is not None
+        self.assertEqual(failed_run.state, "stopped")
+        failed_promotions = self.store.list_promotion_records()
+        failed_backups = self.store.list_verireel_prod_backup_gate_operation_records()
+        self.switch("held")
         self.assertEqual(self.advance(), ())
-        self.assertEqual(
-            len(self.store.list_release_review_decision_records(product=self.profile.product)), 1
+        self.switch("director_standing")
+        incomplete = self.review()
+        assert incomplete.checklist is not None
+        incomplete = incomplete.model_copy(
+            update={
+                "checklist": incomplete.checklist.model_copy(update={"untracked_commits": (HEAD,)})
+            }
         )
-        self.assertEqual(len(self.store.list_promotion_records()), 1)
+        with patch("control_plane.client_release.current_release_review", return_value=incomplete):
+            self.assertEqual(self.advance(), ())
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), (failed,)
+        )
+        self.publish.side_effect = ValueError("release record unavailable")
+        self.assertEqual(self.advance(), ())
+        unpublished = self.store.list_release_review_decision_records(product=self.profile.product)[
+            0
+        ]
+        self.assertNotEqual(unpublished.record_id, failed.record_id)
+        self.assertEqual(unpublished.release_issue_url, "")
+        self.assertEqual(
+            self.store.list_verireel_prod_backup_gate_operation_records(), failed_backups
+        )
+        self.publish.side_effect = None
+        self.assertEqual(len(self.advance()), 1)
+        fresh = self.store.list_release_review_decision_records(product=self.profile.product)[0]
+        self.assertEqual(fresh.record_id, unpublished.record_id)
+        self.assertNotEqual(fresh.record_id, failed.record_id)
+        self.assertEqual(fresh.checklist_digest, failed.checklist_digest)
+        self.assertEqual(fresh.acceptance_source, "director_standing")
+        self.assertEqual(fresh.checklist.candidate, failed.checklist.candidate)
+        self.assertEqual(self.publish.call_count, 3)
+        self.assertTrue(fresh.release_issue_url)
+        fresh_backups = self.store.list_verireel_prod_backup_gate_operation_records()
+        self.assertEqual(len(fresh_backups), len(failed_backups) + 1)
+        self.assertNotEqual(fresh_backups[0].operation_id, failed_backups[0].operation_id)
+        self.assertEqual(self.store.list_promotion_records(), failed_promotions)
         self.assertEqual(self.provider.deployed_artifacts, [])
+        self.assertEqual(self.advance(), ())
+        self.capture()
+        self.advance()
+        self.assertEqual(self.provider.deployed_artifacts, [fresh.checklist.candidate.artifact_id])
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=failed.product, record_id=failed.record_id
+            ),
+            failed,
+        )
+        self.assertEqual(
+            read_client_release_run(store=self.store, profile=self.profile, decision=failed),
+            failed_run,
+        )
 
     def test_settled_standing_decision_does_not_read_github_again(self) -> None:
         self.switch("director_standing")

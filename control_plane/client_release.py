@@ -1165,7 +1165,7 @@ def _record_standing_acceptance(
                         )
                     )
                     is not None
-                    and run.state != "waiting"
+                    and run.state not in {"waiting", "stopped"}
                 )
             )
         ):
@@ -1201,7 +1201,9 @@ def _record_standing_acceptance(
     ).hexdigest()
     expected_record_id = f"release-review-standing-{record_key}"
     if existing is not None and existing.release_issue_url and existing.release_start:
-        return
+        run = read_client_release_run(store=store, profile=profile, decision=existing)
+        if run is None or run.state != "stopped":
+            return
     if existing is not None and not existing.release_issue_url:
         decision = existing
     else:
