@@ -144,6 +144,30 @@ class OnlineBackupTests(unittest.TestCase):
         self.assertEqual(self.output.getvalue(), "")
         self.assertFalse(list(self.destination.glob(".filestore-snapshot-*")))
 
+    def test_capture_claim_blocks_a_second_dispatch_even_before_any_dump_bytes(self) -> None:
+        self.environment["CUTOVER_CAPTURE_CLAIM"] = "1"
+        self.psycopg.connect.side_effect = RuntimeError("database unavailable")
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            self.capture()
+        claim = self.destination.with_name(self.destination.name + ".attempt.json")
+        self.assertEqual(
+            json.loads(claim.read_text()),
+            {
+                "record_id": self.environment["BACKUP_RECORD_ID"],
+                "nonce": self.environment["BACKUP_NONCE"],
+            },
+        )
+        self.assertFalse(tuple(self.destination.iterdir()))
+        self.psycopg.connect.reset_mock()
+        with self.assertRaises(FileExistsError):
+            self.capture()
+        self.psycopg.connect.assert_not_called()
+
+    def test_manifest_preserves_the_capture_nonce(self) -> None:
+        self.capture()
+        manifest = json.loads((self.destination / "manifest.json").read_text())
+        self.assertEqual(manifest["backup_nonce"], self.environment["BACKUP_NONCE"])
+
     def test_missing_or_corrupt_committed_attachment_blocks_capture(self) -> None:
         self.source.write_bytes(b"wrong bytes")
         with self.assertRaisesRegex(RuntimeError, "integrity"):

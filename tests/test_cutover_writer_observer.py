@@ -101,6 +101,7 @@ class NativeWriterObserverTests(unittest.TestCase):
                 target=lambda slot, writer: target,
                 addresses=lambda slot, writer: {"10.0.0.2"},
                 timeout_seconds=0,
+                capability=lambda slot, writer: "registry-bound",
             )
             database = Mock(return_value={"sessions": []})
             with (

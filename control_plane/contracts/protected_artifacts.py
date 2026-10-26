@@ -575,7 +575,7 @@ def build_protected_artifact_set(
             runtime = lane.odoo_cutover.host_runtime if lane.odoo_cutover is not None else None
             if runtime is None:
                 continue
-            for reference in {runtime.prepared_image, runtime.restore_image}:
+            for reference in (runtime.prepared_image, runtime.restore_image):
                 repository, digest = reference.split("@", 1)
                 entries.append(
                     ProtectedArtifactEntry(

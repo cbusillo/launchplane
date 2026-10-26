@@ -46,7 +46,7 @@ from tests.test_dokploy import _write_dokploy_managed_secrets
 from tests.test_odoo_cutover_website_settings import snapshot
 from tests.test_odoo_prod_promotion_operation import _operation
 from tests import test_production_promotion_backup as backup_fixtures
-from control_plane.contracts.prepared_public_site import WriterTarget
+from control_plane.contracts.prepared_public_site import WriterTarget, WRITER_KINDS
 
 
 @unittest.skipUnless(
@@ -105,8 +105,7 @@ class InstalledOdooCutoverTests(unittest.TestCase):
             ODOO_ADMIN_PASSWORD="isolated-fixture-admin-passphrase-4844",
             ODOO_MAX_CRON_THREADS="0",
             ODOO_WORKERS="0",
-            PLATFORM_INSTANCE="testing",
-            ENV_OVERRIDE_DISABLE_CRON="true",
+            PLATFORM_INSTANCE="prod",
         )
         override = {
             "config_parameters": [
@@ -425,6 +424,17 @@ class InstalledOdooCutoverTests(unittest.TestCase):
                         return
             except HTTPError as error:
                 error.close()
+                web = self.container(self.old_project, "web")
+                if (
+                    self.command(
+                        ("docker", "inspect", "--format", "{{.State.Running}}", web)
+                    ).strip()
+                    != "true"
+                ):
+                    self.capture_fixture_logs()
+                    raise RuntimeError(
+                        "isolated serving startup exited; its own logs are retained"
+                    ) from error
                 if time.monotonic() >= deadline:
                     raise
             except OSError:
@@ -433,25 +443,25 @@ class InstalledOdooCutoverTests(unittest.TestCase):
             time.sleep(1)
 
     def native_tick(self, project: str) -> None:
-        before = self.sql(
-            "SELECT coalesce((SELECT value::int FROM ir_config_parameter WHERE key='cutover.fixture.native_ticks'),0)"
-        )
+        query = "SELECT coalesce(json_object_agg(key,value::int),'{}'::json)::text FROM ir_config_parameter WHERE key LIKE 'cutover.fixture.native_ticks.%'"
+        before = json.loads(self.sql(query))
         self.sql(
-            "UPDATE ir_cron SET active=true,nextcall=now()-interval '1 minute' WHERE id=(SELECT res_id FROM ir_model_data WHERE module='cutover_probe' AND name='native_tick')"
+            "UPDATE ir_cron SET active=true,nextcall=now()-interval '1 minute' WHERE id IN (SELECT res_id FROM ir_model_data WHERE module='cutover_probe' AND name LIKE 'native_tick_%')"
         )
+        self.sql("NOTIFY cron_trigger, 'fixture'", "postgres")
         deadline = time.monotonic() + 90
-        while (
-            self.sql(
-                "SELECT coalesce((SELECT value::int FROM ir_config_parameter WHERE key='cutover.fixture.native_ticks'),0)"
-            )
-            == before
-        ):
+        while True:
+            observed = json.loads(self.sql(query))
+            if all(
+                observed.get("cutover.fixture.native_ticks." + role, 0)
+                > before.get("cutover.fixture.native_ticks." + role, 0)
+                for role in WRITER_KINDS
+                if role != "web"
+            ):
+                break
             if time.monotonic() >= deadline:
-                raise TimeoutError("real Odoo scheduler did not tick")
+                raise TimeoutError("real native role jobs did not all tick")
             time.sleep(1)
-        self.sql(
-            "UPDATE ir_cron SET active=false WHERE id=(SELECT res_id FROM ir_model_data WHERE module='cutover_probe' AND name='native_tick')"
-        )
         scheduler = self.container(project, "scheduler")
         result = self.command(
             (
@@ -537,7 +547,7 @@ class InstalledOdooCutoverTests(unittest.TestCase):
                 prepared_image=self.config["prepared_image"],
                 restore_image=self.config["database_image"],
                 filestore_path="/volumes/data/filestore",
-                backup_root="/volumes/data/backups",
+                backup_root="/volumes/data/backups/launchplane",
                 website_id=1,
                 modules=[
                     "base",
@@ -555,6 +565,14 @@ class InstalledOdooCutoverTests(unittest.TestCase):
                 retained_assets=["/cutover_probe/static/mark.svg"],
                 excluded_prefixes=["/web", "/my"],
                 notice="Updates are being applied. Please return shortly.",
+                cron_writer_bindings=[
+                    dict(
+                        writer_id=writer.writer_id,
+                        cron_xmlids=["cutover_probe.native_tick_" + writer.kind],
+                    )
+                    for writer in writers
+                    if writer.kind != "web"
+                ],
                 readiness_timeout_seconds=120,
             )
         )
@@ -665,7 +683,20 @@ class InstalledOdooCutoverTests(unittest.TestCase):
         )
         return plan
 
+    def capture_fixture_logs(self) -> None:
+        program = "import json,subprocess,sys; v=json.load(sys.stdin); r=subprocess.run(['docker','logs','--tail','100',v['container']],capture_output=True,text=True); print(json.dumps({'output':(r.stdout+r.stderr)[-64000:],'returncode':r.returncode}))"
+        for project in self.projects:
+            ids = self.command(
+                ("docker", "ps", "-aq", "--filter", "label=com.docker.compose.project=" + project)
+            ).split()
+            for container in ids:
+                output = self.command(
+                    ("python3", "-c", program), json.dumps({"container": container})
+                )
+                (self.root / (container + "-logs.json")).write_text(output)
+
     def cleanup(self) -> None:
+        self.capture_fixture_logs()
         for project in self.projects:
             directory = self.root / project
             if (directory / "compose.yml").exists():

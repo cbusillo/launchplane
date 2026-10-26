@@ -110,10 +110,12 @@ class NativeWriterObserver:
         target: Callable[[OdooSlot, WriterTarget], SlotWriterContainer],
         addresses: Callable[[OdooSlot, WriterTarget], set[str]],
         timeout_seconds: float = 60,
+        capability: Callable[[OdooSlot, WriterTarget], str] | None = None,
     ) -> None:
         self.plan, self.execute, self.runner = plan, execute, runner
         self.target, self.addresses = target, addresses
         self.timeout_seconds = timeout_seconds
+        self.capability = capability
         self.evidence: dict[tuple[str, str], str] = {}
 
     def database(self) -> dict[str, Any]:
@@ -176,9 +178,14 @@ class NativeWriterObserver:
 
     def native_ready(self, target: SlotWriterContainer) -> None:
         slot = self.plan.old if target.slot_id == self.plan.old.slot_id else self.plan.new
+        if target.writer.kind != "web" and self.capability is None:
+            raise ValueError("background writer lacks its own native executor capability")
         deadline = time.monotonic() + self.timeout_seconds
         previous: tuple[int, str] | None = None
         while True:
+            if target.writer.kind != "web":
+                assert self.capability is not None
+                self.capability(slot, target.writer)
             bound = self.target(slot, target.writer)
             observed = json.loads(self.execute(("docker", "inspect", bound.container), None))
             if len(observed) != 1 or observed[0]["Config"]["Image"] != slot.image:

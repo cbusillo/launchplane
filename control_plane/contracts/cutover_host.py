@@ -1,10 +1,14 @@
 from pathlib import PurePosixPath
-from typing import Literal, Self
+from copy import deepcopy
+from typing import Literal, Self, cast
+import re
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 
 from control_plane.contracts.prepared_public_site import FrozenRecord, validate_public_path
+from control_plane.contracts.odoo_online_backup import normalized_odoo_backup_root
+from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 
 
 def canonical_host_path(value: str) -> str:
@@ -57,6 +61,20 @@ class CutoverReadinessRoute(FrozenRecord):
         return validate_public_path(value)
 
 
+class OdooCronWriterBinding(FrozenRecord):
+    writer_id: str = Field(min_length=1)
+    cron_xmlids: tuple[str, ...] = Field(min_length=1)
+
+    @field_validator("cron_xmlids")
+    @classmethod
+    def native_cron_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(set(values)) != len(values) or any(
+            re.fullmatch(r"[A-Za-z0-9_]+\.[A-Za-z0-9_]+", value) is None for value in values
+        ):
+            raise ValueError("native cron capabilities require unique module-owned job identities")
+        return values
+
+
 class OdooCutoverHostRuntime(FrozenRecord):
     route: CutoverFileRoute
     public_origin: str
@@ -76,7 +94,16 @@ class OdooCutoverHostRuntime(FrozenRecord):
     retained_assets: tuple[str, ...]
     excluded_prefixes: tuple[str, ...] = Field(min_length=1)
     notice: str = Field(min_length=1)
+    cron_writer_bindings: tuple[OdooCronWriterBinding, ...] = ()
     readiness_timeout_seconds: int = Field(default=90, ge=1, le=300)
+    operation_timeout_seconds: int = cast(
+        int, deepcopy(ProductionBackupGateRequest.model_fields["timeout_seconds"])
+    )
+
+    @field_validator("backup_root")
+    @classmethod
+    def backup_directory(cls, value: str) -> str:
+        return normalized_odoo_backup_root(value)
 
     @field_validator("public_origin")
     @classmethod
@@ -99,6 +126,14 @@ class OdooCutoverHostRuntime(FrozenRecord):
 
     @model_validator(mode="after")
     def complete_readiness(self) -> Self:
+        identities = [binding.writer_id for binding in self.cron_writer_bindings]
+        jobs = [job for binding in self.cron_writer_bindings for job in binding.cron_xmlids]
+        if len(set(identities)) != len(identities) or len(set(jobs)) != len(jobs):
+            raise ValueError("logical writer capabilities cannot alias the same native job")
+        if any(job.split(".", 1)[0] not in self.modules for job in jobs):
+            raise ValueError(
+                "native cron capabilities must belong to the declared readiness modules"
+            )
         if not {"homepage", "login", "public"} <= {route.kind for route in self.readiness_routes}:
             raise ValueError("cutover readiness requires homepage, login and public routes")
         if not {"base", "web", "website", "launchplane_runtime_health"} <= set(self.modules):

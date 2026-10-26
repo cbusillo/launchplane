@@ -92,9 +92,9 @@ class CutoverHostStateTests(unittest.TestCase):
                     prepared_volume="fixture-public",
                     prepared_container="fixture-prepared",
                     prepared_image="fixture-server@sha256:" + "1" * 64,
-                    restore_image="fixture-database@sha256:" + "2" * 64,
+                    restore_image="fixture-postgres@sha256:" + "2" * 64,
                     filestore_path="/volumes/data/filestore",
-                    backup_root="/volumes/data/backups",
+                    backup_root="/volumes/data/backups/launchplane",
                     website_id=1,
                     modules=["base", "web", "website", "launchplane_runtime_health"],
                     readiness_routes=[
@@ -108,6 +108,28 @@ class CutoverHostStateTests(unittest.TestCase):
                     notice="Please return shortly.",
                 )
             )
+            from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
+            from control_plane.contracts.odoo_online_backup import DEFAULT_ODOO_BACKUP_ROOT
+
+            self.assertEqual(
+                runtime.operation_timeout_seconds,
+                ProductionBackupGateRequest.model_fields["timeout_seconds"].default,
+            )
+            for path in ("/tmp/backups", "/volumes/data", DEFAULT_ODOO_BACKUP_ROOT + "-other"):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    OdooCutoverHostRuntime.model_validate(
+                        {**runtime.model_dump(), "backup_root": path}
+                    )
+            with self.assertRaises(ValueError):
+                OdooCutoverHostRuntime.model_validate(
+                    {
+                        **runtime.model_dump(),
+                        "cron_writer_bindings": [
+                            {"writer_id": name, "cron_xmlids": ["base.shared_job"]}
+                            for name in ("queue", "integration")
+                        ],
+                    }
+                )
             lane = OdooCutoverLane(
                 route_id=plan.route_id,
                 host=plan.host,
@@ -136,13 +158,8 @@ class CutoverHostStateTests(unittest.TestCase):
             store = FilesystemRecordStore(state_dir=root / "records")
             store.write_product_profile_record(profile)
             protected = build_protected_artifact_set(store, product=profile.product)
-            self.assertTrue(
-                {runtime.prepared_image, runtime.restore_image} <= set(protected.image_references)
-            )
-            self.assertTrue(
-                {runtime.prepared_image.split("@")[1], runtime.restore_image.split("@")[1]}
-                <= set(protected.image_digests)
-            )
+            self.assertTrue({runtime.prepared_image} <= set(protected.image_references))
+            self.assertTrue({runtime.prepared_image.split("@")[1]} <= set(protected.image_digests))
             self.assertEqual(
                 build_protected_artifact_set(store, product="another-product").entries, ()
             )

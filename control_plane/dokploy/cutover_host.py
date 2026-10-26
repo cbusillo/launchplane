@@ -43,11 +43,12 @@ from control_plane.dokploy.cutover_host_state import (
 from control_plane.dokploy.cutover_probes import CutoverProbes
 from control_plane.dokploy.cutover_transport import CutoverHostTransport
 from control_plane.dokploy.cutover_writer_observer import NativeWriterObserver, container_addresses
+from control_plane.dokploy.cutover_writer_capabilities import NativeCronWriterCapabilities
+from control_plane.dokploy.cutover_restore_probe import verify_disposable_database_restore
 from control_plane.dokploy.generic_web_cutover import WebSlotDriver
 from control_plane.dokploy.odoo_cutover import OdooSlotDriver
 from control_plane.dokploy.prepared_host import PreparedSiteDirectory
 from control_plane.dokploy.prepared_server import require_prepared_server
-from control_plane.dokploy.cutover_restore_probe import verify_disposable_database_restore
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.dokploy.service_cutover import OdooHostCapabilities
 from control_plane.dokploy.slot_compose import render_odoo_app_slot_compose
@@ -131,11 +132,12 @@ print(json.dumps({'release':spec['release']},sort_keys=True))
 BACKUP_MANIFEST_PROGRAM = r"""
 import json,sys
 from pathlib import Path
-spec=json.load(sys.stdin); path=Path(spec['directory'])
-if not path.exists(): print(json.dumps({'state':'absent'}))
-elif path.is_symlink() or path.resolve()!=path or not path.is_dir(): raise ValueError('backup path differs')
-elif not (path/'manifest.json').is_file(): print(json.dumps({'state':'uncertain'}))
-else: print(json.dumps({'state':'captured','manifest':json.loads((path/'manifest.json').read_text())}))
+spec=json.load(sys.stdin); path=Path(spec['directory']); claim=path.with_name(path.name+'.attempt.json')
+if path.is_symlink() or claim.is_symlink() or path.resolve()!=path: raise ValueError('backup path differs')
+if (path/'manifest.json').is_file() and claim.is_file():
+    print(json.dumps({'state':'captured','manifest':json.loads((path/'manifest.json').read_text()),'claim':json.loads(claim.read_text())}))
+elif claim.exists() or path.exists() and (not path.is_dir() or any(path.iterdir())): print(json.dumps({'state':'uncertain'}))
+else: print(json.dumps({'state':'absent'}))
 """
 
 
@@ -185,7 +187,11 @@ class BoundOdooCutoverHost:
         if len(servers) != 1:
             raise ValueError("cutover slots do not share one admitted provider host")
         self.transport = CutoverHostTransport(
-            host=self.host, token=self.token, server_id=servers.pop(), guard=self.guard
+            host=self.host,
+            token=self.token,
+            server_id=servers.pop(),
+            guard=self.guard,
+            timeout_seconds=self.runtime.operation_timeout_seconds,
         )
         self.state = CutoverHostState(
             plan,
@@ -213,6 +219,9 @@ class BoundOdooCutoverHost:
             raise ValueError("cutover host requires its dedicated prepared-public volume")
         self.prepared_path = Path(prepared_root) / plan.route_id
         targets = self.initial_targets()
+        self.native_writer_capability = NativeCronWriterCapabilities(
+            plan, self.runtime.cron_writer_bindings, self.transport.read, self.runner
+        )
         self.observer = NativeWriterObserver(
             plan,
             execute=self.transport.read,
@@ -220,6 +229,7 @@ class BoundOdooCutoverHost:
             target=self.target,
             addresses=self.state.addresses,
             timeout_seconds=self.runtime.readiness_timeout_seconds,
+            capability=self.native_writer_capability,
         )
         self.writers = ContainerSlotWriters(
             plan,
@@ -463,6 +473,8 @@ class BoundOdooCutoverHost:
             ):
                 raise ValueError("inactive candidate or unknown database writers are not fenced")
         self.startup_capability(plan.old)
+        for writer in plan.writers:
+            self.native_writer_capability(plan.old, writer)
         rendered = render_odoo_app_slot_compose(
             plan, data_volume=self.runtime.data_volume, private_network=self.runtime.private_network
         )
@@ -901,13 +913,15 @@ class BoundOdooCutoverHost:
             )
         )
         if manifest.get("state") == "captured":
+            if not original_attempt or manifest.get("claim") != {
+                "record_id": backup_id,
+                "nonce": binding["nonce"],
+            }:
+                raise ValueError("captured backup does not belong to the original admitted attempt")
             captured = {
-                key: manifest["manifest"][key]
-                for key in OdooProdBackupCaptureEvidence.model_fields
-                if key != "backup_nonce"
+                key: manifest["manifest"][key] for key in OdooProdBackupCaptureEvidence.model_fields
             }
-            captured["backup_nonce"] = binding["nonce"]
-        elif original_attempt or manifest.get("state") != "absent":
+        elif manifest.get("state") != "absent":
             raise ValueError("original coherent capture is uncertain; it cannot be repeated")
         else:
             script = post_deploy._build_dokploy_odoo_backup_gate_script(
@@ -918,6 +932,7 @@ class BoundOdooCutoverHost:
                 backup_root=self.runtime.backup_root,
                 backup_record_id=backup_id,
                 expected_web_state="exited" if record.pause else "running",
+                cutover_capture_claim=True,
             )
             captured = post_deploy.extract_odoo_backup_gate_result(
                 self.transport(("bash", "-s"), script)
@@ -988,6 +1003,7 @@ class BoundOdooCutoverHost:
             database=plan.old.binding.database,
             filestore=directory + "/" + plan.old.binding.database + "-filestore.tar.gz",
             filestore_sha256=capture.filestore_archive_sha256,
+            timeout_seconds=self.runtime.operation_timeout_seconds,
         )
         backup_record = BackupGateRecord(
             record_id=backup_id,
@@ -1010,7 +1026,9 @@ class BoundOdooCutoverHost:
         )
         self.store.write_backup_gate_record(backup_record)
         if self.store.read_backup_gate_record(backup_id) != backup_record:
-            raise ValueError("coherent backup has no durable capture and restore readback")
+            raise ValueError(
+                "coherent backup has no durable capture and archive-verification readback"
+            )
         return OdooRecoveryTuple(
             binding=plan.old.binding,
             image=plan.old.image,

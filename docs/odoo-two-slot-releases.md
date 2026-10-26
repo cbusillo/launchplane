@@ -363,8 +363,7 @@ The lane's optional `host_runtime` record supplies the watched route file and
 Traefik API, public origin, remote authority directory, existing shared data
 volume and private network, backup locations, website/module/readiness coverage,
 public-copy paths and exclusions. It also names the retained prepared container,
-its dedicated public volume and immutable Launchplane image, and an immutable
-PostgreSQL image for the disposable restore probe. These are persisted lane
+its dedicated public volume and immutable Launchplane image, and its dedicated serving lifecycle. These are persisted lane
 coordinates, never Python defaults or request-selected commands. Existing lanes
 without these capabilities remain unavailable for installed-host activation.
 
@@ -402,7 +401,7 @@ only, as `launchplane-browser`, with a read-only root filesystem and dropped
 capabilities. The host inspects the exact running image, command, environment,
 network and mount before admitting it. Keep this component outside API/worker
 replacement; retain its original image throughout an active pause. Profile-based
-artifact protection includes its image and the restore-probe image. A package
+artifact protection includes its image through its lane record. A package
 update must not replace this retained server while it serves a pause.
 
 Admission seals the original plan, provider placement, maintenance payload,
@@ -421,17 +420,24 @@ zero database work. Unknown sessions or missing evidence hold the lane. Every
 logical role keeps its own observation even when cron-family roles share the
 separate scheduler. Handoff additionally checks the effective Odoo command,
 configuration, current database connection, stable restart identity, and absence
-of scheduler HTTP listeners. Docker `Running` alone is insufficient.
+of scheduler HTTP listeners. Each background role additionally binds distinct,
+enabled module-owned cron jobs in the selected database. Missing bindings,
+shared job identities or unsupported queue/integration executors refuse before
+effects. This host supports cron-backed roles, not HTTP-dependent queue runners.
+Docker `Running` alone is insufficient.
 
 Candidate writers are fenced before maintenance releases the native marker.
 Private readiness starts only its web process and keeps its cron-family services
 drained. Real native readiness and a headless browser verify the declared pages,
 assets and exact runtime; previous retained asset bytes must still match the
 original capture. The coherent backup uses the existing online SQL/attachment
-capture and archive verifier, plus an actual database restore into an owned,
-networkless, disposable PostgreSQL container. The exact capture and restore
-readback are persisted before the recovery tuple is returned. An interrupted
-capture without its manifest is held, never captured again under another nonce.
+capture and archive verifier, followed by a network-isolated database and
+filestore restore on a dedicated disk volume. One batch verifies every restored
+attachment against the restored database. The command deadline comes from the
+lane's operation timeout, whose default and bounds match the backup gate.
+Exact restore readback is persisted before the tuple is returned. An atomic
+native capture claim distinguishes intent from capture: denial before dispatch
+can replay the same nonce, while started capture without its manifest stays held.
 
 A passing native-maintenance receipt is checkpointed before startup recreation.
 Automatic original-operation recovery requires that receipt, the coherent

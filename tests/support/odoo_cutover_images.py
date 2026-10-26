@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+from xml.etree import ElementTree
+from control_plane.contracts.prepared_public_site import WRITER_KINDS
 from typing import Any
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -132,6 +134,30 @@ def build_fixture_images(
         metadata_path = addon / "__manifest__.py"
         metadata = ast.literal_eval(metadata_path.read_text())
         metadata["version"] = str(major) + ".0.1.0.0"
+        metadata["data"].append("jobs.xml")
+        jobs = ElementTree.Element("odoo", noupdate="1")
+        for role in WRITER_KINDS:
+            if role == "web":
+                continue
+            job = ElementTree.SubElement(jobs, "record", id="native_tick_" + role, model="ir.cron")
+            values = dict(
+                name="Isolated " + role + " tick",
+                model_id="model_cutover_fixture_guard",
+                state="code",
+                code="model._cutover_tick('" + role + "')",
+                interval_number="1",
+                interval_type="minutes",
+                active="False",
+            )
+            for field, value in values.items():
+                node = ElementTree.SubElement(job, "field", name=field)
+                if field == "model_id":
+                    node.set("ref", value)
+                elif field == "active":
+                    node.set("eval", value)
+                else:
+                    node.text = value
+        ElementTree.ElementTree(jobs).write(addon / "jobs.xml", encoding="utf-8")
         metadata_path.write_text(repr(metadata))
         if name != "old":
             (addon / "static/site.css").write_text("body {font-family:sans-serif;color:#146}")

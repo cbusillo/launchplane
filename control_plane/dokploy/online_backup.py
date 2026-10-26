@@ -39,6 +39,15 @@ def capture():
         raise RuntimeError("Filestore must be an existing directory without symlinks")
     if backup_dir.resolve() != backup_dir.absolute() or any(backup_dir.iterdir()):
         raise RuntimeError("Backup destination must be a new empty directory without symlinks")
+    if os.environ.get('CUTOVER_CAPTURE_CLAIM') == '1':
+        claim=backup_dir.with_name(backup_dir.name+'.attempt.json')
+        descriptor=os.open(claim,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(descriptor,'w') as handle:
+            json.dump({'record_id':os.environ['BACKUP_RECORD_ID'],'nonce':os.environ['BACKUP_NONCE']},handle)
+            handle.flush();os.fsync(handle.fileno())
+        descriptor=os.open(claim.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try: os.fsync(descriptor)
+        finally: os.close(descriptor)
     image_id = os.environ["IMAGE_ID"]
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError("Backup requires an immutable running image identity")
@@ -173,6 +182,7 @@ def capture():
             evidence, backup_dir=str(backup_dir), database_dump_path=str(dump_path),
             filestore_archive_path=str(archive_path), manifest_path=str(manifest_path),
             captured_at=recovery_point.isoformat(),
+            backup_nonce=os.environ['BACKUP_NONCE'],
         )
         for artifact in (dump_path, archive_path, inventory_path):
             sync_file(artifact)
