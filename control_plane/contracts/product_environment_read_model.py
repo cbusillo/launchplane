@@ -740,8 +740,8 @@ def build_product_site_overview(
         warnings += _preview_refresh_warnings(record_store, profile)
     if preview_summary.untracked_observed_slugs:
         warnings += (
-            f"{len(preview_summary.untracked_observed_slugs)} provider previews have no active "
-            "lifecycle record. Inspect preview inventory and retained operations.",
+            f"{len(preview_summary.untracked_observed_slugs)} previews are present without a "
+            "current status. Check preview cleanup.",
         )
     trust_state = _combine_trust_states(
         (summary.trust_state for summary in environment_summaries),

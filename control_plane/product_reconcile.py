@@ -3258,12 +3258,48 @@ def request_product_reconcile_sweep(
             require_unrecorded_preview_original,
         )
 
-        originals = (
-            record_store.list_odoo_preview_cleanup_originals(product=profile.product)
-            if isinstance(record_store, PostgresRecordStore)
-            else held_preview_reservations(record_store, product=profile.product)
-        )
-        for reservation in originals:
+        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
+        originals = {
+            item.record_id: item
+            for item in held_preview_reservations(record_store, product=profile.product)
+        }
+        if isinstance(record_store, PostgresRecordStore) and product_profile_uses_odoo_driver(
+            profile
+        ):
+            from control_plane.preview_inventory_evidence import read_preview_inventory_evidence
+            from control_plane.workflows.generic_web_preview import preview_pr_number_from_slug
+
+            inventory = read_preview_inventory_evidence(
+                record_store=record_store,
+                context=profile.preview.context,
+                product=profile.product,
+                repository=profile.repository,
+            )
+            tracked = {
+                item.anchor_pr_number
+                for item in previews
+                if item.context == profile.preview.context
+                and item.state not in _ENDED_PREVIEW_STATES
+            }
+            if inventory.status in {"empty", "nonempty"}:
+                for slug in inventory.observed_slugs:
+                    number = preview_pr_number_from_slug(
+                        preview_slug=slug, slug_template=profile.preview.slug_template
+                    )
+                    if (
+                        number is None
+                        or number <= 0
+                        or number in tracked
+                        or profile.preview.slug_template.format(number=number) != slug
+                    ):
+                        continue
+                    originals.update(
+                        (item.record_id, item)
+                        for item in record_store.list_odoo_preview_cleanup_originals(
+                            product=profile.product, number=number
+                        )
+                    )
+        for reservation in originals.values():
             try:
                 original = original_preview_intent(reservation, profile=profile, store=record_store)
                 if reservation.state == "completed":
@@ -3290,7 +3326,6 @@ def request_product_reconcile_sweep(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
         for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(

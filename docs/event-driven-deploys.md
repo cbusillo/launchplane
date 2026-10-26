@@ -353,6 +353,8 @@ reservation. The webhook request never waits on a deploy.
     its retained original identifies the exact preview, including a completed
     failed creation or a failed recreation after an earlier retirement. The
     sweep stops revisiting completed originals once newer retirement is recorded.
+    It uses the existing fresh provider inventory to select untracked PRs before
+    reading their failed originals, rather than scanning all historical failures.
     Closed-PR reconciliation
     uses that original as its lifecycle token and rechecks its product, context,
     PR, target naming and exclusive ownership before effects. Existing executor

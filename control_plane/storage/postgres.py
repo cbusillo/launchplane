@@ -9580,7 +9580,7 @@ class PostgresRecordStore(HumanSessionStore):
         return self._list_odoo_preview_reservations(product=product, limit=min(max(limit, 1), 1001))
 
     def list_odoo_preview_cleanup_originals(
-        self, *, product: str, number: int | None = None
+        self, *, product: str, number: int
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         return self._list_odoo_preview_reservations(
             product=product, number=number, include_failed=True

@@ -1057,6 +1057,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
 
     def test_sweep_revisits_completed_failed_creations_without_preview_records(self) -> None:
         from control_plane.product_reconcile import request_product_reconcile_sweep
+        from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 
         self.reservation = self.replace_record(
             state="completed",
@@ -1067,6 +1068,27 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
         transport = Mock()
         transport.get_json.return_value = []
+        with (
+            patch("control_plane.product_reconcile._has_repository_identity", return_value=True),
+            patch.object(self.store, "list_odoo_preview_cleanup_originals") as history,
+        ):
+            request_product_reconcile_sweep(
+                self.store, datetime.now(timezone.utc).isoformat(), lambda *_: transport
+            )
+            history.assert_not_called()
+        self.store.write_preview_inventory_scan_record(
+            PreviewInventoryScanRecord(
+                scan_id="observed-preview",
+                context=self.profile.preview.context,
+                product=self.profile.product,
+                repository=self.profile.repository,
+                source="provider",
+                scanned_at=datetime.now(timezone.utc).isoformat(),
+                status="pass",
+                preview_count=1,
+                preview_slugs=(self.issued.preview_slug,),
+            )
+        )
         with patch("control_plane.product_reconcile._has_repository_identity", return_value=True):
             request_product_reconcile_sweep(
                 self.store, datetime.now(timezone.utc).isoformat(), lambda *_: transport

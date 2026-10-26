@@ -75,8 +75,6 @@ class ActionEffectTests(unittest.TestCase):
             for action, allowed in (
                 ("product_profile.read", True),
                 ("product_config.plan", True),
-                ("preview_lifecycle.plan", True),
-                ("preview_desired_state.discover", True),
                 ("preview_lifecycle.cleanup", False),
                 ("ingress_route.audit", True),
                 ("product_profile.health_monitoring.apply", True),

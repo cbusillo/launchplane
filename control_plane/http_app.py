@@ -23388,12 +23388,19 @@ def create_launchplane_fastapi_app(
         trace_id = next_trace_id()
         if not resolved_authz_policy_runtime.allows(
             identity=identity,
-            action="preview_lifecycle.plan"
-            if director_agent_identity(identity) and not cleanup_request.apply
-            else "preview_lifecycle.cleanup",
+            action="preview_lifecycle.cleanup",
             product=cleanup_request.product,
             context=cleanup_request.context,
-            inherit_agent_read_role=director_agent_identity(identity) and not cleanup_request.apply,
+            inherit_agent_read_role=False,
+        ) and (
+            cleanup_request.apply
+            or not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="preview_lifecycle.plan",
+                product=cleanup_request.product,
+                context=cleanup_request.context,
+                inherit_agent_read_role=director_agent_identity(identity),
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
