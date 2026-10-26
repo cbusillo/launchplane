@@ -949,40 +949,42 @@ an ORM column/table or remains only in the evidence payload.
   through the signed-in administrator's reviewed Route binding card, with
   CSRF, exact review digest, current-record CAS and atomic source comparisons,
   including the public product profile. Custodian or domain changes cannot be
-  hidden in an evidence refresh. External custody uses the existing 30-day
-  attestation window. Agents may refresh unchanged managed evidence without
-  extending that window; only a signed-in review can renew the attestation.
-  The operation updates records only; it never changes a provider route.
+  hidden in an evidence refresh. The custody timestamp records the reviewed
+  decision; continued qualification comes from current strict HTTP/runtime and
+  TLS observations, without a calendar re-attestation step. The operation
+  updates records only; it never changes a provider route.
 
-  Saving split authority also declares its full hostname set for public
-  monitoring. The existing monitor derives one strict runtime-identity HTTP
-  check per hostname using the lane's health path, plus each hostname's TLS
-  check using its resolved ownership. These mandatory checks do not require
-  duplicated profile entries and cannot be disabled by the legacy non-strict
-  check. The route-record SHA fences incident transitions; persisted HTTP
-  observations are evaluated against current check URLs, monitoring intent,
-  deployment identity, profile and relevant source dates. Each HTTPS redirect
-  must stay within the requested hostname's custody set. The transport checks
-  each hop before connecting and retains the visited URLs; old redirected
-  observations without that evidence cannot verify custody. Apex/www redirects
-  within the external subset are allowed. Missing, stale, failed or wrong-runtime observations for any
-  hostname keep topology/readiness unverified or blocked. Managed audit
-  staleness retains its existing advisory treatment; custody expiration is a
-  separate error with its deadline shown in the lane and decision, and a
-  renewal warning begins at the existing attestation refresh threshold. An
-  evidence-only refresh does not invalidate still-current public observations
-  or extend the external attestation. Custodian-reported
-  configuration remains distinct from directly verified public behavior.
+  Saving split authority declares its full hostname set for public monitoring.
+  One derived strict runtime-identity HTTP check per hostname replaces the
+  profile's public HTTP checks, avoiding duplicate incidents and disagreement
+  over old check URLs. Private and provider checks retain their existing policy.
+  Every hostname also gets a TLS check using its resolved ownership. The lane's
+  health path and query are preserved. The route-record SHA fences incident
+  transitions; persisted HTTP observations are evaluated against current check
+  URLs, monitoring intent, deployment identity, profile and relevant source dates.
+  Each HTTPS redirect must stay within the requested hostname's custody set.
+  The transport checks each hop before connecting and retains the visited URLs;
+  old redirected observations without that evidence cannot verify custody.
+  Apex/www redirects within the external subset are allowed. Missing, stale,
+  failed or wrong-runtime observations keep topology/readiness unverified.
+
+  When stored managed evidence reaches its freshness deadline, the topology
+  reader reruns the existing reconcile plan without writing. It refreshes only
+  the projected provenance when current custody, authority and evidence
+  projections all agree with the stored binding. Missing, changed, conflicting
+  or unavailable sources retain the stale-evidence warning. This adds no job,
+  periodic authority write or renewal action. An explicit evidence refresh that
+  adopts newer source versions requires subsequent probes for the affected
+  authority dates. Custodian-reported configuration remains distinct from
+  directly verified public behavior.
+
   A new report, custodian or domain split can be reviewed as an exact authority
   replacement in the same signed-in card. Clearing the external subset requires
   a complete managed audit for all recorded hosts. A custody decision cannot
   absorb changes to destination, domain roles, managed ingress, TLS or status.
-  The existing stable route-refresh controller also discovers eligible
-  service-owned split generic-web bindings, retaining external attestation and
-  exact source/profile comparisons at commit. It never creates a binding or
-  changes custody. Exact provider no-op audits
-  may use the lane's tracked target hostnames without duplicating profile check
-  URLs; that hostname source is unavailable when any provider write is enabled.
+  Exact provider no-op audits may use the lane's tracked target hostnames without
+  duplicating profile check URLs; that hostname source is unavailable when any
+  provider write is enabled.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from

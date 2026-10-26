@@ -1,7 +1,7 @@
 import json
 import unittest
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -12,7 +12,10 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.product_operational_readiness import (
     build_product_operational_readiness,
 )
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneHealthCheck,
+)
 from control_plane.contracts.product_topology_read_model import build_product_environment_topology
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
@@ -31,12 +34,15 @@ from control_plane.route_binding_reconcile import (
     is_evidence_only_route_binding_refresh,
     plan_route_binding_reconcile,
 )
-from control_plane.split_ingress import split_ingress_check_name, split_ingress_monitoring_lane
+from control_plane.split_ingress import (
+    split_ingress_check_name,
+    split_ingress_custody_hosts,
+    split_ingress_monitoring_lane,
+)
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorTarget,
     check_public_ingress_target,
     discover_public_ingress_monitor_targets,
-    fetch_public_ingress_url,
     fetch_public_tls,
 )
 from tests.support.auth import _identity, _StubVerifier
@@ -76,6 +82,39 @@ def split_binding() -> EnvironmentRouteBindingRecord:
 
 
 class SplitIngressTests(unittest.TestCase):
+    def test_split_public_checks_replace_legacy_and_outside_host_checks(self) -> None:
+        profile = _strict_public_profile(domain_name="business.example.test")
+        lane = profile.lanes[0]
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={
+                        "checks": (
+                            *lane.health_monitoring.checks,
+                            ProductLaneHealthCheck(
+                                name="other-host",
+                                kind="public_http",
+                                url="http://outside.example.test/healthz",
+                            ),
+                        ),
+                    }
+                )
+            }
+        )
+        binding = split_binding()
+        effective = split_ingress_monitoring_lane(profile, lane, binding)
+        self.assertEqual(
+            {check.name for check in effective.health_monitoring.checks},
+            {split_ingress_check_name(domain.domain_name) for domain in binding.domains},
+        )
+        self.assertTrue(
+            all(check.require_runtime_identity for check in effective.health_monitoring.checks)
+        )
+        self.assertIn("other-host", {check.name for check in lane.health_monitoring.checks})
+        self.assertEqual(
+            split_ingress_custody_hosts(binding, "https://outside.example.test/healthz"), ()
+        )
+
     def test_canonical_redirect_proof_and_custody_renewal_are_scoped_per_check(self) -> None:
         binding = split_binding().model_copy(
             update={"product": "example-site", "context": "example-context", "instance": "prod"}
@@ -148,26 +187,6 @@ class SplitIngressTests(unittest.TestCase):
         )
         self.assertNotEqual(status(observations[0].check_name, renewed), "verified")
         self.assertEqual(status(observations[2].check_name, renewed), "verified")
-        expiring = binding.model_copy(
-            update={
-                "external_ingress": binding.external_ingress.model_copy(
-                    update={"attested_at": (_NOW - timedelta(days=20)).isoformat()}
-                )
-            }
-        )
-        topology = build_product_environment_topology(
-            record_store=_TopologyStore(route_binding=expiring),
-            profile=profile,
-            lane=lane,
-            lane_summary=summary,
-            now=_NOW,
-        )
-        self.assertTrue(
-            any(
-                w.code == "stale_route_authority" and w.severity == "warning"
-                for w in topology.warnings
-            )
-        )
         queried = lane.model_copy(update={"health_url": f"{lane.health_url}?scope=runtime"})
         derived = split_ingress_monitoring_lane(profile, queried, binding)
         self.assertTrue(
@@ -211,6 +230,10 @@ class SplitIngressTests(unittest.TestCase):
             headers=(("content-type", "application/json"),),
             body=json.dumps({"runtime_identity": identity.model_dump(mode="json")}).encode(),
         )
+
+        def legacy_http_get(_url: str, _timeout: int) -> Any:
+            raise AssertionError("A legacy transport cannot handle custody-bound probes")
+
         with patch(
             "control_plane.workflows.public_ingress_monitor.request_public_http",
             return_value=response,
@@ -219,7 +242,7 @@ class SplitIngressTests(unittest.TestCase):
                 target=target,
                 checked_at=_NOW.isoformat(),
                 timeout_seconds=5,
-                http_get=fetch_public_ingress_url,
+                http_get=legacy_http_get,
                 tls_get=fetch_public_tls,
             )
         self.assertEqual(observation.status, "pass")
@@ -297,7 +320,6 @@ class SplitIngressTests(unittest.TestCase):
         self.assertEqual(binding.tls_for_domain("operator.example.test"), binding.tls)
         public = redacted_route_binding_record(binding)
         self.assertEqual(public.external_ingress, binding.external_ingress)
-        self.assertEqual(public.external_ingress_expires_at, binding.external_ingress_expires_at)
         self.assertEqual(public.record_sha256, route_binding_record_sha256(binding))
 
     def test_external_scope_cannot_hide_or_replace_managed_hosts(self) -> None:
@@ -418,27 +440,6 @@ class SplitIngressTests(unittest.TestCase):
                 now=_NOW,
             ).provenance.freshness_status,
             "verified",
-        )
-        assert binding.external_ingress is not None
-        store.route_binding = binding.model_copy(
-            update={
-                "external_ingress": binding.external_ingress.model_copy(
-                    update={"attested_at": (_NOW - timedelta(days=31)).isoformat()}
-                )
-            }
-        )
-        expired_topology = build_product_environment_topology(
-            record_store=store,
-            profile=profile,
-            lane=profile.lanes[0],
-            lane_summary=summary,
-            now=_NOW,
-        )
-        self.assertTrue(
-            any(
-                warning.code == "stale_route_authority" and warning.severity == "error"
-                for warning in expired_topology.warnings
-            )
         )
         store.route_binding = binding
         failed = _http_observation(
@@ -797,7 +798,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(response.json()["error"]["code"], "authorization_denied")
 
-    async def test_refresh_preserves_external_expiry_and_missing_alias_audit_blocks(self) -> None:
+    async def test_refresh_preserves_external_custody_and_missing_alias_audit_blocks(self) -> None:
         payload = self.seed_split()
         evaluated_at = "2026-07-20T00:00:00Z"
         external = {**payload["external_ingress"], "attested_at": "2026-07-01T00:00:00Z"}
@@ -829,29 +830,17 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                     expected_current=RouteBindingExpectedCurrent(
                         state="present", record_sha256=route_binding_record_sha256(planned.record)
                     ),
-                    evaluated_at="2026-07-20T13:00:00Z",
+                    evaluated_at=(
+                        datetime.fromisoformat(
+                            planned.record.source.stale_after.replace("Z", "+00:00")
+                        )
+                        + timedelta(seconds=1)
+                    ).isoformat(),
                 ),
             )
         self.assertTrue(is_evidence_only_route_binding_refresh(refresh))
         assert refresh.record is not None
         self.assertEqual(refresh.record.external_ingress, planned.record.external_ingress)
-        expired = plan_route_binding_reconcile(
-            record_store=self.store,
-            request=RouteBindingReconcileRequest.model_validate(
-                {
-                    **{
-                        key: value
-                        for key, value in payload.items()
-                        if key not in {"mode", "browser_review"}
-                    },
-                    "external_ingress": external,
-                    "evaluated_at": "2026-08-02T00:00:00Z",
-                }
-            ),
-        )
-        self.assertEqual(
-            [finding.code for finding in expired.findings], ["external_attestation_not_current"]
-        )
         self.store.write_ingress_route_audit_record(
             _ingress_audit_record(record_id="audit-alias", domains=("foreign.example.test",))
         )
@@ -860,6 +849,65 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
             [finding["code"] for finding in missing.json()["review"]["findings"]],
             ["ingress_audit_missing"],
         )
+
+    async def test_current_stored_sources_verify_without_a_refresh_write(self) -> None:
+        payload = self.seed_split()
+        plan = plan_route_binding_reconcile(
+            record_store=self.store,
+            request=RouteBindingReconcileRequest.model_validate(
+                {
+                    **{
+                        key: value
+                        for key, value in payload.items()
+                        if key not in {"mode", "browser_review"}
+                    },
+                    "evaluated_at": "2026-07-20T00:00:00Z",
+                    "external_ingress": {
+                        **payload["external_ingress"],
+                        "attested_at": "2025-07-01T00:00:00Z",
+                    },
+                }
+            ),
+        )
+        assert plan.record is not None
+        current = plan.record
+        self.store.write_route_binding_record(current)
+        evaluated = datetime.fromisoformat(
+            current.source.stale_after.replace("Z", "+00:00")
+        ) + timedelta(seconds=1)
+        profile = self.store.read_product_profile_record(current.product)
+
+        def topology() -> Any:
+            return build_product_environment_topology(
+                record_store=self.store,
+                profile=profile,
+                lane=profile.lanes[0],
+                lane_summary=None,
+                now=evaluated,
+            )
+
+        observed = topology()
+        self.assertEqual(observed.provider_recorded.trust_state, "recorded")
+        self.assertFalse(any(w.code == "stale_route_authority" for w in observed.warnings))
+        self.assertEqual(
+            self.store.read_route_binding_record(
+                product=current.product,
+                context_name=current.context,
+                instance_name=current.instance,
+            ),
+            current,
+        )
+        edge = next(
+            e
+            for e in self.store.list_edge_endpoint_records()
+            if e.endpoint_key == current.ingress.endpoint_key
+        )
+        self.store.write_edge_endpoint_record(
+            edge.model_copy(update={"updated_at": evaluated.isoformat()})
+        )
+        changed = topology()
+        self.assertEqual(changed.provider_recorded.trust_state, "stale")
+        self.assertTrue(any(w.code == "stale_route_authority" for w in changed.warnings))
 
     async def test_profile_change_during_commit_settles_without_binding(self) -> None:
         payload = self.seed_split()

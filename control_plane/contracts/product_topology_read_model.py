@@ -33,7 +33,6 @@ from control_plane.contracts.public_ingress_monitoring import (
     health_monitor_freshness_seconds,
 )
 from control_plane.contracts.route_binding_record import (
-    EXTERNAL_INGRESS_REFRESH_THRESHOLD,
     EnvironmentRouteBindingRecord,
     RouteBindingExternalIngress,
     RouteBindingIngressReadModel,
@@ -52,6 +51,7 @@ from control_plane.lane_runtime_verification import (
     read_check_runtime_verification,
 )
 from control_plane.public_dns_diagnostics import PublicDnsDiagnostic, build_public_dns_diagnostics
+from control_plane.route_binding_reconcile import read_unchanged_route_binding_evidence
 from control_plane.split_ingress import split_ingress_check_name, split_ingress_monitoring_lane
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
@@ -202,11 +202,6 @@ class ProductProviderRecordedTopology(BaseModel):
     external_ingress: RouteBindingExternalIngress | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-    external_ingress_expires_at: str = Field(
-        default="",
-        exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     trust_state: FreshnessStatus = "missing"
@@ -396,6 +391,7 @@ def build_product_environment_topology(
         route_binding=route_binding,
         lane_summary=lane_summary,
         now=evaluated_at,
+        record_store=record_store,
     )
     observed, tls_evidence = _observed_topology(
         record_store=record_store,
@@ -596,6 +592,7 @@ def _provider_recorded_topology(
     route_binding: EnvironmentRouteBindingRecord | None,
     lane_summary: LaunchplaneLaneSummary | None,
     now: datetime,
+    record_store: object,
 ) -> ProductProviderRecordedTopology:
     if route_binding is None:
         target = lane_summary.provider_target if lane_summary is not None else None
@@ -620,18 +617,28 @@ def _provider_recorded_topology(
                 provenance=provenance,
             ),
         )
+    source = route_binding.source
+    if (
+        route_binding.external_ingress
+        and _effective_freshness(source.freshness_status, stale_after=source.stale_after, now=now)
+        == "stale"
+    ):
+        source = (
+            read_unchanged_route_binding_evidence(record_store, route_binding, now.isoformat())
+            or source
+        )
     trust_state = _effective_freshness(
-        route_binding.source.freshness_status,
-        stale_after=route_binding.source.stale_after,
+        source.freshness_status,
+        stale_after=source.stale_after,
         now=now,
     )
     provenance = DataProvenance(
         source_kind="record",
         source_record_id=route_binding.binding_key,
         recorded_at=route_binding.updated_at,
-        refreshed_at=route_binding.source.refreshed_at,
+        refreshed_at=source.refreshed_at,
         freshness_status=trust_state,
-        stale_after=route_binding.source.stale_after,
+        stale_after=source.stale_after,
         detail="Launchplane provider-neutral environment route-binding record.",
     )
     placement = ProductTopologyPlacement(
@@ -689,7 +696,6 @@ def _provider_recorded_topology(
         ingress=ingress,
         tls=tls,
         external_ingress=route_binding.external_ingress,
-        external_ingress_expires_at=route_binding.external_ingress_expires_at,
         trust_state=trust_state,
         provenance=provenance,
     )
@@ -1402,21 +1408,6 @@ def _topology_warnings(
                         "error" if route_binding.ingress.provider == "external" else "warning"
                     ),
                     detail="The provider-neutral route-binding evidence is stale.",
-                )
-            )
-        if (
-            route_binding.external_ingress
-            and route_binding.external_ingress.attestation_stale_after()
-            <= now + EXTERNAL_INGRESS_REFRESH_THRESHOLD
-        ):
-            warnings.append(
-                _warning(
-                    code="stale_route_authority",
-                    scope="authority",
-                    severity="error"
-                    if route_binding.external_ingress.attestation_stale_after() <= now
-                    else "warning",
-                    detail="External custody attestation needs renewal; review the custodian's current report in Route binding.",
                 )
             )
         if route_binding.external_ingress and lane.health_monitoring.monitoring_intent != "public":

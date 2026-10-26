@@ -2894,9 +2894,6 @@ class _RouteBindingMutationStore(_RouteBindingReconcileStore, Protocol):
         expected_record: EnvironmentRouteBindingRecord | None,
         replacement_record: EnvironmentRouteBindingRecord,
         mutation: DbOnlyMutationRequest,
-        reviewed_sources: control_plane_route_binding_reconcile.RouteBindingReviewSources
-        | None = None,
-        reviewed_product: str = "",
         native_sources: TestingRouteRefreshSources | None = None,
     ) -> RouteBindingReconcileWriteResult: ...
 
@@ -22762,48 +22759,35 @@ def create_launchplane_fastapi_app(
                     "result": outcome_payload,
                 }
                 renew_controller_reservation()
-                try:
-                    mutation_result = mutation_store.reconcile_route_binding_record(
-                        expected_record=reconcile_plan.current_record,
-                        replacement_record=reconcile_plan.record,
-                        reviewed_sources=reconcile_plan.review_sources
-                        if isinstance(
-                            reconcile_plan,
-                            control_plane_route_binding_reconcile.RouteBindingReconcilePlan,
-                        )
-                        else None,
-                        reviewed_product=outcome.product,
-                        native_sources=reconcile_plan.native_review_sources
-                        if isinstance(
-                            reconcile_plan,
-                            control_plane_route_binding_reconcile.RouteBindingReconcilePlan,
-                        )
-                        else None,
-                        mutation=DbOnlyMutationRequest(
-                            scope=idempotency_scope(identity),
-                            route_path=route_path,
-                            idempotency_key=binding_idempotency_key,
-                            request_fingerprint=idempotency_request_fingerprint(
-                                route_path=route_path,
-                                payload={
-                                    "controller_request_fingerprint": payload_fingerprint,
-                                    "binding_key": binding_key,
-                                    "current_record_sha256": outcome.current_record_sha256,
-                                    "candidate_record_sha256": outcome.candidate_record_sha256,
-                                },
-                            ),
-                            lease_owner=f"{trace_id}:{binding_token}",
-                            response_status_code=202,
-                            response_trace_id=trace_id,
-                            response_payload=binding_response_payload,
-                            lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
-                        ),
+                mutation_result = mutation_store.reconcile_route_binding_record(
+                    expected_record=reconcile_plan.current_record,
+                    replacement_record=reconcile_plan.record,
+                    native_sources=reconcile_plan.native_review_sources
+                    if isinstance(
+                        reconcile_plan,
+                        control_plane_route_binding_reconcile.RouteBindingReconcilePlan,
                     )
-                except (
-                    control_plane_route_binding_reconcile.RouteBindingSourceChanged,
-                    ProductContextOwnershipError,
-                ):
-                    mutation_result = RouteBindingReconcileWriteResult(status="changed")
+                    else None,
+                    mutation=DbOnlyMutationRequest(
+                        scope=idempotency_scope(identity),
+                        route_path=route_path,
+                        idempotency_key=binding_idempotency_key,
+                        request_fingerprint=idempotency_request_fingerprint(
+                            route_path=route_path,
+                            payload={
+                                "controller_request_fingerprint": payload_fingerprint,
+                                "binding_key": binding_key,
+                                "current_record_sha256": outcome.current_record_sha256,
+                                "candidate_record_sha256": outcome.candidate_record_sha256,
+                            },
+                        ),
+                        lease_owner=f"{trace_id}:{binding_token}",
+                        response_status_code=202,
+                        response_trace_id=trace_id,
+                        response_payload=binding_response_payload,
+                        lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
+                    ),
+                )
                 if mutation_result.status == "refreshed":
                     outcome_payload["status"] = "refreshed"
                 elif mutation_result.status == "unchanged":

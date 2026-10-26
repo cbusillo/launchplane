@@ -127,10 +127,10 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   useEffect(() => {
     const settledRecovery = recoveryWasActive.current && !recovering;
     recoveryWasActive.current = recovering;
-    if (recovering || custodyBaseline.current === recordedCustody) return;
+    if (kind !== "binding" || recovering || custodyBaseline.current === recordedCustody) return;
     custodyBaseline.current = recordedCustody;
     if (!settledRecovery) { revision.current += 1; setReview(null); setConfirmed(false); }
-    if (custodyDirty) setCustodyConflict(true);
+    if (custodyDirty || settledRecovery && apply.state.phase !== "succeeded") setCustodyConflict(true);
     else loadRecordedCustody();
   }, [recordedCustody, recovering]);
   useEffect(() => { setActive(busy); }, [busy]);
@@ -229,7 +229,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
       <button className="button button-secondary" disabled={locked} onClick={loadRecordedCustody}>Use saved custody</button>
       <button className="button button-secondary" disabled={locked} onClick={() => setCustodyConflict(false)}>Keep my custody edits</button>
     </div>}
-    {kind === "binding" && externalIngress && <p>Applying this decision attests the custodian's current report. Review the report before confirming; the proposed expiry is shown below.</p>}
+    {kind === "binding" && externalIngress && <p>Applying this decision attests the custodian's current report. Review the report before confirming. Each hostname must keep passing its strict health and TLS checks.</p>}
     <button type="button" className="button button-secondary" disabled={locked || custodyConflict || !reason.trim()} onClick={() => void inspect()}>Review {title.toLowerCase()}</button>
     {review && <div className="product-owner-plan route-repair-review" aria-label={`${title} review`}>
       <p><strong>{review.status === "ready" ? "Ready for your decision" : review.status === "unchanged"
@@ -244,14 +244,13 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
         {review.current_record?.external_ingress && review.proposed_record && !review.proposed_record.external_ingress && <p>Remove external custody. Every domain will use the managed ingress and TLS authority shown below.</p>}
         {review.proposed_record && <p>Destination: {review.proposed_record.provider_target.target_name}. Ingress: {review.proposed_record.ingress.provider} · {review.proposed_record.ingress.endpoint_key || "no endpoint"}. TLS ownership: {review.proposed_record.tls.owner}.</p>}
         {review.proposed_record?.external_ingress && <p>External ingress and TLS for {review.proposed_record.external_ingress.domains.join(", ")}: {review.proposed_record.external_ingress.custodian}. <a href={review.proposed_record.external_ingress.evidence_url} target="_blank" rel="noreferrer">Configuration evidence</a>. Other domains retain the managed ingress and TLS shown above.</p>}
-        {review.proposed_record?.external_ingress_expires_at && <p>External custody expires: <time dateTime={review.proposed_record.external_ingress_expires_at}>{new Date(review.proposed_record.external_ingress_expires_at).toLocaleString()}</time>.</p>}
         {review.findings.length > 0 && <ul>{review.findings.map(finding => <li key={finding.code}>{finding.detail}</li>)}</ul>}
       </>}
       <details><summary>Investigate evidence</summary><p>Lane: {scope.product} / {scope.context} / {scope.instance}</p><p>Reviewed digest: <code>{review.plan_sha256}</code></p>
         {review.operation === "repair-domain-authority" ? <p>Target: <code>{review.target_id}</code></p> : <p>Current record: <code>{review.current_record_sha256 || "absent"}</code></p>}
         <ul>{review.source_records.map(source => <li key={source.identity}><code>{source.identity}</code> · {source.version}</li>)}</ul>
       </details>
-      {review.status === "ready" && <><label className="confirmation-check"><input type="checkbox" disabled={locked} checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{review.operation === "reconcile-route-binding" && review.proposed_record?.external_ingress ? "I verified the custodian's current configuration report and want to record the shown custody and expiry." : <>I reviewed this lane’s {title.toLowerCase()} and want to update its Launchplane records.</>}</label>
+      {review.status === "ready" && <><label className="confirmation-check"><input type="checkbox" disabled={locked} checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />{review.operation === "reconcile-route-binding" && review.proposed_record?.external_ingress ? "I verified the custodian's current configuration report and want to record the shown custody." : <>I reviewed this lane’s {title.toLowerCase()} and want to update its Launchplane records.</>}</label>
         <button className="button button-primary" type="button" disabled={locked || !confirmed} onClick={() => void save()}>Apply reviewed {title.toLowerCase()}</button></>}
       <button className="button button-secondary" type="button" disabled={busy || recovering} onClick={() => { revision.current += 1; setReview(null); setConfirmed(false); }}>Leave records unchanged</button>
     </div>}

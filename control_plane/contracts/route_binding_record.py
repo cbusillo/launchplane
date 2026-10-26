@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -16,8 +16,6 @@ RouteBindingStatus = Literal["active", "disabled"]
 RouteBindingTerminationKind = Literal["edge", "direct", "none"]
 RouteBindingIngressProvider = str
 RouteBindingTlsOwner = Literal["launchplane", "provider", "external", "none"]
-EXTERNAL_INGRESS_ATTESTATION_WINDOW = timedelta(days=30)
-EXTERNAL_INGRESS_REFRESH_THRESHOLD = timedelta(days=15)
 
 _SECRET_KEY_TOKENS = (
     "secret",
@@ -147,14 +145,10 @@ class RouteBindingExternalIngress(BaseModel):
         ):
             raise ValueError("External ingress evidence requires a credential-free HTTPS URL")
         if self.attested_at:
-            self.attestation_stale_after()
+            timestamp = datetime.fromisoformat(self.attested_at.replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                raise ValueError("External ingress attestation requires a timezone")
         return self
-
-    def attestation_stale_after(self) -> datetime:
-        timestamp = datetime.fromisoformat(self.attested_at.replace("Z", "+00:00"))
-        if timestamp.tzinfo is None:
-            raise ValueError("External ingress attestation requires a timezone")
-        return timestamp.astimezone(timezone.utc) + EXTERNAL_INGRESS_ATTESTATION_WINDOW
 
 
 class RouteBindingProviderTargetReadModel(BaseModel):
@@ -297,14 +291,6 @@ class EnvironmentRouteBindingRecord(BaseModel):
         return self.tls
 
     @property
-    def external_ingress_expires_at(self) -> str:
-        return (
-            self.external_ingress.attestation_stale_after().isoformat().replace("+00:00", "Z")
-            if self.external_ingress
-            else ""
-        )
-
-    @property
     def binding_key(self) -> str:
         return build_route_binding_key(
             product=self.product,
@@ -327,11 +313,6 @@ class EnvironmentRouteBindingReadModel(BaseModel):
     external_ingress: RouteBindingExternalIngress | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
-        json_schema_extra={"x-launchplane-optional-response": True},
-    )
-    external_ingress_expires_at: str = Field(
-        default="",
-        exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     status: RouteBindingStatus
@@ -376,7 +357,6 @@ def redacted_route_binding_record(
             owner=record.tls.owner,
         ),
         external_ingress=record.external_ingress,
-        external_ingress_expires_at=record.external_ingress_expires_at,
         status=record.status,
         source=record.source,
         updated_at=record.updated_at,

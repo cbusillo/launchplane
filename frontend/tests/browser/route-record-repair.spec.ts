@@ -5,7 +5,6 @@ import { repairOperationScope, repairStorageKey, type RepairKind } from "../../s
 const scope = { product: "atlas-commerce", context: "atlas-testing", instance: "testing" };
 const proposedDomains = ["testing.example.invalid", "alias.example.invalid"];
 const planDigest = "a".repeat(64);
-const custodyExpiresAt = "2026-11-19T10:00:00Z";
 function bindingRecord(): EnvironmentRouteBindingReadModel {
   return { schema_version: 1, ...scope, provider_target: { provider_id: "dokploy", target_category: "application", provider_target_type: "application", target_name: "Recorded testing destination" },
     ingress: { provider: "edge", endpoint_key: "recorded-testing-edge", termination_kind: "edge" },
@@ -30,7 +29,7 @@ function bindingReview(applied: boolean, stored = false): RouteBindingRepairRevi
 }
 type Scenario = "saved" | "blocked" | "unchanged" | "denied" | "role-only" | "read-only" | "uncertain" | "stale" | "uncertain-stale" | "uncertain-conflict" | "readback-denied" | "readback-failed" |
   "storage-unavailable" | "missing-request" | "receipt-mismatch" | "receipt-digest-mismatch" | "current-drift" | "refresh" | "readback-refresh" | "edit" | "leave" |
-  "persistent-refusal" | "changed-confirmation" | "missing-binding" | "split" | "split-uncertain";
+  "persistent-refusal" | "changed-confirmation" | "missing-binding" | "split" | "split-uncertain" | "split-uncertain-stale";
 
 async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
   await page.goto("/ui/products?fixture=empty");
@@ -74,8 +73,7 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
     let review = kind === "domain" ? domainReview(applying, !applying && stored) : bindingReview(applying, !applying && stored);
     if (scenario.startsWith("split") && review.operation === "reconcile-route-binding" && review.proposed_record) {
       review = { ...review, proposed_record: { ...review.proposed_record,
-        external_ingress: { ...body.external_ingress, attested_at: bindingRecord().updated_at },
-        external_ingress_expires_at: custodyExpiresAt } };
+        external_ingress: { ...body.external_ingress, attested_at: bindingRecord().updated_at } } };
     }
     if (activeConfirmation) review = { ...review, expected_confirmation: activeConfirmation };
     if (applying || !stored) review = { ...review, plan_sha256: activeDigest };
@@ -85,7 +83,8 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
       }
       expect(body.confirmation).toBe(review.expected_confirmation);
       expect(body.browser_review.reviewed_plan_sha256).toBe(activeDigest);
-      if (scenario === "split-uncertain" && applies.length === 1) return route.abort();
+      if (["split-uncertain", "split-uncertain-stale"].includes(scenario) && applies.length === 1) return route.abort();
+      if (scenario === "split-uncertain-stale" && applies.length === 2) return route.fulfill({ status: 409, json: { trace_id: "split-stale", error: { code: "stale", message: "Saved custody changed." } } });
       if (["persistent-refusal", "changed-confirmation"].includes(scenario) && applies.length === 1) {
         if (scenario === "changed-confirmation") activeConfirmation = "fixture-confirmation-after-deploy";
         return route.abort();
@@ -152,9 +151,9 @@ test("split ingress review preserves both custodians through save and readback @
   expect(bodies.at(-1)?.external_ingress).toEqual(bodies[1].external_ingress);
 });
 
-for (const mode of ["pristine", "dirty", "uncertain"] as const) {
+for (const mode of ["pristine", "dirty", "uncertain", "refused"] as const) {
   test(`split custody reconciles saved updates while ${mode} @responsive`, async ({ page }) => {
-    const state = await fixture(page, "binding", mode === "uncertain" ? "split-uncertain" : "split");
+    const state = await fixture(page, "binding", mode === "refused" ? "split-uncertain-stale" : mode === "uncertain" ? "split-uncertain" : "split");
     let panel = state.panel;
     const original = { domains: [proposedDomains[0]], custodian: "First custodian", evidence_url: "https://example.test/first-report" };
     async function refresh(custody: typeof original) {
@@ -168,7 +167,7 @@ for (const mode of ["pristine", "dirty", "uncertain"] as const) {
     await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue(original.custodian);
     await panel.getByLabel("Route binding reason", { exact: true }).fill("Review current custody.");
     if (mode !== "pristine") await panel.getByLabel("Proxy custodian", { exact: true }).fill("My edited custodian");
-    if (mode === "uncertain") {
+    if (mode === "uncertain" || mode === "refused") {
       await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
       await panel.getByRole("checkbox").check();
       await panel.getByRole("button", { name: "Apply reviewed route binding", exact: true }).click();
@@ -197,7 +196,15 @@ for (const mode of ["pristine", "dirty", "uncertain"] as const) {
       panel = page.getByRole("region", { name: "Route binding", exact: true });
       await expect(panel).toHaveAttribute("data-recovery", "true");
       await panel.getByRole("button", { name: "Resume original route binding", exact: true }).click();
-      await expect(panel).toHaveAttribute("data-readback", "verified");
+      if (mode === "refused") {
+        await expect(panel).toHaveAttribute("data-operation-phase", "failed");
+        await expect(panel).toHaveAttribute("data-recovery", "false");
+        await panel.getByRole("button", { name: "Edit external custody", exact: true }).click();
+        await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue("My edited custodian");
+        await expect(panel.getByRole("button", { name: "Review route binding", exact: true })).toBeDisabled();
+        await panel.getByRole("button", { name: "Use saved custody", exact: true }).click();
+        await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue(successor.custodian);
+      } else await expect(panel).toHaveAttribute("data-readback", "verified");
       const applies = state.calls.filter(call => call.body.mode === "apply");
       expect(applies[1]).toEqual(applies[0]);
     }

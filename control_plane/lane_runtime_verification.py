@@ -346,13 +346,6 @@ def read_check_runtime_verification(
             monitoring_intent=lane.health_monitoring.monitoring_intent, check_kind=check.kind
         )
         and (
-            not external_check
-            or binding is not None
-            and binding.external_ingress is not None
-            and (now or datetime.now(timezone.utc))
-            < binding.external_ingress.attestation_stale_after()
-        )
-        and (
             observation.product,
             observation.context,
             observation.instance,

@@ -114,7 +114,7 @@ def _discover_route_bindings(
     if target_limit < 1:
         raise ValueError("Route binding refresh target_limit must be positive.")
     targets: dict[tuple[str, str, str], RouteBindingRefreshTarget] = {}
-    for profile in record_store.list_product_profile_records(driver_id="" if remaining else "odoo"):
+    for profile in record_store.list_product_profile_records(driver_id="odoo"):
         if not profile.is_active:
             continue
         for lane in profile.lanes:
@@ -140,17 +140,8 @@ def _discover_route_bindings(
                 )
             if record.status != "active":
                 continue
-            if profile.driver_id != "odoo" and not (
-                remaining
-                and profile.driver_id in {"generic-web", "generic-web-service"}
-                and record.external_ingress is not None
-                and record.source.source_kind in {"service", "backfill"}
-            ):
-                continue
             existing_testing_target = (
-                profile.driver_id == "odoo"
-                and record.instance == "testing"
-                and record.source.source_kind == "service"
+                record.instance == "testing" and record.source.source_kind == "service"
             )
             if remaining == existing_testing_target:
                 continue

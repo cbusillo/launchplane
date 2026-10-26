@@ -54,7 +54,7 @@ def split_ingress_monitoring_lane(
                     "checks": tuple(
                         check
                         for check in lane.health_monitoring.checks
-                        if check.name not in derived_names
+                        if check.kind != "public_http" and check.name not in derived_names
                     )
                     + checks,
                 }
@@ -73,6 +73,8 @@ def split_ingress_custody_hosts(
     if binding is None or binding.external_ingress is None:
         return ()
     host = urlsplit(url).hostname
+    if host not in {domain.domain_name for domain in binding.domains}:
+        return ()
     external = binding.external_ingress.domains
     if host in external:
         return external

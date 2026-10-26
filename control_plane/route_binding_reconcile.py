@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -365,6 +365,46 @@ def is_evidence_only_route_binding_refresh(plan: RouteBindingReconcilePlan) -> b
     )
 
 
+def read_unchanged_route_binding_evidence(
+    record_store: object, record: EnvironmentRouteBindingRecord, evaluated_at: str
+) -> RouteBindingSource | None:
+    if not all(
+        callable(getattr(record_store, method, None))
+        for method in (
+            "read_provider_target_record",
+            "read_dokploy_target_record",
+            "read_dokploy_target_id_record",
+            "list_private_health_endpoint_records",
+            "list_edge_endpoint_records",
+            "list_ingress_route_audit_records",
+            "read_route_binding_record",
+            "read_product_profile_record",
+        )
+    ):
+        return None
+    plan = plan_route_binding_reconcile(
+        record_store=cast(RouteBindingReconcileStore, record_store),
+        request=RouteBindingReconcileRequest(
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+            expected_current=RouteBindingExpectedCurrent(
+                state="present", record_sha256=route_binding_record_sha256(record)
+            ),
+            source_label=record.source.source_label,
+            evaluated_at=evaluated_at,
+        ),
+    )
+    if (
+        is_evidence_only_route_binding_refresh(plan)
+        and plan.record is not None
+        and _route_binding_evidence_projection(record)
+        == _route_binding_evidence_projection(plan.record)
+    ):
+        return plan.record.source
+    return None
+
+
 def build_route_binding_candidate(
     *,
     record_store: RouteBindingReconcileStore,
@@ -444,17 +484,14 @@ def build_route_binding_candidate(
                 }
             )
         assert request.external_ingress is not None
-        expires_at = request.external_ingress.attestation_stale_after()
-        if (
-            not _parse_utc_timestamp(request.external_ingress.attested_at)
-            <= _parse_utc_timestamp(request.evaluated_at)
-            < expires_at
+        if not _parse_utc_timestamp(request.external_ingress.attested_at) <= _parse_utc_timestamp(
+            request.evaluated_at
         ):
             return _blocked_plan(
                 findings=(
                     RouteBindingReconcileFinding(
                         code="external_attestation_not_current",
-                        detail="Review and attest external custody again in the signed-in Route binding card.",
+                        detail="The external custody timestamp cannot be in the future.",
                     ),
                 ),
                 current_record=current_record,
@@ -625,13 +662,6 @@ def build_route_binding_candidate(
         profile_source = f"product-profile:{split_profile.product}"
         source_record_ids = (*source_record_ids, profile_source)
         source_versions[profile_source] = split_profile.updated_at
-        assert request.external_ingress is not None
-        stale_after = _format_utc_timestamp(
-            min(
-                _parse_utc_timestamp(stale_after),
-                request.external_ingress.attestation_stale_after(),
-            )
-        )
 
     record = EnvironmentRouteBindingRecord(
         product=request.product,

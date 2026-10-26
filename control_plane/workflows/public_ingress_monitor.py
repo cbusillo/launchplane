@@ -2842,7 +2842,7 @@ def _check_url(
             fetch_public_ingress_url(
                 url, timeout_seconds, allowed_https_hosts=target.allowed_https_hosts
             )
-            if target.allowed_https_hosts and http_get is fetch_public_ingress_url
+            if target.allowed_https_hosts
             else http_get(url, timeout_seconds)
         )
     except HTTPError as error:

@@ -843,9 +843,10 @@ custody and managed recovery ingress. Expand **Separate externally managed
 domains**, name the custodian and configuration report, and review the complete
 hostname set. The remaining managed hosts still need their exact applied audit
 and active edge join. A blocked plan offers no Apply. A ready decision shows
-both custodians, binds their exact evidence and records a 30-day attestation;
-it changes no live route. Review again to renew external custody. Automated
-managed-evidence refresh preserves its original attestation deadline.
+both custodians and binds their exact evidence; it changes no live route.
+Review a changed custodian or configuration report in the same card. Current
+health, runtime identity and TLS checks qualify every hostname without monthly
+re-attestation. Unchanged stored managed sources are rechecked on reads.
 Saving also enables strict runtime-identity HTTP checks and TLS checks for
 every hostname. The lane stays unverified until those observations are current.
 Evidence refreshes reload untouched custody fields. If saved custody changes
