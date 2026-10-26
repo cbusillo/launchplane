@@ -45,14 +45,16 @@ def pipe(source_command,destination):
         if source.poll() is None:
             source.kill()
             source.wait(timeout=cleanup_seconds)
+if run(['ps','-a','--filter','label=launchplane.cutover-restore='+spec['record'],'--format','{{.ID}}']).strip():
+    raise RuntimeError('original restore work remains live or uncertain')
 try:
     source_size=int(run(['exec','-e','DATABASE_NAME='+spec['database'],spec['runner'],'/venv/bin/python','-c',"import os,psycopg2; c=psycopg2.connect(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_DB_PORT','5432'),dbname=os.environ['DATABASE_NAME'],user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],connect_timeout=10); q=c.cursor();q.execute('SELECT pg_database_size(current_database()) + COALESCE(sum(file_size),0) FROM ir_attachment');print(q.fetchone()[0])"]).decode().strip())
-    container=run(['run','-d','--rm','--pull','never','--label','launchplane.cutover-restore='+spec['record'],'--network','none','--user','postgres','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--tmpfs','/var/lib/postgresql:rw,mode=1777','--mount','type=volume,dst=/var/lib/postgresql/data','--tmpfs','/tmp:rw,mode=1777','--tmpfs','/var/run/postgresql:rw,mode=1777','-e','PGDATA=/var/lib/postgresql/data/pgdata','-e','POSTGRES_HOST_AUTH_METHOD=trust','--entrypoint','timeout',spec['image'],'--signal=KILL',str(work_seconds),'docker-entrypoint.sh','postgres']).decode().strip()
+    container=run(['run','-d','--rm','--pull','never','--name',spec['record']+'-restore-probe','--label','launchplane.cutover-restore='+spec['record'],'--network','none','--user','postgres','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--tmpfs','/var/lib/postgresql:rw,mode=1777','--mount','type=volume,dst=/var/lib/postgresql/data','--tmpfs','/tmp:rw,mode=1777','--tmpfs','/var/run/postgresql:rw,mode=1777','-e','PGDATA=/var/lib/postgresql/data/pgdata','-e','POSTGRES_HOST_AUTH_METHOD=trust','--entrypoint','timeout',spec['image'],'--signal=KILL',str(work_seconds),'docker-entrypoint.sh','postgres']).decode().strip()
     if not re.fullmatch('[0-9a-f]{64}',container): raise ValueError('restore allocation has no exact container identity')
     available=int(run(['exec',container,'df','-PB1','/var/lib/postgresql/data']).decode().splitlines()[-1].split()[3])
     if source_size<=0 or available < source_size*2: raise ValueError('isolated Docker storage lacks restore staging capacity')
     while True:
-        response=subprocess.run(['docker','exec',container,'pg_isready','-U','postgres'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=remaining())
+        response=subprocess.run(['docker','exec',container,'pg_isready','-h','127.0.0.1','-U','postgres'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=remaining())
         if response.returncode==0: break
         time.sleep(min(.5,remaining()))
     if run(['exec',spec['runner'],'sha256sum',spec['dump']]).decode().split()[0]!=spec['database_dump_sha256']: raise ValueError('restore input differs from verified capture')
@@ -112,7 +114,6 @@ def verify_disposable_database_restore(
         image=image,
         runner=runner,
         record=record_id,
-        container=record_id + "-restore-probe",
         dump=dump,
         database_uuid=database_uuid,
         database_dump_sha256=dump_sha256,

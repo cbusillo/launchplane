@@ -18,7 +18,11 @@ def backup_recovery_eligible(record: OdooCutoverRecord) -> bool:
         return False
     pause, site, plan = record.pause, record.public_site, record.plan
     if pause is None:
-        return site is None and plan.compatibility.classification == "compatible"
+        return (
+            site is None
+            and plan.compatibility.classification == "compatible"
+            and plan.website_settings is None
+        )
     if site is None:
         return False
     try:

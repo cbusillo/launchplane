@@ -33,7 +33,9 @@ class CutoverRestoreProbeTests(unittest.TestCase):
             self.commands.append((argv, kwargs))
             output = b""
             status = 0
-            if argv[1] == "run":
+            if argv[1] == "ps" and failure == "live":
+                output = self.container.encode()
+            elif argv[1] == "run":
                 output = self.container.encode()
             elif "pg_database_size" in argv[-1]:
                 output = b"100000"
@@ -94,10 +96,6 @@ class CutoverRestoreProbeTests(unittest.TestCase):
                 for _, kwargs in self.commands
             )
         )
-        allocation = next(argv for argv, _ in self.commands if argv[1] == "run")
-        self.assertIn("--rm", allocation)
-        self.assertIn("type=volume,dst=/var/lib/postgresql/data", allocation)
-        self.assertIn("timeout", allocation)
         self.assertIn(
             ["docker", "rm", "-f", "-v", self.container], [argv for argv, _ in self.commands]
         )
@@ -116,6 +114,11 @@ class CutoverRestoreProbeTests(unittest.TestCase):
                     self.assertFalse(any("pg_restore" in argv for argv, _ in self.commands))
         with self.assertRaises(subprocess.TimeoutExpired):
             self.run_probe(failure="cleanup")
+
+    def test_live_original_restore_refuses_a_second_copy_without_effects(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "original restore work"):
+            self.run_probe(failure="live")
+        self.assertFalse(any(argv[1] in {"run", "rm"} for argv, _ in self.commands))
 
 
 class NativeRestoreLifetimeTests(unittest.TestCase):

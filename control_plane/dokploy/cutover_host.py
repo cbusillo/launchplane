@@ -1,4 +1,3 @@
-from control_plane.contracts.odoo_cutover import ODOO_CUTOVER_TERMINAL_STEPS
 import base64
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -235,7 +234,11 @@ class BoundOdooCutoverHost:
         self.prepared_path = Path(prepared_root) / plan.route_id
         targets = self.initial_targets()
         self.native_writer_capability = NativeCronWriterCapabilities(
-            plan, self.runtime.cron_writer_bindings, self.transport.read, self.runner
+            plan,
+            self.runtime.cron_writer_bindings,
+            self.transport.read,
+            self.runner,
+            self.executor_web,
         )
         self.observer = NativeWriterObserver(
             plan,
@@ -391,6 +394,10 @@ class BoundOdooCutoverHost:
             raise ValueError("cutover private runner is unavailable")
         return containers[0]
 
+    def executor_web(self, slot: OdooSlot) -> dict[str, Any]:
+        web = next(writer for writer in self.plan.writers if writer.kind == "web")
+        return self.inspect(slot, "web", self.target(slot, web).container)
+
     def startup_capability(self, slot: OdooSlot) -> None:
         result = json.loads(
             self.transport.read(
@@ -487,18 +494,6 @@ class BoundOdooCutoverHost:
                 session.get("address") not in old_addresses for session in database["sessions"]
             ):
                 raise ValueError("inactive candidate or unknown database writers are not fenced")
-        dump_version = self.transport.read(
-            ("docker", "exec", self.runner(plan.old), "pg_dump", "--version"), None
-        )
-        dump_major = int(dump_version.split()[2].split(".")[0])
-        tools = json.loads(
-            self.transport(
-                ("python3", "-c", RESTORE_PREFLIGHT_PROGRAM),
-                json.dumps({"image": self.runtime.restore_image, "dump_major": dump_major}),
-            )
-        )
-        if tools != {"restore_tools": True}:
-            raise ValueError("immutable restore tools lack qualified native preflight")
         self.startup_capability(plan.old)
         self.native_writer_capability.preflight(plan.old)
         for writer in plan.writers:
@@ -608,6 +603,18 @@ class BoundOdooCutoverHost:
 
     def prepare_candidate(self, plan: OdooCutoverPlan) -> None:
         self.guard()
+        dump_version = self.transport.read(
+            ("docker", "exec", self.runner(plan.old), "pg_dump", "--version"), None
+        )
+        dump_major = int(dump_version.split()[2].split(".")[0])
+        tools = json.loads(
+            self.transport(
+                ("python3", "-c", RESTORE_PREFLIGHT_PROGRAM),
+                json.dumps({"image": self.runtime.restore_image, "dump_major": dump_major}),
+            )
+        )
+        if tools != {"restore_tools": True}:
+            raise ValueError("immutable restore tools lack qualified native preflight")
         prepare_dokploy_odoo_slot(
             plan,
             host=self.host,
@@ -805,6 +812,7 @@ class BoundOdooCutoverHost:
         record = self.record()
         if record is None or slot == plan.new and record.maintenance is None:
             raise ValueError("native readiness lacks the passing original maintenance")
+        self.native_writer_capability.preflight(slot)
         targets = tuple(
             target
             for target in self.writers.targets
@@ -813,7 +821,6 @@ class BoundOdooCutoverHost:
         for target in {target.container: target for target in targets}.values():
             self.writers._stop(target)
         self.writers.require_drained(targets)
-        self.native_writer_capability.preflight(slot)
         web_writer = next(writer for writer in plan.writers if writer.kind == "web")
         web = self.target(slot, web_writer)
         if not self.writers._running(web):

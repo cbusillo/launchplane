@@ -381,12 +381,16 @@ def abort_before_maintenance(
             provider.observed_public_copy(record.pause.pause_id)
             != record.public_site.content_digest
         ):
-            raise ValueError("abort lost its original published pause")
+            _require_recovery_route(provider.current_route(plan), plan, plan.old)
     else:
         _require_route(provider.current_route(plan), plan, plan.old)
-    _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
-    route = provider.switch(plan, plan.old)
-    _require_route(route, plan, plan.old)
+    if record.pause is None:
+        route = provider.current_route(plan)
+        _require_route(route, plan, plan.old)
+    else:
+        _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
+        route = provider.switch(plan, plan.old)
+        _require_route(route, plan, plan.old)
     if record.pause is not None:
         assert record.public_site is not None
         PreparedPublicPause(

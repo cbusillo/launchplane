@@ -1,6 +1,8 @@
 from collections.abc import Callable
 import hashlib
 import json
+import re
+from typing import Any
 
 from control_plane.contracts.cutover_host import OdooCronWriterBinding
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooSlot
@@ -30,6 +32,7 @@ import ast,configparser,hashlib,json,os,runpy,sys,tempfile
 from pathlib import Path
 import psycopg2
 spec=json.load(sys.stdin)
+os.environ.clear();os.environ.update(spec['environment'])
 sys.path.insert(0,'/volumes/scripts')
 startup=runpy.run_path('/volumes/scripts/run_odoo_startup.py',run_name='executor_preflight')
 with tempfile.TemporaryDirectory() as directory:
@@ -76,6 +79,7 @@ class NativeCronWriterCapabilities:
         bindings: tuple[OdooCronWriterBinding, ...],
         execute: ContainerCommand,
         runner: Callable[[OdooSlot], str],
+        web: Callable[[OdooSlot], dict[str, Any]] | None = None,
     ) -> None:
         expected = {writer.writer_id for writer in plan.writers if writer.kind != "web"}
         if {binding.writer_id for binding in bindings} != expected or len(bindings) != len(
@@ -85,18 +89,51 @@ class NativeCronWriterCapabilities:
                 "every logical background writer requires its own native cron capability"
             )
         self.plan, self.bindings, self.execute, self.runner = plan, bindings, execute, runner
+        self.web = web
 
     def preflight(self, slot: OdooSlot) -> str:
         if slot not in (self.plan.old, self.plan.new):
             raise ValueError("executor preflight crossed the admitted artifact")
+        if self.web is None:
+            raise ValueError("executor preflight requires the exact web container")
+        web = self.web(slot)
+        config = web["Config"]
+        command = config.get("Cmd")
+        startup = (
+            "exec /venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
+        )
+        if (
+            config.get("Image") != slot.image
+            or config.get("Entrypoint") != ["/bin/sh", "-c"]
+            or not isinstance(command, list)
+            or len(command) != 1
+            or not isinstance(command[0], str)
+            or not command[0].endswith(startup)
+            or command[0] != startup
+            and re.fullmatch(
+                r'while \[ "\$\(cat [A-Za-z0-9_./-]+ 2>/dev/null\)" != "[0-9a-f]{64}" \]; do sleep 1; done; '
+                + re.escape(startup),
+                command[0],
+            )
+            is None
+            or any(
+                mount.get("Type") != "volume" or mount.get("Destination") != "/volumes/data"
+                for mount in web.get("Mounts", [])
+            )
+        ):
+            raise ValueError("web executor differs from the supported immutable startup topology")
+        environment: dict[str, str] = {}
+        for entry in config.get("Env", []):
+            key, separator, value = entry.partition("=")
+            if not separator or key in environment:
+                raise ValueError("web executor environment is incomplete or ambiguous")
+            environment[key] = value
         observed = json.loads(
             self.execute(
                 (
                     "docker",
                     "exec",
                     "-i",
-                    "-e",
-                    "ODOO_MAX_CRON_THREADS=0",
                     self.runner(slot),
                     "/venv/bin/python",
                     "-c",
@@ -105,6 +142,7 @@ class NativeCronWriterCapabilities:
                 json.dumps(
                     {
                         "image": slot.image,
+                        "environment": environment,
                         "database": slot.binding.database,
                         "database_uuid": slot.runtime_identity.database_uuid,
                         "planned_modules": list(self.plan.compatibility.install_modules)

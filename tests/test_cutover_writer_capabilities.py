@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Any
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock
@@ -67,6 +68,7 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
         self,
     ) -> None:
         import configparser
+        import os
         from contextlib import redirect_stdout
         import io
         import sys
@@ -99,7 +101,10 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
 
             def configure(value: object) -> None:
                 parser = configparser.ConfigParser()
-                parser["options"] = {"max_cron_threads": "0", "addons_path": str(manifests)}
+                parser["options"] = {
+                    "max_cron_threads": os.environ.get("ODOO_MAX_CRON_THREADS", "2"),
+                    "addons_path": str(manifests),
+                }
                 if queue_section:
                     parser["queue_job"] = {"channels": "root:1"}
                 with Path(settings.config_path).open("w") as stream:
@@ -112,6 +117,7 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
                     "database": self.plan.old.binding.database,
                     "database_uuid": self.plan.old.runtime_identity.database_uuid,
                     "planned_modules": [],
+                    "environment": {"ODOO_MAX_CRON_THREADS": "0"},
                     "image": self.plan.old.image,
                 }
             )
@@ -126,15 +132,41 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
             original_path = list(sys.path)
             self.addCleanup(lambda: sys.path.__setitem__(slice(None), original_path))
 
-            def probe() -> None:
+            def probe(payload: str = request) -> str:
+                output = io.StringIO()
                 with (
+                    patch.dict("os.environ", {}, clear=True),
                     patch.dict("sys.modules", modules),
                     patch("runpy.run_path", return_value=startup),
-                    patch("sys.stdin", io.StringIO(request)),
-                    redirect_stdout(io.StringIO()),
+                    patch("sys.stdin", io.StringIO(payload)),
+                    redirect_stdout(output),
                 ):
                     exec(EXECUTOR_PREFLIGHT_PROGRAM, {})
+                return output.getvalue()
 
+            web: dict[str, Any] = {
+                "Config": {
+                    "Image": self.plan.old.image,
+                    "Entrypoint": ["/bin/sh", "-c"],
+                    "Cmd": [
+                        "exec /venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
+                    ],
+                    "Env": ["ODOO_MAX_CRON_THREADS=0"],
+                },
+                "Mounts": [],
+            }
+            capability = NativeCronWriterCapabilities(
+                self.plan,
+                self.bindings,
+                lambda argv, stdin: probe(stdin or ""),
+                lambda slot: "runner",
+                lambda slot: web,
+            )
+            self.assertTrue(capability.preflight(self.plan.old))
+            web["Config"]["Env"] = ["ODOO_MAX_CRON_THREADS=1"]
+            with self.assertRaisesRegex(ValueError, "web warming"):
+                capability.preflight(self.plan.old)
+            web["Config"]["Env"] = ["ODOO_MAX_CRON_THREADS=0"]
             probe()
             installed.append("queue_job")
             with self.assertRaisesRegex(ValueError, "HTTP-dependent"):

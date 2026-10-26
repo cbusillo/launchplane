@@ -1,6 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 from control_plane.odoo_cutover_recovery import DefiniteBackupFailure
@@ -102,3 +103,72 @@ class CutoverAbortTests(unittest.TestCase):
             assert resumed.pause is not None and held.pause is not None
             self.assertEqual(resumed.pause.pause_id, held.pause.pause_id)
             self.assertEqual(resumed.pause.began_at, held.pause.began_at)
+
+    def test_abort_reconciles_a_lost_switch_reply_without_republishing_pause(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            provider = IsolatedCutoverProvider(root, database_changing=True)
+            self.addCleanup(provider.engine.dispose)
+            store = cutover_store(root)
+            switch = provider.switch
+
+            def lost_reply(plan: Any, slot: Any) -> Any:
+                switch(plan, slot)
+                raise TimeoutError("old route applied; reply lost")
+
+            with (
+                patch.object(provider, "backup", side_effect=DefiniteBackupFailure()),
+                patch.object(provider, "switch", side_effect=lost_reply),
+                self.assertRaises(TimeoutError),
+            ):
+                execute_odoo_cutover(provider.cutover, store, provider, record_id="original")
+            held = store.load("original")
+            assert held.pause is not None
+            self.assertEqual(held.pause.state, "drained")
+            with patch.object(provider, "backup") as backup:
+                recovered = execute_odoo_cutover(
+                    provider.cutover, store, provider, record_id="original"
+                )
+            backup.assert_not_called()
+            self.assertEqual(recovered.step, "aborted")
+            assert recovered.pause is not None
+            self.assertEqual(recovered.pause.began_at, held.pause.began_at)
+
+    def test_unpaused_abort_keeps_existing_serving_writers_running(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            provider = IsolatedCutoverProvider(root)
+            self.addCleanup(provider.engine.dispose)
+            store = cutover_store(root)
+            with (
+                patch.object(provider, "backup", side_effect=DefiniteBackupFailure()),
+                patch.object(provider, "readiness") as readiness,
+                patch.object(provider, "switch") as switch,
+            ):
+                result = execute_odoo_cutover(
+                    provider.cutover, store, provider, record_id="original"
+                )
+            readiness.assert_not_called()
+            switch.assert_not_called()
+            self.assertEqual(result.step, "aborted")
+
+    def test_compatible_settings_release_requires_its_original_pause_for_abort(self) -> None:
+        from datetime import UTC, datetime
+        from control_plane.contracts.odoo_cutover import OdooCutoverRecord
+        from control_plane.odoo_cutover_recovery import backup_recovery_eligible
+        from tests.test_odoo_cutover_website_settings import snapshot
+
+        with TemporaryDirectory() as directory:
+            provider = IsolatedCutoverProvider(Path(directory))
+            self.addCleanup(provider.engine.dispose)
+            plan = provider.cutover.model_copy(
+                update={"website_settings": snapshot(provider.cutover)}
+            )
+            record = OdooCutoverRecord(
+                record_id="original",
+                plan=plan,
+                step="backing_up",
+                began_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+            self.assertFalse(backup_recovery_eligible(record))
