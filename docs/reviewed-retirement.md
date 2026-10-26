@@ -172,13 +172,19 @@ Client boundaries in DIRECTION.md before approving the exact change.
 **Remove reviewed settings** uses the signed-in administrator's existing authority,
 CSRF protection and one retained operation key. The original request stays in that
 browser tab's session storage for same-request recovery after a lost reply or
-reload. An uncertain outcome locks edits and new reviews; **Retry original removal**
+reload. Recovery is keyed by the administrator and the physical stored record
+(scope, context and instance), independently of product ownership. The record
+selector stays usable after uncertainty so other records can be reviewed;
+returning to the same record restores its original request and key. An uncertain
+outcome locks that record's setting names, reason and new reviews; **Retry original removal**
 reuses the request and key. Missing recovery storage blocks submission. A stale
 attempt that is proven rolled back requires a fresh review, including after
 an uncertain reply. An unverified reservation keeps the original operation locked.
-A committed removal is followed by an independent readback. An unavailable or
+A committed removal is followed by an independent readback, and its local saved
+request is cleared. Historical completion remains in service custody. An unavailable or
 mismatched readback stays unverified. **Check current record**
-can repeat that read, including while an Apply is uncertain. After a confirmed
+can repeat that read, including while an Apply is uncertain. A shown current
+match or mismatch never settles the original Apply. After a confirmed
 commit, a fresh review can inspect the current record even if another writer
 has changed it; the historical receipt does not promise current agreement.
 Runtime sync, deployment and production acceptance remain separate operations.

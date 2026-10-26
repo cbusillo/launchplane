@@ -66,13 +66,39 @@ class RuntimeSettingRemovalRequest(BaseModel):
         }
 
 
+class RuntimeSettingRemovalPlan(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    product: str
+    scope: str
+    context: str
+    instance: str
+    removed_keys: list[str]
+    record_sha256: str
+    updated_at: str
+    surviving_keys: list[str]
+    unprintable_survivor_count: int
+    surviving_value_count: int
+    retirement_intent_count: int
+    record_deleted: bool
+    requires_compatible_readers_and_rollback: bool
+    authority_sha256: str
+    plan_sha256: str
+    review_id: str
+    applied: bool
+    applied_at: str | None = None
+    audit_review_id: str | None = None
+    readback_matches: bool | None = None
+    current_record_present: bool | None = None
+    replayed: bool | None = None
+
+
 def removal_plan(
     record: RuntimeEnvironmentRecord,
     request: RuntimeSettingRemovalRequest,
     *,
     authority_sha256: str,
     private_nonce: str,
-) -> dict[str, object]:
+) -> RuntimeSettingRemovalPlan:
     if (record.scope, record.context, record.instance) != (
         request.scope,
         request.context,
@@ -102,7 +128,9 @@ def removal_plan(
         "applied": False,
     }
     digest = request_fingerprint({"intent": request.intent(), "plan": plan})
-    return {**plan, "plan_sha256": digest, "review_id": "runtime-removal-" + digest}
+    return RuntimeSettingRemovalPlan.model_validate(
+        {**plan, "plan_sha256": digest, "review_id": "runtime-removal-" + digest}
+    )
 
 
 class RuntimeSettingRemovalStale(ValueError):

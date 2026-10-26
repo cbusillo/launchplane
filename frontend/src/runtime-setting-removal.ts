@@ -27,3 +27,17 @@ export function recoverRemovalRequest(storageKey: string): RuntimeSettingRemoval
       request.review_id === `runtime-removal-${request.reviewed_plan_sha256}` ? request : null;
   } catch { return null; }
 }
+
+export type RemovalRecord = Pick<RuntimeSettingRemovalRequest, "product" | "scope" | "context" | "instance">;
+
+export function removalRecordScope(actorId: number, record: RemovalRecord): string {
+  return `runtime-setting-removal:${JSON.stringify([actorId, record.scope, record.context || "", record.instance || ""])}`;
+}
+
+export function recoverRemovalRecord(storageKey: string): RemovalRecord | null {
+  try {
+    const record = JSON.parse(sessionStorage.getItem(storageKey) || "null") as RemovalRecord | null;
+    return record && typeof record.product === "string" && ["global", "context", "instance"].includes(record.scope) &&
+      typeof record.context === "string" && typeof record.instance === "string" ? record : null;
+  } catch { return null; }
+}

@@ -10,36 +10,11 @@ from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDepend
 from control_plane.runtime_setting_removal import (
     ROUTE,
     RuntimeSettingRemovalRequest,
+    RuntimeSettingRemovalPlan,
     RuntimeSettingRemovalStale,
 )
 from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.storage.postgres import PostgresRecordStore
-
-
-class RuntimeSettingRemovalPlan(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    product: str
-    scope: str
-    context: str
-    instance: str
-    removed_keys: list[str]
-    record_sha256: str
-    updated_at: str
-    surviving_keys: list[str]
-    unprintable_survivor_count: int
-    surviving_value_count: int
-    retirement_intent_count: int
-    record_deleted: bool
-    requires_compatible_readers_and_rollback: bool
-    authority_sha256: str
-    plan_sha256: str
-    review_id: str
-    applied: bool
-    applied_at: str | None = None
-    audit_review_id: str | None = None
-    readback_matches: bool | None = None
-    current_record_present: bool | None = None
-    replayed: bool | None = None
 
 
 class RuntimeSettingRemovalResponse(BaseModel):
@@ -99,9 +74,7 @@ def register_runtime_setting_removal_routes(
                 code="runtime_setting_removal_unverified",
                 message="Refresh the exact review or read the original removal receipt; no retry under a new key.",
             ) from None
-        return RuntimeSettingRemovalResponse(
-            trace_id=trace, result=RuntimeSettingRemovalPlan.model_validate(result)
-        )
+        return RuntimeSettingRemovalResponse(trace_id=trace, result=result)
 
     app.add_api_route(
         ROUTE,

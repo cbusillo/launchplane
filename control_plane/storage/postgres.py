@@ -510,7 +510,10 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.runtime_setting_removal import RuntimeSettingRemovalRequest
+from control_plane.runtime_setting_removal import (
+    RuntimeSettingRemovalRequest,
+    RuntimeSettingRemovalPlan,
+)
 from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
@@ -31833,7 +31836,7 @@ class PostgresRecordStore(HumanSessionStore):
         identity: LaunchplaneIdentity,
         trace_id: str,
         idempotency_key: str = "",
-    ) -> dict[str, object]:
+    ) -> RuntimeSettingRemovalPlan:
         """Keep review preimages private; commit the contraction and receipt together."""
         from control_plane.service_auth import AuthorizationTarget
         from control_plane.contracts.product_profile_record import product_context_owner_map
@@ -31938,7 +31941,7 @@ class PostgresRecordStore(HumanSessionStore):
                 plan = removal_plan(
                     current, request, authority_sha256=authority_sha256, private_nonce=private_nonce
                 )
-                review_id = str(plan["review_id"])
+                review_id = plan.review_id
                 existing = session.scalar(
                     self._idempotency_statement(
                         scope="runtime-setting-review",
@@ -31954,12 +31957,12 @@ class PostgresRecordStore(HumanSessionStore):
                         scope="runtime-setting-review",
                         route_path=REVIEW_ROUTE,
                         idempotency_key=review_id,
-                        request_fingerprint=str(plan["plan_sha256"]),
+                        request_fingerprint=plan.plan_sha256,
                         response_status_code=200,
                         response_trace_id=trace_id,
                         recorded_at=now,
                         response_payload={
-                            "plan": plan,
+                            "plan": plan.model_dump(mode="json", exclude_none=True),
                             "private_nonce": private_nonce,
                             "intent": request.intent(),
                             "before": current.model_dump(mode="json"),
@@ -31986,23 +31989,25 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 raise ValueError("The reviewed selection differs from this request.")
             before = RuntimeEnvironmentRecord.model_validate(review.response_payload["before"])
-            plan = dict(review.response_payload["plan"])
+            plan = RuntimeSettingRemovalPlan.model_validate(review.response_payload["plan"])
             remaining = {key: value for key, value in before.env.items() if key not in request.keys}
             if request.mode == "readback":
                 matches = (
                     current is None
-                    if plan["record_deleted"]
+                    if plan.record_deleted
                     else current is not None
                     and request_fingerprint(current.env) == request_fingerprint(remaining)
                     and current.retired_provider_keys == before.retired_provider_keys
                     and current.source_label == before.source_label
                     and current.schema_version == before.schema_version
                 )
-                return {
-                    **plan,
-                    "readback_matches": matches,
-                    "current_record_present": current is not None,
-                }
+                return RuntimeSettingRemovalPlan.model_validate(
+                    {
+                        **plan.model_dump(mode="json", exclude_none=True),
+                        "readback_matches": matches,
+                        "current_record_present": current is not None,
+                    }
+                )
             if not idempotency_key.strip():
                 raise ValueError("Apply requires the original stable idempotency key.")
             fingerprint = request_fingerprint(request.model_dump(mode="json"))
@@ -32021,7 +32026,9 @@ class PostgresRecordStore(HumanSessionStore):
                 mutation=mutation,
             )
             if status == "replayed":
-                return {**reservation.response_payload, "replayed": True}
+                return RuntimeSettingRemovalPlan.model_validate(
+                    {**reservation.response_payload, "replayed": True}
+                )
             if status != "acquired":
                 raise ValueError("The original removal outcome requires reconciliation.")
             assert receipt_row is not None
@@ -32055,7 +32062,7 @@ class PostgresRecordStore(HumanSessionStore):
             if current_plan != plan:
                 raise RuntimeSettingRemovalStale("Reviewed runtime record or authority changed.")
             replacement = None
-            if not plan["record_deleted"]:
+            if not plan.record_deleted:
                 replacement = RuntimeEnvironmentRecord.model_validate(
                     {
                         **before.model_dump(mode="json"),
@@ -32064,7 +32071,7 @@ class PostgresRecordStore(HumanSessionStore):
                     }
                 )
             event = RuntimeEnvironmentDeleteEvent(
-                event_id="runtime-setting-removal-" + str(plan["plan_sha256"]),
+                event_id="runtime-setting-removal-" + plan.plan_sha256,
                 recorded_at=now,
                 actor=idempotency_scope(identity),
                 scope=request.scope,
@@ -32115,19 +32122,21 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if written != replacement:
                 raise ValueError("Removal readback did not match its committed intent.")
-            result = {
-                **plan,
-                "applied": True,
-                "applied_at": now,
-                "audit_review_id": request.review_id,
-                "readback_matches": True,
-            }
+            result = RuntimeSettingRemovalPlan.model_validate(
+                {
+                    **plan.model_dump(mode="json", exclude_none=True),
+                    "applied": True,
+                    "applied_at": now,
+                    "audit_review_id": request.review_id,
+                    "readback_matches": True,
+                }
+            )
             completion = complete_launchplane_mutation_reservation(
                 reservation,
                 response_status_code=200,
                 response_trace_id=trace_id,
                 completed_at=now,
-                response_payload=result,
+                response_payload=result.model_dump(mode="json", exclude_none=True),
             )
             self._sync_idempotency_row(receipt_row, completion)
             self._after_product_authority_bundle_step("runtime_setting_removal_receipt")
