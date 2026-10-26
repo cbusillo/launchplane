@@ -1,7 +1,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 from control_plane.contracts.product_profile_record import ProductLaneProfile
@@ -125,7 +125,12 @@ class MonitorIncidentLifecycleTests(unittest.TestCase):
             queued = store.list_outbox_delivery_records(
                 states=("pending",), kind="public_ingress_notification"
             )
-            self.assertTrue(any(row.payload["attempt"]["event"] == "reminder" for row in queued))
+            self.assertTrue(
+                any(
+                    cast(dict[str, object], row.payload["attempt"]).get("event") == "reminder"
+                    for row in queued
+                )
+            )
             monitor("2026-07-27T16:21:00Z", 200)
             store.close()
             store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))

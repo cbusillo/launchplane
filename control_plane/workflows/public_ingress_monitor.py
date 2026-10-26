@@ -1372,7 +1372,7 @@ def _monitoring_reconciliation_observations(
 def _monitoring_reconciliation_observation(
     *,
     incident: PublicIngressIncidentRecord,
-    monitoring_intent: ProductLaneMonitoringIntent,
+    monitoring_intent: ProductLaneMonitoringIntent | Literal["legacy"],
     observed_at: str,
     lane_removed: bool = False,
 ) -> PublicIngressObservationRecord:
@@ -3717,7 +3717,7 @@ def deliver_public_ingress_notification_outbox_delivery(
                     and attempt.destination_id == attempt_payload.get("destination_id")
                     for attempt in record_store.list_public_ingress_notification_attempt_records(
                         incident_id=incident.incident_id,
-                        destination_kind=destination_payload.get("kind", ""),
+                        destination_kind=_required_payload_text(destination_payload, "kind"),
                     )
                 )
             retired_refusal = (
