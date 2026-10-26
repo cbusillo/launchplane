@@ -110,7 +110,7 @@ jobs:
 
       - name: Apply live target runtime sync
         id: live_target_runtime_request
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@52fffdb3afede77957c09e01f5ac512e8e1eaf8f # launchplane-request
+        uses: cbusillo/launchplane/.github/actions/launchplane-request@dc9fb481d20c6e9a6ccf62b20f5416b237d46191 # launchplane-request
         with:
           launchplane-url: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
           audience: ${{ vars.LAUNCHPLANE_SERVICE_AUDIENCE }}
