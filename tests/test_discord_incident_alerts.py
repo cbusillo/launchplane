@@ -146,10 +146,10 @@ class DiscordIncidentAlertTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
 
     def test_critical_http_failures_do_not_replay_uncertain_sends(self) -> None:
-        for index, (critical, status) in enumerate(((True, 503), (True, None))):
-            with self.subTest(critical=critical, status=status):
-                instance = f"lane-{critical}-{status}"
-                self.observe(instance, critical=critical, time=f"{12 + index}:00:00")
+        for index, status in enumerate((503, None)):
+            with self.subTest(status=status):
+                instance = f"lane-{status}"
+                self.observe(instance, critical=True, time=f"{12 + index}:00:00")
 
                 def fail(_url: str, payload: dict[str, object]) -> None:
                     self.sent.append(payload)
@@ -164,8 +164,8 @@ class DiscordIncidentAlertTests(unittest.TestCase):
                 self.assertEqual(len(self.sent), before + 1)
                 row = max(self.store.list_outbox_delivery_records(), key=lambda v: v.updated_at)
                 self.assertEqual(row.state, "failed")
-                self.assertEqual(bool(row.provider_operation_key), status != 404)
-                self.observe(instance, critical=critical, time=f"{12 + index}:11:00", status="pass")
+                self.assertTrue(row.provider_operation_key)
+                self.observe(instance, critical=True, time=f"{12 + index}:11:00", status="pass")
                 self.drain(f"{12 + index}:15:00")
 
     def test_delayed_critical_page_respects_silence_and_acknowledgement(self) -> None:
@@ -224,11 +224,10 @@ class DiscordIncidentAlertTests(unittest.TestCase):
     def test_changes_between_render_and_admission_never_send_stale_conditions(self) -> None:
         marker = self.store.mark_outbox_delivery_provider_started
         for index, change in enumerate(("resolved", "silenced", "material", "return")):
-            critical = True
-            with self.subTest(change=change, critical=critical):
-                instance = f"race-{index}-{critical}"
-                hour = 12 + 2 * index + int(critical)
-                self.observe(instance, critical=critical, time=f"{hour}:00:00")
+            with self.subTest(change=change):
+                instance = f"race-{index}"
+                hour = 12 + 2 * index
+                self.observe(instance, critical=True, time=f"{hour}:00:00")
                 before = len(self.sent)
                 changed = False
 
@@ -255,12 +254,12 @@ class DiscordIncidentAlertTests(unittest.TestCase):
                         elif change in {"material", "return"}:
                             self.observe(
                                 instance,
-                                critical=critical,
+                                critical=True,
                                 time=f"{hour}:04:00",
-                                code="dns_failure" if critical else "testing_delivery_failed",
+                                code="dns_failure",
                             )
                             if change == "return":
-                                self.observe(instance, critical=critical, time=f"{hour}:04:01")
+                                self.observe(instance, critical=True, time=f"{hour}:04:01")
                             changed = True
                             return marker(**kwargs)
                         self.store.write_public_ingress_incident_record(
@@ -276,13 +275,11 @@ class DiscordIncidentAlertTests(unittest.TestCase):
                 if change not in {"material", "return"}:
                     self.assertEqual(len(self.sent), before)
                 else:
-                    self.assertLessEqual(
-                        len(self.sent), before + int(critical or change == "return")
-                    )
+                    self.assertLessEqual(len(self.sent), before + 1)
                 self.drain(f"{hour}:10:00")
                 if change in {"material", "return"}:
                     self.assertEqual(len(self.sent), before + 1)
-                    self.observe(instance, critical=critical, time=f"{hour}:11:00", status="pass")
+                    self.observe(instance, critical=True, time=f"{hour}:11:00", status="pass")
                     self.drain(f"{hour}:15:00")
 
     def test_warnings_and_reminders_remain_recorded_without_discord_work(self) -> None:
@@ -309,17 +306,7 @@ class DiscordIncidentAlertTests(unittest.TestCase):
                 self.observe(str(warning), critical=True)
                 queued = self.store.list_outbox_delivery_records(states=("pending",))[0]
                 if warning:
-                    incident = self.store.read_public_ingress_incident_record(queued.aggregate_id)
-                    self.store.write_public_ingress_incident_record(
-                        incident.model_copy(
-                            update={
-                                "schema_version": 1,
-                                "severity": "warning",
-                                "material_fingerprint": None,
-                                "material_fingerprint_sha256": "",
-                            }
-                        )
-                    )
+                    self.observe(str(warning), critical=True, time="12:00:30", code="tls_expiring")
                 else:
                     attempt_payload = queued.payload["attempt"]
                     assert isinstance(attempt_payload, dict)
@@ -361,4 +348,26 @@ class DiscordIncidentAlertTests(unittest.TestCase):
                 completed = self.store.read_outbox_delivery_record(record.delivery_id)
                 self.assertEqual(completed.state, "failed" if started else "delivered")
                 self.assertEqual(completed.provider_operation_key, record.provider_operation_key)
+                if started:
+                    self.assertEqual(completed.action, record.action)
                 self.assertEqual(self.sent, [])
+
+    def test_paged_critical_incident_gets_resolution_after_warning_downgrade(self) -> None:
+        self.observe("prod", critical=True)
+        self.drain("12:00:01")
+        self.observe("prod", critical=True, time="12:01:00", code="tls_expiring")
+        self.drain("12:01:01")
+        self.assertEqual(len(self.sent), 1)
+        incident = self.store.list_public_ingress_incident_records()[0]
+        self.assertEqual(incident.severity, "warning")
+        self.observe("prod", critical=True, time="12:02:00", status="pass")
+        self.drain("12:02:01")
+        self.assertEqual(len(self.sent), 2)
+        self.assertFalse(_is_red(self.sent[-1]))
+        attempts = self.store.list_public_ingress_notification_attempt_records()
+        self.assertTrue(
+            any(
+                value.event == "resolved" and value.delivery_status == "delivered"
+                for value in attempts
+            )
+        )

@@ -1676,15 +1676,17 @@ Delivery attempts are the idempotency boundary for notifications, while incident
 records remain the source of truth for active public-ingress state.
 
 Discord pages only critical openings, material critical changes, and their
-resolutions after a delivered failure notice. Warnings and unchanged reminders
+resolutions after a delivered failure notice, even if the incident later downgraded
+to a warning. Warning openings, material warning changes, and unchanged reminders
 remain in Product Ops with their incident events and reminder state; they create
 no Discord delivery work. Discord warning/reminder summaries, batching windows,
 snapshot coverage, and summary-specific secret scope checks are removed.
 
 Before delivery, current state is re-read and obsolete failure and material alerts
 are superseded. Discord retains event-bound material state and the final atomic
-open/active incident-state admission check. Silenced and acknowledged conditions
-do not page. Email retains its existing backlog compaction.
+open/active incident-state admission check. Silenced and acknowledged failure
+conditions do not page; a recovery still closes their previously delivered failure
+notice. Email retains its existing backlog compaction.
 
 Retained `public_ingress_discord_summary` outbox rows complete without a send.
 Rows with an existing provider marker retain their unknown-effect evidence and

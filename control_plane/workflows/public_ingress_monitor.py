@@ -47,6 +47,7 @@ from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.outbox_delivery import (
     PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY,
+    RETIRED_DISCORD_SUMMARY_AGGREGATE_TYPE,
     OutboxDeliveryRecord,
     build_outbox_dedupe_key,
     build_outbox_delivery_id,
@@ -3696,11 +3697,13 @@ def deliver_public_ingress_notification_outbox_delivery(
 ) -> OutboxDeliveryRecord:
     delivery_record = record
     try:
-        if record.aggregate_type == "public_ingress_discord_summary":
+        if record.aggregate_type == RETIRED_DISCORD_SUMMARY_AGGREGATE_TYPE:
             return record.model_copy(
                 update={
                     "state": "failed" if record.provider_operation_key else "delivered",
-                    "action": "skipped_retired_discord_summary",
+                    "action": record.action
+                    if record.provider_operation_key
+                    else "skipped_retired_discord_summary",
                     "error_code": "delivery_outcome_unknown"
                     if record.provider_operation_key
                     else "",
@@ -4314,7 +4317,9 @@ def _deliver_email_notification(
 def _discord_incident_pages(
     incident: PublicIngressIncidentRecord, event: PublicIngressIncidentEvent
 ) -> bool:
-    return incident.severity == "critical" and event in {"opened", "updated", "resolved"}
+    return event == "resolved" or (
+        incident.severity == "critical" and event in {"opened", "updated"}
+    )
 
 
 def _deliver_discord_notification(
