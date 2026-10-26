@@ -5395,8 +5395,9 @@ Unavailable reads include nullable aggregate and per-source `failure_stage`
 fields from [the closed vocabulary](../control_plane/odoo_source_prerequisite_programs.py).
 A stage identifies the boundary that did not complete; it does not establish
 why it failed or authorize a correction. No exception text, file path, endpoint,
-login, parameter value or credential is added. Legacy responses without a stage
-remain unknown. All existing unavailable and drift results remain unavailable.
+login, parameter value or credential is added. Independent source failures have
+per-source stages without an aggregate stage. All existing unavailable and drift
+results remain unavailable.
 
 The closed response reports per-option `explicit`, `empty`, `absent` or
 `unknown` input provenance and effective agreement between authority, delivered

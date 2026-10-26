@@ -606,12 +606,31 @@ class PrerequisiteTests(PrerequisiteFixture):
     def test_all_unverified_producers_keep_their_failure_stages_without_querying_odoo(self) -> None:
         for name in reader.SOURCE_ADDONS:
             self.producer(name).write_text("changed")
-        result = self.read()
+        for missing in reader.SOURCE_ADDONS:
+            with self.subTest(missing=missing):
+                expected = {name: "source_provenance" for name in reader.SOURCE_ADDONS}
+                inventory = reader.producer_files(
+                    self.manifest, self.fixture.connection, self.fixture.profile.repository
+                )
+                inventory[missing] = {}
+                expected[missing] = "producer_inventory"
+                with patch.object(reader, "producer_files", return_value=inventory):
+                    result = self.read()
+                self.assertEqual(result.runtime, "unknown")
+                self.assertIsNone(result.failure_stage)
+                for source in result.sources:
+                    self.assertEqual(source.failure_stage, expected[source.source])
+                    self.assertEqual(source.producer, "unknown")
+                self.assertFalse(self.connects)
+
+    def test_invalid_container_result_is_validation_failure_without_returning_values(self) -> None:
+        authority = reader._authority(self.fixture.store, self.fixture.profile.product)
+        authority.metadata["cm_data"]["unexpected"] = PRIVATE
+        with patch.object(reader, "_authority", return_value=authority):
+            result = self.read()
         self.assertEqual(result.runtime, "unknown")
-        for source in result.sources:
-            self.assertEqual(source.failure_stage, "source_provenance")
-            self.assertEqual(source.producer, "unknown")
-        self.assertFalse(self.connects)
+        self.assertEqual(result.failure_stage, "result_validation")
+        self.assertNotIn(PRIVATE, result.model_dump_json())
 
     def test_server_independently_rejects_nonclosed_or_duplicate_provider_frames(self) -> None:
         authority = reader._authority(self.fixture.store, self.fixture.profile.product)

@@ -90,7 +90,6 @@ import psycopg2
 spec=json.loads(sys.stdin.read(262145))
 names=tuple(spec['addons'])
 unknown={'runtime':'unknown','sources':[{'source':name} for name in names]}
-stage='runtime_inspection'
 
 def safe_path(raw):
     path=Path(raw)
@@ -361,9 +360,10 @@ CONTAINER_PROGRAM = (
     CONTAINER_LIBRARY
     + r"""
 def run():
+    global stage
+    stage='runtime_inspection'
     if os.environ.get('PLATFORM_INSTANCE')!='testing' or json.loads(os.environ[__IDENTITY_KEY__])!=spec['identity']:
         raise ValueError()
-    global stage
     stage='configuration'
     config,options=config_snapshot()
     stage='code_roots'
@@ -390,8 +390,7 @@ def run():
         except Exception:
             failures[name]=stage
     if not modules:
-        return {**unknown,'failure_stage':stage,
-                'sources':[{'source':name,'failure_stage':failures[name]} for name in names]}
+        return {**unknown,'sources':[{'source':name,'failure_stage':failures[name]} for name in names]}
     keys=list(dict.fromkeys(key for module in modules.values() for key in module.PARAMETER_KEYS))
     stage='applied_parameters'
     before,installed=parameters(keys,options) if keys else ({},{})
@@ -429,6 +428,7 @@ def run():
 
 try:
     result=run()
+    stage='result_validation'
     validate_result(result,names)
 except BaseException:
     result={**unknown,'failure_stage':stage}

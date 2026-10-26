@@ -381,7 +381,6 @@ def diagnose_source_prerequisites(
             connection.app_name,
             selection.identity,
         )
-        stage = "transport"
         result = runtime_prerequisites(
             connection,
             files=files,
