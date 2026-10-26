@@ -90,6 +90,7 @@ from control_plane.workflows.generic_web_execution import (
     evidence_digest,
     execution_receipt,
     observe_execution,
+    require_receipt_extension,
 )
 from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
@@ -113,6 +114,34 @@ from control_plane.generic_web_testing_settlement import settle_testing_pre_imag
 
 
 class OriginalExecutionTests(unittest.TestCase):
+    def test_recorded_execution_proof_cannot_be_rewritten(self) -> None:
+        entry = ExecutionEntry(
+            kind="schedule_run",
+            name="maintenance",
+            target_id="schedule-1",
+            payload_digest=evidence_digest({}),
+            acknowledgement="identified",
+            deployment_id="job-1",
+            status="running",
+            terminal="done",
+        )
+        recorded = ExecutionReceipt(entries=(entry,))
+        require_receipt_extension(recorded, recorded)
+        require_receipt_extension(
+            ExecutionReceipt(entries=(entry.model_copy(update={"terminal": ""}),)), recorded
+        )
+        for field, replacement in (
+            ("acknowledgement", "rejected"),
+            ("deployment_id", "job-2"),
+            ("status", "done"),
+            ("terminal", ""),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                require_receipt_extension(
+                    recorded,
+                    ExecutionReceipt(entries=(entry.model_copy(update={field: replacement}),)),
+                )
+
     def test_real_unresolved_application_effects_keep_current_source_unqualified(self) -> None:
         for failure in ("product_transport", "product_server", "canary_server", "quiesce_lost"):
             with (
