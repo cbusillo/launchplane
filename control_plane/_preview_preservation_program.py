@@ -10,6 +10,7 @@ PREVIEW_PRESERVATION_PROGRAM = (
     + inspect.getsource(observe_memory_headroom)
     + r"""
 import base64
+from contextlib import contextmanager
 import fcntl
 from pathlib import Path
 import stat
@@ -145,7 +146,7 @@ def preview_containers(source: dict) -> dict:
             or mount.get('RW') is not False or not isinstance(mount.get('Destination'), str)
             or mount['Destination'] == '/' or mount['Destination'].startswith('/volumes')
             for mount in extra):
-            raise RuntimeError('Preview preservation has unowned writable storage')
+            raise RuntimeError('Preview preservation has an unowned mount')
         if (host.get('NetworkMode') == 'host' or host.get('PidMode') == 'host'
             or host.get('Privileged') or host.get('Devices')
             or any(not isinstance(value, str) or not value.endswith(':host-gateway')
@@ -302,6 +303,30 @@ def initialize_pending_preservation(temporary: Path, owner: dict) -> None:
     sync_preservation_parent(temporary)
 
 
+def require_preservation_databases(database: dict, source: dict) -> None:
+    expected = sorted([source['database_name'], 'postgres'])
+    actual = json.loads(database_query(database['Id'], 'postgres',
+        b'SELECT json_agg(datname ORDER BY datname) FROM pg_database WHERE NOT datistemplate;\n'))
+    if actual != expected:
+        raise RuntimeError('Preview preservation has additional database custody')
+
+
+@contextmanager
+def preservation_database(database: dict):
+    started = not database['State']['Running']
+    try:
+        if started:
+            docker('start', database['Id'])
+            wait_database(database['Id'])
+            floor = spec.get('memory_floor')
+            if floor is not None and observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup')) < floor:
+                raise RuntimeError('Preview preservation lacks reviewed memory headroom')
+        yield
+    finally:
+        if started:
+            docker('stop', '-t', '30', database['Id'])
+
+
 def preserve(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
     database = containers['database']
@@ -328,6 +353,8 @@ def preserve(path: Path, source: dict) -> dict:
         raise RuntimeError('Preview preservation lacks reviewed memory headroom')
     if total > budget['filestore_bytes'] or space.f_bavail * space.f_frsize < budget['reserve_bytes'] + 2 * budget['database_bytes'] + total:
         raise RuntimeError('Preview preservation lacks reviewed storage headroom')
+    if database['State']['Running']:
+        require_preservation_databases(database, source)
     temporary = path.with_name('.pending-' + path.name)
     if pending_preservation(temporary, source, binding, database['Image']):
         verification_resources('lp-preview-preserve-' + spec['preservation_id'][:32], database['Image'])
@@ -341,48 +368,42 @@ def preserve(path: Path, source: dict) -> dict:
     require_unserved_web(containers['web'])
     for service in ('web', 'script-runner'):
         docker('stop', '-t', '30', containers[service]['Id'])
-    if not database['State']['Running']:
-        docker('start', database['Id'])
-        wait_database(database['Id'])
-    expected_databases = sorted([source['database_name'], 'postgres'])
-    actual_databases = json.loads(database_query(database['Id'], 'postgres',
-        b'SELECT json_agg(datname ORDER BY datname) FROM pg_database WHERE NOT datistemplate;\n'))
-    if actual_databases != expected_databases:
-        raise RuntimeError('Preview preservation has additional database custody')
-    other_connections = database_query(database['Id'], source['database_name'],
-        b"SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend';\n")
-    if other_connections != '0':
-        raise RuntimeError('Preview preservation database is in use')
-    source_tables = int(database_query(database['Id'], source['database_name'],
-        b"SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p');\n"))
-    initialize_pending_preservation(temporary, {'authority': spec['authority'], 'source': source,
-        'volume_binding': binding, 'verification_image': database['Image']})
-    status, _, _ = capture_snapshot_file(['docker', 'exec', database['Id'], 'sh', '-c',
-        'pg_dump -Fc --lock-wait-timeout=10s -U "$POSTGRES_USER" --dbname "$1"', '_', source['database_name']],
-        temporary / 'database.dump', budget['database_bytes'],
-        timeout_seconds=max(1, deadline - time.monotonic()))
-    if status:
-        raise RuntimeError('Preview preservation database capture failed')
-    with tarfile.open(temporary / 'filestore.tar.gz', 'w:gz') as archive:
-        for name in sorted(manifest):
-            archive.add(filestore / name, arcname=name, recursive=False)
-    os.chmod(temporary / 'filestore.tar.gz', 0o600)
-    if tree_manifest(filestore) != manifest:
-        raise RuntimeError('Preview preservation filestore changed during capture')
-    verify_filestore(temporary / 'filestore.tar.gz', manifest)
-    if restore_verification(temporary / 'database.dump', database['Image']) != source_tables:
-        raise RuntimeError('Preview preservation restored database differs')
-    if preview_attempt_binding(source['compose_project'], source['database_name'], source['preview_volumes'], spec['authority']) != binding:
-        raise RuntimeError('Preview preservation source storage changed')
-    receipt = {'authority': spec['authority'], 'source': source, 'volume_binding': binding,
-        'filestore_manifest': manifest, 'database_restore_verified': True,
-        'empty_addon_directories': sorted(str(entry.relative_to(addons)) for entry in addons.rglob('*')) if addons.exists() else [],
-        'artifacts': {name: snapshot_file_digest(temporary / name) for name in ('database.dump', 'filestore.tar.gz')}}
-    write_snapshot_receipt(temporary / 'receipt.json', receipt)
-    sync_snapshot_directory(temporary)
-    os.rename(temporary, path)
-    sync_preservation_parent(path)
-    return verify_preservation(path)
+    with preservation_database(database):
+        require_preservation_databases(database, source)
+        other_connections = database_query(database['Id'], source['database_name'],
+            b"SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend';\n")
+        if other_connections != '0':
+            raise RuntimeError('Preview preservation database is in use')
+        source_tables = int(database_query(database['Id'], source['database_name'],
+            b"SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p');\n"))
+        initialize_pending_preservation(temporary, {'authority': spec['authority'], 'source': source,
+            'volume_binding': binding, 'verification_image': database['Image']})
+        status, _, _ = capture_snapshot_file(['docker', 'exec', database['Id'], 'sh', '-c',
+            'pg_dump -Fc --lock-wait-timeout=10s -U "$POSTGRES_USER" --dbname "$1"', '_', source['database_name']],
+            temporary / 'database.dump', budget['database_bytes'],
+            timeout_seconds=max(1, deadline - time.monotonic()))
+        if status:
+            raise RuntimeError('Preview preservation database capture failed')
+        with tarfile.open(temporary / 'filestore.tar.gz', 'w:gz') as archive:
+            for name in sorted(manifest):
+                archive.add(filestore / name, arcname=name, recursive=False)
+        os.chmod(temporary / 'filestore.tar.gz', 0o600)
+        if tree_manifest(filestore) != manifest:
+            raise RuntimeError('Preview preservation filestore changed during capture')
+        verify_filestore(temporary / 'filestore.tar.gz', manifest)
+        if restore_verification(temporary / 'database.dump', database['Image']) != source_tables:
+            raise RuntimeError('Preview preservation restored database differs')
+        if preview_attempt_binding(source['compose_project'], source['database_name'], source['preview_volumes'], spec['authority']) != binding:
+            raise RuntimeError('Preview preservation source storage changed')
+        receipt = {'authority': spec['authority'], 'source': source, 'volume_binding': binding,
+            'filestore_manifest': manifest, 'database_restore_verified': True,
+            'empty_addon_directories': sorted(str(entry.relative_to(addons)) for entry in addons.rglob('*')) if addons.exists() else [],
+            'artifacts': {name: snapshot_file_digest(temporary / name) for name in ('database.dump', 'filestore.tar.gz')}}
+        write_snapshot_receipt(temporary / 'receipt.json', receipt)
+        sync_snapshot_directory(temporary)
+        os.rename(temporary, path)
+        sync_preservation_parent(path)
+        return verify_preservation(path)
 
 
 def inspect_pending_preservation(path: Path, source: dict) -> dict:

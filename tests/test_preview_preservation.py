@@ -102,6 +102,8 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         self.calls.append(arguments)
         if arguments[0] == "stop":
             self.containers[arguments[-1]]["State"]["Running"] = False
+        if arguments[0] == "start":
+            self.containers[arguments[-1]]["State"]["Running"] = True
         return b""
 
     def query(self, container: str, database: str, query: bytes) -> str:
@@ -165,6 +167,31 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         )
         self.assertFalse(self.containers["web"]["State"]["Running"])
         self.assertFalse(self.containers["script-runner"]["State"]["Running"])
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_started_database_returns_to_stopped_after_failed_restore(self) -> None:
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock()
+        self.restored.side_effect = RuntimeError("restore failed")
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.assertFalse(self.path.exists())
+
+    def test_started_database_must_leave_the_memory_floor_available(self) -> None:
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock()
+        self.namespace["observe_memory_headroom"] = Mock(side_effect=[2048, 0])
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.restored.assert_not_called()
+
+    def test_additional_running_databases_refuse_before_application_stop(self) -> None:
+        self.namespace["database_query"] = Mock(return_value='["foreign", "postgres"]')
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_owned_interrupted_capture_can_resume_without_touching_original(self) -> None:
         self.restored.side_effect = RuntimeError("interrupted")
@@ -459,6 +486,17 @@ class PreviewPreservationRuntimeShapeTests(unittest.TestCase):
                     namespace["preview_containers"](source)
                 extra.clear()
                 extra.update(original)
+        containers["web"]["HostConfig"]["ExtraHosts"] = ["fixture-host:192.0.2.1"]
+        with self.assertRaises(RuntimeError):
+            namespace["preview_containers"](source)
+        containers["web"]["HostConfig"]["ExtraHosts"] = []
+        containers["script-runner"]["Mounts"].remove(extra)
+        for service in ("web", "database"):
+            with self.subTest(service=service):
+                containers[service]["Mounts"].append(extra)
+                with self.assertRaises(RuntimeError):
+                    namespace["preview_containers"](source)
+                containers[service]["Mounts"].remove(extra)
 
 
 class PreviewPreservationVerifierCustodyTests(unittest.TestCase):
