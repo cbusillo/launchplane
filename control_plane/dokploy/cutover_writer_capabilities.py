@@ -1,13 +1,13 @@
 from collections.abc import Callable
 import hashlib
 import json
-import re
 from typing import Any
 
 from control_plane.contracts.cutover_host import OdooCronWriterBinding
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooSlot
 from control_plane.contracts.prepared_public_site import WriterTarget
 from control_plane.dokploy.slot_maintenance import ContainerCommand
+from control_plane.dokploy.slot_compose import slot_startup_command
 
 
 CRON_CAPABILITY_PROGRAM = r"""
@@ -32,12 +32,15 @@ import ast,configparser,hashlib,json,os,runpy,sys,tempfile
 from pathlib import Path
 import psycopg2
 spec=json.load(sys.stdin)
-os.environ.clear();os.environ.update(spec['environment'])
 sys.path.insert(0,'/volumes/scripts')
 startup=runpy.run_path('/volumes/scripts/run_odoo_startup.py',run_name='executor_preflight')
 with tempfile.TemporaryDirectory() as directory:
     arguments=type('Arguments',(),{'config_path':directory+'/odoo.conf'})()
+    runner_settings=startup['_load_settings'](arguments)
+    os.environ.clear();os.environ.update(spec['environment'])
     settings=startup['_load_settings'](arguments)
+    if settings.database_name!=spec['database'] or any(getattr(settings,key)!=getattr(runner_settings,key) for key in ('database_host','database_port','database_user','database_password')):
+        raise ValueError('effective web database differs from the admitted runner transport')
     startup['_write_runtime_config'](settings)
     parser=configparser.ConfigParser(interpolation=None)
     parser.read(settings.config_path)
@@ -47,7 +50,7 @@ with tempfile.TemporaryDirectory() as directory:
     if not server_wide <= {'base','web'}: raise ValueError('web-hosted executors lack isolated cutover support')
     if parser.has_section('queue_job') or os.environ.get('ODOO_QUEUE_JOB_CHANNELS') or os.environ.get('QUEUE_JOB_CHANNELS'):
         raise ValueError('HTTP-dependent queue executors are unsupported')
-    with psycopg2.connect(host=settings.database_host,port=settings.database_port,dbname=spec['database'],user=settings.database_user,password=settings.database_password,connect_timeout=10) as connection, connection.cursor() as cursor:
+    with psycopg2.connect(host=settings.database_host,port=settings.database_port,dbname=settings.database_name,user=settings.database_user,password=settings.database_password,connect_timeout=10) as connection, connection.cursor() as cursor:
         cursor.execute("SELECT value FROM ir_config_parameter WHERE key='database.uuid'")
         if cursor.fetchone()!=(spec['database_uuid'],): raise ValueError('executor inventory database differs')
         cursor.execute("SELECT name FROM ir_module_module WHERE state IN ('installed','to install','to upgrade','to remove')")
@@ -99,23 +102,13 @@ class NativeCronWriterCapabilities:
         web = self.web(slot)
         config = web["Config"]
         command = config.get("Cmd")
-        startup = (
-            "exec /venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
-        )
+        allowed = web.get("startup_commands", ["exec " + slot_startup_command()])
         if (
             config.get("Image") != slot.image
             or config.get("Entrypoint") != ["/bin/sh", "-c"]
             or not isinstance(command, list)
             or len(command) != 1
-            or not isinstance(command[0], str)
-            or not command[0].endswith(startup)
-            or command[0] != startup
-            and re.fullmatch(
-                r'while \[ "\$\(cat [A-Za-z0-9_./-]+ 2>/dev/null\)" != "[0-9a-f]{64}" \]; do sleep 1; done; '
-                + re.escape(startup),
-                command[0],
-            )
-            is None
+            or command[0] not in allowed
             or any(
                 mount.get("Type") != "volume" or mount.get("Destination") != "/volumes/data"
                 for mount in web.get("Mounts", [])

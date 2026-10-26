@@ -50,10 +50,17 @@ def backup_recovery_eligible(record: OdooCutoverRecord) -> bool:
             pause.state == "drained"
             and pause.ended_at is None
             or record.step == "aborting"
-            and record.backup_failed
             and pause.state in {"resuming", "complete"}
             and pause.recovery_binding == plan.old.binding
         )
+    )
+
+
+def abort_reconciliation_eligible(record: OdooCutoverRecord) -> bool:
+    return backup_recovery_eligible(record) or (
+        record.step == "aborted"
+        and record.ended_at is not None
+        and backup_recovery_eligible(record.model_copy(update={"step": "aborting"}))
     )
 
 

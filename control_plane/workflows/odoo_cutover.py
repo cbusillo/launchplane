@@ -53,6 +53,9 @@ class OdooCutoverProvider(PublicPauseProvider, Protocol):
         """Capture exact old runtime and prove passive navigation/assets in a browser."""
         ...
 
+    def owns_prepared_pause(self, pause_id: str) -> bool: ...
+    def cancel_backup_restore(self, plan: OdooCutoverPlan) -> None: ...
+
     def backup(self, plan: OdooCutoverPlan) -> OdooRecoveryTuple: ...
     def maintenance(self, plan: OdooCutoverPlan) -> OdooMaintenanceReceipt:
         """Complete planned devkit run; read an uncertain receipt before repeating."""
@@ -169,6 +172,7 @@ def execute_odoo_cutover(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     checkpoint: Callable[[str], None] = lambda _step: None,
     settings_checkpoint: Callable[[], None] = lambda: None,
+    abort_only: bool = False,
 ) -> OdooCutoverRecord:
     """The caller supplies existing accepted-release/worker and backup authority.
 
@@ -180,6 +184,8 @@ def execute_odoo_cutover(
         try:
             record = store.load(record_id)
         except FileNotFoundError:
+            if abort_only:
+                raise ValueError("abort-only continuation cannot create a cutover")
             provider.preflight(plan)
             _require_route(provider.current_route(plan), plan, plan.old)
             record = OdooCutoverRecord(
@@ -189,6 +195,8 @@ def execute_odoo_cutover(
         record = OdooCutoverRecord.model_validate(record.model_dump())
         if record.plan != plan:
             raise ValueError("cannot change an uncertain cutover's immutable release plan")
+        if abort_only and record.step != "aborted" and not backup_recovery_eligible(record):
+            raise ValueError("abort-only continuation requires its existing pre-maintenance record")
         if record.step in ODOO_CUTOVER_TERMINAL_STEPS:
             slot = plan.new if record.step == "complete" else plan.old
             if slot == plan.new:
@@ -263,11 +271,15 @@ def execute_odoo_cutover(
             if record.step == "backing_up":
                 checkpoint("capture_backup")
                 try:
+                    if abort_only:
+                        provider.cancel_backup_restore(plan)
+                        advance("aborting")
+                        return abort_before_maintenance(store, provider, record_id, clock=clock)
                     backup = provider.backup(plan)
                 except DefiniteBackupFailure:
                     if not backup_recovery_eligible(store.load(record_id)):
                         raise ValueError("backup failure cannot abort an unverified pause")
-                    advance("aborting", backup_failed=True)
+                    advance("aborting")
                     return abort_before_maintenance(store, provider, record_id, clock=clock)
                 if backup.binding != plan.old.binding or backup.image != plan.old.image:
                     raise ValueError(
@@ -371,26 +383,34 @@ def abort_before_maintenance(
     clock: Callable[[], datetime],
 ) -> OdooCutoverRecord:
     record = store.load(record_id)
-    if not record.backup_failed or not backup_recovery_eligible(record):
+    if record.step != "aborting" or not backup_recovery_eligible(record):
         raise ValueError("abort requires definite backup termination before maintenance")
     plan = record.plan
     provider.preflight(plan)
-    if record.pause is not None and record.pause.state == "drained":
+    route = (
+        provider.current_route(plan)
+        if record.pause is None or record.pause.state != "drained"
+        else None
+    )
+    if route is not None:
+        _require_route(route, plan, plan.old)
+    elif record.pause is not None:
         assert record.public_site is not None
-        if (
-            provider.observed_public_copy(record.pause.pause_id)
-            != record.public_site.content_digest
-        ):
-            _require_recovery_route(provider.current_route(plan), plan, plan.old)
-    else:
-        _require_route(provider.current_route(plan), plan, plan.old)
-    if record.pause is None:
-        route = provider.current_route(plan)
-        _require_route(route, plan, plan.old)
-    else:
-        _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
-        route = provider.switch(plan, plan.old)
-        _require_route(route, plan, plan.old)
+        try:
+            current = provider.current_route(plan)
+        except (ValueError, OSError):
+            current = None
+        if current is not None and current.slot_id == plan.old.slot_id:
+            _require_recovery_route(current, plan, plan.old)
+            route = current
+        else:
+            if not provider.owns_prepared_pause(record.pause.pause_id):
+                raise ValueError("abort lacks its original prepared-route authority")
+            _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
+            route = provider.switch(plan, plan.old)
+            _require_route(route, plan, plan.old)
+    if route is None:
+        raise ValueError("abort has no verified old serving route")
     if record.pause is not None:
         assert record.public_site is not None
         PreparedPublicPause(

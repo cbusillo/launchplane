@@ -230,7 +230,6 @@ class OdooCutoverRecord(FrozenRecord):
     public_site: PreparedPublicSite | None = None
     pause: PublicPauseRecord | None = None
     backup: OdooRecoveryTuple | None = None
-    backup_failed: bool = False
     maintenance: OdooMaintenanceReceipt | None = None
     rollback_website_settings: OdooWebsiteSettingsReceipt | None = None
     website_settings_attempted: bool = False

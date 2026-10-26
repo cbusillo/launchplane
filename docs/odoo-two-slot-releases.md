@@ -460,12 +460,16 @@ live lane. Parent #3268 still waits for its exact accepted real-release event.
 
 ### Source recovery and retention
 
-Before a pause, guarded candidate preparation checks the immutable restore
-image's native tools and PostgreSQL archive major version. Provider discovery
+Before a pause, guarded candidate preparation acquires the pinned immutable restore
+image and checks its native tools and PostgreSQL archive major version. Provider discovery
 only binds and reads. Executor preflight inspects the exact web container's
 immutable command, mounts and environment, evaluates that environment with its
 artifact's startup code, and inventories installed and planned module manifests
-through the same artifact's runner. Web warming requires zero cron threads and the supported
+through the same artifact's runner. Its effective database name and connection settings
+must match that runner. Read-only old-slot readiness verifies the database UUID,
+credential boundary, required modules and absence of pending module work before
+any public pause. Native PostgreSQL and Docker addresses are normalized before
+attributing database sessions to physical writers. Web warming requires zero cron threads and the supported
 `base,web` server-wide topology. Installed `queue_job`, queue configuration or
 module `post_load` hooks remain unsupported; distinct cron jobs alone cannot
 prove that an HTTP queue or integration runner is fenced. Qualify a different
@@ -476,7 +480,11 @@ hash, stream, readiness observation and database command shares the earlier
 monotonic work deadline. Capacity is checked on the actual anonymous Docker data
 volume against the source database and attachment sizes before copying. The
 original operation admits only one restore allocation, using its label and a
-deterministic name. An orphan keeps reconciliation held until it exits. The
+deterministic name. Atomic host receipts bind intent, allocation and completion
+to the original capture nonce, immutable image and archive hashes. A reclaimed
+operation verifies an orphan's full container identity and isolated configuration,
+removes that disposable container and reads back its absence. It then aborts
+the cutover; it never starts another restore copy. The
 container runs without network access, owns its anonymous volume and enforces
 its own maximum lifetime. Docker removes it and the volume on exit, including
 when the coordinator dies. Cleanup uses the returned container ID, never a
@@ -488,14 +496,25 @@ rejected duplicate cannot write that witness. A restored-copy failure is definit
 only after cleanup reads back absence of the exact owned container. Definite
 pre-maintenance failures may enter `aborting` under the original operation,
 lease and plan. The original pause and complete drain must still agree; readiness
-of the old slot precedes the switch and writer handoff. A lost switch reply can
-resume from the exact old route. An unpaused compatible abort verifies the
+of the old slot precedes the switch and writer handoff. Recovery may leave an
+unhealthy prepared server only when the original active pointer, verified bundle,
+and exact applied route prove ownership. Fresh publication still requires health.
+A lost switch reply can resume from the exact old route. A resumed or completed
+old-slot handoff never runs readiness that would stop its writers again.
+An unpaused compatible abort verifies the
 already-serving old slot without stopping its writers or switching traffic. The final `aborted` state
 records failure with the old service restored, and is terminal for deployment,
-worker and unfinished-operation readers. Started or orphaned capture, missing
-completion, mismatched/ended pause, maintenance dispatch or lost authority keeps
-the recovery hold. The worker reclaims `backing_up` and interrupted `aborting`
-under its existing delay, attempt budget and queue ordering.
+worker and unfinished-operation readers. Started or orphaned capture, uncertain
+allocation, a foreign pause, maintenance dispatch or lost authority keeps
+the recovery hold. Normal continuation retains the existing attempt budget,
+delay and queue ordering. Once that budget is exhausted, a narrowly eligible
+original pre-maintenance operation can acquire an uncharged abort-only lease.
+That path cannot capture, allocate a restore, maintain a database, replace a
+target or deploy a candidate. It retains authorization, lease checks and lane
+serialization, and a refusal cannot refund an attempt or turn the hold into
+pending work. Restoring the unchanged old service does not await a new release
+window. If `aborted` was saved before the worker lost its terminal write, the
+same path verifies the old route and finishes only the failure audit.
 
 The host prunes filesystem bundles after a successful executor return while
 holding the original lane authority. It retains applied prepared publication

@@ -15,6 +15,35 @@ from tests.test_odoo_cutover import release_plan
 
 
 class NativeWriterObserverTests(unittest.TestCase):
+    def test_postgres_network_suffix_does_not_turn_known_writers_into_unknowns(self) -> None:
+        with TemporaryDirectory() as temporary:
+            fixture = WebsiteFixture(Path(temporary))
+            self.addCleanup(fixture.engine.dispose)
+            plan = release_plan(fixture)
+            for native, address in (
+                ("10.0.0.2/32", "10.0.0.2"),
+                ("2001:db8::2/128", "2001:db8::2"),
+            ):
+                with self.subTest(native=native):
+                    observer = NativeWriterObserver(
+                        plan,
+                        execute=Mock(
+                            return_value=json.dumps(
+                                {
+                                    "database_uuid": plan.old.runtime_identity.database_uuid,
+                                    "prepared_transactions": 0,
+                                    "observed_at": datetime.now(UTC).isoformat(),
+                                    "sessions": [{"address": native}],
+                                }
+                            )
+                        ),
+                        runner=Mock(),
+                        target=Mock(),
+                        addresses=lambda slot, writer: {address} if slot == plan.old else set(),
+                    )
+                    self.assertEqual(observer.active_jobs(plan.new, plan.writers[0]), 0)
+                    self.assertEqual(observer.active_jobs(plan.old, plan.writers[0]), 1)
+
     def test_missing_container_never_substitutes_for_surviving_database_sessions(self) -> None:
         with TemporaryDirectory() as temporary:
             fixture = WebsiteFixture(Path(temporary))

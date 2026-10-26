@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
 import hashlib
+from ipaddress import ip_address, ip_interface
 import json
 import time
 from typing import Any
@@ -93,7 +94,7 @@ def container_addresses(value: dict[str, Any]) -> set[str]:
     if not isinstance(networks, dict):
         raise ValueError("native container network observation is incomplete")
     return {
-        str(network[key])
+        str(ip_address(network[key]))
         for network in networks.values()
         for key in ("IPAddress", "GlobalIPv6Address")
         if network.get(key)
@@ -151,6 +152,9 @@ class NativeWriterObserver:
         observed_at = datetime.fromisoformat(value["observed_at"])
         if not 0 <= (datetime.now(UTC) - observed_at).total_seconds() <= 30:
             raise ValueError("native database observation is stale")
+        for session in value["sessions"]:
+            if session.get("address"):
+                session["address"] = str(ip_interface(session["address"]).ip)
         return value
 
     def active_jobs(self, slot: OdooSlot, writer: WriterTarget) -> int:

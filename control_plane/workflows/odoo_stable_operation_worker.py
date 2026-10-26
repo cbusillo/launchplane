@@ -825,6 +825,16 @@ def run_odoo_stable_operation_worker_once(
             claimed_at=claim_started_at,
             max_attempts=max_attempts,
         )
+        abort_only = False
+        if promotion_operation is None:
+            promotion_operation = record_store.claim_odoo_cutover_reconciliation_record(
+                lease_owner=normalized_lease_owner,
+                lease_expires_at=claim_expires_at,
+                claimed_at=claim_started_at,
+                max_attempts=max_attempts,
+                abort_only=True,
+            )
+            abort_only = promotion_operation is not None
         if promotion_operation is not None:
             terminal_write_committed = _execute_prod_promotion_operation(
                 record_store=promotion_store,
@@ -834,6 +844,7 @@ def run_odoo_stable_operation_worker_once(
                 lease_owner=normalized_lease_owner,
                 lease_seconds=lease_seconds,
                 heartbeat_seconds=heartbeat_seconds,
+                abort_only=abort_only,
             )
             return OdooStableOperationWorkerResult(
                 status="worked",
@@ -1649,6 +1660,7 @@ def _run_release_operation(
     run: Callable[[Callable[[str], None], Callable[[str], None]], Any],
     terminal: Callable[[Any, Any], Any],
     retain_denied_hold: Callable[[], bool] = lambda: False,
+    abort_only: bool = False,
 ) -> bool:
     """Lease, heartbeat, authority checks, and the terminal write for a queued release.
 
@@ -1722,7 +1734,7 @@ def _run_release_operation(
                 "result": None,
                 # An authority refusal ran no recovery effects. Preserve the
                 # budget for actual provider attempts after authority returns.
-                "attempt": max(operation.attempt - 1, 0),
+                "attempt": max(operation.attempt - (0 if abort_only else 1), 0),
                 "error_code": error.code,
                 "error_message": "Unfinished cutover recovery was denied; retain the lane hold without effects.",
             }
@@ -1735,31 +1747,44 @@ def _run_release_operation(
             raise authorization_guard.denial_error
     except DurableOperationAuthorizationDeniedError as error:
         logging.warning("%s operation %s was denied: %s", label, operation.operation_id, error)
-        if retain_denied_hold():
+        if abort_only or retain_denied_hold():
             terminal_operation = denied_hold(error)
         else:
             terminal_operation = failed(str(error), error.code)
     except BusinessHoursHeld as error:
-        terminal_operation = _retry_source_order_read(read_current()).model_copy(
+        terminal_operation = (
+            read_current().model_copy(
+                update={
+                    "status": "reconciliation_required",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                    "heartbeat_at": "",
+                    "finished_at": "",
+                }
+            )
+            if abort_only
+            else _retry_source_order_read(read_current())
+        ).model_copy(
             update={
                 "error_code": "business_hours_held",
                 "error_message": str(error),
-                "attempt": max(operation.attempt - 1, 0),
+                "attempt": max(operation.attempt - (0 if abort_only else 1), 0),
             }
         )
     except Exception as error:
         logging.exception(
             "%s operation %s failed before producing a result.", label, operation.operation_id
         )
-        if authorization_guard.denial_error is not None and retain_denied_hold():
+        if authorization_guard.denial_error is not None and (abort_only or retain_denied_hold()):
             terminal_operation = denied_hold(authorization_guard.denial_error)
         elif (
-            isinstance(error, LaneMovementRefused)
+            not abort_only
+            and isinstance(error, LaneMovementRefused)
             and error.code == "source_order_unavailable"
             and not odoo_release_wrote_production(read_current())
         ):
             terminal_operation = _retry_source_order_read(read_current())
-        elif odoo_release_wrote_production(read_current()):
+        elif abort_only or odoo_release_wrote_production(read_current()):
             terminal_operation = read_current().model_copy(
                 update={
                     "status": "reconciliation_required",
@@ -1796,6 +1821,7 @@ def _execute_prod_promotion_operation(
     lease_seconds: int,
     heartbeat_seconds: int,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
+    abort_only: bool = False,
 ) -> bool:
     def retain_denied_cutover_hold() -> bool:
         known_write = odoo_release_wrote_production(operation)
@@ -1835,7 +1861,11 @@ def _execute_prod_promotion_operation(
 
         def before_effect(effect_name: str) -> None:
             nonlocal started
-            if not started and operation.authorization.grant in RELEASE_DECISION_GRANTS:
+            if (
+                not abort_only
+                and not started
+                and operation.authorization.grant in RELEASE_DECISION_GRANTS
+            ):
                 if not isinstance(record_store, PostgresRecordStore):
                     raise ValueError("Scheduled releases require durable storage.")
                 profile = record_store.read_product_profile_record(operation.product)
@@ -1858,6 +1888,70 @@ def _execute_prod_promotion_operation(
                 require_odoo_release_recovery_pin(record_store, operation)
             checkpoint_provider_effect(effect_name)
             started = True
+
+        if abort_only:
+            from control_plane.odoo_cutover_plan import cutover_identity
+            from control_plane.odoo_cutover_recovery import abort_reconciliation_eligible
+            from control_plane.odoo_cutover_storage import DeploymentStore
+            from control_plane.workflows.odoo_cutover_deployment import (
+                execute_odoo_cutover_deployment,
+            )
+
+            if cutover_provider_factory is None:
+                raise ValueError("abort-only continuation requires its installed original provider")
+            identity = cutover_identity(
+                operation.product,
+                operation.context,
+                operation.instance,
+                operation.request.request_id,
+            )
+            deployment = record_store.read_deployment_record("deployment-cutover-" + identity)
+            current = deployment.odoo_cutover
+            if (
+                current is None
+                or not abort_reconciliation_eligible(current)
+                or current.record_id != identity
+            ):
+                raise ValueError("abort-only continuation requires its original unfinished cutover")
+            plan = current.plan
+            if (
+                plan.new.binding.product_id,
+                plan.new.runtime_identity.context,
+                plan.new.binding.environment_id,
+                plan.release_id,
+                plan.new.runtime_identity.deployment_record_id,
+            ) != (
+                operation.product,
+                operation.context,
+                operation.instance,
+                operation.request.request_id,
+                deployment.record_id,
+            ):
+                raise ValueError("abort-only continuation crossed its original deployment identity")
+            applied = execute_odoo_cutover_deployment(
+                plan=plan,
+                record_store=cast(DeploymentStore, record_store),
+                provider=cutover_provider_factory(plan),
+                context=operation.context,
+                instance=operation.instance,
+                checkpoint=before_effect,
+                abort_only=True,
+            )
+            finished = record_store.read_deployment_record(deployment.record_id).odoo_cutover
+            if finished is None or finished.step != "aborted":
+                raise RuntimeError("abort-only continuation retains its unfinished lane hold")
+            return OdooProdPromotionRunResult(
+                context=operation.context,
+                from_instance=operation.request.from_instance,
+                to_instance=operation.instance,
+                request_id=operation.request.request_id,
+                run_status="fail",
+                input_status="ready",
+                promotion_status="fail",
+                deployment_status="fail",
+                deployment_record_id=deployment.record_id,
+                error_message=applied.error_message,
+            )
 
         return execute_odoo_prod_promotion_run(
             control_plane_root=control_plane_root_path,
@@ -1935,6 +2029,7 @@ def _execute_prod_promotion_operation(
         run=run,
         terminal=terminal,
         retain_denied_hold=retain_denied_cutover_hold,
+        abort_only=abort_only,
     )
 
 

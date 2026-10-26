@@ -17341,6 +17341,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_expires_at: str,
         claimed_at: str,
         cutover_reconciliation: bool = False,
+        cutover_abort_only: bool = False,
         max_attempts: int = 5,
     ) -> Any:
         normalized_lease_owner = lease_owner.strip()
@@ -17376,7 +17377,6 @@ class PostgresRecordStore(HumanSessionStore):
                     if (
                         model_type
                         not in {OdooProdPromotionOperationRecord, OdooProdRollbackOperationRecord}
-                        or record.attempt >= max_attempts
                         or datetime.fromisoformat(claimed_at.replace("Z", "+00:00"))
                         < datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
                         + ODOO_CUTOVER_RECONCILIATION_DELAY
@@ -17425,8 +17425,20 @@ class PostgresRecordStore(HumanSessionStore):
                     from control_plane.odoo_cutover_recovery import (
                         startup_recovery_pause,
                         backup_recovery_eligible,
+                        abort_reconciliation_eligible,
                     )
 
+                    if cutover_abort_only:
+                        if (
+                            model_type is not OdooProdPromotionOperationRecord
+                            or cutover is None
+                            or not abort_reconciliation_eligible(cutover)
+                            or record.attempt < max_attempts
+                            and cutover.step != "aborted"
+                        ):
+                            continue
+                    elif record.attempt >= max_attempts:
+                        continue
                     if (
                         cutover is None
                         or not (
@@ -17435,6 +17447,8 @@ class PostgresRecordStore(HumanSessionStore):
                             or cutover.step in {"maintaining", "rolling_back"}
                             and startup_recovery_pause(cutover) is not None
                             or backup_recovery_eligible(cutover)
+                            or cutover_abort_only
+                            and abort_reconciliation_eligible(cutover)
                         )
                         or cutover.plan.new.binding.product_id != record.product
                         or cutover.plan.new.binding.environment_id != record.instance
@@ -17480,7 +17494,7 @@ class PostgresRecordStore(HumanSessionStore):
                         "lease_owner": normalized_lease_owner,
                         "lease_expires_at": lease_expires_at.strip(),
                         "heartbeat_at": claimed_at.strip(),
-                        "attempt": record.attempt + 1,
+                        "attempt": record.attempt + (0 if cutover_abort_only else 1),
                     }
                 )
                 self._sync_release_operation_row(row, claimed_record)
@@ -17791,7 +17805,13 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def claim_odoo_cutover_reconciliation_record(
-        self, *, lease_owner: str, lease_expires_at: str, claimed_at: str, max_attempts: int
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+        max_attempts: int,
+        abort_only: bool = False,
     ) -> OdooProdPromotionOperationRecord | None:
         # Use the same serialized service/lane admission and lease CAS. Only a
         # persisted idempotent cutover timeout can resume; legacy unknown effects
@@ -17806,6 +17826,7 @@ class PostgresRecordStore(HumanSessionStore):
                 lease_expires_at=lease_expires_at,
                 claimed_at=claimed_at,
                 cutover_reconciliation=True,
+                cutover_abort_only=abort_only,
                 max_attempts=max_attempts,
             ),
         )

@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import Mock
 
 from control_plane.contracts.cutover_host import OdooCronWriterBinding
+from control_plane.dokploy.slot_compose import slot_startup_command
 from control_plane.dokploy.cutover_writer_capabilities import NativeCronWriterCapabilities
 from tests.support.prepared_public_fixture import WebsiteFixture
 from tests.test_odoo_cutover import release_plan
@@ -110,7 +111,18 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
                 with Path(settings.config_path).open("w") as stream:
                     parser.write(stream)
 
-            native = SimpleNamespace(_load_settings=lambda args: settings)
+            def load_settings(args: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    **{
+                        **vars(settings),
+                        "database_name": os.environ.get(
+                            "ODOO_DB_NAME", self.plan.old.binding.database
+                        ),
+                        "database_host": os.environ.get("ODOO_DB_HOST", settings.database_host),
+                    },
+                )
+
+            native = SimpleNamespace(_load_settings=load_settings)
             startup = {"_load_settings": native._load_settings, "_write_runtime_config": configure}
             request = json.dumps(
                 {
@@ -148,9 +160,7 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
                 "Config": {
                     "Image": self.plan.old.image,
                     "Entrypoint": ["/bin/sh", "-c"],
-                    "Cmd": [
-                        "exec /venv/bin/python /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
-                    ],
+                    "Cmd": ["exec " + slot_startup_command()],
                     "Env": ["ODOO_MAX_CRON_THREADS=0"],
                 },
                 "Mounts": [],
@@ -165,6 +175,13 @@ class NativeCronWriterCapabilityTests(unittest.TestCase):
             self.assertTrue(capability.preflight(self.plan.old))
             web["Config"]["Env"] = ["ODOO_MAX_CRON_THREADS=1"]
             with self.assertRaisesRegex(ValueError, "web warming"):
+                capability.preflight(self.plan.old)
+            web["Config"]["Env"] = ["ODOO_MAX_CRON_THREADS=0"]
+            web["Config"]["Env"] = ["ODOO_MAX_CRON_THREADS=0", "ODOO_DB_NAME=foreign"]
+            with self.assertRaisesRegex(ValueError, "effective web database"):
+                capability.preflight(self.plan.old)
+            web["Config"]["Env"] = ["ODOO_MAX_CRON_THREADS=0", "ODOO_DB_HOST=foreign"]
+            with self.assertRaisesRegex(ValueError, "effective web database"):
                 capability.preflight(self.plan.old)
             web["Config"]["Env"] = ["ODOO_MAX_CRON_THREADS=0"]
             probe()

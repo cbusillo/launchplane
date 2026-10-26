@@ -83,6 +83,7 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
                 transport=self.transport,
                 runtime=SimpleNamespace(
                     backup_root=DEFAULT_ODOO_BACKUP_ROOT,
+                    authority_directory=temporary.name,
                     restore_image="postgres@sha256:" + "a" * 64,
                     operation_timeout_seconds=1800,
                     filestore_path="/volumes/data/filestore",

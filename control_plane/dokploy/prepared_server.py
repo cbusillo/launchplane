@@ -16,7 +16,9 @@ PREPARED_COMMAND = (
 )
 
 
-def require_prepared_server(runtime: OdooCutoverHostRuntime, reader: ContainerCommand) -> None:
+def require_prepared_server(
+    runtime: OdooCutoverHostRuntime, reader: ContainerCommand, *, require_running: bool = True
+) -> None:
     values = json.loads(reader(("docker", "inspect", runtime.prepared_container), None))
     if len(values) != 1:
         raise ValueError("prepared server inventory is ambiguous")
@@ -46,7 +48,7 @@ def require_prepared_server(runtime: OdooCutoverHostRuntime, reader: ContainerCo
         or mounts[0].get("Name") != runtime.prepared_volume
         or mounts[0].get("Destination") != "/prepared"
         or mounts[0].get("RW") is not False
-        or state.get("Running") is not True
-        or state.get("Restarting") is not False
+        or require_running
+        and (state.get("Running") is not True or state.get("Restarting") is not False)
     ):
         raise ValueError("prepared server lacks its isolated, read-only retained lifecycle")

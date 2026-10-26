@@ -2,7 +2,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Iterator
+from typing import Iterator, Any
 import unittest
 from unittest.mock import Mock, patch
 
@@ -259,7 +259,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                         datetime.fromisoformat(current.updated_at.replace("Z", "+00:00"))
                         + ODOO_CUTOVER_RECONCILIATION_DELAY,
                     )
-                arguments = dict(
+                arguments: dict[str, Any] = dict(
                     lease_owner="cutover-worker",
                     lease_expires_at=(at + timedelta(minutes=5)).isoformat(),
                     claimed_at=at.isoformat(),

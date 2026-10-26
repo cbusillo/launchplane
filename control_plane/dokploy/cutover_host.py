@@ -57,7 +57,11 @@ from control_plane.dokploy.prepared_host import PreparedSiteDirectory
 from control_plane.dokploy.prepared_server import require_prepared_server
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.dokploy.service_cutover import OdooHostCapabilities
-from control_plane.dokploy.slot_compose import render_odoo_app_slot_compose
+from control_plane.dokploy.slot_compose import (
+    render_odoo_app_slot_compose,
+    held_slot_command,
+    slot_startup_command,
+)
 from control_plane.dokploy.slot_maintenance import (
     maintenance_payload,
     payload_digest,
@@ -85,7 +89,12 @@ from control_plane.odoo_cutover_plan import (
     rollback_pause_identity,
 )
 from control_plane.odoo_cutover_storage import DeploymentStore
-from control_plane.odoo_cutover_recovery import startup_recovery_pause, DefiniteBackupFailure
+from control_plane.odoo_cutover_recovery import (
+    startup_recovery_pause,
+    DefiniteBackupFailure,
+    backup_recovery_eligible,
+    abort_reconciliation_eligible,
+)
 from control_plane.prepared_public_site import prepare_public_site, verify_snapshot
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupVerificationEvidence
 from control_plane.workflows.production_promotion_backup import (
@@ -123,6 +132,7 @@ import json,os,sys
 import psycopg2
 spec=json.load(sys.stdin)
 with psycopg2.connect(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_DB_PORT','5432'),dbname=spec['database'],user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],connect_timeout=10) as connection, connection.cursor() as cursor:
+    if 'release' not in spec: connection.set_session(readonly=True)
     cursor.execute("SELECT key,value FROM ir_config_parameter WHERE key IN ('database.uuid','odoo_devkit.credential_boundary_commit')")
     values=dict(cursor.fetchall())
     if values.get('database.uuid')!=spec['database_uuid'] or not values.get('odoo_devkit.credential_boundary_commit'):
@@ -133,9 +143,10 @@ with psycopg2.connect(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_
     if cursor.fetchall(): raise ValueError('native readiness has pending modules')
     cursor.execute("SELECT name FROM ir_module_module WHERE state='installed' AND name=ANY(%s)",(spec['modules'],))
     if {row[0] for row in cursor.fetchall()}!=set(spec['modules']): raise ValueError('native readiness module coverage differs')
-    payload=json.dumps(spec['release'],sort_keys=True,separators=(',',':'))
-    cursor.execute("INSERT INTO ir_config_parameter(key,value,create_uid,write_uid) VALUES ('launchplane.readiness.release',%s,1,1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",(payload,))
-print(json.dumps({'release':spec['release']},sort_keys=True))
+    if 'release' in spec:
+        payload=json.dumps(spec['release'],sort_keys=True,separators=(',',':'))
+        cursor.execute("INSERT INTO ir_config_parameter(key,value,create_uid,write_uid) VALUES ('launchplane.readiness.release',%s,1,1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",(payload,))
+print(json.dumps({'release':spec['release']} if 'release' in spec else {'ready_base':True},sort_keys=True))
 """
 
 
@@ -396,7 +407,48 @@ class BoundOdooCutoverHost:
 
     def executor_web(self, slot: OdooSlot) -> dict[str, Any]:
         web = next(writer for writer in self.plan.writers if writer.kind == "web")
-        return self.inspect(slot, "web", self.target(slot, web).container)
+        value = self.inspect(slot, "web", self.target(slot, web).container)
+        startup = slot_startup_command()
+        value["startup_commands"] = ["exec " + startup]
+        if slot == self.plan.new:
+            value["startup_commands"].append(held_slot_command(self.plan, startup))
+        else:
+            try:
+                deployment = self.store.read_deployment_record(
+                    slot.runtime_identity.deployment_record_id
+                )
+            except FileNotFoundError:
+                deployment = None
+            previous = deployment.odoo_cutover if deployment is not None else None
+            if previous is not None and previous.plan.new.runtime_identity == slot.runtime_identity:
+                value["startup_commands"].append(held_slot_command(previous.plan, startup))
+        return value
+
+    def old_readiness(self) -> None:
+        slot = self.plan.old
+        observed = json.loads(
+            self.transport.read(
+                (
+                    "docker",
+                    "exec",
+                    "-i",
+                    self.runner(slot),
+                    "/venv/bin/python",
+                    "-c",
+                    READINESS_RELEASE_PROGRAM,
+                ),
+                json.dumps(
+                    {
+                        "database": slot.binding.database,
+                        "database_uuid": slot.runtime_identity.database_uuid,
+                        "credential_commit_id": "",
+                        "modules": list(self.runtime.modules),
+                    }
+                ),
+            )
+        )
+        if observed != {"ready_base": True}:
+            raise ValueError("old slot cannot supply its native recovery readiness")
 
     def startup_capability(self, slot: OdooSlot) -> None:
         result = json.loads(
@@ -422,7 +474,10 @@ class BoundOdooCutoverHost:
         if plan != self.plan:
             raise ValueError("host preflight crossed its admitted release")
         self.state.verify_execution(require_existing=self.record() is not None)
-        self.prepared_server()
+        record = self.record()
+        self.prepared_server(
+            require_running=not (record is not None and abort_reconciliation_eligible(record))
+        )
         for slot in (plan.old, plan.new):
             current = self.payload(slot)
             if (
@@ -494,6 +549,14 @@ class BoundOdooCutoverHost:
                 session.get("address") not in old_addresses for session in database["sessions"]
             ):
                 raise ValueError("inactive candidate or unknown database writers are not fenced")
+        if record is None or record.step in {
+            "preparing",
+            "prepared",
+            "pausing",
+            "backing_up",
+            "aborting",
+        }:
+            self.old_readiness()
         self.startup_capability(plan.old)
         self.native_writer_capability.preflight(plan.old)
         for writer in plan.writers:
@@ -610,7 +673,13 @@ class BoundOdooCutoverHost:
         tools = json.loads(
             self.transport(
                 ("python3", "-c", RESTORE_PREFLIGHT_PROGRAM),
-                json.dumps({"image": self.runtime.restore_image, "dump_major": dump_major}),
+                json.dumps(
+                    {
+                        "image": self.runtime.restore_image,
+                        "dump_major": dump_major,
+                        "timeout_seconds": self.runtime.operation_timeout_seconds,
+                    }
+                ),
             )
         )
         if tools != {"restore_tools": True}:
@@ -664,8 +733,8 @@ class BoundOdooCutoverHost:
     def prepared_store(self) -> PreparedSiteDirectory:
         return PreparedSiteDirectory(self.prepared_path)
 
-    def prepared_server(self) -> None:
-        require_prepared_server(self.runtime, self.transport.read)
+    def prepared_server(self, *, require_running: bool = True) -> None:
+        require_prepared_server(self.runtime, self.transport.read, require_running=require_running)
 
     def stage_public(self, site: PreparedPublicSite, pause_id: str) -> str:
         self.guard()
@@ -699,6 +768,25 @@ class BoundOdooCutoverHost:
 
     def load_prepared(self, pause_id: str) -> PreparedPublicSite:
         return self.prepared_store().load(pause_id)
+
+    def owns_prepared(self, pause_id: str) -> bool:
+        record = self.record()
+        if (
+            record is None
+            or record.pause is None
+            or record.public_site is None
+            or not backup_recovery_eligible(record)
+            or record.pause.pause_id != pause_id
+        ):
+            return False
+        directory = self.prepared_store()
+        return (
+            directory.active_pause() == pause_id
+            and directory.load(pause_id) == record.public_site
+            and self.route.observed_target() == self.lane.prepared_origin
+            and yaml.safe_load(self.route.target.route_file.read_text())
+            == json.loads(json.dumps(route_payload(self.route.target, self.lane.prepared_origin)))
+        )
 
     def observe_prepared(self, pause_id: str) -> str:
         store = self.prepared_store()
@@ -1079,6 +1167,8 @@ class BoundOdooCutoverHost:
             filestore=directory + "/" + plan.old.binding.database + "-filestore.tar.gz",
             filestore_sha256=capture.filestore_archive_sha256,
             timeout_seconds=self.runtime.operation_timeout_seconds,
+            authority_directory=self.runtime.authority_directory,
+            capture_nonce=binding["nonce"],
         )
         backup_record = BackupGateRecord(
             record_id=backup_id,
@@ -1117,6 +1207,64 @@ class BoundOdooCutoverHost:
             independent_backup_verified=True,
         )
 
+    def cancel_backup_restore(self, plan: OdooCutoverPlan) -> None:
+        self.guard()
+        record = self.record()
+        if plan != self.plan or record is None or not backup_recovery_eligible(record):
+            raise ValueError("backup cancellation lacks its original pre-maintenance operation")
+        backup_id = cutover_record_id(plan) + "-online"
+        binding = self.state.authority("backup")
+        if binding is None or binding.get("record_id") != backup_id:
+            raise ValueError("backup cancellation lacks its original capture intent")
+        directory = (
+            self.runtime.backup_root.rstrip("/") + "/" + plan.old.binding.database + "/" + backup_id
+        )
+        manifest = json.loads(
+            self.transport.read(
+                (
+                    "docker",
+                    "exec",
+                    "-i",
+                    self.runner(plan.old),
+                    "/venv/bin/python",
+                    "-c",
+                    BACKUP_MANIFEST_PROGRAM,
+                ),
+                json.dumps({"directory": directory}),
+            )
+        )
+        if manifest.get("claim") != {"record_id": backup_id, "nonce": binding["nonce"]}:
+            raise ValueError("backup cancellation lacks its exact native capture claim")
+        if manifest.get("state") == "failed":
+            return
+        if manifest.get("state") != "captured":
+            raise ValueError("live or unknown native capture cannot be cancelled")
+        capture = OdooProdBackupCaptureEvidence.model_validate(
+            {key: manifest["manifest"][key] for key in OdooProdBackupCaptureEvidence.model_fields}
+        )
+        if (
+            capture.backup_record_id != backup_id
+            or capture.backup_nonce != binding["nonce"]
+            or capture.database_name != plan.old.binding.database
+        ):
+            raise ValueError("backup cancellation crossed its original captured tuple")
+        verify_disposable_database_restore(
+            self.transport,
+            image=self.runtime.restore_image,
+            runner=self.runner(plan.old),
+            record_id=backup_id,
+            dump=directory + "/" + plan.old.binding.database + ".dump",
+            database_uuid=plan.old.runtime_identity.database_uuid,
+            dump_sha256=capture.database_dump_sha256,
+            database=plan.old.binding.database,
+            filestore=directory + "/" + plan.old.binding.database + "-filestore.tar.gz",
+            filestore_sha256=capture.filestore_archive_sha256,
+            timeout_seconds=self.runtime.operation_timeout_seconds,
+            authority_directory=self.runtime.authority_directory,
+            capture_nonce=binding["nonce"],
+            cancel_only=True,
+        )
+
     def capabilities(self) -> OdooHostCapabilities:
         driver = OdooSlotDriver(
             exclusive=self.exclusive,
@@ -1132,6 +1280,8 @@ class BoundOdooCutoverHost:
             handoff_writers=lambda plan, slot: self.writers.handoff(slot),
             drain_old=self.drain_old,
             load_prepared=self.load_prepared,
+            owns_prepared=self.owns_prepared,
+            cancel_backup_restore=self.cancel_backup_restore,
             lane=self.lane,
             verify_endpoint=lambda plan, slot: self.probes.private_health(slot),
         )

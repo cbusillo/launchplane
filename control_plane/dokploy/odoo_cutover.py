@@ -67,6 +67,9 @@ class OdooSlotDriver:
         | None
     ) = None
 
+    owns_prepared: Callable[[str], bool] = lambda _pause: False
+    cancel_backup_restore: Callable[[OdooCutoverPlan], None] | None = None
+
 
 class DokployOdooCutoverProvider:
     def __init__(
@@ -175,10 +178,20 @@ class DokployOdooCutoverProvider:
         digest = self.driver.observe_prepared(pause_id)
         return digest if digest == site.content_digest else ""
 
+    def owns_prepared_pause(self, pause_id: str) -> bool:
+        if pause_id not in (self.pause_id, rollback_pause_identity(self.pause_id)):
+            return False
+        return self.driver.owns_prepared(pause_id)
+
     def fence_and_drain(
         self, site: PreparedPublicSite, pause_id: str
     ) -> tuple[WriterObservation, ...]:
         return self.driver.fence_and_drain(site, pause_id)
+
+    def cancel_backup_restore(self, plan: OdooCutoverPlan) -> None:
+        if self.driver.cancel_backup_restore is None:
+            raise ValueError("original backup cancellation capability is unavailable")
+        self.driver.cancel_backup_restore(plan)
 
     def backup(self, plan: OdooCutoverPlan) -> OdooRecoveryTuple:
         return self.driver.backup(plan)
@@ -218,6 +231,8 @@ class DokployOdooCutoverProvider:
         if observed == self.driver.lane.prepared_origin or observed not in expected:
             if observed != self.driver.lane.prepared_origin or not any(
                 self.observed_public_copy(pause_id)
+                or slot == plan.old
+                and self.owns_prepared_pause(pause_id)
                 for pause_id in (self.pause_id, rollback_pause_identity(self.pause_id))
             ):
                 raise ValueError("unknown route is not a verified prepared public copy")

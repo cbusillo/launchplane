@@ -172,3 +172,79 @@ class CutoverAbortTests(unittest.TestCase):
                 updated_at=datetime.now(UTC),
             )
             self.assertFalse(backup_recovery_eligible(record))
+
+    def test_resumed_abort_never_stops_old_writers_again(self) -> None:
+        for state in ("resuming", "complete"):
+            with self.subTest(state=state), TemporaryDirectory() as directory:
+                root = Path(directory)
+                provider = IsolatedCutoverProvider(root, database_changing=True)
+                self.addCleanup(provider.engine.dispose)
+                store = cutover_store(root)
+
+                def interrupt(step: str) -> None:
+                    if step == "aborting":
+                        raise TimeoutError("interrupted before old handoff")
+
+                with (
+                    patch.object(provider, "backup", side_effect=DefiniteBackupFailure()),
+                    self.assertRaises(TimeoutError),
+                ):
+                    execute_odoo_cutover(
+                        provider.cutover,
+                        store,
+                        provider,
+                        record_id="original",
+                        checkpoint=interrupt,
+                    )
+                held = store.load("original")
+                assert held.pause is not None
+                provider.target = provider.cutover.old
+                pause = held.pause.model_copy(
+                    update={"state": state, "recovery_binding": provider.cutover.old.binding}
+                )
+                if state == "complete":
+                    from datetime import UTC, datetime
+
+                    pause = pause.model_copy(
+                        update={"ended_at": datetime.now(UTC), "duration_seconds": 1.0}
+                    )
+                store.save(held.model_copy(update={"pause": pause}))
+                with (
+                    patch.object(provider, "readiness") as readiness,
+                    patch.object(provider, "switch") as switch,
+                ):
+                    result = execute_odoo_cutover(
+                        provider.cutover, store, provider, record_id="original"
+                    )
+                self.assertEqual(result.step, "aborted")
+                readiness.assert_not_called()
+                switch.assert_not_called()
+
+    def test_unhealthy_prepared_server_can_only_be_escaped_with_original_ownership(self) -> None:
+        for owned in (True, False):
+            with self.subTest(owned=owned), TemporaryDirectory() as directory:
+                root = Path(directory)
+                provider = IsolatedCutoverProvider(root, database_changing=True)
+                self.addCleanup(provider.engine.dispose)
+                store = cutover_store(root)
+                with (
+                    patch.object(provider, "backup", side_effect=TimeoutError()),
+                    self.assertRaises(TimeoutError),
+                ):
+                    execute_odoo_cutover(provider.cutover, store, provider, record_id="original")
+                with (
+                    patch.object(provider, "backup", side_effect=DefiniteBackupFailure()),
+                    patch.object(provider, "observed_public_copy", return_value=""),
+                    patch.object(provider, "owns_prepared_pause", return_value=owned),
+                ):
+                    if owned:
+                        result = execute_odoo_cutover(
+                            provider.cutover, store, provider, record_id="original"
+                        )
+                        self.assertEqual(result.step, "aborted")
+                    else:
+                        with self.assertRaisesRegex(ValueError, "prepared-route authority"):
+                            execute_odoo_cutover(
+                                provider.cutover, store, provider, record_id="original"
+                            )
+                        self.assertEqual(store.load("original").step, "aborting")

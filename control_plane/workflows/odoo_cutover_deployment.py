@@ -71,6 +71,7 @@ def execute_odoo_cutover_deployment(
     context: str,
     instance: str,
     checkpoint: Callable[[str], None],
+    abort_only: bool = False,
 ) -> OdooCutoverApplyResult:
     if context != plan.new.runtime_identity.context or instance != plan.new.binding.environment_id:
         raise ValueError("deployment envelope differs from cutover context/lane")
@@ -103,6 +104,7 @@ def execute_odoo_cutover_deployment(
             provider,
             record_id=record_id,
             checkpoint=checkpoint,
+            abort_only=abort_only,
             settings_checkpoint=lambda: record_website_application(
                 record_store, plan, plan.website_settings, verified=False
             ),

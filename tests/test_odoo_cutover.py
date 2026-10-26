@@ -122,6 +122,12 @@ class IsolatedCutoverProvider(WebsiteFixture):
             ),
         )
 
+    def cancel_backup_restore(self, plan: OdooCutoverPlan) -> None:
+        self.actions.append("cancel-restore")
+
+    def owns_prepared_pause(self, pause_id: str) -> bool:
+        return bool(self.observed_public_copy(pause_id))
+
     def preflight(self, plan: OdooCutoverPlan) -> None:
         pass
 

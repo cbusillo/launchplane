@@ -1,14 +1,25 @@
 import json
+from typing import Any
 
 from control_plane.dokploy.slot_maintenance import ContainerCommand
+from control_plane.dokploy.cutover_restore_state import (
+    RESTORE_STATE_PROGRAM,
+    RESTORE_CANCEL_PROGRAM,
+)
 from control_plane.odoo_cutover_recovery import DefiniteBackupFailure
 
 
 RESTORE_PREFLIGHT_PROGRAM = r"""
 import json,subprocess,sys
 spec=json.load(sys.stdin)
-command=['docker','run','--rm','--pull','never','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--entrypoint','/bin/sh',spec['image'],'-ec',"command -v timeout; command -v docker-entrypoint.sh; command -v postgres; command -v pg_isready; command -v pg_restore; command -v psql; command -v tar; command -v sha1sum; command -v df; pg_restore --version; timeout --signal=KILL 1 sh -c 'exit 0'"]
-result=subprocess.run(command,capture_output=True,timeout=30)
+inspected=subprocess.run(['docker','image','inspect',spec['image']],capture_output=True,timeout=30)
+if inspected.returncode:
+    pulled=subprocess.run(['docker','pull',spec['image']],capture_output=True,timeout=max(1,spec.get('timeout_seconds',300)-60))
+    if pulled.returncode: raise ValueError('immutable restore artifact could not be acquired')
+    inspected=subprocess.run(['docker','image','inspect',spec['image']],capture_output=True,timeout=30)
+if inspected.returncode or len(json.loads(inspected.stdout))!=1: raise ValueError('immutable restore artifact is unavailable')
+command=['docker','run','--rm','--pull','never','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--entrypoint','timeout',spec['image'],'--signal=KILL','30','/bin/sh','-ec',"command -v timeout; command -v docker-entrypoint.sh; command -v postgres; command -v pg_isready; command -v pg_restore; command -v psql; command -v tar; command -v sha1sum; command -v df; pg_restore --version; timeout --signal=KILL 1 sh -c 'exit 0'"]
+result=subprocess.run(command,capture_output=True,timeout=40)
 if result.returncode: raise ValueError('immutable restore artifact lacks bounded native tools')
 versions=[line for line in result.stdout.decode().splitlines() if line.startswith('pg_restore ')]
 if len(versions)!=1 or int(versions[0].split()[2].split('.')[0])!=spec['dump_major']: raise ValueError('restore tools differ from capture PostgreSQL major')
@@ -16,14 +27,16 @@ print(json.dumps({'restore_tools':True}))
 """
 
 
-RESTORE_PROBE_PROGRAM = r"""
-import json,re,subprocess,sys,time
-spec=json.load(sys.stdin)
+RESTORE_PROBE_PROGRAM = (
+    RESTORE_STATE_PROGRAM
+    + r"""
+import time
 cleanup_seconds=min(30,max(2,spec['timeout_seconds']//5))
 work_seconds=spec['timeout_seconds']-cleanup_seconds-2
 if work_seconds<1: raise ValueError('restore budget has no reserved cleanup time')
 deadline=time.monotonic()+work_seconds
 container=None
+allocation_started=False
 cleaned=False
 failure=None
 result=None
@@ -45,12 +58,17 @@ def pipe(source_command,destination):
         if source.poll() is None:
             source.kill()
             source.wait(timeout=cleanup_seconds)
-if run(['ps','-a','--filter','label=launchplane.cutover-restore='+spec['record'],'--format','{{.ID}}']).strip():
-    raise RuntimeError('original restore work remains live or uncertain')
+previous=restore_outcome()
+if previous is not None:
+    print(json.dumps(previous));sys.exit(0)
+seal_receipt('intent')
 try:
     source_size=int(run(['exec','-e','DATABASE_NAME='+spec['database'],spec['runner'],'/venv/bin/python','-c',"import os,psycopg2; c=psycopg2.connect(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_DB_PORT','5432'),dbname=os.environ['DATABASE_NAME'],user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],connect_timeout=10); q=c.cursor();q.execute('SELECT pg_database_size(current_database()) + COALESCE(sum(file_size),0) FROM ir_attachment');print(q.fetchone()[0])"]).decode().strip())
-    container=run(['run','-d','--rm','--pull','never','--name',spec['record']+'-restore-probe','--label','launchplane.cutover-restore='+spec['record'],'--network','none','--user','postgres','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--tmpfs','/var/lib/postgresql:rw,mode=1777','--mount','type=volume,dst=/var/lib/postgresql/data','--tmpfs','/tmp:rw,mode=1777','--tmpfs','/var/run/postgresql:rw,mode=1777','-e','PGDATA=/var/lib/postgresql/data/pgdata','-e','POSTGRES_HOST_AUTH_METHOD=trust','--entrypoint','timeout',spec['image'],'--signal=KILL',str(work_seconds),'docker-entrypoint.sh','postgres']).decode().strip()
+    allocation_started=True
+    container=run(['run','-d','--rm','--pull','never','--name',spec['record']+'-restore-probe','--label','launchplane.cutover-restore='+spec['record'],'--label','launchplane.cutover-restore-request='+request_digest,'--network','none','--user','postgres','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--tmpfs','/var/lib/postgresql:rw,mode=1777','--mount','type=volume,dst=/var/lib/postgresql/data','--tmpfs','/tmp:rw,mode=1777','--tmpfs','/var/run/postgresql:rw,mode=1777','-e','PGDATA=/var/lib/postgresql/data/pgdata','-e','POSTGRES_HOST_AUTH_METHOD=trust','--entrypoint','timeout',spec['image'],'--signal=KILL',str(work_seconds),'docker-entrypoint.sh','postgres']).decode().strip()
     if not re.fullmatch('[0-9a-f]{64}',container): raise ValueError('restore allocation has no exact container identity')
+    allocation=seal_receipt('allocation',container=container)
+    if allocation['container']!=container: raise ValueError('restore allocation changed')
     available=int(run(['exec',container,'df','-PB1','/var/lib/postgresql/data']).decode().splitlines()[-1].split()[3])
     if source_size<=0 or available < source_size*2: raise ValueError('isolated Docker storage lacks restore staging capacity')
     while True:
@@ -84,15 +102,16 @@ finally:
         inventory=subprocess.run(['docker','ps','-a','--no-trunc','--filter','id='+container,'--format','{{.ID}}'],capture_output=True,timeout=max(.1,cleanup_deadline-time.monotonic()))
         cleaned=inventory.returncode==0 and not inventory.stdout.strip()
     elif container is None:
-        cleaned=False
+        cleaned=not allocation_started
 if failure is not None:
-    if cleaned: print(json.dumps({'status':'failed','terminated':True}))
+    if cleaned: print(json.dumps(seal_receipt('completed',result={'status':'failed','terminated':True})['result']))
     else: raise failure
 elif not cleaned:
     raise RuntimeError('isolated restore cleanup is uncertain')
 else:
-    print(json.dumps(result,sort_keys=True))
+    print(json.dumps(seal_receipt('completed',result=result)['result'],sort_keys=True))
 """
+)
 
 
 def verify_disposable_database_restore(
@@ -108,9 +127,14 @@ def verify_disposable_database_restore(
     filestore: str,
     filestore_sha256: str,
     timeout_seconds: int,
+    authority_directory: str,
+    capture_nonce: str,
+    cancel_only: bool = False,
 ) -> dict[str, str]:
     request = dict(
         timeout_seconds=timeout_seconds,
+        authority_directory=authority_directory,
+        capture_nonce=capture_nonce,
         image=image,
         runner=runner,
         record=record_id,
@@ -121,9 +145,12 @@ def verify_disposable_database_restore(
         filestore=filestore,
         filestore_sha256=filestore_sha256,
     )
-    value: dict[str, str] = json.loads(
-        execute(("python3", "-c", RESTORE_PROBE_PROGRAM), json.dumps(request))
-    )
+    program = RESTORE_CANCEL_PROGRAM if cancel_only else RESTORE_PROBE_PROGRAM
+    value: dict[str, Any] = json.loads(execute(("python3", "-c", program), json.dumps(request)))
+    if cancel_only:
+        if value != {"cancelled": True}:
+            raise ValueError("original restore cancellation lacks termination evidence")
+        return {}
     if value == {"status": "failed", "terminated": True}:
         raise DefiniteBackupFailure("isolated restore failed after verified termination")
     if value != {
@@ -132,4 +159,4 @@ def verify_disposable_database_restore(
         "filestore_archive_sha256": filestore_sha256,
     }:
         raise ValueError("isolated restore has no exact database/capture witness")
-    return value
+    return {key: str(item) for key, item in value.items()}
