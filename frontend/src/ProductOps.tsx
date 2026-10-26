@@ -29,7 +29,7 @@ import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -1276,6 +1276,8 @@ function recordedPublicObservation(environment: ProductEnvironmentSummary): stri
 }
 
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
+  const warnings = operationalWarningReasons(environment);
+  if (warnings.length) return warnings.join(" · ");
   // No summary, current or retained, may stand as the headline of a red lane.
   if (environmentOperationalTone(environment) === "danger") {
     return "Needs attention";
@@ -1306,7 +1308,7 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
-    return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
+    return environment ? operationalWarningReasons(environment)[0] ?? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {
     return "Evidence missing";

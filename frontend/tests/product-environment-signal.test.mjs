@@ -35,6 +35,32 @@ function environment() {
 test("a fresh identity and health verification makes a monitored lane green", () =>
   assert.equal(environmentOperationalTone(environment()), "verified"));
 
+test("failed production delivery warns only while the running release is verified", () => {
+  for (const failure_code of ["production_delivery_failed", "deploy_fence_held"]) {
+    const lane = environment();
+    lane.environment = "prod";
+    const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+    Object.assign(incident, { severity: "warning", check_kind: "provider", failure_code });
+    lane.health_monitoring.open_incidents = [incident];
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.deepEqual(operationalAttentionReasons(lane), []);
+    assert.equal(lane.health_monitoring.open_incidents[0], incident);
+    lane.health_monitoring.checks[0].status = "fail";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.checks[0].status = "pass";
+    for (const status of ["mismatch", "malformed", "missing", "unchecked", "unverifiable"]) {
+      lane.topology.observed.placement.runtime_identity_status = status;
+      assert.equal(environmentOperationalTone(lane), "danger");
+    }
+    lane.topology.observed.placement.runtime_identity_status = "match";
+    assert.equal(environmentOperationalTone(lane, Date.parse(lane.provenance.stale_after) + 1), "danger");
+    incident.severity = "critical";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.open_incidents = [];
+    assert.equal(environmentOperationalTone(lane), "verified");
+  }
+});
+
 test("a canonical generated occurrence blocks green independently of declared checks", () => {
   const lane = environment();
   const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
