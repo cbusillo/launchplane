@@ -536,7 +536,7 @@ cache target so runner slots share cache versions and archives; each restore
 still writes only its own checkout. The new cache-key namespace resets the old
 shared-home entries. Sibling restores cannot overwrite an install's objects. Checkout cleanup
 owns this generated directory; jobs never clear the shared home store. The same
-setup applies to validation, fork validation, both browser shards and evidence
+setup applies to validation, fork validation, browser shards and evidence
 verification. The wrapper verifies that its namespace differs from
 the host and removes only its captured container ID, including after failures.
 The workflow owns the image pin. Match the
