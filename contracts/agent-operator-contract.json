@@ -68,7 +68,7 @@
           "checklist_digest",
           "decision_reference"
         ],
-        "schema_fingerprint_sha256": "f115692c3fb674b18f91ad11f6babe3fa8592a1a8e8fe4e50015fd769dd22382",
+        "schema_fingerprint_sha256": "b1ff3a80954d9ea34f365a91e2c7f07f3aa128c2fe1ab58f4480a8916d7c2413",
         "supported_surfaces": [
           "service_api",
           "browser"
@@ -96,7 +96,7 @@
         "reviewed_evidence": [
           "expected_digest"
         ],
-        "schema_fingerprint_sha256": "58db8a0b3f3df37db61c4601e028c49feebe958c318d45a43a250598dfdd4382",
+        "schema_fingerprint_sha256": "dafbd9077abdcd0921a8955410cfe3f31aafc0ba3e7fbd95a1350eb503e15812",
         "supported_surfaces": [
           "service_api"
         ]
@@ -123,7 +123,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "02c6e7012e3e7533e0c9ecb3a5a8ee312af755b6b7274583b85de4003744aad7",
+        "schema_fingerprint_sha256": "3131c2d628e56039f58a4aaef00083e220ae48ddc742110e0bf74a2c7b083014",
         "supported_surfaces": [
           "service_api"
         ]
@@ -151,7 +151,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "8cfbb235e6a5cf86aefb0d2cca62a133d4afa53f049b119ba716353002f6ba2c",
+        "schema_fingerprint_sha256": "3f1251e9871536d8bce055ded45c4ac39de3d86e2cbc880026de32bd0536a7e4",
         "supported_surfaces": [
           "service_api"
         ]
@@ -180,7 +180,7 @@
         "reviewed_evidence": [
           "expected_recovery_digest"
         ],
-        "schema_fingerprint_sha256": "386933a4bfe1b123111068ee033fe1387a1c6a4fe72f6cfd051aa3a7cbdb8dd0",
+        "schema_fingerprint_sha256": "4381d42d59c33af0a2389b589edad0c4027ad5606b10ef5b928c143428529230",
         "supported_surfaces": [
           "service_api"
         ]
@@ -208,7 +208,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "7d7b87bb458d0fa5dbe3e9ef102590d26e7fb33c002c2ddd0f2b7bc2e9c56a89",
+        "schema_fingerprint_sha256": "4c1f5fc68096626b7903f91f5c58a8a6a0773b22417d34823da9462690d0920e",
         "supported_surfaces": [
           "service_api"
         ]
@@ -235,7 +235,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "29adc4075f38325d0f365026f8223fb1cd7a27fad6f9e112b8714fa39447f914",
+        "schema_fingerprint_sha256": "7bfbc6b1748171cff291719148d1ba862a375cd24a8230db3161b80c4cb307d2",
         "supported_surfaces": [
           "service_api"
         ]
@@ -261,7 +261,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "2cc149a0f8aa3e692be39f9a8ff7275e808ad1e0da4ee6d5dbb426896392e6e6",
+        "schema_fingerprint_sha256": "1b4a3f6d26d2d0732a7dcdfbd943a1522c281ec6cd8073a2e3fd4c2b6a3f20d0",
         "supported_surfaces": [
           "service_api"
         ]
@@ -287,7 +287,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "ff5422cc4dade71342abd12c496dfa36c39a781c07ccb808cadf58a8d9bb14a7",
+        "schema_fingerprint_sha256": "238950f42ef788bb54c8933d617f65c024ce6e5b2cdac29e25e60dfcbd1787be",
         "supported_surfaces": [
           "service_api"
         ]
@@ -313,7 +313,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "aab7a05d0fdc2341e37a506b916322d3e5e8115f33a5fcc4a701e9a26ca24eb5",
+        "schema_fingerprint_sha256": "c6dfe2ae59b3906074718b2ad087effd555b80bf05f1ac540643ab64afaf90bf",
         "supported_surfaces": [
           "service_api"
         ]
@@ -338,7 +338,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "a251b4bce1b506b67b2b4752da6231f305ffbe860d33423223a4771bf51283e2",
+        "schema_fingerprint_sha256": "796a76b43ba081a32bfcbc6a78a3483845c0d0e414d20ab237aeb38055f94de1",
         "supported_surfaces": [
           "service_api"
         ]
@@ -368,7 +368,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "86e1fa186a0bd5391ffa676966d737d0644fe5700c895c61863974345a4dbb4f",
+        "schema_fingerprint_sha256": "ceae1f45be1a1e72f00c2848cf8f5a8e0ec3817c3e1dc37004f90c58a2a3deb4",
         "supported_surfaces": [
           "service_api"
         ]
@@ -398,7 +398,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "384f5ce4d4694dc8ecdeabc1c33f50fdd93af15b109a1853e2e85d9f8e23d342",
+        "schema_fingerprint_sha256": "b59371e53f3a97b43ffb2ddc4d37994e8950c2fc8457bff0ac5335858d12e3c7",
         "supported_surfaces": [
           "service_api"
         ]
@@ -429,7 +429,7 @@
           "expected_plan_sha256",
           "host_review"
         ],
-        "schema_fingerprint_sha256": "8595c6f3b9d86f0de87b2d9bcfaa6fbbfbf45974fd635357d80d1b9fe19ce2be",
+        "schema_fingerprint_sha256": "b92b669a70fb4e8aecc36db328f4d0539a42a390539893ece6939ff05e8aa86c",
         "supported_surfaces": [
           "service_api",
           "local_cli"
@@ -460,7 +460,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "b6766c09df89c7ab62a1ad2d8c07488a8a9acf78a0c048b7bfdc8d8b9aee1726",
+        "schema_fingerprint_sha256": "8c3ae83b520e9986ebcde155bb0108ba547b36d07d71e6d85855c1dbb80313d9",
         "supported_surfaces": [
           "service_api"
         ]
@@ -490,7 +490,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "6b47a49547415639977863d2d2747e5fb896ebfef965f4cd6703e881f0abc8d3",
+        "schema_fingerprint_sha256": "07ac108a4d353cc7f0f47b0e1a066ceb315709ae73b00ba00c7a8acf69260eba",
         "supported_surfaces": [
           "service_api"
         ]
@@ -518,7 +518,7 @@
         "reviewed_evidence": [
           "expected_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "2603c2c987506ba6dbce6765ec4793afe0227ecebc1c6b14e926c837e071f81e",
+        "schema_fingerprint_sha256": "22e4ce331360580c24371bbcff3a40cc802df669c2ed684ba54a089e11d5f09a",
         "supported_surfaces": [
           "service_api",
           "local_cli"
@@ -548,7 +548,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "3963867c5c058922f309d9303f21605cd0e7cb6f9e139d18a4ae8440f634ae8b",
+        "schema_fingerprint_sha256": "1d7ac7b707cc89cc6a8a54b5f6efbc1a688bca9909f7168430e91250b5aee0b6",
         "supported_surfaces": [
           "service_api"
         ]
@@ -578,7 +578,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "535f901764568d1524de5200f4dcde9accda388481881f327afdeca509186a71",
+        "schema_fingerprint_sha256": "0830c5219a06f66073a4cc0c04e89f1a4dbaeb70e3e314fd633179f5079d1bf0",
         "supported_surfaces": [
           "service_api"
         ]
@@ -609,7 +609,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "9a480ac84f0cbadc885ff981e9c42e04affa7e3f7a04d83434203b38dcef9395",
+        "schema_fingerprint_sha256": "3cb730a681c9deda0b9ca64eba4c012137050080b7c2d338a238594d52c5d773",
         "supported_surfaces": [
           "service_api"
         ]
@@ -640,7 +640,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "c511c140ac67b2921121dc599c8a086983925b6e7edf23daf9c041b437521c6d",
+        "schema_fingerprint_sha256": "4a8ee12c32520d8054a0a3177cdce41652de106b45032a50b7d0bcdbf03d39e4",
         "supported_surfaces": [
           "service_api"
         ]
@@ -672,7 +672,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "57325f6b33cfc755a4dcc4f1f11e6b2dd0e11a315083c3ffe2a70099503595ce",
+        "schema_fingerprint_sha256": "624185baec4b894cc9bcd61424f63c0f12e54a7d6372c10ee863419ec81ae76c",
         "supported_surfaces": [
           "service_api"
         ]
@@ -706,7 +706,7 @@
           "expected_binding_sha256",
           "expected_observation_sha256"
         ],
-        "schema_fingerprint_sha256": "9f597f2977189b213c7e5ac9c74a17e6de16008407a3e568f7e538adc1674eb3",
+        "schema_fingerprint_sha256": "30af7a9d8197e43425e685b1aaca4a0ca01bcf7950986c425c7c84f05391b551",
         "supported_surfaces": [
           "service_api"
         ]
@@ -735,7 +735,7 @@
           "expected_record_id",
           "expected_policy_sha256"
         ],
-        "schema_fingerprint_sha256": "a29328e09a0fc505068a33925bd447a2fbf8aaf1ea12576ab6139ca58c438526",
+        "schema_fingerprint_sha256": "74fb903b7a534dc6da32dc3c60dd4d3169ccd66c5df029defb99273f8d54319c",
         "supported_surfaces": [
           "service_api"
         ]
@@ -768,7 +768,7 @@
           "current_artifact_identity",
           "release_lane_exclusion"
         ],
-        "schema_fingerprint_sha256": "d21c23fe8c2561b4c30efa827a0f68125838085eb653c92adb12666151f2b0d7",
+        "schema_fingerprint_sha256": "24f2a0a86005fb9f8e681c18be33b256656fc3bf50f99bd2d46c755e64d85df5",
         "supported_surfaces": [
           "bounded_admin_helper",
           "operator_ui",
@@ -796,7 +796,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "c49fedac49b94dbc12172b8a8cf85fe3e2684565f3f072baa065e89d1ad92c9b",
+        "schema_fingerprint_sha256": "b2747cbe4a6300340ff302c6ec12fadfab954bc4c06a6f6a4a245c33d2136850",
         "supported_surfaces": [
           "agent_helper",
           "read_only_service"
@@ -822,7 +822,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "1f0c8b32c85ddf362d9ee75b310a9c21948d59ee50af95043e991c1ba3e1d87c",
+        "schema_fingerprint_sha256": "4192131e1f2bee74aee50609c7788b6cc9ab1315f5a36c7c81ebee76bbf90609",
         "supported_surfaces": [
           "agent_helper",
           "service_api"
@@ -852,7 +852,7 @@
         "reviewed_evidence": [
           "reviewed_dry_run"
         ],
-        "schema_fingerprint_sha256": "7204ea174461e746df94c2a6ae2a4ecdb8c067b39c17c936f720c0d5721c6b01",
+        "schema_fingerprint_sha256": "65c61e38237129e6b0117a0252e01913365e3eeefcb664fac9ea535293e3261d",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -885,7 +885,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "e0bc6e9b9a07b51cba7375d63bd3259f1c6fc37e5d4c807f24ea886d32110f0a",
+        "schema_fingerprint_sha256": "e2b122aa5c0648ace65e98c8655dee387633625626facd3d91149e422d059091",
         "supported_surfaces": [
           "service_api"
         ]
@@ -916,7 +916,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "b8787659ca340aa29df2bde31b34beb3ad71ceffa7fb18c4c6d4f601a11c5456",
+        "schema_fingerprint_sha256": "a73021c89e70017a2b014aa6a22e7fe89c5c676481feaef3db2eb8bd0df9b6a9",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -946,7 +946,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "9bb00c7435fa496a74476039776e6a410dbdd406ac6a18822814e76d93f60f5e",
+        "schema_fingerprint_sha256": "e113d028993bc2f201b6a30cc57b1d6d7a7354d5c356217c01325ea48bfffd9f",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -977,7 +977,7 @@
         "reviewed_evidence": [
           "reviewed_dry_run"
         ],
-        "schema_fingerprint_sha256": "5b2b1930447b9b0b1ff88c95e9395b4bf27625922d55d7f7b642a4bcb7fa49be",
+        "schema_fingerprint_sha256": "3ed16d91ac11dfe43e054cc80fedf6f0d9c9b4c94b2f4a0be5342f0dfd1b6d9e",
         "supported_surfaces": [
           "agent_helper",
           "operator_ui",
@@ -1011,7 +1011,7 @@
           "expected_plan_digest",
           "plan_idempotency_key"
         ],
-        "schema_fingerprint_sha256": "1a5b6056a5f67987eb4fc7ac9b4f242b3b95a1d306599cb72a74a58bff7371b0",
+        "schema_fingerprint_sha256": "09887c698d110f8467bc191aedbcd1a23810e859aea1bf152a3f95e0e4eeeba9",
         "supported_surfaces": [
           "agent_helper",
           "service_api"
@@ -1042,7 +1042,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "ab31ba59e8bbcb0a548181ec2b99bae05e5e9dc0c18b54224bf246dffa83b486",
+        "schema_fingerprint_sha256": "212aae46d0c1f853a917a22341a51fa9bf1f9a467d71a913df11ff4c423c480a",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
@@ -1074,7 +1074,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "67c78f2fad901e7f865073383374a1cdd2eb153eed16e4110c9155915e771c8b",
+        "schema_fingerprint_sha256": "8c20a21664f6450ed5cd14e2bd1f4ce24bd6ede323a1413e474343cba7a5361b",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
@@ -1105,7 +1105,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "74213c5c364421a8107eceac865c87176d2d555a5b6cb93fd8b58caed37b1e72",
+        "schema_fingerprint_sha256": "66a6c84e8418a115e58bd701602cc9d983d7c4b46db60ec53697a9a53d71180c",
         "supported_surfaces": [
           "operator_ui",
           "service_api"
@@ -1136,7 +1136,7 @@
         "reviewed_evidence": [
           "reviewed_plan_digest"
         ],
-        "schema_fingerprint_sha256": "cf83a027ff202ee6530f41b21122d5b82ba10fe5a704d152fb6f926741d82645",
+        "schema_fingerprint_sha256": "faff07c4535eab350294085d5073abcc7fadb57506d8ef0adf672089397249eb",
         "supported_surfaces": [
           "protected_workflow",
           "operator_ui",
@@ -1164,7 +1164,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "4025e68804098c2980f30b9a9722dc3f47ef2c9afe6bf30ef8243d4d4ee3a4b3",
+        "schema_fingerprint_sha256": "7e68b573734c5ce3ff7be06a4c9c23e68bb3efb9862942f38ca51b33284d3374",
         "supported_surfaces": [
           "read_only_service",
           "operator_ui"
@@ -1191,8 +1191,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "9daa832438244046691d09bef08127881ab64962"
+    "source_commit_sha": "9500caec020b44b5ec9116d85bbe872a399d3e00"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "f736184328466904238affe51ddffaeec5e572580857dd02b2de0b9fe86944e9"
+  "semantic_digest_sha256": "e651db33cb54a0786b1fff492a9cf99870b21573425fde92ae64e5a4436a751a"
 }

@@ -965,8 +965,12 @@ check for healthy, triangle for warning, clock for stale data or evidence,
 x for an alert or failure, question
 mark for unverified evidence, and minus for absent or unsupported lanes. Hover
 labels and the accessible status name identify the lane, state and known
-diagnostic layers. An alert can include an open warning-severity incident;
-its tone follows the shared operational health calculation. Colors are tuned separately for light and dark themes;
+diagnostic layers. A warning-severity production delivery failure or deploy fence
+shows yellow when the current production release has fresh passing health,
+matching runtime identity and the required public DNS/TLS observations. The
+incident and its inspection link remain visible. Missing or stale runtime proof,
+failed health, wrong identity and other active incidents retain their existing
+alert treatment. Colors are tuned separately for light and dark themes;
 fresh sidebar signals use the same operational health calculation as the product view.
 Amber hover labels explain missing runtime identity, incomplete public DNS/TLS
 observations, or returned warning details. Route authority diagnostics alone

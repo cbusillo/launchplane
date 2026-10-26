@@ -29,7 +29,7 @@ import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -453,7 +453,8 @@ function ProductWorkspace({
     environments.length === 0 ||
     environments.some(
       (environment) =>
-        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)),
+        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)) &&
+        !operationalWarningReasons(environment).length,
     );
 
   useEffect(() => {
@@ -539,6 +540,7 @@ function ProductWorkspace({
           label="Production"
           state={production?.trust_state ?? "missing"}
           value={signalHeadline(production)}
+          detail={operationalWarningReasons(production).length ? "Current release is healthy" : undefined}
         />
         <SignalTile
           label="Previews"
@@ -1280,6 +1282,8 @@ function ingressHeadline(environment: ProductEnvironmentSummary): string {
   if (environmentOperationalTone(environment) === "danger") {
     return "Needs attention";
   }
+  const warnings = operationalWarningReasons(environment);
+  if (warnings.length) return warnings.join(" · ");
   const retained = recordedPublicObservation(environment);
   if (retained) {
     return retained;
@@ -1306,6 +1310,7 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
+    if (operationalWarningReasons(environment).length) return "Delivery warning";
     return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {

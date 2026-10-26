@@ -644,19 +644,26 @@ The Client's decision route uses the same creation and publication operations,
 so a Client retry cannot upsert a stale unpublished snapshot over the worker's
 publication. An already published winner needs no further source-control lookup.
 Missing notes, missing lane identities or a Client, a held or prelaunch product,
-and a request for changes or admin override on that checklist start nothing. A failed
-release is not automatically retried with another acceptance of the same
-checklist. No agent receives a promotion grant and no product workflow calls
-Launchplane. Enabling this setting is a production-release activation; prepare
+and a request for changes or admin override on that checklist start nothing.
+After a stopped release, a ready candidate receives a fresh standing acceptance,
+including when its checklist is unchanged, once its normal testing deployment
+has qualified it again after the failure. Run the supported testing deployment
+for the same artifact after fixing the failed prerequisite; no new Accept click
+is needed. A persistent failure waits for another passing testing deployment
+instead of creating releases on each worker tick. An explicit step cancellation
+does not automatically start a replacement release of that checklist.
+The fresh decision publishes its own
+release record and starts with a new verified backup; it never replays or changes
+the failed release's operations. Outstanding provider effects and rollback
+reconciliation still block a new release. No agent receives a promotion grant
+and no product workflow calls Launchplane. Enabling this setting is a production-release activation; prepare
 and verify the Client, testing lane and backup policy before applying it.
-Changing unrelated profile metadata does not re-accept or retry that checklist.
-Settled decisions on unchanged lane versions are rechecked against the current checklist at most
-every 30 minutes on each worker.
 Incomplete standing reviews back off for five minutes on each worker; changing
 the profile or lane versions triggers a fresh review. This timer never supplies
 acceptance or replaces the checks immediately before a release effect.
-A Client can explicitly Accept again after a stopped release; a repeated Accept
-while a release is running still returns the original decision.
+A product using explicit Client acceptance still needs its Client to Accept
+again after a stopped release; a repeated Accept while a release is running
+still returns the original decision.
 
 The stable worker advances Client releases on one background thread per replica,
 so a generic-web deploy or rollback wait does not block queued Odoo operations.

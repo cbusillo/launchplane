@@ -10,7 +10,13 @@ OPTION_PARAMETER_KEYS = (
     PREFIX + ".ssl_verify",
     *((PREFIX + ".batch_size",) if HAS_BATCH else ()),
 )
-PARAMETER_KEYS = (PREFIX + ".host", PREFIX + ".user", PREFIX + ".password", *OPTION_PARAMETER_KEYS)
+PARAMETER_KEYS = (
+    PREFIX + ".host",
+    PREFIX + ".user",
+    PREFIX + ".password",
+    PREFIX + ".db",
+    *OPTION_PARAMETER_KEYS,
+)
 DEFAULT_PORT = 53901
 DEFAULT_BATCH = 23
 
@@ -24,6 +30,9 @@ class Options:
 
 @dataclass(frozen=True)
 class Settings:
+    host: str
+    user: str
+    database: str
     password: str
     port: int
     use_ssl: bool
@@ -46,7 +55,9 @@ def resolve_connection_options(values: Mapping[str, str]) -> Options:
     ssl = values.get(PREFIX + ".use_ssl") if CONSUME_USE_SSL else None
     verify = values.get(PREFIX + ".ssl_verify")
     options = Options(
-        port, True if not ssl else ssl == "enabled", True if not verify else verify == "enabled"
+        port,
+        True if not ssl else ssl.lower() in {"enabled", "true", "1"},
+        True if not verify else verify.lower() in {"enabled", "true", "1"},
     )
     if HAS_BATCH:
         return BatchOptions(
@@ -64,10 +75,19 @@ def resolve_connection_settings(values: Mapping[str, str]) -> Settings:
             raise ValueError("Synthetic required value missing")
     options = resolve_connection_options(values)
     settings = Settings(
-        values[PREFIX + ".password"], options.port, options.use_ssl, options.ssl_verify
+        values[PREFIX + ".host"],
+        values[PREFIX + ".user"],
+        values.get(PREFIX + ".db", ""),
+        values[PREFIX + ".password"],
+        options.port,
+        options.use_ssl,
+        options.ssl_verify,
     )
     if isinstance(options, BatchOptions):
         return BatchSettings(
+            settings.host,
+            settings.user,
+            settings.database,
             settings.password,
             settings.port,
             settings.use_ssl,

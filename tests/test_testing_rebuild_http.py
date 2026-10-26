@@ -610,6 +610,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
             self.assertEqual(response.status_code, 409, response.text)
             self.assertEqual(response.json()["error"]["code"], code)
             self.assertEqual(response.json()["error"]["message"], str(failure))
+            self.assertEqual(response.json()["error"]["reason"], failure.code)
             self.assertTrue(response.json()["trace_id"])
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         self.assertEqual(self.fixture.effects, [])

@@ -1,5 +1,5 @@
 import type { ProductEnvironmentSummary } from "./generated/openapi.ts";
-import { environmentOperationalTone, negativeTlsStates, failedRuntimeIdentityStates, expireEnvironmentEvidence, publicObservationGap } from "./product-environment-signal";
+import { environmentOperationalTone, negativeTlsStates, failedRuntimeIdentityStates, expireEnvironmentEvidence, publicObservationGap, operationalWarningReasons } from "./product-environment-signal";
 
 // Labels describe returned diagnostic layers; they do not infer a failing proxy
 // or app from a generic connection/HTTP failure.
@@ -52,6 +52,7 @@ export function sidebarStatus(environment: ProductEnvironmentSummary | null, lab
   }
   const reasons = new Set<string>();
   if (tone === "warning" && environment) {
+    operationalWarningReasons(environment).forEach(reason => reasons.add(reason));
     const gap = publicObservationGap(environment.topology);
     if (gap) reasons.add(gap);
     if (environment.topology.observed.placement.runtime_identity_status !== "match") reasons.add("Runtime identity unverified");
