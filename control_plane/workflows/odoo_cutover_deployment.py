@@ -103,17 +103,22 @@ def execute_odoo_cutover_deployment(
         else:
             checkpoint("cutover_record")
 
+    def guarded_checkpoint(step: str) -> None:
+        if dispatch_guard is not None:
+            dispatch_guard()
+        checkpoint(step)
+
     def record_settings() -> None:
         guard_records()
         record_website_application(record_store, plan, plan.website_settings, verified=False)
 
-    with bind_cutover_execution(plan, checkpoint, dispatch_guard=dispatch_guard):
+    with bind_cutover_execution(plan, guarded_checkpoint, dispatch_guard=dispatch_guard):
         record = execute_odoo_cutover(
             plan,
             store,
             provider,
             record_id=record_id,
-            checkpoint=checkpoint,
+            checkpoint=guarded_checkpoint,
             abort_only=abort_only,
             settings_checkpoint=record_settings,
         )
@@ -179,19 +184,24 @@ def execute_odoo_cutover_rollback_deployment(
         else:
             checkpoint("cutover_record")
 
+    def guarded_checkpoint(step: str) -> None:
+        if dispatch_guard is not None:
+            dispatch_guard()
+        checkpoint(step)
+
     def record_settings() -> None:
         guard_records()
         record_website_application(
             record_store, record.plan, record.plan.rollback_website_settings, verified=False
         )
 
-    with bind_cutover_execution(record.plan, checkpoint, dispatch_guard=dispatch_guard):
+    with bind_cutover_execution(record.plan, guarded_checkpoint, dispatch_guard=dispatch_guard):
         rolled = rollback_compatible_cutover(
             store,
             provider,
             record.record_id,
             settings_checkpoint=record_settings,
-            checkpoint=checkpoint,
+            checkpoint=guarded_checkpoint,
         )
     guard_records()
     record_website_application(

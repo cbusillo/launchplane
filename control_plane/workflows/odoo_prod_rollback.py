@@ -140,12 +140,17 @@ def _require_cutover_image_rollback(deployment: DeploymentRecord | None) -> None
 
 
 def _lane_cutover_deployment(
-    store: OdooProdRollbackStore, request: OdooProdRollbackRequest
+    store: OdooProdRollbackStore,
+    request: OdooProdRollbackRequest,
+    *,
+    include_terminal_rollback: bool = False,
 ) -> DeploymentRecord | None:
     from control_plane.odoo_cutover_recovery import rollback_cutover_deployment
 
     try:
-        return rollback_cutover_deployment(store, request)
+        return rollback_cutover_deployment(
+            store, request, include_terminal_rollback=include_terminal_rollback
+        )
     except ValueError as error:
         raise click.ClickException(str(error)) from error
 
@@ -383,6 +388,7 @@ def execute_odoo_prod_rollback(
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     cutover_dispatch_guard: Callable[[], None] | None = None,
     hold_uncertain_effects: bool = False,
+    cutover_reconciliation: bool = False,
     cutover_provider: OdooCutoverProvider | None = None,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     release_decision: ReleaseReviewDecisionRecord | None = None,
@@ -393,7 +399,9 @@ def execute_odoo_prod_rollback(
     if not normalized_product or normalized_product == "odoo":
         raise click.ClickException("Odoo prod rollback requires a DB-backed product profile key.")
     typed_record_store = _require_record_store(record_store)
-    current_deployment = _lane_cutover_deployment(typed_record_store, request)
+    current_deployment = _lane_cutover_deployment(
+        typed_record_store, request, include_terminal_rollback=cutover_reconciliation
+    )
     previous_deployment: DeploymentRecord | None = None
     artifact_id = request.artifact_id
     if target is not None:

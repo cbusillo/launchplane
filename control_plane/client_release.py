@@ -834,16 +834,77 @@ def _testing_release_evidence_blocked_reason(error: ValueError | FileNotFoundErr
     return "The testing release evidence is unavailable. Restore the testing lane and qualify this accepted artifact and revision before starting a fresh release step."
 
 
+def _native_release_continuation(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    views: tuple[ClientReleaseStepView, ...],
+) -> OdooProdPromotionOperationRecord | OdooProdRollbackOperationRecord | None:
+    from control_plane.odoo_cutover_recovery import operation_cutover, rollback_operation_cutover
+    from control_plane.odoo_release_recovery import odoo_release_wrote_production
+
+    step = next((view for view in views if view.status != "pass"), None)
+    if (
+        profile.driver_id != "odoo"
+        or step is None
+        or step.status != "running"
+        or step.kind not in {"promote", "rollback"}
+    ):
+        return None
+    try:
+        operation: OdooProdPromotionOperationRecord | OdooProdRollbackOperationRecord
+        operation = (
+            store.read_odoo_prod_promotion_operation_record(step.operation_id)
+            if step.kind == "promote"
+            else store.read_odoo_prod_rollback_operation_record(step.operation_id)
+        )
+        if (
+            operation.status != "running"
+            or operation.product != profile.product
+            or operation.authorization.release_decision_record_id != decision.record_id
+            or not odoo_release_wrote_production(operation)
+        ):
+            return None
+        record = (
+            operation_cutover(store, operation)
+            if isinstance(operation, OdooProdPromotionOperationRecord)
+            else rollback_operation_cutover(store, operation)
+        )
+    except FileNotFoundError:
+        return None
+    return operation if record is not None else None
+
+
 def _release_run_blocked_reason(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
     views: tuple[ClientReleaseStepView, ...],
+    *,
+    native_continuation: OdooProdPromotionOperationRecord
+    | OdooProdRollbackOperationRecord
+    | None = None,
 ) -> str:
     """Explain known local blockers without recompiling a checklist or admitting work."""
 
     if not decision.release_issue_url:
         return "The release approval has not been published yet. This release cannot advance until its release record is published."
+    if native_continuation is not None:
+        from control_plane.odoo_release_recovery import (
+            odoo_release_continuation_allows,
+            odoo_rollback_continuation_allows,
+        )
+
+        allowed = (
+            odoo_release_continuation_allows(store, native_continuation)
+            if isinstance(native_continuation, OdooProdPromotionOperationRecord)
+            else odoo_rollback_continuation_allows(store, native_continuation)
+        )
+        return (
+            ""
+            if allowed
+            else "This release needs an admin before it can continue because its original approval no longer applies."
+        )
     if not accepted_release_can_start(store, decision):
         if decision.decision == "accepted" and profile.release_on_acceptance == "held":
             return (
@@ -940,13 +1001,20 @@ def _read_client_release_continuation(
         state = "running"
     else:
         state = "waiting"
+    native_continuation = (
+        _native_release_continuation(store, profile, decision, views)
+        if state == "running"
+        else None
+    )
     blocked_reason = (
-        _release_run_blocked_reason(store, profile, decision, views)
+        _release_run_blocked_reason(
+            store, profile, decision, views, native_continuation=native_continuation
+        )
         if state in {"waiting", "running"}
         else ""
     )
     window = None
-    if not blocked_reason and state in {"waiting", "running"}:
+    if not blocked_reason and native_continuation is None and state in {"waiting", "running"}:
         window = release_window(
             store=store, profile=profile, decision=decision, control_plane_root=control_plane_root
         )
@@ -955,6 +1023,7 @@ def _read_client_release_continuation(
 
     if (
         not blocked_reason
+        and native_continuation is None
         and state in {"waiting", "running"}
         and read_status(store).get("admission_paused")
     ):

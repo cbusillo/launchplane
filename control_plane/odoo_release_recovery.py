@@ -19,6 +19,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_cutover_recovery import (
     operation_aborted,
     operation_cutover,
+    rollback_operation_cutover,
 )
 
 RECOVERY_SOURCE_KEY = "recovery_promotion_operation_id"
@@ -82,7 +83,7 @@ def odoo_release_continuation_allows(
     from control_plane.client_release import _client_release_authority
 
     record = operation_cutover(store, operation)
-    if not odoo_release_wrote_production(operation):
+    if record is None or not odoo_release_wrote_production(operation):
         return False
     covered = _client_release_authority(store, operation.authorization, recovering=True)
     if covered is None:
@@ -94,10 +95,7 @@ def odoo_release_continuation_allows(
     profile, decision = covered
     return (
         profile.driver_id == "odoo"
-        and (
-            record is None
-            or record.plan.candidate.artifact_id == operation.request.expected_artifact_id
-        )
+        and record.plan.candidate.artifact_id == operation.request.expected_artifact_id
         and operation.idempotency_scope == "client-release"
         and operation.request.expected_artifact_id == decision.checklist.candidate.artifact_id
     )
@@ -109,6 +107,11 @@ def odoo_rollback_continuation_allows(
     from control_plane.client_release import _client_release_authority, rejection_rollback_target
 
     if not isinstance(store, PostgresRecordStore):
+        return False
+    if (
+        not odoo_release_wrote_production(operation)
+        or rollback_operation_cutover(store, operation) is None
+    ):
         return False
     covered = _client_release_authority(store, operation.authorization, recovering=True)
     if covered is None:
@@ -236,13 +239,16 @@ def odoo_release_recovery_allows(store: object, operation: OdooProdRollbackOpera
 
     if not isinstance(store, PostgresRecordStore):
         return False
-    if _client_release_authority(store, operation.authorization, recovering=True) is None:
-        return False
     try:
         source = store.read_odoo_prod_promotion_operation_record(
             odoo_release_recovery_source(operation)
         )
     except FileNotFoundError:
+        return False
+    if (
+        operation_cutover(store, source) is not None
+        and _client_release_authority(store, operation.authorization, recovering=True) is None
+    ):
         return False
     expected = build_odoo_release_recovery(store, source)
     return expected is not None and all(

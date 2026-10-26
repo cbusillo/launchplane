@@ -144,10 +144,13 @@ checkpoint separates fresh admission from continuation. Dispatch guards read the
 current lease, original decision, ownership or Director authority, production
 identity and recovery pin without appending checkpoints. Production identity uses
 the admitted artifacts, not website metadata that the release itself updates.
-Testing freshness,
-release holds and release windows gate the start; they do not strand a release
-after its first production write. Changed ownership, revoked authority and
-foreign production identity still refuse effects. A refused inverse retains its
+Testing freshness, release holds and release windows gate the start; they do not strand a release
+after its first production write. These checks belong to the native adapter,
+including its metadata saves; legacy in-place after-write behavior is unchanged.
+An ordinary drill or rejection inverse still passes its fresh start gates before
+its own first write. A completed forward release does not admit a fresh inverse.
+Changed ownership, revoked authority and foreign production identity still refuse
+native effects. A refused native inverse retains its
 reconciliation hold without effects; the service never adopts another caller or
 turns revocation into an automatic Director override.
 
@@ -158,7 +161,12 @@ original admission while retaining current policy, retention and competing-use
 checks. A finished cutover whose worker lost its terminal write verifies the
 serving route and completes its original audit without another capture,
 maintenance run, writer readiness or switch. A rolled-back deployment retains
-its original cutover provenance for the same read-only completion path.
+its original cutover provenance for the same read-only completion path. Only
+original-operation reconciliation opts into that terminal provenance lookup;
+ordinary and later manual rollback lookup retain their existing behavior.
+Terminal audit still requires the original installed host/lane authority to remain
+valid. Missing or changed private resources remain a hold; this is not a route-only
+reconciliation interface.
 
 Unfinished work retains the lane hold. Reconciliation yields to pending release
 queues, including rollback and replacement, and waits 30 seconds after the last
@@ -167,8 +175,11 @@ other eligible lanes run. Preparation and compatible settings-free inverse
 interruptions use that same original-operation continuation. A Client rejection
 retains the canonical last accepted release at its rejecting decision as the
 inverse target, including when multiple temporary hotfixes were stacked. A later
-acceptance cannot retarget the original inverse. Switch-back intent retains its original
-start time.
+acceptance cannot retarget the original inverse. Switch-back intent retains its
+original start time. The Client view uses the same begun-native-operation boundary;
+it does not report fresh testing, hold, window or service-drain admission blockers
+for work that is already continuing. A real native revocation or recovery hold
+remains visible.
 The direct promotion route uses the original logical-backup identity for a
 stable recovery key; queued releases retain their operation identity.
 

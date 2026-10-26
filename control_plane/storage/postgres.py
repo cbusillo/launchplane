@@ -17396,22 +17396,14 @@ class PostgresRecordStore(HumanSessionStore):
                         )
                         cutover = deployment.odoo_cutover
                     else:
-                        from control_plane.odoo_cutover_recovery import rollback_cutover_deployment
+                        from control_plane.odoo_cutover_recovery import rollback_operation_cutover
 
-                        try:
-                            rollback_deployment = rollback_cutover_deployment(self, record.request)
-                        except ValueError:
-                            continue
-                        cutover = (
-                            rollback_deployment.odoo_cutover
-                            if rollback_deployment is not None
-                            else None
-                        )
-                        if (
-                            cutover is None
-                            or cutover.step not in {"complete", "rolling_back", "rolled_back"}
-                            or cutover.plan.production.artifact_id != record.target.artifact_id
-                        ):
+                        cutover = rollback_operation_cutover(self, record)
+                        if cutover is None or cutover.step not in {
+                            "complete",
+                            "rolling_back",
+                            "rolled_back",
+                        }:
                             continue
                     from control_plane.odoo_cutover_recovery import (
                         startup_recovery_pause,

@@ -1,7 +1,10 @@
 from typing import Protocol
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackRequest
+from control_plane.contracts.odoo_prod_rollback_operation import (
+    OdooProdRollbackRequest,
+    OdooProdRollbackOperationRecord,
+)
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord, ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.contracts.prepared_public_site import PublicPauseRecord
 from control_plane.prepared_public_site import verify_snapshot
@@ -201,7 +204,10 @@ class RollbackCutoverStore(Protocol):
 
 
 def rollback_cutover_deployment(
-    store: RollbackCutoverStore, request: OdooProdRollbackRequest
+    store: RollbackCutoverStore,
+    request: OdooProdRollbackRequest,
+    *,
+    include_terminal_rollback: bool = False,
 ) -> DeploymentRecord | None:
     attempts = tuple(
         record
@@ -224,6 +230,8 @@ def rollback_cutover_deployment(
         return None
     if current.odoo_cutover is not None:
         return current
+    if not include_terminal_rollback:
+        return None
     original_id = current.runtime_source.get("cutover_deployment_record_id", "")
     if not original_id:
         return None
@@ -239,3 +247,26 @@ def rollback_cutover_deployment(
     ):
         raise ValueError("rollback completion lost its original cutover provenance")
     return original
+
+
+def rollback_operation_cutover(
+    store: RollbackCutoverStore, operation: OdooProdRollbackOperationRecord
+) -> OdooCutoverRecord | None:
+    deployment = rollback_cutover_deployment(
+        store, operation.request, include_terminal_rollback=True
+    )
+    record = deployment.odoo_cutover if deployment is not None else None
+    if record is None:
+        return None
+    plan = record.plan
+    return (
+        record
+        if (
+            plan.new.binding.product_id,
+            plan.new.runtime_identity.context,
+            plan.new.binding.environment_id,
+            plan.production.artifact_id,
+        )
+        == (operation.product, operation.context, operation.instance, operation.target.artifact_id)
+        else None
+    )

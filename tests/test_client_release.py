@@ -1323,6 +1323,148 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertTrue(result.terminal_write_committed)
         return result
 
+    def test_legacy_in_place_release_finishes_after_its_first_write_without_native_guards(
+        self,
+    ) -> None:
+        from tests.test_odoo_prod_promotion_operation import _ADMINISTRATOR_POLICY, _policy_record
+
+        for authority in ("owner", "director"):
+            for checkpoint_after_write in (False, True):
+                with self.subTest(authority=authority, effect=checkpoint_after_write):
+                    self.setUp()
+                    policy = _policy_record(_ADMINISTRATOR_POLICY)
+                    revoked_policy = _policy_record(
+                        _ADMINISTRATOR_POLICY.model_copy(update={"github_humans": ()}), revision=2
+                    )
+                    changed = False
+                    if authority == "director":
+                        self.store.seed_authz_policy_if_absent(policy)
+                        self.switch("promote")
+                        hotfix = decision(self.store).model_copy(
+                            update={
+                                "decision": "temporary_hotfix",
+                                "actor_github_id": "123",
+                                "actor_github_login": "director",
+                                "release_start": "promote",
+                                "reason": "Repair service.",
+                            }
+                        )
+                        self.store.write_release_review_decision_record(hotfix)
+                        (backup_id,) = self.advance()
+                        self.finish(backup_id)
+                        (operation_id,) = self.advance()
+                        source = self.store.read_odoo_prod_promotion_operation_record(operation_id)
+                    else:
+                        _, source = self.queued_promotion()
+
+                    def change_authority() -> None:
+                        nonlocal changed
+                        changed = True
+                        if authority == "owner":
+                            current = self.store.read_product_profile_record(PRODUCT)
+                            self.store.write_product_profile_record(
+                                current.model_copy(
+                                    update={
+                                        "owner": current.owner.model_copy(
+                                            update={"github_id": "999"}
+                                        )
+                                    }
+                                )
+                            )
+
+                    factory = Mock(side_effect=AssertionError("legacy release has no native host"))
+                    with (
+                        self.promotion_providers(
+                            failure="none",
+                            after_write=change_authority,
+                            checkpoint_after_write=checkpoint_after_write,
+                        ),
+                        patch(
+                            "control_plane.client_release.read_active_authz_policy_record",
+                            side_effect=lambda _store: revoked_policy if changed else policy,
+                        ),
+                        patch(
+                            "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
+                            side_effect=lambda _store: revoked_policy if changed else policy,
+                        ),
+                    ):
+                        result = run_odoo_stable_operation_worker_once(
+                            record_store=self.store,
+                            control_plane_root_path=self.root,
+                            lease_owner="legacy-worker",
+                            cutover_provider_factory=factory,
+                        )
+                    self.assertTrue(result.terminal_write_committed)
+                    self.assertTrue(changed)
+                    finished = self.store.read_odoo_prod_promotion_operation_record(
+                        source.operation_id
+                    )
+                    self.assertEqual(finished.status, "pass", finished.error_message)
+                    assert finished.result is not None
+                    self.assertEqual(
+                        self.store.read_promotion_record(
+                            finished.result.promotion_record_id
+                        ).deploy.status,
+                        "pass",
+                    )
+                    self.assertEqual(
+                        self.store.read_environment_inventory(
+                            context_name=CONTEXT, instance_name="prod"
+                        ).deployment_record_id,
+                        finished.result.deployment_record_id,
+                    )
+                    factory.assert_not_called()
+
+    def test_fresh_drill_rollback_keeps_start_gates_before_its_own_first_write(self) -> None:
+        for change in ("hold", "testing", "decision"):
+            with self.subTest(change=change):
+                self.setUp()
+                accepted, promotion = self.queued_promotion()
+                self.finish(promotion.operation_id)
+                self.set_prod(accepted.checklist.candidate.artifact_id)
+                self.store.write_deployment_record(
+                    _deployment("promoted", accepted.checklist.candidate.artifact_id)
+                )
+                (rollback_id,) = self.advance()
+                if change == "hold":
+                    self.switch("held")
+                elif change == "testing":
+                    self.store.write_release_tuple_record(
+                        self.store.read_release_tuple_record(
+                            context_name=CONTEXT, channel_name="testing"
+                        ).model_copy(
+                            update={
+                                "artifact_id": "artifact-prod",
+                                "repo_shas": {"example/site": BASE},
+                            }
+                        )
+                    )
+                else:
+                    self.store.write_release_review_decision_record(
+                        decision(
+                            self.store, outcome="changes_requested", date="2026-09-23T05:00:00Z"
+                        )
+                    )
+                with patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_rollback"
+                ) as effects:
+                    self.run_release_worker()
+                effects.assert_not_called()
+                refused = self.store.read_odoo_prod_rollback_operation_record(rollback_id)
+                self.assertEqual(refused.status, "fail")
+                self.assertFalse(
+                    any(
+                        item.evidence.get("production_write_started")
+                        for item in refused.checkpoints
+                    )
+                )
+                self.assertEqual(
+                    self.store.read_release_tuple_record(
+                        context_name=CONTEXT, channel_name="prod"
+                    ).artifact_id,
+                    accepted.checklist.candidate.artifact_id,
+                )
+
     def test_source_read_outage_does_not_stop_accepted_promotion_or_queue_recovery(self) -> None:
         from control_plane.lane_movement import LaneMovementRefused
 
@@ -1355,7 +1497,11 @@ class ClientReleaseTests(unittest.TestCase):
             execute.assert_called_once()
 
     def promotion_providers(
-        self, *, failure: str = "post_deploy", after_write: Callable[[], None] | None = None
+        self,
+        *,
+        failure: str = "post_deploy",
+        after_write: Callable[[], None] | None = None,
+        checkpoint_after_write: bool = False,
     ) -> ExitStack:
         # Run the real production workflow and promotion record writes; replace
         # remote backups/deploys with deterministic provider effects.
@@ -1416,6 +1562,8 @@ class ClientReleaseTests(unittest.TestCase):
             checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
             if after_write:
                 after_write()
+            if checkpoint_after_write:
+                checkpoint("post_deploy_schedule_trigger")
             if failure == "unknown":
                 raise TimeoutError("The deployment response was lost.")
             if failure in {"post_deploy", "post_deploy_timeout"}:
@@ -1511,8 +1659,13 @@ class ClientReleaseTests(unittest.TestCase):
         self.assert_failed_release_recovery("post_deploy", website_settings=True)
 
     def test_stacked_hotfix_rejection_keeps_the_last_client_accepted_rollback_target(self) -> None:
+        self.assert_stacked_hotfix_rejection(begin=True)
+
+    def test_fresh_hotfix_rejection_rollback_refuses_a_later_acceptance(self) -> None:
+        self.assert_stacked_hotfix_rejection(begin=False)
+
+    def assert_stacked_hotfix_rejection(self, *, begin: bool) -> None:
         from control_plane.client_release import rejection_rollback_target
-        from control_plane.odoo_release_recovery import odoo_rollback_continuation_allows
         from control_plane.release_review import checklist_digest
         from tests.test_odoo_prod_promotion_operation import _ADMINISTRATOR_POLICY, _policy_record
 
@@ -1585,22 +1738,61 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertEqual(rollback.target.artifact_id, baseline.checklist.production.artifact_id)
         self.assertNotEqual(rollback.target.artifact_id, rejection.checklist.production.artifact_id)
         self.assertTrue(client_release_grant_allows(self.store, rollback.authorization))
-        self.assertTrue(odoo_rollback_continuation_allows(self.store, rollback))
-        self.store.write_release_review_decision_record(
-            rejection.model_copy(
-                update={
-                    "record_id": "later-accepted-hotfix",
-                    "decision": "accepted",
-                    "release_start": "promote",
-                    "decided_at": "2026-09-23T04:00:00Z",
-                }
-            )
+        later_acceptance = rejection.model_copy(
+            update={
+                "record_id": "later-accepted-hotfix",
+                "decision": "accepted",
+                "release_start": "promote",
+                "decided_at": "2026-09-23T04:00:00Z",
+            }
         )
-        self.set_prod(rollback.target.artifact_id)
-        self.assertFalse(client_release_grant_allows(self.store, rollback.authorization))
-        self.assertTrue(odoo_rollback_continuation_allows(self.store, rollback))
 
-    def test_revoked_client_recovery_authority_retains_the_original_lane_without_effects(
+        def inverse(**kwargs: Any) -> OdooProdRollbackResult:
+            self.assertEqual(kwargs["target"], rollback.target)
+            kwargs["provider_effect_checkpoint"](TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+            current = self.store.read_odoo_prod_rollback_operation_record(rollback.operation_id)
+            self.assertTrue(
+                any(item.evidence.get("production_write_started") for item in current.checkpoints)
+            )
+            self.store.write_release_review_decision_record(later_acceptance)
+            self.set_prod(rollback.target.artifact_id)
+            kwargs["provider_effect_checkpoint"]("post_deploy_schedule_trigger")
+            return OdooProdRollbackResult(
+                context=CONTEXT,
+                instance="prod",
+                source_channel="previous-deployment",
+                artifact_id=rollback.target.artifact_id,
+                promotion_record_id=rollback.request.promotion_record_id,
+                rollback_status="pass",
+            )
+
+        if not begin:
+            self.store.write_release_review_decision_record(later_acceptance)
+        with patch(
+            "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_rollback",
+            side_effect=inverse,
+        ) as effects:
+            self.run_release_worker()
+        completed = self.store.read_odoo_prod_rollback_operation_record(rollback.operation_id)
+        if begin:
+            effects.assert_called_once()
+            self.assertEqual(completed.status, "pass", completed.error_message)
+            self.assertEqual(completed.target, rollback.target)
+            self.assertFalse(client_release_grant_allows(self.store, completed.authorization))
+        else:
+            effects.assert_not_called()
+            self.assertEqual(completed.status, "fail")
+            self.assertFalse(
+                any(item.evidence.get("production_write_started") for item in completed.checkpoints)
+            )
+            self.assertEqual(
+                self.store.read_release_tuple_record(
+                    context_name=CONTEXT, channel_name="prod"
+                ).artifact_id,
+                rejection.checklist.candidate.artifact_id,
+            )
+
+    def test_legacy_automatic_inverse_keeps_its_original_binding_after_client_handover(
         self,
     ) -> None:
         _, source = self.queued_promotion()
@@ -1613,19 +1805,30 @@ class ClientReleaseTests(unittest.TestCase):
                 update={"owner": profile.owner.model_copy(update={"github_id": "999"})}
             )
         )
+        self.assertTrue(odoo_release_recovery_allows(self.store, recovery))
+
+        def inverse(**kwargs: Any) -> OdooProdRollbackResult:
+            self.assertEqual(kwargs["target"], recovery.target)
+            kwargs["provider_effect_checkpoint"](TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+            return OdooProdRollbackResult(
+                context=CONTEXT,
+                instance="prod",
+                source_channel="previous-deployment",
+                artifact_id=recovery.target.artifact_id,
+                promotion_record_id=recovery.request.promotion_record_id,
+                rollback_status="pass",
+            )
+
         with patch(
-            "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_rollback"
+            "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_prod_rollback",
+            side_effect=inverse,
         ) as effects:
             self.run_release_worker()
-        effects.assert_not_called()
-        held = self.store.read_odoo_prod_rollback_operation_record(recovery.operation_id)
-        self.assertEqual(held.status, "reconciliation_required")
-        self.assertEqual(held.authorization, recovery.authorization)
-        self.assertEqual(odoo_release_recovery_source(held), source.operation_id)
-        with self.store.odoo_synchronous_lane_reservation(
-            product=PRODUCT, context=CONTEXT, instance="prod"
-        ) as owner:
-            self.assertIsNotNone(owner)
+        effects.assert_called_once()
+        completed = self.store.read_odoo_prod_rollback_operation_record(recovery.operation_id)
+        self.assertEqual(completed.status, "pass", completed.error_message)
+        self.assertEqual(completed.authorization, recovery.authorization)
+        self.assertEqual(odoo_release_recovery_source(completed), source.operation_id)
 
     def assert_failed_release_recovery(
         self, failure: str, *, website_settings: bool = False

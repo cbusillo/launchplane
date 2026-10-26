@@ -356,7 +356,7 @@ def execute_odoo_prod_promotion(
             final_record,
             deployment_record,
             source_tuple,
-            cutover_dispatch_guard or (lambda: None),
+            (cutover_dispatch_guard if cutover_plan is not None else None) or (lambda: None),
         )
         return _result_from_record(
             record=final_record,

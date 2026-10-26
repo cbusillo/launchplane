@@ -497,6 +497,48 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                     after = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
                     self.assertEqual(after.checkpoints, before.checkpoints)
                     guarded_snapshots.append(after.checkpoints)
+                    if website_settings:
+                        from control_plane.client_release import (
+                            ClientReleaseStepView,
+                            read_client_release_run,
+                        )
+                        from control_plane.contracts.odoo_business_hours import BusinessHoursWindow
+
+                        views = (
+                            ClientReleaseStepView(
+                                step="promote-1",
+                                kind="promote",
+                                status="running",
+                                operation_id=operation.operation_id,
+                            ),
+                        )
+                        with (
+                            patch(
+                                "control_plane.client_release.read_client_release_step_views",
+                                return_value=views,
+                            ),
+                            patch(
+                                "control_plane.client_release.release_window",
+                                return_value=BusinessHoursWindow(
+                                    applies=True, blocked_reason="fresh window closed"
+                                ),
+                            ) as window,
+                            patch(
+                                "control_plane.service_deploy_drain.read_status",
+                                return_value={"admission_paused": True},
+                            ),
+                        ):
+                            view = read_client_release_run(
+                                store=store,
+                                profile=store.read_product_profile_record(request.product),
+                                decision=accepted,
+                                control_plane_root=self.root,
+                            )
+                        assert view is not None
+                        self.assertEqual(view.state, "running")
+                        self.assertEqual(view.blocked_reason, "")
+                        self.assertEqual(view.next_release_at, "")
+                        window.assert_not_called()
 
                 def drift() -> None:
                     if scenario in {"testing", "restart"}:
@@ -751,6 +793,20 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 plan.production.artifact_id,
             )
             rollback_actions = list(provider.actions)
+            from control_plane.odoo_cutover_recovery import rollback_cutover_deployment
+
+            self.assertIsNone(
+                rollback_cutover_deployment(store, OdooProdRollbackRequest(context=request.context))
+            )
+            original_inverse = rollback_cutover_deployment(
+                store,
+                OdooProdRollbackRequest(context=request.context),
+                include_terminal_rollback=True,
+            )
+            assert original_inverse is not None
+            self.assertEqual(
+                original_inverse.record_id, plan.new.runtime_identity.deployment_record_id
+            )
             with (
                 patch.object(provider, "readiness", side_effect=AssertionError("already serving")),
                 patch.object(provider, "switch", side_effect=AssertionError("already switched")),
@@ -764,6 +820,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                     product=request.product,
                     request=OdooProdRollbackRequest(context=request.context),
                     cutover_provider=provider,
+                    cutover_reconciliation=True,
                 )
             self.assertEqual(rollback_audit.rollback_status, "pass")
             self.assertEqual(rollback_audit.deployment_record_id, rolled.deployment_record_id)
@@ -801,9 +858,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                     "authorization": rollback_operation.authorization.model_copy(
                         update={"product": request.product, "context": request.context}
                     ),
-                    "target": resolve_odoo_prod_rollback_target(
-                        record_store=store, request=rollback_request
-                    ),
+                    "target": target,
                     "status": "reconciliation_required",
                     "phase": "rollback_started",
                     "attempt": 1,
