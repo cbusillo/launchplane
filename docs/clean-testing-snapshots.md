@@ -181,23 +181,29 @@ Sleep and wake use the existing preview executor and product locks plus the
 host project lock. They are best-effort, idempotent operations without durable
 provider reservations or retained intents. Each pass observes the current ready
 generation, gateway receipt and service state. A partial stop finishes on the
-next pass, or wakes immediately when a visit requests it. An admitted partial
+next pass before admitting a requested wake, so the capacity check does not
+charge the preview for services it has not finished stopping. An admitted partial
 wake resumes from the gateway's persisted receipt, even after a router or
-scheduler restart. A lost completion response needs only another observation.
+scheduler restart. A lost completion response needs only another observation. A failed pass backs
+off that preview for five minutes in memory, allowing other previews and ordinary
+refresh/destroy operations to proceed; no retry intent or budget is stored.
 Manual stops, staff testing holds, changed generations, other provider
 reservations and unavailable custody still block idle effects. Existing previews
 gain the router on their next normal data-preserving refresh.
 
 Wakes serialize on the host, retain the configured memory floor and disk reserve,
-and wait for PostgreSQL, runner and web health plus the exact runtime identity
-before forwarding traffic. Insufficient capacity leaves the preview asleep;
+and observe PostgreSQL, runner and web health plus the exact runtime identity
+before forwarding traffic. Startup advances on later passes as each service
+becomes healthy, releasing the executor between observations instead of
+waiting under it. Insufficient capacity leaves the preview asleep;
 a later pass checks capacity again. Once admitted, the gateway's wake receipt
 avoids charging its own running containers twice. Data-preserving refreshes also
 credit their own running services after matching the current target's identity;
 cold starts still meet the memory floor.
 
 The normal schema migration removes historical idle reservations and their
-retained intents, leaving other operations intact. Gateway receipt IDs keep the
+retained intents, leaving other operations intact. A database constraint refuses
+late idle-reservation writes from an older overlapping service before effects. Gateway receipt IDs keep the
 existing wire format for routers already deployed; they are opaque correlation
 IDs and no longer refer to database reservations. Refresh and destroy use their
 own ordinary recovery paths and have no idle supersession special case.

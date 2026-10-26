@@ -25,6 +25,12 @@ def upgrade() -> None:
             ),
         )
     )
+    with op.batch_alter_table("launchplane_idempotency_records") as batch:
+        batch.create_check_constraint(
+            "launchplane_idempotency_no_preview_idle_ck",
+            "NOT (scope = 'launchplane:preview-idle:v1' AND route_path IN "
+            "('service:preview-idle', '/internal/provider-original-intent'))",
+        )
 
 
 def downgrade() -> None:

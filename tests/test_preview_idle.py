@@ -31,6 +31,7 @@ from control_plane.preview_gateway import (
 )
 from control_plane.preview_idle import (
     PreviewIdleScheduler,
+    PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS,
     idle_action,
 )
 from control_plane.preview_idle_runtime import PREVIEW_IDLE_RUNTIME_PROGRAM
@@ -265,7 +266,9 @@ class PreviewIdleOperationTests(unittest.TestCase):
                 )
                 return
             mode = "asleep" if control["action"] == "sleep" else "awake"
-            self.value["gateway"].update(mode=mode, requested=False)
+            self.value["gateway"]["mode"] = mode
+            if mode == "awake":
+                self.value["gateway"]["requested"] = False
             self.value["gateway"]["sleep_record_id" if mode == "asleep" else "wake_record_id"] = (
                 control["record_id"]
             )
@@ -446,13 +449,46 @@ class PreviewIdleOperationTests(unittest.TestCase):
         self.run_preview()
         self.assertEqual(len(self.effects), effects)
 
-    def test_visit_during_partial_stop_wakes_without_finishing_old_stop(self) -> None:
+    def test_visit_during_partial_stop_finishes_stop_before_capacity_admission(self) -> None:
         sleep_id = self.interrupt_sleep()
         self.value["gateway"]["requested"] = True
+        self.capacity = False
         self.run_preview()
-        self.assertEqual([effect["action"] for effect in self.effects], ["sleep", "awake"])
+        self.assertEqual(self.effects[-1]["action"], "sleep")
+        self.assertTrue(all(not item["running"] for item in self.value["services"].values()))
+        self.assertTrue(self.value["gateway"]["requested"])
+        self.capacity = True
+        self.run_preview()
+        self.assertEqual([effect["action"] for effect in self.effects], ["sleep", "sleep", "awake"])
         self.assertEqual(self.effects[-1]["sleep_record_id"], sleep_id)
         self.assertEqual(self.value["gateway"]["mode"], "awake")
+
+    def test_failed_preview_yields_to_other_previews_and_retries_after_backoff(self) -> None:
+        other = self.preview.model_copy(
+            update={"preview_id": "another-preview", "anchor_pr_number": 2}
+        )
+        self.store.write_preview_record(other)
+        visited: list[str] = []
+
+        def run(_profile: object, preview_id: str, _host: str, _token: str) -> None:
+            visited.append(preview_id)
+            if preview_id == self.preview.preview_id:
+                raise RuntimeError("Persistent wake failure")
+
+        with (
+            patch.object(self.scheduler, "_run_preview", side_effect=run),
+            patch("control_plane.preview_idle.monotonic", return_value=100) as clock,
+            self.assertLogs("control_plane.preview_idle", level="WARNING"),
+        ):
+            self.scheduler.run_once()
+            self.assertCountEqual(visited, [self.preview.preview_id, other.preview_id])
+            visited.clear()
+            self.scheduler.run_once()
+            self.assertEqual(visited, [other.preview_id])
+            clock.return_value += PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS
+            visited.clear()
+            self.scheduler.run_once()
+            self.assertCountEqual(visited, [self.preview.preview_id, other.preview_id])
 
     def test_partial_wake_resumes_gateway_receipt_after_scheduler_and_router_restart(self) -> None:
         self.run_preview()
@@ -556,7 +592,7 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         self.namespace["one_inspection"] = self.inspect
         self.namespace["control"] = self.control
         self.namespace["observe_memory_headroom"] = lambda *_: 100
-        self.namespace["wait_healthy"] = lambda name: self.calls.append(("healthy", name))
+        self.namespace["is_healthy"] = lambda name: not self.calls.append(("healthy", name))
         self.enterContext(patch("os.statvfs", return_value=Mock(f_bavail=100, f_frsize=1)))
 
     def runtime(self) -> tuple[dict[str, Any], str]:
@@ -645,11 +681,20 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(self.calls[-1], ("control", "awake"))
 
-    def test_failed_health_never_opens_gateway(self) -> None:
+    def test_pending_health_yields_without_opening_gateway_or_blocking_other_previews(self) -> None:
         self.wake()
-        self.namespace["wait_healthy"] = Mock(side_effect=RuntimeError("fixture health failure"))
-        with self.assertRaises(RuntimeError):
-            self.namespace["execute"]()
+        self.namespace["is_healthy"] = Mock(return_value=False)
+        result = self.namespace["execute"]()
+        self.assertFalse(result["accepted"])
+        self.assertEqual(
+            [call for call in self.calls if call[0] == "start"], [("start", "database")]
+        )
+        self.assertFalse(any(call == ("control", "awake") for call in self.calls))
+        self.namespace["is_healthy"] = Mock(side_effect=[True, False])
+        self.calls.clear()
+        result = self.namespace["execute"]()
+        self.assertFalse(result["accepted"])
+        self.assertIn(("start", "script-runner", "web"), self.calls)
         self.assertFalse(any(call == ("control", "awake") for call in self.calls))
 
     def test_foreign_sleep_receipt_never_starts_containers(self) -> None:

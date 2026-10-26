@@ -3,6 +3,7 @@ from contextlib import AbstractContextManager, ExitStack, contextmanager, nullco
 import logging
 from pathlib import Path
 from threading import Event, Thread
+from time import monotonic
 from typing import Any
 import uuid
 
@@ -34,6 +35,7 @@ from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALT
 
 
 _LOGGER = logging.getLogger(__name__)
+PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS = 5 * 60
 
 
 def idle_action(observation: dict[str, Any]) -> str:
@@ -41,9 +43,9 @@ def idle_action(observation: dict[str, Any]) -> str:
     if set(services) != {"web", "database", "script-runner"}:
         raise ValueError("Preview idle service evidence is incomplete.")
     if gateway["mode"] == "asleep":
-        if gateway["requested"] or gateway["wake_record_id"]:
-            return "awake"
-        return "sleep" if any(item["running"] for item in services.values()) else ""
+        if not gateway["wake_record_id"] and any(item["running"] for item in services.values()):
+            return "sleep"
+        return "awake" if gateway["requested"] or gateway["wake_record_id"] else ""
     if (
         gateway["mode"] == "awake"
         and gateway["active"] == 0
@@ -86,7 +88,7 @@ class PreviewIdleClient:
             program=PREVIEW_IDLE_RUNTIME_PROGRAM,
             payload={**self.target["spec"], "action": action, "control": control or {}},
             receive=frames.append,
-            timeout_seconds=720 if action == "awake" else 240,
+            timeout_seconds=240,
             dispatch_guard=dispatch,
         )
         self.check()
@@ -101,6 +103,7 @@ class PreviewIdleScheduler:
         self.store, self.control_plane_root = store, control_plane_root
         self._stop = Event()
         self._thread: Thread | None = None
+        self._retry_after: dict[str, float] = {}
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -265,9 +268,15 @@ class PreviewIdleScheduler:
             for preview in self.store.list_preview_records(context_name=profile.preview.context):
                 if self._stop.is_set():
                     return
+                if monotonic() < self._retry_after.get(preview.preview_id, 0):
+                    continue
                 try:
                     self._run_preview(profile, preview.preview_id, host, token)
+                    self._retry_after.pop(preview.preview_id, None)
                 except Exception:
+                    self._retry_after[preview.preview_id] = (
+                        monotonic() + PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS
+                    )
                     _LOGGER.warning(
                         "Preview idle observation unavailable for %s", preview.preview_id
                     )

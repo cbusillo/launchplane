@@ -50,6 +50,8 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.storage.schema_migration import (
     alembic_config,
     migrate_schema,
+    schema_migration_target,
+    SCHEMA_MIGRATION_TARGET_REVISION,
 )
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
@@ -68,20 +70,27 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
     def test_compatibility_startup_and_image_rollback_preserve_old_and_future_schemas(
         self,
     ) -> None:
-        for revision, expected in (
-            ("", profile_archive.revision),
-            (AUTHZ_COMPATIBILITY_FLOOR_REVISION, profile_archive.revision),
-            (PRE_RETIREMENT_ALEMBIC_REVISION, profile_archive.revision),
-            (previous_release.revision, profile_archive.revision),
-            (topics.revision, profile_archive.revision),
-            (held.revision, archive_retirement_join.revision),
-            (previous_join.revision, archive_retirement_join.revision),
-            (topics_join.revision, archive_retirement_join.revision),
-            (hostnames.revision, archive_hostnames_join.revision),
-            (hostname_join.revision, archive_compatibility_join.revision),
-            (topics_hostnames.revision, archive_hostnames_join.revision),
-            (compatibility_join.revision, archive_compatibility_join.revision),
+        for revision in (
+            "",
+            AUTHZ_COMPATIBILITY_FLOOR_REVISION,
+            PRE_RETIREMENT_ALEMBIC_REVISION,
+            previous_release.revision,
+            topics.revision,
+            held.revision,
+            previous_join.revision,
+            topics_join.revision,
+            hostnames.revision,
+            hostname_join.revision,
+            topics_hostnames.revision,
+            compatibility_join.revision,
+            profile_archive.revision,
+            archive_retirement_join.revision,
+            archive_hostnames_join.revision,
+            archive_compatibility_join.revision,
         ):
+            expected = schema_migration_target(
+                current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+            )
             with self.subTest(revision=revision), _isolated_postgres_database() as url:
                 if revision:
                     command.upgrade(alembic_config(url), revision)
@@ -212,10 +221,10 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
 
     def test_explicit_delivery_request_keeps_its_historical_join(self) -> None:
         with _isolated_postgres_database() as url:
-            migrate_schema(database_url=url)
+            current = migrate_schema(database_url=url)
             self.assertEqual(
                 migrate_schema(database_url=url, target_revision=held.revision),
-                archive_retirement_join.revision,
+                schema_migration_target(current_revision=current, target_revision=held.revision),
             )
             store = PostgresRecordStore(database_url=url)
             self.addCleanup(store.close)

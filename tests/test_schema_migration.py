@@ -29,13 +29,7 @@ from control_plane.storage.migrations.versions import (
     f1b5d9a3c7e0_join_public_host_fences as public_host_join,
     f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
     f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
-    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
-    a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
-    b0a2c4e6f8d1_retire_preview_idle_reservations as idle_retirement,
-    b1b3d5f7a9e2_join_idle_retirement as idle_retirement_join,
-    b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
-    f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -76,52 +70,6 @@ class SchemaMigrationTests(unittest.TestCase):
             command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
 
         self.assertFalse(application_logger.disabled)
-
-    def test_release_archive_joins_every_applied_branch_without_activating_held_drop(
-        self,
-    ) -> None:
-        for revision, target in (
-            (retired_delivery.revision, idle_retirement_join.revision),
-            (retirement_join.revision, idle_retirement_join.revision),
-            (topics_join.revision, idle_retirement_join.revision),
-            (public_host_fences.revision, idle_hostnames_join.revision),
-            (topics_hostnames.revision, idle_hostnames_join.revision),
-            (public_host_join.revision, idle_compatibility_join.revision),
-            (compatibility_join.revision, idle_compatibility_join.revision),
-            (archive_retirement_join.revision, idle_retirement_join.revision),
-            (archive_hostnames_join.revision, idle_hostnames_join.revision),
-            (archive_compatibility_join.revision, idle_compatibility_join.revision),
-            (idle_retirement.down_revision, SCHEMA_MIGRATION_TARGET_REVISION),
-            (discussion_topics.revision, SCHEMA_MIGRATION_TARGET_REVISION),
-            (retired_preview.revision, SCHEMA_MIGRATION_TARGET_REVISION),
-        ):
-            with self.subTest(revision=revision):
-                self.assertEqual(schema_migration_action(current_revision=revision), "upgrade")
-                self.assertEqual(
-                    schema_migration_target(
-                        current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
-                    ),
-                    target,
-                )
-        for revision in (
-            idle_retirement_join.revision,
-            idle_hostnames_join.revision,
-            idle_compatibility_join.revision,
-        ):
-            with self.subTest(revision=revision):
-                self.assertEqual(
-                    schema_migration_action(current_revision=revision), "compatible_ahead"
-                )
-
-    def test_explicit_delivery_request_after_archive_joins_both_paths(self) -> None:
-        for target in (retired_delivery.revision, retirement_join.revision, topics_join.revision):
-            with self.subTest(target=target):
-                self.assertEqual(
-                    schema_migration_target(
-                        current_revision=SCHEMA_MIGRATION_TARGET_REVISION, target_revision=target
-                    ),
-                    idle_retirement_join.revision,
-                )
 
     def test_delivery_preview_join_preserves_explicit_topics_route(self) -> None:
         for current, target in (

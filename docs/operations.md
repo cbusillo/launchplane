@@ -5744,7 +5744,8 @@ image above is no longer a rollback target once the archive has run.
 
 Release revision `b0a2c4e6f8d1` follows the non-runtime profile archive. It
 removes only the retired preview-idle scope's stop/start reservations and
-original-intent records. Other operations, target fences and preview data are
+original-intent records. A matching database constraint refuses an overlapping
+old scheduler's late reservation writes before effects. Other operations, target fences and preview data are
 unchanged. The gateway's persisted receipt and current lane observation recover
 sleep and wake under the existing executor lock; see
 [preview idle behavior](clean-testing-snapshots.md).

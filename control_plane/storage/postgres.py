@@ -4755,6 +4755,11 @@ class LaunchplaneMergeTrainStackCollapsePlanRow(Base):
 class LaunchplaneIdempotencyRow(Base):
     __tablename__ = "launchplane_idempotency_records"
     __table_args__ = (
+        CheckConstraint(
+            "NOT (scope = 'launchplane:preview-idle:v1' AND route_path IN "
+            "('service:preview-idle', '/internal/provider-original-intent'))",
+            name="launchplane_idempotency_no_preview_idle_ck",
+        ),
         Index(
             "launchplane_idempotency_scope_route_key_idx",
             "scope",

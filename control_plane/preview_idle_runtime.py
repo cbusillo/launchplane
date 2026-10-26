@@ -14,7 +14,6 @@ import base64
 import fcntl
 import hashlib
 import sys
-import time
 
 inherited_lock_descriptors = ()
 
@@ -74,16 +73,9 @@ def application_state(containers):
         for name, (_, item) in containers.items()}
 
 
-def wait_healthy(identifier):
-    deadline = time.monotonic() + 180
-    while time.monotonic() < deadline:
-        state = one_inspection(identifier)['State']
-        if not state['Running']:
-            raise RuntimeError('Preview stopped while waking')
-        if state.get('Health', {}).get('Status') == 'healthy':
-            return
-        time.sleep(2)
-    raise RuntimeError('Preview wake health is unavailable')
+def is_healthy(identifier):
+    state = one_inspection(identifier)['State']
+    return state['Running'] and state.get('Health', {}).get('Status') == 'healthy'
 
 
 def execute():
@@ -124,10 +116,11 @@ def execute():
             if not status.get('accepted'):
                 raise RuntimeError('Preview wake admission receipt was refused')
         docker('start', containers['database'][0])
-        wait_healthy(containers['database'][0])
+        if not is_healthy(containers['database'][0]):
+            return {'gateway': status, 'accepted': False}
         docker('start', containers['script-runner'][0], containers['web'][0])
-        for service in ('script-runner', 'web'):
-            wait_healthy(containers[service][0])
+        if not all(is_healthy(containers[service][0]) for service in ('script-runner', 'web')):
+            return {'gateway': status, 'accepted': False}
         program = 'import json,sys,urllib.request;response=json.load(urllib.request.urlopen("http://127.0.0.1:"+sys.argv[1]+sys.argv[2],timeout=10));print(json.dumps(response))'
         port = one_inspection(router)['Config']['Cmd'][1]
         health = json.loads(docker('exec', containers['web'][0], '/venv/bin/python3', '-I', '-S', '-c', program, port, spec['health_path']))
