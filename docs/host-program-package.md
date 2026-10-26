@@ -47,7 +47,11 @@ are removed.
 
 The archive contains no runtime records, product settings, credentials or restore
 data. Inputs continue to come from the operation's existing reviewed records.
-Old archives are retained without automatic pruning. Installing a new version
+Old archives, bootstrap schedule rows and their provider script/log directories
+are retained without automatic pruning. This adds metadata and disk upkeep;
+primary-server schedule inventories approaching the existing program-row bound
+need a recovery-aware retirement design, rather than deletion during an active
+operation. Installing a new version
 does not authorize replaying or replacing an operation.
 
 Each action also binds its dispatcher, program and referenced helpers. Retained storage

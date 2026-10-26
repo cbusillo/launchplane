@@ -41,7 +41,6 @@ from control_plane.testing_replacement_recovery import (
     recover_stranded_testing_replacements,
     testing_replacement_recovery_read,
 )
-from control_plane.dokploy.host_package import HOST_PACKAGE_SCHEDULE_APP_NAME
 from control_plane.testing_legacy_replacement_inspection import inspect_legacy_replacement
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerStore,
@@ -668,7 +667,7 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                                 {
                                     "scheduleId": f"unrelated-schedule-{index}",
                                     "name": f"host-package-{index}",
-                                    "appName": HOST_PACKAGE_SCHEDULE_APP_NAME,
+                                    "appName": f"other-lane-{index}",
                                     "enabled": True,
                                 }
                                 for index in range(80)
@@ -1593,7 +1592,6 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                             token="fixture-token",
                             target_id="fixture-user",
                             schedule_type="dokploy-server",
-                            app_name="fixture-testing",
                             payload={"script": host_schedule("resources", {}), "serverId": None},
                         )
                     fenced = self.fence(store)

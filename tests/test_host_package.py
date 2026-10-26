@@ -149,7 +149,6 @@ class HostPackageTests(unittest.TestCase):
             payload = arguments["schedule_payload"]
             assert isinstance(payload, dict)
             api.validate_dokploy_schedule_script(payload)
-            self.assertNotEqual(payload["appName"], "fixture")
             self.assertEqual(payload["appName"], arguments["app_name"])
             names.append(str(arguments["schedule_name"]))
             key = str(len(scripts))
@@ -190,7 +189,6 @@ class HostPackageTests(unittest.TestCase):
                 token="fixture",
                 target_id="fixture-user",
                 schedule_type="dokploy-server",
-                app_name="fixture",
                 payload={"script": host_schedule("resources", {}), "serverId": None},
             )
             initial = len(scripts)
@@ -199,7 +197,6 @@ class HostPackageTests(unittest.TestCase):
                 token="fixture",
                 target_id="fixture-user",
                 schedule_type="dokploy-server",
-                app_name="fixture",
                 payload={"script": host_schedule("resources", {}), "serverId": None},
             )
             self.assertEqual(len(scripts), initial + 1)
@@ -219,7 +216,6 @@ class HostPackageTests(unittest.TestCase):
                         token="fixture",
                         target_id="fixture-user",
                         schedule_type="dokploy-server",
-                        app_name="fixture",
                         payload={"script": host_schedule("resources", {}), "serverId": None},
                     )
 
@@ -274,7 +270,6 @@ class HostPackageTests(unittest.TestCase):
                 token="fixture",
                 target_id="fixture-server",
                 schedule_type="server",
-                app_name="fixture",
                 payload={"script": script, "serverId": "fixture-server"},
             )
 

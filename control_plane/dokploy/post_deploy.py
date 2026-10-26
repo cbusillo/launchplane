@@ -583,7 +583,6 @@ def run_manual_data_schedule(
             token=token,
             target_id=schedule_lookup_id,
             schedule_type=schedule_type,
-            app_name=schedule_app_name,
             payload=schedule_payload,
             provider_mutation_guard=provider_mutation_guard,
         )
@@ -1004,7 +1003,6 @@ def run_compose_post_deploy_update(
         token=token,
         target_id=schedule_lookup_id,
         schedule_type=schedule_type,
-        app_name=schedule_app_name,
         payload={
             "script": schedule_script,
             "serverId": schedule_server_id,

@@ -74,7 +74,6 @@ def ensure_schedule_host_package(
     token: str,
     target_id: str,
     schedule_type: str,
-    app_name: str,
     payload: dict[str, Any],
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> None:
@@ -97,19 +96,9 @@ def ensure_schedule_host_package(
 
     def request(spec: dict[str, object]) -> bool:
         script = bootstrap_script(spec)
-        name = (
-            "Launchplane host package "
-            + installation_id
-            + " "
-            + hashlib.sha256(script.encode()).hexdigest()[:24]
-        )
-        bootstrap_app = (
-            HOST_PACKAGE_SCHEDULE_APP_NAME
-            + "-"
-            + installation_id
-            + "-"
-            + hashlib.sha256(script.encode()).hexdigest()[:16]
-        )
+        digest = hashlib.sha256(script.encode()).hexdigest()
+        name = "Launchplane host package " + installation_id + " " + digest[:24]
+        bootstrap_app = HOST_PACKAGE_SCHEDULE_APP_NAME + "-" + installation_id + "-" + digest[:16]
         with (provider_mutation_guard or nullcontext)():
             schedule = api.upsert_dokploy_schedule(
                 host=host,
