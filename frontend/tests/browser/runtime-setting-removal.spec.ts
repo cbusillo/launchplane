@@ -20,7 +20,7 @@ async function setup(page: Page, outcome = "ok", admin = true) {
       await route.fulfill({ status: outcome === "uncertain-denied" ? 403 : 409, json: { trace_id: "stale", error: { code: outcome === "uncertain-denied" ? "authorization_denied" : outcome.startsWith("uncertain-pending") ? "runtime_setting_removal_unverified" : "runtime_setting_removal_stale", message: "Refresh the exact review or read the original removal receipt." } } }); return;
     }
     const digest = "a".repeat(64);
-    await route.fulfill({ json: { status: "ok", trace_id: body.mode, result: {
+    await route.fulfill({ json: { status: "ok", trace_id: `${body.mode}-${requests.length}`, result: {
       product: body.product, scope: body.scope, context: body.context || "", instance: body.instance || "",
       removed_keys: outcome === "mismatch" || (outcome === "malformed-apply" && body.mode === "apply" && applies.length === 1) ? ["UNREVIEWED_KEY"] : body.keys,
       surviving_keys: outcome === "retirement-only" ? [] : ["SURVIVING_KEY"],
@@ -68,25 +68,38 @@ test("stored removal reviews exact scope, invalidates edits, applies and reads b
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole("button", { name: "Remove reviewed settings" }).click();
   await expect(page.getByRole("status")).toContainText("Current stored record matches");
+  const previousCheck = await page.getByLabel("Current record check reference").textContent();
   let finishReadback!: () => void;
   const pendingReadback = new Promise<void>(resolve => { finishReadback = resolve; });
   await page.route("**/v1/admin/runtime-settings/removal", async route => {
     await pendingReadback;
     await route.fallback();
   });
+  const freshResponse = page.waitForResponse(response => response.url().endsWith("/v1/admin/runtime-settings/removal") && response.request().postDataJSON().mode === "readback");
   await page.getByRole("button", { name: "Check current record" }).click();
   try {
-    await expect(page.getByRole("status")).toContainText("Checking current record");
+    await expect(page.getByRole("button", { name: "Check current record" })).toBeDisabled();
+    await expect(page.getByLabel("Current record check reference")).toHaveCount(0);
     await expect(page.getByText("Current stored record matches", { exact: false })).toHaveCount(0);
   } finally { finishReadback(); }
   await waitForState(() => requests.filter(request => request.body.mode === "readback").length).toBe(2);
   await expect(page.getByRole("status")).toContainText("Current stored record matches");
+  const freshTrace = (await (await freshResponse).json()).trace_id;
+  expect(freshTrace).not.toBe(previousCheck);
+  await expect(page.getByLabel("Current record check reference")).toHaveText(freshTrace);
   expect(requests.filter(request => request.body.mode === "apply")).toHaveLength(1);
   const apply = requests.find(request => request.body.mode === "apply")!;
   expect(apply.body).toMatchObject({ product: "fixture-site", scope: "instance", context: "fixture-context", instance: "testing", keys: ["OBSOLETE_INPUT"], reason: "Changed reason requires a fresh review." });
   expect(apply.body.review_id).toBe(requests.findLast(request => request.body.mode === "readback")!.body.review_id);
   expect(apply.key).toBeTruthy();
   expect(errors).toEqual([]);
+  await page.route("**/v1/admin/runtime-settings/removal", route => route.fulfill({ status: 503, json: {
+    trace_id: "readback-unavailable", error: { code: "service_unavailable", message: "Current record cannot be checked." },
+  } }));
+  await page.getByRole("button", { name: "Check current record" }).click();
+  await expect(page.getByText("Current record cannot be checked.", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Current record check reference")).toHaveCount(0);
+  await expect(page.getByText("Current stored record matches", { exact: false })).toHaveCount(0);
 });
 
 for (const outcome of ["uncertain", "uncertain-stale", "uncertain-pending"]) {
@@ -144,10 +157,10 @@ test("committed removal with later drift can review current state", async ({ pag
   await page.goto("/ui/engineering/runtime-setting-removal");
   await review(page); await confirm(page);
   await page.getByRole("button", { name: "Remove reviewed settings" }).click();
-  await expect(page.getByRole("status")).toContainText("Current readback is unverified");
+  await expect(page.getByRole("status")).toContainText("Current stored record does not match");
   await expect(page.getByRole("button", { name: "Review removal", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "Check current record" }).click();
-  await expect(page.getByRole("status")).toContainText("Current readback is unverified");
+  await expect(page.getByRole("status")).toContainText("Current stored record does not match");
   await page.getByRole("button", { name: "Review removal", exact: true }).click();
   await expect(page.getByRole("checkbox")).toHaveCount(1);
 });

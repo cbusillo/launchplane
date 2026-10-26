@@ -64,6 +64,7 @@ function RemovalForm({ actorId, target, onBusy }: { actorId: number; target: Rem
   const [error, setError] = useState("");
   const [completion, setCompletion] = useState<RemovalResponse | null>(null);
   const [readback, setReadback] = useState<RemovalResponse | null>(null);
+  const [checkingRecord, setCheckingRecord] = useState(false);
   const operationOptions = {
     execute: removeRuntimeSettings,
     failureFor: productConfigOperationFailure,
@@ -77,8 +78,7 @@ function RemovalForm({ actorId, target, onBusy }: { actorId: number; target: Rem
     if (applyOperation.state.phase === "failed") { setReview(null); setConfirmed(false); }
   }, [applyOperation.state.phase]);
   const readOperation = useBrowserOperationController({ ...operationOptions, scope: `${scope}:readback`, readOnly: true });
-  const checkingRecord = ["queued", "submitting"].includes(readOperation.state.phase);
-  const busy = [planOperation, applyOperation, readOperation].some(operation => ["queued", "submitting"].includes(operation.state.phase));
+  const busy = checkingRecord || [planOperation, applyOperation, readOperation].some(operation => ["queued", "submitting"].includes(operation.state.phase));
   const uncertain = applyOperation.state.requiresIdempotencyContinuity;
   const committed = Boolean(completion);
   useEffect(() => { onBusy(busy); return () => onBusy(false); }, [busy, onBusy]);
@@ -105,9 +105,12 @@ function RemovalForm({ actorId, target, onBusy }: { actorId: number; target: Rem
   }
 
   async function checkReadback(request: RuntimeSettingRemovalRequest) {
+    if (checkingRecord) return;
+    setCheckingRecord(true);
     setReadback(null);
-    const result = await readOperation.run({ ...request, mode: "readback" });
-    setReadback(result);
+    try {
+      setReadback(await readOperation.run({ ...request, mode: "readback" }));
+    } finally { setCheckingRecord(false); }
   }
 
   async function apply() {
@@ -164,9 +167,11 @@ function RemovalForm({ actorId, target, onBusy }: { actorId: number; target: Rem
     {committed || checkingRecord ? <p role="status">
       {committed ? "Removal committed. " : ""}
       {checkingRecord ? "Checking current record…" :
-        readback?.result.readback_matches ? "Current stored record matches the reviewed removal." :
+        readback ? readback.result.readback_matches ? "Current stored record matches the reviewed removal." :
+          "Current stored record does not match the reviewed removal. Review the changed record before another removal." :
           "Current readback is unverified. Check again or review the current record before another removal."}
     </p> : null}
+    {readback ? <p>Check reference: <code aria-label="Current record check reference">{readback.trace_id}</code></p> : null}
     <div className="product-config-actions">
       <button type="button" className="button" disabled={locked || !canPlan} onClick={() => void preview()}>Review removal</button>
       <button type="button" className="button button-primary" disabled={busy || (uncertain ? !saved : !plan || !confirmed)} onClick={() => void apply()}>{uncertain ? "Retry original removal" : "Remove reviewed settings"}</button>

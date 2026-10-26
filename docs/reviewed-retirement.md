@@ -185,9 +185,11 @@ A committed removal is followed by an independent readback, and its local saved
 request is cleared. Historical completion remains in service custody. An unavailable or
 mismatched readback stays unverified. **Check current record**
 can repeat that read, including while an Apply is uncertain. The previous
-result is cleared while a fresh check runs, and the page shows **Checking current
-record…** until that request finishes. A previous match is not current proof
-during the recheck. A current match or mismatch never settles the original Apply. After a confirmed
+result is cleared while a fresh check runs, and progress is shown until the
+request finishes. Completed checks show their service reference so a fast recheck
+is distinguishable from its predecessor. A mismatch reports changed state;
+a failed check stays unverified. A previous match is not current proof during
+the recheck. A current match or mismatch never settles the original Apply. After a confirmed
 commit, a fresh review can inspect the current record even if another writer
 has changed it; the historical receipt does not promise current agreement.
 Runtime sync, deployment and production acceptance remain separate operations.
