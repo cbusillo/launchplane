@@ -12,7 +12,7 @@ exact `context_instance` testing lane with class `testing` and no sharing reason
 can be delivered. Production, preview, context-wide, shared, worker and service
 credentials cannot use this path. The active key-safety evaluation still applies.
 
-The signed-in administrator or a local-operator agent uses existing
+The signed-in administrator or an agent authenticated as `local_operator` uses existing
 exact-lane `product_config.plan` and `product_config.apply` authority. Agent read
 access alone cannot issue a delivery. Worker and service identities cannot issue
 one. Terminal-agent credentials remain read/plan only. No credential, enrollment,
