@@ -135,7 +135,7 @@ def require_canonical_workflows(host: str, token: str, plan: TestingAddressPlan)
         require_complete=True,
     )
     if any(not api.deployment_is_terminal(item) for item in deployments):
-        raise ValueError("Canonical settings require settled target deployments.")
+        raise NativeSourceUnavailable("Canonical settings require settled target deployments.")
 
 
 def canonical_settings_frame(
@@ -352,7 +352,7 @@ class CanonicalAddressEffect:
     ) -> ProviderObservation:
         if reconciliation_key != self.plan.digest:
             return ProviderObservation("unknown")
-        host, token, provider, _ = self.checked_provider()
+        _, _, provider, _ = self.checked_provider()
         if self.phase == "environment":
             if (
                 api.parse_dokploy_env_text(str(provider.get("env") or "")).get(PAYLOAD_KEY)
@@ -426,7 +426,7 @@ class CanonicalAddressEffect:
                 try:
                     self.frame("observe")
                     break
-                except (NativeSourceUnavailable, ValueError):
+                except NativeSourceUnavailable:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise NativeSourceUnavailable(

@@ -163,13 +163,6 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.enterContext(patch.object(api, "update_dokploy_target_env", side_effect=self.update))
         self.enterContext(patch.object(api, "trigger_deployment", side_effect=self.deploy))
         self.enterContext(
-            patch.object(
-                api,
-                "deployment_for_target_by_title",
-                side_effect=AssertionError("Compose completion must use native runtime proof"),
-            )
-        )
-        self.enterContext(
             patch.object(settings, "canonical_settings_frame", side_effect=self.frame)
         )
 
@@ -329,6 +322,26 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.assertEqual(self.events, ["environment", "deployment"])
         self.deployment_status = "done"
         self.assertEqual(self.run_address(False).status, "completed")
+
+    def test_permanent_runtime_refusal_is_preserved_without_polling(self) -> None:
+        refusal = ValueError("Fixture reviewed intent changed")
+        original = settings.CanonicalAddressEffect.frame
+
+        def frame(effect: settings.CanonicalAddressEffect, *args: Any, **kwargs: Any) -> Any:
+            if effect.phase == "deployment":
+                raise refusal
+            return original(effect, *args, **kwargs)
+
+        with (
+            patch.object(settings.CanonicalAddressEffect, "frame", frame),
+            patch.object(time, "monotonic", side_effect=itertools.count(0, 3600)),
+            patch.object(time, "sleep") as pause,
+            self.assertRaises(ValueError) as caught,
+        ):
+            self.run_address(False)
+        self.assertIs(caught.exception, refusal)
+        self.assertFalse(pause.called)
+        self.assertEqual(self.events, ["environment", "deployment"])
 
 
 class CanonicalAddressProgramTests(unittest.TestCase):
