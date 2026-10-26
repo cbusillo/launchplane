@@ -96,7 +96,11 @@ read neither empties storage nor restarts a process. It publishes only current
 resource facts with the existing expiration and binding. It leaves occupancy
 UNKNOWN and preserves recorded use, needed-copy and shared-resource protections.
 Missing custody, unsupported mounts, changed inputs or incomplete physical reads
-supply no positive resource fact. Provider authorization refusals remain denials.
+supply no positive resource fact. Collection propagates provider authorization
+refusals as denials. A first-effect preflight denial preserves the existing
+deploy/recovery response mapping: direct deploy returns `400 invalid_request`;
+recovery retains its original-operation reconciliation fence. Neither creates
+a failed deployment or permits a provider write.
 Immediately before its first provider-effect checkpoint, a standing Compose
 testing deployment repeats the same read outside the heartbeat mutex and global
 authority lock. The existing locked checkpoint then compares the captured
