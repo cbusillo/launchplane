@@ -29056,7 +29056,7 @@ class PostgresRecordStore(HumanSessionStore):
         return True
 
     @staticmethod
-    def _read_product_profile_payload(payload: PayloadDict) -> LaunchplaneProductProfileRecord:
+    def read_product_profile_payload(payload: PayloadDict) -> LaunchplaneProductProfileRecord:
         return LaunchplaneProductProfileRecord.model_validate(
             migrate_product_profile_lifecycle_payload(
                 migrate_product_profile_monitoring_intent_payload(
@@ -29065,6 +29065,8 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             context={"stored_product_profile": True},
         )
+
+    _read_product_profile_payload = read_product_profile_payload
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         statement = (
