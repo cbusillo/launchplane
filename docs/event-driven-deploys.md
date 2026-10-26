@@ -349,6 +349,13 @@ reservation. The webhook request never waits on a deploy.
     waivers or preview collectors. Open PR previews remain; unavailable PR state
     is held. Teardown preserves resources shared with another lane or production,
     including target aliases and credentials outside the destroy set.
+    A failed creation with no lifecycle record remains a cleanup candidate when
+    its retained original identifies the exact preview. Closed-PR reconciliation
+    uses that original as its lifecycle token and rechecks its product, context,
+    PR, target naming and exclusive ownership before effects. Existing executor
+    exclusion, recovery grace, original schedule quiescence, target supersession
+    and physical resource inspection still apply. Missing original proof holds
+    the operation; the cleanup never invents a serving generation.
     A qualified destroy may supersede a missing-original-intent reservation
     under the same target execution lock, expired-lease grace and exact-record
     compare-and-swap. It records the earlier operation as superseded, never as

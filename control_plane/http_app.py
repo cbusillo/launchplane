@@ -23529,8 +23529,13 @@ def create_launchplane_fastapi_app(
         denied_actions_by_product: dict[str, str] = {}
         denied_profile: LaunchplaneProductProfileRecord | None = None
         denied_action = ""
+        required_actions = (
+            ()
+            if director_agent_identity(identity) and not sweep_request.apply
+            else ("preview_lifecycle.plan", "preview_lifecycle.cleanup")
+        )
         for profile in requested_sweep_profiles:
-            for action in ("preview_lifecycle.plan", "preview_lifecycle.cleanup"):
+            for action in required_actions:
                 if not resolved_authz_policy_runtime.allows(
                     identity=identity,
                     action=action,

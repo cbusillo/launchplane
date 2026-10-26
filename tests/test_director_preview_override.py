@@ -66,6 +66,33 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
             payload=payload if payload is not None else self.after,
         )
 
+    async def test_director_can_report_preview_cleanup_without_cleanup_mutation_authority(
+        self,
+    ) -> None:
+        with patch(
+            "control_plane.http_app.build_preview_lifecycle_sweep",
+            return_value={"status": "pass", "apply": False, "profiles": []},
+        ) as sweep:
+            response = await request(
+                self.app,
+                "POST",
+                "/v1/previews/lifecycle-sweep",
+                headers=self.headers,
+                payload={"product": self.before.product, "apply": False},
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertFalse(sweep.call_args.kwargs["request"].apply)
+            sweep.reset_mock()
+            response = await request(
+                self.app,
+                "POST",
+                "/v1/previews/lifecycle-sweep",
+                headers={**self.headers, "Idempotency-Key": "cleanup-apply"},
+                payload={"product": self.before.product, "apply": True},
+            )
+            self.assertEqual(response.status_code, 403, response.text)
+            sweep.assert_not_called()
+
     async def test_director_saves_one_preview_key_and_preserves_every_other_field(self) -> None:
         response = await self.post()
         self.assertEqual(response.status_code, 202, response.text)

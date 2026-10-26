@@ -643,6 +643,68 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         assert old is not None
         self.assertNotEqual(old.response_payload["result"]["status"], "pass")
 
+    def test_closed_unrecorded_preview_retires_its_retained_original(self) -> None:
+        from tests.test_product_reconcile import FakePreviewProvider
+        from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsRequest
+
+        self.assertEqual(self.store.list_preview_records(), ())
+        provider = FakePreviewProvider()
+
+        def inputs(
+            *,
+            profile: LaunchplaneProductProfileRecord,
+            request: OdooPreviewApplyInputsRequest,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            payload = provider.build_inputs(profile=profile, request=request, **kwargs)
+            plan = payload["dry_run_plan"]
+            assert isinstance(plan, dict)
+            plan["environment_id"] = self.issued.dry_run_plan.environment_id
+            return payload
+
+        with patch(
+            "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+            return_value=self.issued.dry_run_plan.compose_name,
+        ):
+            result = self.cleanup(
+                observe_apply=lambda **_: ("unknown", None, False), build_inputs=inputs
+            )
+        self.assertFalse(result.error, result.plan)
+        self.assertEqual(self.provider.applied, [("destroy", 42)])
+        self.assertEqual(held_preview_reservations(self.store, product=self.profile.product), ())
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+
+    def test_unrecorded_cleanup_preserves_unknown_original_and_live_executor(self) -> None:
+        with self.store.testing_replacement_execution_lock(
+            preview_execution_lock_name(self.reservation.provider_target_key)
+        ):
+            result = self.cleanup()
+        self.assertTrue(result.error or result.deferred, result.plan)
+        self.assertFalse(self.provider.applied)
+        result = self.cleanup(quiescence_check=lambda **_: False)
+        self.assertTrue(result.error or result.deferred, result.plan)
+        self.assertFalse(self.provider.applied)
+        self.assertEqual(self.store.list_preview_records(), ())
+
+    def test_unrecorded_cleanup_requires_the_original_and_preserves_other_lanes(self) -> None:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context=self.profile.preview.context,
+                instance="prod",
+                target_id=self.issued.dry_run_plan.compose_ref,
+                updated_at=self.profile.updated_at,
+            )
+        )
+        result = self.cleanup(observe_apply=lambda **_: ("unknown", None, False))
+        self.assertTrue(result.plan["held"], result.plan)
+        self.assertFalse(self.provider.applied)
+        self.remove_original_intent()
+        result = self.cleanup()
+        self.assertFalse(self.provider.applied)
+        self.assertEqual(self.store.list_preview_records(), ())
+
     def test_closed_pr_cleanup_ignores_usage_and_custody_reports(self) -> None:
         self.remove_original_intent()
         self.prepare_cleanup(usage="in_use", data="only_copy")

@@ -2087,9 +2087,9 @@ def _preview_cleanup_guard(
     store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
     number: int,
+    original_reservation_id: str = "",
 ) -> None:
     from control_plane.disposable_lanes import (
-        DisposableLaneSafetyUnknown,
         DisposableLaneStore,
         resolve_disposable_preview,
         require_lane_target_ownership,
@@ -2103,12 +2103,24 @@ def _preview_cleanup_guard(
         )
     instance = profile.preview.slug_template.format(number=number)
     try:
-        resolve_disposable_preview(
-            cast(DisposableLaneStore, store),
-            profile,
-            profile.preview.context,
-            instance,
-        )
+        if original_reservation_id:
+            from control_plane.preview_reservation_recovery import (
+                require_unrecorded_preview_original,
+            )
+
+            require_unrecorded_preview_original(
+                cast(PostgresRecordStore, store),
+                profile=profile,
+                number=number,
+                reservation_id=original_reservation_id,
+            )
+        else:
+            resolve_disposable_preview(
+                cast(DisposableLaneStore, store),
+                profile,
+                profile.preview.context,
+                instance,
+            )
         target_store = cast(PreviewTargetOwnershipStore, store)
         require_lane_target_ownership(
             (
@@ -2118,7 +2130,7 @@ def _preview_cleanup_guard(
             context=profile.preview.context,
             instance=instance,
         )
-    except DisposableLaneSafetyUnknown as error:
+    except ValueError as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
 
 
@@ -2171,6 +2183,28 @@ def _plan_preview_target(
         plan.update(action="wait", held=True, reason="preview_cleanup_pr_state_unknown")
         return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     if pull_request.get("state") != "open":
+        if not live and isinstance(record_store, PostgresRecordStore):
+            from control_plane.preview_reservation_recovery import (
+                held_preview_reservations,
+                require_unrecorded_preview_original,
+            )
+
+            for reservation in held_preview_reservations(record_store, product=profile.product):
+                try:
+                    require_unrecorded_preview_original(
+                        record_store,
+                        profile=profile,
+                        number=pull_request_number,
+                        reservation_id=reservation.record_id,
+                    )
+                except ValueError:
+                    continue
+                live = True
+                lifecycle_token = (
+                    f"original:{reservation.record_id}:{reservation.request_fingerprint}"
+                )
+                plan["unrecorded_original_reservation_id"] = reservation.record_id
+                break
         return without_preview("pull_request_not_open")
     intent = change_client_review(
         body=str(pull_request.get("body") or ""),
@@ -2342,7 +2376,12 @@ def _run_preview_operation(
         ):
             raise _PullRequestMovedError
         if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
-            _preview_cleanup_guard(record_store, profile, pull_request_number)
+            _preview_cleanup_guard(
+                record_store,
+                profile,
+                pull_request_number,
+                str(plan.get("unrecorded_original_reservation_id") or ""),
+            )
 
     def execute_apply(**kwargs: object) -> dict[str, object]:
         checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])

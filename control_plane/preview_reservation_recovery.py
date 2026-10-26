@@ -174,6 +174,60 @@ def held_preview_reservations(
     return store.list_held_odoo_preview_reservations(product=product, limit=limit)
 
 
+def require_unrecorded_preview_original(
+    store: PostgresRecordStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
+    reservation_id: str,
+) -> LaunchplaneIdempotencyRecord:
+    from control_plane.disposable_lanes import require_lane_target_ownership
+
+    reservation = store.read_idempotency_record_by_id(reservation_id)
+    if reservation is None:
+        raise ValueError("Original preview reservation is unavailable.")
+    original = original_preview_intent(reservation, profile=profile, store=store)
+    issued = original.issued_plan
+    instance = profile.preview.slug_template.format(number=number)
+    if (
+        issued.operation != "refresh"
+        or issued.plan_request.pr_number != number
+        or issued.context != profile.preview.context
+        or issued.preview_slug != instance
+        or issued.dry_run_plan.compose_name
+        != preview_application_name(
+            app_name_prefix=effective_preview_app_name_prefix(profile=profile),
+            preview_slug=instance,
+        )
+        or any(
+            profile.preview.slug_template.format(number=item.anchor_pr_number) == instance
+            for item in store.list_preview_records(context_name=profile.preview.context)
+        )
+    ):
+        raise ValueError("Original preview does not identify an unrecorded preview.")
+    for other in store.list_product_profile_records():
+        if any(
+            (lane.context, lane.instance) == (issued.context, instance) for lane in other.lanes
+        ) or (
+            other.product != profile.product
+            and issued.context
+            in {
+                other.preview.context,
+                *other.historical_contexts,
+                *(lane.context for lane in other.lanes),
+            }
+        ):
+            raise ValueError("Original preview has shared lane or context ownership.")
+    target_id = issued.dry_run_plan.compose_ref
+    require_lane_target_ownership(
+        (*store.list_dokploy_target_id_records(), *store.list_physical_provider_target_records()),
+        context=issued.context,
+        instance=instance,
+        target_id="" if target_id.startswith("${created.") else target_id,
+    )
+    return reservation
+
+
 def recover_held_preview(
     *,
     store: PostgresRecordStore,
