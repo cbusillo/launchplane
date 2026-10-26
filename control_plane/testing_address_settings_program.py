@@ -84,9 +84,13 @@ def canonical_address_settings(spec, containers):
         if data['database_values_sha256']!=settings['database_values_sha256'] and data['canonical_settings_verified'] is not True:
             raise CopyReadbackRefused(ReadbackPredicate.SETTINGS)
         docker('exec','-i',runner,'python3','-c',
-            "import hashlib,os,sys;from pathlib import Path;p=Path(sys.argv[1]);"
-            "assert p.is_absolute() and not p.is_symlink();"
-            "p.write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ['ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64']).encode()).hexdigest())",
+            "import hashlib,os,sys,tempfile;from pathlib import Path;p=Path(sys.argv[1]);"
+            "assert p.is_absolute() and not p.is_symlink()\n"
+            "with tempfile.TemporaryDirectory(dir=p.parent,prefix=p.name+'.') as directory:\n"
+            " marker=Path(directory)/'marker'\n"
+            " marker.write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ['ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64']).encode()).hexdigest())\n"
+            " marker.chmod(0o644)\n"
+            " os.replace(marker,p)\n",
             spec['web_gate_path'])
         data['canonical_gate_released']=True
     print(sys.argv[2]+json.dumps({'type':'complete',**data}),flush=True)
