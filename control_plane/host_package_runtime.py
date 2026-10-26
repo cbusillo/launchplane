@@ -58,7 +58,7 @@ def main(package_content: bytes | None = None) -> None:
     if arguments.action == "version":
         return
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
-        actions = json.loads(archive.read("actions.json"))
+        actions = json.load(archive.open("actions.json"))
         if arguments.action not in actions:
             raise ValueError("Unknown packaged host action")
         raw = (
@@ -77,7 +77,7 @@ def main(package_content: bytes | None = None) -> None:
             raise ValueError("Packaged host action version differs")
         spec = expand(raw, archive)
         program = archive.read("programs/" + actions[arguments.action] + ".py").decode()
-        filename = json.loads(archive.read("filenames.json"))[arguments.action]
+        filename = json.load(archive.open("filenames.json"))[arguments.action]
     sys.argv = [arguments.action, base64.b64encode(json.dumps(spec).encode()).decode()]
     if arguments.prefix:
         sys.argv.append(arguments.prefix)
