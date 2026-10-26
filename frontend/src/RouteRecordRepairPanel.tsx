@@ -169,7 +169,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     setPending(request);
     const response = await apply.run(request);
     if (!response) return;
-    setReview(null); setPending(null); setConfirmed(false);
+    setReview(null); setPending(null); setConfirmed(false); setCustodyDirty(false);
     try { sessionStorage.removeItem(storageKey); } catch { /* Settled state never recovers a leftover request. */ }
     // The verified receipt settles this apply. Later readback cannot make it uncertain again.
     setReadback("pending");

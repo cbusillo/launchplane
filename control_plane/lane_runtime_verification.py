@@ -400,6 +400,9 @@ def read_check_runtime_verification(
                     visited_urls=item.visited_urls,
                     hosts=hosts,
                 )
+                and binding is not None
+                and item.external_custody_sha256
+                == binding.external_custody_sha256(urlsplit(requested_url).hostname or "")
                 for item in observation.targets
                 if item.target in {"base_url", "health_url"}
             )

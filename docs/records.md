@@ -942,66 +942,38 @@ an ORM column/table or remains only in the evidence payload.
   domain set stays in `domains`, with its primary/alias roles unchanged.
   Legacy single-path records retain their existing serialized form and digest.
 
-  `POST /v1/route-bindings/reconcile` accepts this attestation in the existing
-  dry-run contract. The managed audit must match exactly the remaining hosts
-  and still join the canonical target and an active edge endpoint. An absent,
-  ambiguous or stale source stays blocked. Split authority can be saved only
-  through the signed-in administrator's reviewed Route binding card, with
-  CSRF, exact review digest, current-record CAS and atomic source comparisons,
-  including the lane's URLs and monitoring policy, product driver, public-site
-  intent and active state. Unrelated profile edits do not invalidate the decision.
-  Custodian or domain changes cannot be
-  hidden in an evidence refresh. The custody timestamp records the reviewed
-  decision; continued qualification comes from current strict HTTP/runtime and
-  TLS observations, without a calendar re-attestation step. The operation
-  updates records only; it never changes a provider route.
+  The existing signed-in Route binding review establishes, changes or removes
+  external custody with CSRF, review digest, current-record CAS and atomic source
+  comparisons. The managed audit must cover exactly the remaining hosts and join
+  the recorded target and active edge. The commit compares route-relevant profile
+  fields, including monitoring URLs, the fallback health path and public-site intent;
+  unrelated display edits do not invalidate it. Custody decisions cannot absorb
+  changes to destination, domain roles, managed ingress/TLS or status. Removing
+  external custody requires complete managed evidence. This operation changes
+  records only, never provider routes. Agents can refresh unchanged evidence.
 
-  Saving split authority declares its full hostname set for public monitoring.
-  One derived strict runtime-identity HTTP check per hostname replaces the
-  profile's public HTTP checks, avoiding duplicate incidents and disagreement
-  over old check URLs. Private and provider checks retain their existing policy.
-  Every hostname also gets a TLS check using its resolved ownership. The lane's
-  health path and query are preserved. Its configured homepage is checked once,
-  on its own hostname, alongside that host's health endpoint. Existing DNS
-  expectations and recovery thresholds carry into the derived checks. Conflicting
-  or unmappable DNS expectations, and enabled public checks outside the retained
-  homepage/health URLs, block admission and remain visible monitoring configuration
-  failures if introduced later, before any network request. Disabled checks do
-  not supply DNS expectations or recovery thresholds.
-  The route-record SHA fences incident
-  transitions; persisted HTTP observations are evaluated against current check
-  URLs, monitoring intent, deployment identity, profile and relevant source dates.
-  Custody timestamps are server-derived: unchanged custody keeps its original
-  receipt, while changed custody uses the decision time regardless of caller input.
-  External HTTP and TLS observations must strictly follow that time, including
-  edits and observations within the same recorded second.
-  Each HTTPS redirect must stay within the requested hostname's custody set.
-  The transport checks each hop before connecting and retains the visited URLs;
-  old redirected observations without that evidence cannot verify custody.
-  Apex/www redirects within the external subset are allowed. Missing, stale,
-  failed or wrong-runtime observations keep topology/readiness unverified.
+  Each recorded host gets a strict runtime-identity HTTP check and a TLS check
+  using its resolved custody. Derived HTTP checks retain the configured homepage,
+  health path/query, DNS expectations and recovery thresholds. Unsupported checks
+  or conflicting DNS policy block admission and remain no-network configuration
+  failures if introduced later. Disabled checks supply no policy.
 
-  When stored managed evidence reaches its freshness deadline, the topology
-  reader reruns the existing reconcile plan without writing. It refreshes only
-  the projected provenance when current custody, authority and evidence
-  projections all agree with the stored binding. Missing, changed, conflicting
-  or unavailable sources retain the stale-evidence warning. This adds no job,
-  periodic authority write or renewal action. TLS snapshots use the same current
-  authority proof only when their per-host authority and exact source
-  identities/versions still agree and the probe follows the custody decision;
-  certificate probe freshness is checked
-  separately. Unchanged browser reviews preserve the recorded custody receipt. An explicit evidence refresh that
-  adopts newer source versions requires subsequent probes for the affected
-  authority dates. Custodian-reported configuration remains distinct from
-  directly verified public behavior.
+  Topology and runtime readers share observation applicability: current monitoring
+  intent, URLs, deployment identity, profile and relevant authority dates must agree.
+  The server preserves unchanged custody timestamps and stamps changed custody
+  itself; HTTP and TLS probes must strictly follow the decision. HTTP evidence also
+  carries a per-host custody digest so an external observation cannot qualify a
+  host reassigned to managed custody. Each HTTPS redirect is checked before
+  connection against the requested host's custody set, and its visited chain is
+  retained and rechecked. Legacy redirects without adequate proof stay unverified.
+  The route-record SHA separately fences incident transitions.
 
-  A new report, custodian or domain split can be reviewed as an exact authority
-  replacement in the same signed-in card. Clearing the external subset requires
-  a complete managed audit for all recorded hosts. A custody decision cannot
-  absorb changes to destination, domain roles, managed ingress, TLS or status.
-  Exact provider no-op audits may use the lane's tracked target hostnames without
-  duplicating profile check URLs; that hostname source is unavailable when any
-  provider write is enabled.
+  After managed evidence expires, readers may rerun the existing reconcile plan
+  without writing. Only identical current authority, custody and source evidence
+  refresh projected provenance. TLS uses existing per-host divergence checks and
+  exact source identities/versions, while certificate freshness remains independent.
+  Missing or changed sources retain their warnings. There is no periodic authority
+  write, scheduler or calendar re-attestation step.
 
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from

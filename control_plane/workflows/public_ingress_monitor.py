@@ -315,6 +315,7 @@ class PublicIngressMonitorTarget:
     private_tls_ca_pem: str = ""
     route_binding_sha256: str = ""
     allowed_https_hosts: tuple[str, ...] = ()
+    external_custody_sha256: str = ""
     recovery_observation_threshold: int = 1
     resolution_failure_code: PublicIngressFailureCode | None = None
     resolution_failure_summary: str = ""
@@ -754,6 +755,9 @@ def _health_check_monitor_target(
         allowed_https_hosts=split_ingress_custody_hosts(binding, health_url)
         if domain_check
         else (),
+        external_custody_sha256=binding.external_custody_sha256(urlsplit(health_url).hostname or "")
+        if domain_check and binding is not None
+        else "",
         profile_sha256=product_profile_record_sha256(profile),
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         incident_eligible=product_lane_monitoring_incident_eligible(
@@ -2626,6 +2630,10 @@ def check_public_ingress_target(
                 url_observation = url_observation.model_copy(
                     update={"dns": _observe_dns(url=url, expectation=expectation, dns_get=dns_get)}
                 )
+        if target.check_kind == "public_http" and target.external_custody_sha256:
+            url_observation = url_observation.model_copy(
+                update={"external_custody_sha256": target.external_custody_sha256}
+            )
         target_observations.append(url_observation)
     status, failure_code = _record_status(target_observations)
     summary = _record_summary(target=target, status=status, observations=target_observations)

@@ -107,7 +107,12 @@ def split_observation(
     observed = _http_observation(
         domain_name=domain, monitoring_intent="public", runtime_identity_status=status
     )
-    targets = observed.targets
+    targets = tuple(
+        target.model_copy(
+            update={"external_custody_sha256": binding.external_custody_sha256(domain)}
+        )
+        for target in observed.targets
+    )
     base = split_ingress_check_base_url(profile.lanes[0], observed.targets[0].url)
     if base:
         targets += (
@@ -118,6 +123,7 @@ def split_observation(
                 status="pass",
                 http_status=200,
                 summary="Homepage is healthy.",
+                external_custody_sha256=binding.external_custody_sha256(domain),
             ),
         )
     return observed.model_copy(
@@ -321,6 +327,18 @@ class SplitIngressTests(unittest.TestCase):
         )
         self.assertNotEqual(status(observations[1].check_name, replacement), "verified")
         self.assertEqual(status(observations[2].check_name, replacement), "verified")
+        reassigned = binding.model_copy(
+            update={
+                "external_ingress": binding.external_ingress.model_copy(
+                    update={
+                        "domains": ("www.business.example.test",),
+                        "attested_at": _NOW.isoformat(),
+                    }
+                )
+            }
+        )
+        self.assertNotEqual(status(observations[0].check_name, reassigned), "verified")
+        self.assertEqual(status(observations[2].check_name, reassigned), "verified")
 
         queried = lane.model_copy(update={"health_url": f"{lane.health_url}?scope=runtime"})
         derived = split_ingress_monitoring_lane(profile, queried, binding)
@@ -733,7 +751,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
             now=_NOW,
         )
         self.assertTrue(
-            any(w.code == "split_ingress_monitoring_policy_conflict" for w in topology.warnings)
+            any(w.scope == "observation" and w.severity == "error" for w in topology.warnings)
         )
 
     async def test_additional_public_checks_require_a_coverage_decision(self) -> None:
@@ -976,6 +994,19 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                 "attested_at": "2025-01-01T00:00:00Z",
             },
         }
+        unchanged = (
+            await self.post(
+                route,
+                {
+                    **payload,
+                    "external_ingress": {
+                        **payload["external_ingress"],
+                        "domains": list(reversed(payload["external_ingress"]["domains"])),
+                    },
+                },
+            )
+        ).json()["review"]
+        self.assertEqual(unchanged["status"], "unchanged")
         updated = await save(changed, "update-split-custody")
         self.assertEqual(
             updated["external_ingress"]["custodian"], changed["external_ingress"]["custodian"]
@@ -1311,6 +1342,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         for index, (changed, expected_status) in enumerate(
             (
                 (profile.model_copy(update={"lanes": (changed_lane,)}), 409),
+                (profile.model_copy(update={"health_path": "/changed-fallback"}), 409),
                 (profile.model_copy(update={"display_name": "Changed after review"}), 202),
             )
         ):

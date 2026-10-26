@@ -147,7 +147,6 @@ test("split ingress review preserves both custodians through save and readback @
   await expect(panel).toHaveAttribute("data-readback", "verified");
   const bodies = calls.map(call => call.body as unknown as { external_ingress: { domains: string[]; custodian: string; evidence_url: string; attested_at?: string } });
   for (const body of bodies) expect(body.external_ingress).toMatchObject(bodies[0].external_ingress);
-  expect(bodies[1].external_ingress).not.toHaveProperty("attested_at");
   expect(bodies.at(-1)?.external_ingress).toEqual(bodies[1].external_ingress);
 });
 
@@ -172,6 +171,12 @@ for (const mode of ["pristine", "dirty", "uncertain", "refused"] as const) {
       await panel.getByRole("checkbox").check();
       await panel.getByRole("button", { name: "Apply reviewed route binding", exact: true }).click();
       await expect(panel).toHaveAttribute("data-recovery", "true");
+    }
+    if (mode === "pristine") {
+      await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
+      await panel.getByRole("checkbox").check();
+      await panel.getByRole("button", { name: "Apply reviewed route binding", exact: true }).click();
+      await expect(panel).toHaveAttribute("data-readback", "verified");
     }
     const successor = { ...original, custodian: "Saved successor", evidence_url: "https://example.test/successor-report" };
     await refresh(successor);

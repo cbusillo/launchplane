@@ -475,25 +475,19 @@ def build_route_binding_candidate(
 
     managed_domains = domains
     split_profile = None
-    if request.external_ingress is not None:
+    external_ingress = request.external_ingress
+    if external_ingress is not None:
         previous = current_record.external_ingress if current_record else None
         attested_at = (
             previous.attested_at
             if previous is not None
             and previous.model_dump(exclude={"attested_at"})
-            == request.external_ingress.model_dump(exclude={"attested_at"})
+            == external_ingress.model_dump(exclude={"attested_at"})
             else request.evaluated_at
         )
-        request = request.model_copy(
-            update={
-                "external_ingress": request.external_ingress.model_copy(
-                    update={"attested_at": attested_at}
-                )
-            }
-        )
-        assert request.external_ingress is not None
+        external_ingress = external_ingress.model_copy(update={"attested_at": attested_at})
         if not request.allow_authority_change and (
-            previous is None or request.external_ingress != previous
+            previous is None or external_ingress != previous
         ):
             return _blocked_plan(
                 findings=(
@@ -505,7 +499,7 @@ def build_route_binding_candidate(
                 current_record=current_record,
                 current_record_sha256=current_record_sha256,
             )
-        external_names = set(request.external_ingress.domains)
+        external_names = set(external_ingress.domains)
         if not external_names < set(domains):
             return _blocked_plan(
                 findings=(
@@ -644,7 +638,7 @@ def build_route_binding_candidate(
             current_record=current_record,
             current_record_sha256=current_record_sha256,
         )
-    if request.external_ingress and audit_record.tls_owner in {"none", "external"}:
+    if external_ingress and audit_record.tls_owner in {"none", "external"}:
         return _blocked_plan(
             findings=(
                 RouteBindingReconcileFinding(
@@ -715,7 +709,7 @@ def build_route_binding_candidate(
                 else {}
             ),
         ),
-        external_ingress=request.external_ingress,
+        external_ingress=external_ingress,
         status="active",
         source=RouteBindingSource(
             source_kind="service",
@@ -758,6 +752,7 @@ def route_binding_monitoring_projection(
         profile.is_active,
         profile.driver_id,
         profile.public_website,
+        profile.health_path,
         *((lane.base_url, lane.health_url, lane.health_monitoring) if lane else (None,)),
     )
 

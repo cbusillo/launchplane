@@ -130,7 +130,7 @@ class RouteBindingExternalIngress(BaseModel):
 
     @model_validator(mode="after")
     def _validate_custody(self) -> "RouteBindingExternalIngress":
-        self.domains = tuple(_normalized_domain(domain) for domain in self.domains)
+        self.domains = tuple(sorted(_normalized_domain(domain) for domain in self.domains))
         if not self.domains or len(set(self.domains)) != len(self.domains):
             raise ValueError("External ingress requires unique domains")
         self.custodian = require_text(self.custodian, "External ingress requires its custodian")
@@ -289,6 +289,14 @@ class EnvironmentRouteBindingRecord(BaseModel):
         if self.ingress_for_domain(domain_name).provider == "external" and self.external_ingress:
             return RouteBindingTls(owner="external")
         return self.tls
+
+    def external_custody_sha256(self, domain_name: str) -> str:
+        if self.external_ingress is None or domain_name not in self.external_ingress.domains:
+            return ""
+        payload = json.dumps(
+            self.external_ingress.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
 
     @property
     def binding_key(self) -> str:
