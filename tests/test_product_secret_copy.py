@@ -232,6 +232,38 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.store.list_secret_records(instance_name="preview"))
             self.assertFalse(self.store.list_runtime_environment_records(instance_name="preview"))
 
+    def test_disabled_preview_binding_does_not_block_plain_settings(self) -> None:
+        payload = {
+            "product": self.profile.product,
+            "context": self.profile.preview.context,
+            "instance": "preview",
+        }
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                **payload,
+                "secrets": [
+                    {"binding_key": "SETTING", "value": "private", "secret_class": "preview"}
+                ],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        binding = self.store.list_secret_bindings(instance_name="preview")[0]
+        self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={**payload, "runtime_env": {"env": {"SETTING": "public"}}},
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        self.assertEqual(
+            self.store.list_runtime_environment_records(instance_name="preview")[0].env,
+            {"SETTING": "public"},
+        )
+
     def make_app(self, *, source_read: bool = True, standing_read: bool = False) -> FastAPI:
         actions: tuple[str, ...] = (
             "product_config.plan",

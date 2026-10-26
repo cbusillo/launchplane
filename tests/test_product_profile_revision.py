@@ -115,7 +115,7 @@ class ProductProfileRevisionTests(unittest.IsolatedAsyncioTestCase):
         after = current.model_copy(
             update={
                 "preview": current.preview.model_copy(
-                    update={"override_env": {"ODOO_PROXY_MODE": "True"}}
+                    update={"copied_env_keys": ("ODOO_PROXY_MODE",)}
                 )
             }
         )

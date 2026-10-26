@@ -423,13 +423,18 @@ def plan_product_config_authority_bundle(
         source_label=source_label,
     )
     if instance_name == "preview":
-        secret_keys = {
-            binding.binding_key
-            for binding in record_store.list_secret_bindings(
-                integration="runtime_environment", context_name=context_name, limit=None
+        secret_keys = set(
+            control_plane_secrets.resolve_effective_secret_bindings_from_store(
+                record_store=record_store,
+                integration="runtime_environment",
+                context_name=context_name,
+                instance_name="preview",
+                scopes=site_secret_scopes("preview"),
+                excluded_binding_ids=frozenset(
+                    binding.binding_id for binding in disabled_bundle.secret_bindings
+                ),
             )
-            if binding.context == context_name and binding.instance == "preview"
-        } | {
+        ) | {
             str(secret["binding_key"])
             for secret in secrets
             if secret["integration"] == "runtime_environment" and secret["instance"] == "preview"

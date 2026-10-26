@@ -490,6 +490,7 @@ def plan_product_onboarding_authority_bundle(
         if binding.context == product_profile.preview.context
         and binding.instance == "preview"
         and binding.integration == "runtime_environment"
+        and binding.status == "configured"
     )
     validate_preview_scope(
         {}, context=product_profile.preview.context, secret_keys=preview_secret_keys

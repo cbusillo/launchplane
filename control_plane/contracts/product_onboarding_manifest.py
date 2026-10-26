@@ -320,6 +320,7 @@ class ProductOnboardingManifest(BaseModel):
             if binding.context == self.preview.context
             and binding.instance == "preview"
             and binding.integration == "runtime_environment"
+            and binding.status == "configured"
         )
         validate_preview_scope({}, context=self.preview.context, secret_keys=preview_secret_keys)
         for record in self.runtime_environments:

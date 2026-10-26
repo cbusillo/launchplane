@@ -202,24 +202,24 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 "value": {"source": "literal", "value": "preview-client-fixture"},
             }
         ]
-        self.profile = self.profile.model_copy(
-            update={
-                "preview": self.profile.preview.model_copy(
-                    update={
-                        "override_env": {
-                            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
-                                json.dumps(
-                                    {
-                                        "context": "cm",
-                                        "instance": "preview",
-                                        "addon_settings": addon_settings,
-                                    }
-                                ).encode()
-                            ).decode()
-                        }
-                    }
-                )
-            }
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.profile.preview.context,
+                instance="preview",
+                env={
+                    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                        json.dumps(
+                            {
+                                "context": self.profile.preview.context,
+                                "instance": "preview",
+                                "addon_settings": addon_settings,
+                            }
+                        ).encode()
+                    ).decode()
+                },
+                updated_at="2026-10-26T00:00:00Z",
+            )
         )
         before = self.store.list_secret_bindings(limit=None)
         result = _odoo_preview_service_environment(

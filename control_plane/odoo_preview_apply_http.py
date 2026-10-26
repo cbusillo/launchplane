@@ -1304,7 +1304,7 @@ def _odoo_preview_service_environment(
     payload_key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
     encoded_preview = (
         environment_values.get(payload_key, "")
-        if payload_key in preview_environment.setting_keys | preview_environment.secret_keys
+        if payload_key in preview_environment.setting_keys
         else ""
     )
     try:

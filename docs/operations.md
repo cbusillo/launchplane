@@ -5761,3 +5761,9 @@ these revisions or still renders profile overrides is not a rollback target for
 this change; retain a compatible image or the pre-migration backup and matching
 image. Schema initialization's head fence now names the preview compatibility
 join and continues rejecting unreviewed successors.
+
+This data migration uses the shared preview validator. A restored database from
+before this revision must pass the validator in the selected image; later
+validation changes may therefore refuse older values transactionally at startup.
+Preflight that backup's preview settings against the selected image before
+release rather than weakening validation to admit them.
