@@ -15,6 +15,8 @@ from typing import Any, cast
 import unittest
 from unittest.mock import Mock, patch
 
+import yaml
+
 from control_plane._preview_preservation_program import PREVIEW_PRESERVATION_PROGRAM
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.contracts.idempotency_record import complete_launchplane_mutation_reservation
@@ -23,6 +25,7 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope, ODOO_PREVIEW_APPLY_ROUTE
+from control_plane.dokploy.compose import render_odoo_raw_compose_file
 from control_plane.preview_preservation import (
     read_preview_preservation_authority,
     require_preview_preservation_admission,
@@ -273,6 +276,92 @@ class PreviewPreservationProgramTests(unittest.TestCase):
                         archive.addfile(info, io.BytesIO(b"changed"))
                 with self.assertRaises(RuntimeError):
                     self.namespace["verify_filestore"](archive_path, manifest)
+
+
+class PreviewPreservationContainerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
+        self.source: dict[str, Any] = {
+            "compose_project": "fixture-preview",
+            "database_name": "fixture_db",
+            "preview_volumes": {
+                "database": "fixture-db",
+                "data": "fixture-data",
+                "logs": "fixture-logs",
+            },
+        }
+        compose = yaml.safe_load(
+            render_odoo_raw_compose_file(
+                image_reference="registry.example.test/odoo:fixture",
+                hold_web_until_integration_readback=True,
+                mount_workflow_ssh=False,
+            )
+        )
+        self.containers: dict[str, dict[str, Any]] = {}
+        for role, mounts in {
+            "database": {"/var/lib/postgresql/data": "database"},
+            "web": {"/volumes/data": "data", "/volumes/logs": "logs"},
+            "script-runner": {"/volumes/data": "data", "/volumes/logs": "logs"},
+        }.items():
+            self.containers[role] = {
+                "Id": role,
+                "ExecIDs": None,
+                "Config": {
+                    "Labels": {"com.docker.compose.service": role},
+                    "Env": [
+                        "PLATFORM_INSTANCE=preview",
+                        "ODOO_DB_NAME=" + self.source["database_name"],
+                    ],
+                },
+                "HostConfig": {"ExtraHosts": compose["services"][role].get("extra_hosts")},
+                "Mounts": [
+                    {
+                        "Destination": destination,
+                        "Type": "volume",
+                        "Name": self.source["preview_volumes"][volume],
+                    }
+                    for destination, volume in mounts.items()
+                ],
+            }
+        self.namespace.update(docker=self.docker)
+
+    def docker(self, *arguments: str) -> bytes:
+        if arguments[0] == "inspect":
+            return json.dumps([self.containers[arguments[1]]]).encode()
+        if arguments[0] == "ps":
+            selector = arguments[-1]
+            roles = list(self.containers)
+            if selector.startswith("volume="):
+                roles = [
+                    role
+                    for role, container in self.containers.items()
+                    if any(
+                        mount["Name"] == selector.removeprefix("volume=")
+                        for mount in container["Mounts"]
+                    )
+                ]
+            return "\n".join(roles).encode()
+        raise AssertionError(arguments)
+
+    def test_supported_legacy_compose_is_eligible_for_preservation(self) -> None:
+        self.assertEqual(self.namespace["preview_containers"](self.source), self.containers)
+
+    def test_foreign_host_mappings_are_rejected_on_every_service(self) -> None:
+        legacy = self.containers["web"]["HostConfig"]["ExtraHosts"]
+        for role, container in self.containers.items():
+            original = container["HostConfig"]["ExtraHosts"]
+            mappings = [
+                ["foreign.example.test:192.0.2.9"],
+                [*legacy, "foreign.example.test:192.0.2.9"],
+            ]
+            if role != "web":
+                mappings.append(legacy)
+            for hosts in mappings:
+                with self.subTest(role=role, hosts=hosts):
+                    container["HostConfig"]["ExtraHosts"] = hosts
+                    with self.assertRaises(RuntimeError):
+                        self.namespace["preview_containers"](self.source)
+            container["HostConfig"]["ExtraHosts"] = original
 
 
 class SnapshotCaptureDeadlineTests(unittest.TestCase):

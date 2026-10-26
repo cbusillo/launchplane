@@ -17,6 +17,8 @@ from control_plane.preview_gateway import (
     preview_backend_alias,
 )
 
+ODOO_WEB_HOST_GATEWAY = "host.docker.internal:host-gateway"
+
 TESTING_CONNECTION_CSP = (
     "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
     "style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-src 'self'"
@@ -249,7 +251,7 @@ def render_odoo_raw_compose_file(
     web_extra_hosts = (
         ""
         if isolated_testing or not publish_host_ports
-        else '    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
+        else f'    extra_hosts:\n      - "{ODOO_WEB_HOST_GATEWAY}"\n'
     )
     cron_threads = '"0"' if isolated_testing else "${ODOO_MAX_CRON_THREADS:-2}"
     extra_secrets = (

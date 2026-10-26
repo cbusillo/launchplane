@@ -213,7 +213,9 @@ and retains the same binding before effects. Missing or conflicting server
 evidence refuses preservation; old intents are not rewritten.
 
 The service qualifies an unserved plain preview with exclusively owned data,
-log and database volumes. Unexpected data, addon files, sessions, logs,
+log and database volumes. The web container may retain the host-gateway alias
+from Launchplane's legacy compose renderer; other host mappings remain refused.
+Unexpected data, addon files, sessions, logs,
 additional databases, mounts or consumers remain held. It stops only that
 preview's unserved application containers under its durable provider lease.
 The existing memory floor and disk reserve remain in force. It captures a

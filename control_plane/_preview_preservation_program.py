@@ -1,6 +1,7 @@
 from control_plane._odoo_snapshot_files import SNAPSHOT_FILES_LIBRARY
 from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
 from control_plane.dokploy.memory_capacity import observe_memory_headroom
+from control_plane.dokploy.compose import ODOO_WEB_HOST_GATEWAY
 import inspect
 
 
@@ -8,6 +9,7 @@ PREVIEW_PRESERVATION_PROGRAM = (
     SNAPSHOT_FILES_LIBRARY
     + PREVIEW_FILESTORE_LIBRARY
     + inspect.getsource(observe_memory_headroom)
+    + f"\nLEGACY_WEB_EXTRA_HOSTS = {[ODOO_WEB_HOST_GATEWAY]!r}\n"
     + r"""
 import base64
 import fcntl
@@ -140,7 +142,8 @@ def preview_containers(source: dict) -> dict:
     for service, expected in destinations.items():
         host = selected[service]['HostConfig']
         if (host.get('NetworkMode') == 'host' or host.get('PidMode') == 'host'
-            or host.get('Privileged') or host.get('Devices') or host.get('ExtraHosts')
+            or host.get('Privileged') or host.get('Devices')
+            or (host.get('ExtraHosts') and (service != 'web' or host['ExtraHosts'] != LEGACY_WEB_EXTRA_HOSTS))
             or set(mount.get('Destination') for mount in selected[service]['Mounts']) != set(expected)):
             raise RuntimeError('Preview preservation runtime isolation is unavailable')
         for destination, role in expected.items():
