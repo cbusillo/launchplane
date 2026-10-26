@@ -1,5 +1,5 @@
-from contextlib import AbstractContextManager
-from collections.abc import Callable
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import base64
@@ -137,12 +137,17 @@ class OdooPreviewApplyConfigError(click.ClickException):
 class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     apply: OdooPreviewDokployApplyRequest
+    preserve_original_reservation_id: str = Field(
+        default="", max_length=128, pattern=r"^(?:mutation-reservation-[a-f0-9]{64})?$"
+    )
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooPreviewApplyEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo preview apply")
         if self.product.strip() != self.apply.dry_run_plan.product.strip():
             raise ValueError("Odoo preview apply requires matching product values.")
+        if self.preserve_original_reservation_id and self.apply.dry_run_plan.operation != "destroy":
+            raise ValueError("Original preview preservation requires a destroy operation.")
         return self
 
 
@@ -538,6 +543,51 @@ def execute_odoo_preview_apply_result(
     )
     if snapshot_source and not retained_copy and service_dry_run_plan.clean_snapshot is None:
         raise ValueError("A new snapshot preview requires its issued clean source.")
+    effective_mutation_guard = provider_mutation_guard
+    if current_request.preserve_original_reservation_id:
+        from control_plane.preview_preservation import run_preview_preservation
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        if (
+            not isinstance(record_store, PostgresRecordStore)
+            or provider_effect_checkpoint is None
+            or provider_lease_check is None
+        ):
+            raise ValueError("Original preview preservation requires durable provider custody.")
+
+        def verify_preservation() -> None:
+            run_preview_preservation(
+                store=record_store,
+                profile=profile,
+                issued_plan=issued_plan,
+                original_reservation_id=current_request.preserve_original_reservation_id,
+                operation_record_id=deployment_record_id,
+                control_plane_root=control_plane_root_path,
+                mode="verify",
+                timeout_seconds=current_request.apply.timeout_seconds,
+                check=provider_lease_check,
+            )
+
+        @contextmanager
+        def preserved_mutation_guard() -> Iterator[None]:
+            with provider_mutation_guard() if provider_mutation_guard else nullcontext():
+                verify_preservation()
+                yield
+
+        run_preview_preservation(
+            store=record_store,
+            profile=profile,
+            issued_plan=issued_plan,
+            original_reservation_id=current_request.preserve_original_reservation_id,
+            operation_record_id=deployment_record_id,
+            control_plane_root=control_plane_root_path,
+            mode="preserve",
+            timeout_seconds=current_request.apply.timeout_seconds,
+            check=provider_lease_check,
+            effect_checkpoint=provider_effect_checkpoint,
+            mutation_guard=provider_mutation_guard,
+        )
+        effective_mutation_guard = preserved_mutation_guard
     driver_result = execute_odoo_preview_dokploy_apply(
         record_store=record_store,
         preview_context=profile.preview.context,
@@ -554,7 +604,7 @@ def execute_odoo_preview_apply_result(
         restore_upstream=upstream_source and not retained_copy,
         restore_clean_snapshot=snapshot_source and not retained_copy,
         preserve_existing_data=retained_copy,
-        provider_mutation_guard=provider_mutation_guard,
+        provider_mutation_guard=effective_mutation_guard,
     )
     return driver_result.model_dump(mode="json")
 

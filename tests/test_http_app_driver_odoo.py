@@ -2210,7 +2210,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_response.status_code, 409)
         self.assertEqual(
             second_response.json()["error"]["code"],
-            "mutation_reconciliation_required",
+            "odoo_preview_lifecycle_unavailable",
         )
         self.assertNotIn("already running", second_response.json()["error"]["message"])
         self.assertEqual(apply_driver.call_count, 1)
@@ -2316,7 +2316,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied_request.dry_run_plan.operation, "destroy")
         self.assertEqual(applied_request.image_reference, "")
 
-    async def test_odoo_preview_recovers_abandoned_refresh_only_after_grace(
+    async def test_odoo_preview_destroy_recovers_after_grace_but_unrecorded_refresh_stays_held(
         self,
     ) -> None:
         operations: tuple[Literal["refresh", "destroy"], ...] = ("refresh", "destroy")
@@ -2453,6 +2453,15 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                         idempotency_key="odoo-preview-stale-refresh",
                     )
 
+                if operation == "refresh":
+                    self.assertEqual(response.status_code, 409)
+                    self.assertEqual(
+                        response.json()["error"]["code"], "odoo_preview_lifecycle_unavailable"
+                    )
+                    apply_driver.assert_not_called()
+                    assert stored_refresh is not None
+                    self.assertNotEqual(stored_refresh.state, "completed")
+                    continue
                 self.assertEqual(response.status_code, 202)
                 self.assertEqual(response.json()["result"]["status"], "pass")
                 apply_driver.assert_called_once()

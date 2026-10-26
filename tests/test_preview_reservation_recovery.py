@@ -1106,6 +1106,52 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             )
         )
 
+    def test_unqualified_preservation_reference_preserves_original_before_reservation(self) -> None:
+        from control_plane.odoo_preview_apply_http import issue_odoo_preview_apply_plan
+
+        request = self.request.model_copy(deep=True)
+        request.apply.dry_run_plan.compose_ref = "retained-compose"
+        request.apply.dry_run_plan.operation = "destroy"
+        request.preserve_original_reservation_id = self.reservation.record_id
+        issued = issue_odoo_preview_apply_plan(
+            result=_issued_plan(request), plan_id="new-existing-preview-plan"
+        )
+        assert issued.plan_provenance is not None
+        execute = Mock(return_value={"status": "fail", "provider_effect_attempted": True})
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=request,
+            issued_plan=issued,
+            reservation_scope=self.reservation.scope,
+            idempotency_key=issued.plan_provenance.plan_id,
+            request_fingerprint="new-existing-preview",
+            trace_id="new-existing-preview",
+            execute_apply=execute,
+            supersession_is_quiescent=Mock(return_value=True),
+        )
+        original = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                return_value="retained-compose",
+            ),
+            self.assertRaisesRegex(ValueError, "preservation does not match"),
+        ):
+            operation.run(self.store)
+        execute.assert_not_called()
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.reservation.record_id), original
+        )
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=operation.reservation_scope,
+                route_path=operation.route_path,
+                idempotency_key=operation.idempotency_key,
+            )
+        )
+
     def test_guarded_supersession_retains_both_intents_and_refuses_stale_or_active_proof(
         self,
     ) -> None:

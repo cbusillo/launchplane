@@ -299,6 +299,10 @@ reservation. The webhook request never waits on a deploy.
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
+  - An existing Odoo compose without its Launchplane preview record cannot
+    refresh through a new reservation. It returns
+    `odoo_preview_lifecycle_unavailable` before superseding the original.
+    Observation and recovery of the original key remain available.
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.

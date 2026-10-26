@@ -128,6 +128,47 @@ def _issued_plan(apply_request: OdooPreviewApplyEnvelope) -> OdooPreviewApplyInp
 
 
 class RunOdooPreviewApplyOperationTests(unittest.TestCase):
+    def test_preservation_reference_survives_plan_validation_and_retained_intent(self) -> None:
+        original = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        original.apply.dry_run_plan.operation = "destroy"
+        reference = build_launchplane_mutation_reservation_id(
+            scope="original-preview", route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key="donor"
+        )
+        request = OdooPreviewApplyEnvelope.model_validate(
+            {**original.model_dump(mode="json"), "preserve_original_reservation_id": reference}
+        )
+        issued = _issued_plan(request)
+        assert issued.plan_provenance is not None
+        validated = validate_odoo_preview_issued_plan(
+            plan_id=issued.plan_provenance.plan_id, issued_plan=issued, request=request
+        )
+        from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
+
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=Path("."),
+            record_store=Mock(),
+            profile=LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload()),
+            apply_request=validated,
+            issued_plan=issued,
+            reservation_scope=_WORKER_SCOPE,
+            idempotency_key=issued.plan_provenance.plan_id,
+            request_fingerprint="preserving-destroy",
+            trace_id="preserving-destroy",
+        )
+        restored = OdooPreviewApplyEnvelope.model_validate(
+            operation.adapter.original_intent()["apply_request"]
+        )
+        self.assertEqual(restored.preserve_original_reservation_id, reference)
+
+    def test_preservation_reference_cannot_authorize_a_refresh(self) -> None:
+        reference = build_launchplane_mutation_reservation_id(
+            scope="original-preview", route_path=ODOO_PREVIEW_APPLY_ROUTE, idempotency_key="donor"
+        )
+        with self.assertRaises(ValueError):
+            OdooPreviewApplyEnvelope.model_validate(
+                {**_refresh_payload(), "preserve_original_reservation_id": reference}
+            )
+
     def test_qualified_snapshot_preview_refresh_needs_no_first_snapshot(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
         profile.preview.clean_testing_snapshot = True
