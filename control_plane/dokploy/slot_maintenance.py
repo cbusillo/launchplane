@@ -71,13 +71,6 @@ def run_planned_slot_maintenance(
     writers: ContainerSlotWriters | None = None,
     maintenance_checkpoint: Callable[[OdooMaintenanceReceipt], None] | None = None,
 ) -> OdooMaintenanceReceipt:
-    """Read back before repeating; a running/failed attempt remains uncertain.
-
-    The existing SQL-only devkit boundary is the only credential policy. The
-    full planned entrypoint verifies the baked declaration/graph, commits that
-    boundary and creates its registry once. Never invoke the legacy install
-    pass, infer success from generic schedule text, or start candidate web here.
-    """
     if plan.website_settings is not None and (configure_startup is None or writers is None):
         raise ValueError("website settings require the bound startup configuration capability")
     if not runner_container:
@@ -94,7 +87,7 @@ def run_planned_slot_maintenance(
     # This script does not import Odoo or load a registry. It owns a durable
     # attempt marker before the child, and exposes only its receipt/guard ID.
     program = """
-import json, os, subprocess, sys
+import hashlib, json, os, subprocess, sys
 from pathlib import Path
 request = json.loads(sys.stdin.read())
 directory = Path(request['directory'])
@@ -113,8 +106,19 @@ previous_boundary=boundary()
 plan_file, receipt, attempt = (directory / name for name in ('plan.json', 'receipt.json', 'attempt.json'))
 attestation=directory/'boundary.json'
 payload = json.dumps(request['payload'], sort_keys=True, separators=(',', ':'))
+digest = hashlib.sha256(payload.encode()).hexdigest()
 if plan_file.exists() and plan_file.read_text() != payload:
     raise RuntimeError('immutable maintenance plan changed')
+if attempt.exists():
+    try:
+        outcome = json.loads(attempt.read_text())
+    except json.JSONDecodeError:
+        outcome = None
+    if isinstance(outcome, dict) and outcome.get('state') == 'failed':
+        if outcome.get('plan_sha256') != digest:
+            raise RuntimeError('maintenance failure differs from the immutable plan')
+        print(json.dumps(outcome, sort_keys=True))
+        sys.exit(0)
 if not attempt.exists():
     # Reuse the image's registry-free resolver against an independent SQL
     # inventory. Static roots may include optional uninstalled addons; exact
@@ -142,7 +146,19 @@ if not attempt.exists():
         stream.write(result.stdout + result.stderr)
         stream.flush(); os.fsync(stream.fileno())
     if result.returncode:
-        raise RuntimeError('full planned maintenance failed')
+        outcome = {'state': 'failed', 'plan_sha256': digest}
+        pending = attempt.with_suffix('.pending')
+        with os.fdopen(os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
+            json.dump(outcome, stream, sort_keys=True)
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(pending, attempt)
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        print(json.dumps(outcome, sort_keys=True))
+        sys.exit(0)
     committed=boundary()
     if not committed or committed==previous_boundary:
         raise RuntimeError('passing maintenance has no new committed boundary witness')
@@ -166,6 +182,10 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
         ("docker", "exec", "-i", runner_container, python, "-c", program, workflow), request
     )
     response = json.loads(output)
+    if response.get("state") == "failed":
+        if response.get("plan_sha256") != digest:
+            raise RuntimeError("maintenance failure differs from the immutable plan")
+        raise ValueError("full planned maintenance failed")
     result = response["receipt"]
     if (
         result.get("state") != "passed"

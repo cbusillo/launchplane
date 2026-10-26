@@ -491,6 +491,19 @@ live lane. Parent #3268 still waits for its exact accepted real-release event.
 
 ### Source recovery and retention
 
+Canonical maintenance seals a failed outcome in its existing exclusive attempt
+marker only after the child exits unsuccessfully and its log is durable. The
+outcome binds the immutable plan digest. Reading that outcome ends automatic
+reclaiming without starting another child. An interrupted command, partial log,
+legacy started marker or missing boundary witness remains UNKNOWN.
+
+Original inverse recovery deliberately continues under its original guards,
+with the persisted reconciliation delay, after the forward budget is exhausted.
+Before activation, #4844 must inject a persistent inverse failure and its repair,
+prove recovery can finish beyond that budget, and prove replay cannot start
+another upgrade, choose a new target or owner, or starve other lanes. This source
+choice preserves cleanup when the forward attempt budget has been spent.
+
 Before a pause, guarded candidate preparation acquires the pinned immutable restore
 image and checks its native tools and PostgreSQL archive major version. Provider discovery
 only binds and reads. Executor preflight inspects the exact web container's

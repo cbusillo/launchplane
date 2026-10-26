@@ -829,6 +829,7 @@ def run_odoo_stable_operation_worker_once(
             lease_owner=normalized_lease_owner,
             lease_expires_at=claim_expires_at,
             claimed_at=claim_started_at,
+            max_attempts=max_attempts,
         )
         if promotion_operation is not None:
             terminal_write_committed = _execute_prod_promotion_operation(
@@ -857,6 +858,7 @@ def run_odoo_stable_operation_worker_once(
             lease_owner=normalized_lease_owner,
             lease_expires_at=claim_expires_at,
             claimed_at=claim_started_at,
+            max_attempts=max_attempts,
         )
         if rollback_operation is not None:
             terminal_write_committed = _execute_prod_rollback_operation(

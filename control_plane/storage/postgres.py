@@ -17401,7 +17401,15 @@ class PostgresRecordStore(HumanSessionStore):
                     else:
                         from control_plane.odoo_cutover_recovery import rollback_operation_cutover
 
-                        cutover = rollback_operation_cutover(self, record)
+                        try:
+                            cutover = rollback_operation_cutover(self, record)
+                        except (ValueError, FileNotFoundError) as error:
+                            logging.getLogger(__name__).warning(
+                                "Skipping invalid cutover rollback provenance for operation %r (%s).",
+                                record.operation_id[:160],
+                                type(error).__name__,
+                            )
+                            continue
                         if cutover is None or cutover.step not in {
                             "complete",
                             "rolling_back",

@@ -7,6 +7,8 @@ from tempfile import TemporaryDirectory
 from contextlib import redirect_stdout
 from types import SimpleNamespace
 import io
+import base64
+import json
 import sys
 import subprocess
 import unittest
@@ -17,6 +19,7 @@ from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooCutoverRec
 from control_plane.contracts.prepared_public_site import PublicPauseRecord, WriterObservation
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.dokploy.slot_maintenance import maintenance_payload, payload_digest
+from control_plane.dokploy.cutover_transport import CutoverHostTransport
 from control_plane.odoo_cutover_plan import cutover_identity
 from control_plane.odoo_cutover_recovery import startup_recovery_pause, publication_recovery_pause
 from control_plane.prepared_public_site import prepare_public_site
@@ -41,7 +44,7 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                 ("database.uuid", plan.new.runtime_identity.database_uuid),
                 ("odoo_devkit.credential_boundary_commit", "original"),
             ]
-            cursor.fetchall.side_effect = [boundary, [("base", "installed")], boundary]
+            cursor.fetchall.return_value = boundary
             connection = MagicMock()
             connection.__enter__.return_value = connection
             connection.cursor.return_value = cursor
@@ -78,18 +81,79 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                     patch("subprocess.run", child),
                     redirect_stdout(output),
                 ):
-                    exec(program, {})
+                    try:
+                        exec(program, {})
+                    except SystemExit as error:
+                        if error.code not in (None, 0):
+                            raise
                 return output.getvalue()
 
-            with patch(
-                "control_plane.dokploy.slot_maintenance.slot_run_directory",
-                return_value=str(Path(temporary) / "state"),
+            def remote(**kwargs: object) -> None:
+                payload = kwargs["payload"]
+                assert isinstance(payload, dict)
+                receive = kwargs["receive"]
+                assert callable(receive)
+
+                def command(
+                    argv: tuple[str, ...], **arguments: object
+                ) -> subprocess.CompletedProcess[str]:
+                    try:
+                        stdin = arguments["input"]
+                        assert stdin is None or isinstance(stdin, str)
+                        result = execute(argv, stdin)
+                    except Exception:
+                        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+                    return subprocess.CompletedProcess(argv, 0, stdout=result, stderr="")
+
+                output = io.StringIO()
+                with (
+                    patch(
+                        "sys.argv",
+                        [
+                            "python",
+                            base64.b64encode(json.dumps(payload).encode()).decode(),
+                            "frame:",
+                        ],
+                    ),
+                    patch("subprocess.run", side_effect=command),
+                    redirect_stdout(output),
+                ):
+                    exec(str(kwargs["program"]), {})
+                for line in output.getvalue().splitlines():
+                    receive(json.loads(line.removeprefix("frame:")))
+
+            transport = CutoverHostTransport(
+                host="https://provider.invalid", token="inert", server_id="fixture", guard=Mock()
+            )
+            directory = Path(temporary) / "state"
+            with (
+                patch(
+                    "control_plane.dokploy.slot_maintenance.slot_run_directory",
+                    return_value=str(directory),
+                ),
+                patch("control_plane.dokploy.cutover_transport._read_remote", side_effect=remote),
             ):
                 for _ in range(2):
-                    with self.assertRaises(RuntimeError):
+                    with self.assertRaisesRegex(ValueError, "maintenance failed"):
                         run_planned_slot_maintenance(
-                            plan, runner_container="fixture", execute=execute
+                            plan, runner_container="fixture", execute=transport
                         )
+                for incomplete in (
+                    "started",
+                    json.dumps({"state": "failed", "plan_sha256": "foreign"}),
+                ):
+                    (directory / "attempt.json").write_text(incomplete)
+                    (directory / "run.log").write_text("partial")
+                    with self.subTest(incomplete=incomplete), self.assertRaises(RuntimeError):
+                        run_planned_slot_maintenance(
+                            plan, runner_container="fixture", execute=transport
+                        )
+                (directory / "attempt.json").write_text("started")
+                (directory / "receipt.json").write_text(json.dumps({"state": "passed"}))
+                with self.assertRaises(RuntimeError):
+                    run_planned_slot_maintenance(
+                        plan, runner_container="fixture", execute=transport
+                    )
             child.assert_called_once()
 
     def test_only_original_held_operation_can_reclaim_proven_interrupted_startup(self) -> None:
