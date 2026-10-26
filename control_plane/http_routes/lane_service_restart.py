@@ -232,7 +232,7 @@ def register_service_restart_route(
                 refuse(
                     "restart_refused",
                     "Restart identity is ambiguous, unsupported, or the lane is held by a release.",
-                    reason="restart_identity_unavailable",
+                    reason="restart_identity_ambiguous",
                 )
                 raise AssertionError
             if payload.mode == "dry-run":

@@ -30156,14 +30156,24 @@ def create_launchplane_fastapi_app(
                 evaluation=authz_evaluation,
                 policy_provenance=authz_policy_provenance,
             )
+        error_detail = LaunchplaneErrorDetail(code=code, message=message)
+        if reason is not None:
+            try:
+                error_detail = LaunchplaneErrorDetail.model_validate(
+                    {"code": code, "message": message, "reason": reason}
+                )
+            except ValidationError:
+                logging.warning("Invalid optional refusal reason; trace_id=%s", trace_id)
+        error_details = None
+        if details is not None:
+            try:
+                error_details = LaunchplaneErrorDetails.model_validate(details)
+            except ValidationError:
+                logging.warning("Invalid optional refusal details; trace_id=%s", trace_id)
         payload = LaunchplaneErrorResponse(
             trace_id=trace_id,
-            error=LaunchplaneErrorDetail(
-                code=code, message=message, reason=reason if isinstance(reason, str) else None
-            ),
-            details=LaunchplaneErrorDetails.model_validate(details)
-            if isinstance(details, dict)
-            else None,
+            error=error_detail,
+            details=error_details,
             records=records if isinstance(records, dict) else None,
             authz=authz if isinstance(authz, dict) else None,
         )
