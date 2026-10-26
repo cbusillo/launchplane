@@ -113,7 +113,6 @@ class TestingAddressAdapter:
             with self.store.testing_verification_lane_guard(
                 product=self.plan.product,
                 context=self.plan.context,
-                retained_retirement_operation_id=self.plan.retirement_operation_id,
             ) as checkpoint:
                 self.canonical_lane_checkpoint = checkpoint
                 try:
@@ -255,13 +254,22 @@ class TestingAddressAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        with self.canonical_lane():
-            return self.apply_held(provider_operation_key, lease)
+        try:
+            with self.canonical_lane():
+                return self.apply_held(provider_operation_key, lease)
+        except (ValueError, FileNotFoundError) as error:
+            assert isinstance(lease, ProviderEvidenceLease)
+            if not lease.evidence_reservation().provider_effect_started_at:
+                raise ProviderMutationRejectedError(error) from error
+            raise
 
     def apply_held(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        from control_plane.testing_address_settings import apply_canonical_settings
+        from control_plane.testing_address_settings import (
+            apply_canonical_settings,
+            preflight_canonical_settings,
+        )
 
         with self.retained_exclusion():
             if self.cancel:
@@ -273,6 +281,7 @@ class TestingAddressAdapter:
                         "The original address operation has another publication receipt."
                     )
             else:
+                preflight_canonical_settings(self, lease)
                 self.apply_original(lease)
             apply_canonical_settings(self, lease)
             if self.plan.canonical_settings is not None:

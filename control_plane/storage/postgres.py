@@ -13466,7 +13466,7 @@ class PostgresRecordStore(HumanSessionStore):
 
     @contextmanager
     def testing_verification_lane_guard(
-        self, *, product: str, context: str, retained_retirement_operation_id: str = ""
+        self, *, product: str, context: str
     ) -> Iterator[Callable[[], None]]:
         """Reserve the existing lane lock and prove its connection stays held."""
         with self._session_factory() as hold_session:
@@ -13485,12 +13485,6 @@ class PostgresRecordStore(HumanSessionStore):
                     context=context,
                     instance="testing",
                     include_synchronous=False,
-                    exclude_operation=OdooStableLaneOperationOwner(
-                        operation_kind="target_replacement",
-                        operation_id=retained_retirement_operation_id,
-                    )
-                    if retained_retirement_operation_id
-                    else None,
                 )
                 check_session.rollback()
             if owner is not None:

@@ -39,7 +39,7 @@ CANONICAL_ADDRESS_HOST_LIBRARY = (
 def canonical_address_settings(spec, containers):
     settings=spec['canonical_settings']
     mode=settings['mode']
-    if mode not in {'inspect','gate','readback'} or mode=='gate' and spec.get('inspection_only'):
+    if mode not in {'inspect','gate','readback','observe'} or mode=='gate' and spec.get('inspection_only'):
         raise RuntimeError('Unsupported canonical settings mode')
     for service in ('web','database','script-runner'):
         if containers[service][1].get('State',{}).get('Status')!='running':
@@ -58,7 +58,7 @@ def canonical_address_settings(spec, containers):
         if identity!=settings['runtime_identity'] or environment.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64')!=settings['payload']:
             raise CopyReadbackRefused(ReadbackPredicate.SETTINGS)
     runner=containers['script-runner'][0]
-    if mode!='gate':
+    if mode in {'inspect','readback'}:
         credentials=docker('exec','-i',containers['web'][0],'python3','-c',
             base64.b64decode(spec['credential_program']).decode(),stdin=json.dumps(spec).encode()).decode().splitlines()
         if credentials!=['candidate_credentials_verified=true']:
@@ -75,13 +75,14 @@ def canonical_address_settings(spec, containers):
     if gate not in {'True','False'}:
         raise RuntimeError('Canonical web gate observation is unavailable')
     data['canonical_gate_released']=gate=='True'
-    if mode=='gate':
-        if data['database_values_sha256']!=settings['database_values_sha256'] and data['canonical_settings_verified'] is not True:
-            raise CopyReadbackRefused(ReadbackPredicate.SETTINGS)
+    if mode in {'inspect','gate'}:
         readback=docker('exec','-i',runner,'python3','-',spec['database_name'],spec['readback_spec'],'dry-run',
             stdin=spec['readback_program'].encode()).decode().splitlines()
         if 'integration_readback_ok=true' not in readback or 'integration_readback_ok=false' in readback:
             raise CopyReadbackRefused(ReadbackPredicate.INTEGRATIONS)
+    if mode=='gate':
+        if data['database_values_sha256']!=settings['database_values_sha256'] and data['canonical_settings_verified'] is not True:
+            raise CopyReadbackRefused(ReadbackPredicate.SETTINGS)
         docker('exec','-i',runner,'python3','-c',
             "import hashlib,os,sys;from pathlib import Path;p=Path(sys.argv[1]);"
             "assert p.is_absolute() and not p.is_symlink();"

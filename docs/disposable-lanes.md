@@ -1420,14 +1420,17 @@ uses the native copy's storage/network inspection and a read-only database probe
 Known staff, needed-copy, use and sharing protections remain refusals. Original
 retired executors stay excluded; their records and UNKNOWN fences never change.
 The synchronous testing lane reservation also excludes current maintenance,
-isolation and deployments. Only the plan's archived retirement operation is
-excluded from that active-operation check, under its retained executor lock and
-unchanged custody proof.
+isolation and deployments. Unrelated active or UNKNOWN operations remain fences.
 
 After the canonical metadata commit, the same address operation runs three
 durable phases: update that target's payload, recreate its current immutable
 artifact, and release its payload-bound web gate after integration readback.
-The existing native copy lock covers the gate writer. It never invokes module
+The existing native copy lock covers the gate writer and its read-only observer.
+That observer can prove an absent gate without requiring web HTTP readiness;
+web may correctly be waiting for that gate. Positive absence permits the same
+convergent gate write under its original key. An incomplete observation remains
+UNKNOWN. Integration qualification runs during planning and again before route
+or environment effects, as well as at the gate. The operation never invokes module
 updates, data restoration, user normalization or API-key provisioning. Before
 recreating, the existing private readiness probe verifies current local
 credentials without a login or credential write. No secret or other provider
@@ -1439,7 +1442,10 @@ settings phase.
 `canonical_settings_verified` requires an independent read of the current
 website domain, `web.base.url` and its freeze value, the matching web gate and
 both public HTTPS runtime identities. A released gate alone does not prove
-that startup applied the settings. Editing override intent resets its old
+that startup applied the settings. Final apply waits within a bounded window for
+fresh startup and database readback; timeout retains the original continuation
+without redeploying. Readback proves the reviewed deployment at that time; a
+later legitimate deployment needs its own current verification. Editing override intent resets its old
 apply evidence; the canonical result does not certify unrelated pending intent.
 Historical saved plans omit this settings step and retain their original digest
 and behavior. They never acquire an unreviewed write. The operation does not

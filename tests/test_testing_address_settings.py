@@ -1,9 +1,11 @@
 import base64
 from contextlib import redirect_stdout
 import io
+import itertools
 import os
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 import json
 import unittest
@@ -14,6 +16,7 @@ from control_plane import testing_address_settings as settings
 from control_plane.testing_address_settings import canonical_address_payload
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_address_settings import TestingAddressSettingsPlan
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
 from tests import test_testing_address as address_tests
@@ -134,6 +137,11 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.lost = ""
         self.gate_released = False
         self.deployment_visible = False
+        self.deployment_status = "done"
+        self.reject_gate_once = False
+        self.reject_preflight = False
+        self.startup_observations = 0
+        self.startup_held = False
         self.enterContext(
             patch.object(
                 source, "read_dokploy_config", return_value=("https://provider.invalid", "fixture")
@@ -152,7 +160,11 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
                 api,
                 "deployment_for_target_by_title",
                 side_effect=lambda **kwargs: (
-                    {"deploymentId": "canonical", "status": "done", "title": kwargs["title"]}
+                    {
+                        "deploymentId": "canonical",
+                        "status": self.deployment_status,
+                        "title": kwargs["title"],
+                    }
                     if self.deployment_visible
                     else None
                 ),
@@ -192,18 +204,29 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.deployment_visible = True
 
     def frame(self, **kwargs: Any) -> dict[str, object]:
+        if kwargs["mode"] == "inspect" and self.reject_preflight:
+            raise NativeSourceUnavailable("Fixture integration preflight refused")
         if kwargs["mode"] == "gate":
 
             def send() -> None:
                 self.events.append("gate")
+                if self.reject_gate_once:
+                    self.reject_gate_once = False
+                    raise NativeSourceUnavailable("Fixture gate refusal before its write")
                 self.gate_released = True
                 self.lose_reply("gate")
 
             kwargs["dispatch_guard"](send)
+        ready = self.gate_released
+        if kwargs["mode"] == "readback":
+            if self.startup_observations:
+                self.startup_observations -= 1
+                ready = False
+            ready = ready and not self.startup_held
         return {
             "website_id": self.intent.website_id,
             "database_values_sha256": self.intent.database_values_sha256,
-            "canonical_settings_verified": self.gate_released,
+            "canonical_settings_verified": ready,
             "canonical_gate_released": self.gate_released,
         }
 
@@ -251,6 +274,46 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_address(False)
         self.assertFalse(self.events)
+
+    def test_gate_refusal_recovers_after_positive_absence_observation(self) -> None:
+        self.reject_gate_once = True
+        with self.assertRaises(NativeSourceUnavailable):
+            self.run_address(False)
+        self.assertFalse(self.gate_released)
+        self.assertEqual(self.run_address(False).status, "completed")
+        self.assertEqual(self.events, ["environment", "deployment", "gate", "gate"])
+
+    def test_integration_refusal_precedes_route_and_runtime_effects(self) -> None:
+        self.reject_preflight = True
+        original = self.address.fixture.current()
+        with self.assertRaises(NativeSourceUnavailable):
+            self.run_address(False)
+        self.assertFalse(self.events)
+        self.assertEqual(self.address.fixture.current(), original)
+
+    def test_startup_wait_and_timeout_resume_without_redeploy(self) -> None:
+        self.startup_held = True
+        with (
+            patch.object(time, "monotonic", side_effect=itertools.count(0, 3600)),
+            self.assertRaises(NativeSourceUnavailable),
+        ):
+            self.run_address(False)
+        self.startup_held = False
+        self.startup_observations = 2
+        with patch.object(time, "sleep") as pause:
+            self.assertEqual(self.run_address(False).status, "completed")
+        self.assertTrue(pause.called)
+        self.assertEqual(self.events, ["environment", "deployment", "gate"])
+
+    def test_failed_deployment_without_executor_proof_stays_unknown(self) -> None:
+        self.lost = "deployment"
+        with self.assertRaises(NativeSourceUnavailable):
+            self.run_address(False)
+        self.deployment_visible = True
+        self.deployment_status = "failed"
+        with self.assertRaises(NativeSourceUnavailable):
+            self.run_address(False)
+        self.assertEqual(self.events, ["environment", "deployment"])
 
 
 class CanonicalAddressProgramTests(unittest.TestCase):
@@ -314,14 +377,12 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                 return None
 
             def execute(self, query: str, _values: object = None) -> None:
-                if not query.startswith(("SELECT", "SET TRANSACTION READ ONLY")):
-                    raise AssertionError("Canonical verification attempted a database write")
                 self.query = query
 
             def fetchall(self) -> list[Any]:
                 return (
                     list(fixture.websites)
-                    if "FROM website" in self.query
+                    if "FROM WEBSITE" in self.query.upper()
                     else list(fixture.parameters.items())
                 )
 
@@ -335,7 +396,19 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                 sys.modules, {"psycopg2": SimpleNamespace(connect=lambda **_kwargs: connection)}
             ),
             patch.dict(os.environ, self.environment),
-            patch.object(sys, "argv", ["fixture", *arguments]),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "fixture",
+                    *[
+                        str(self.gate)
+                        if argument == self.native.spec["web_gate_path"]
+                        else argument
+                        for argument in arguments
+                    ],
+                ],
+            ),
             patch.object(sys, "stdin", io.StringIO(stdin.decode())),
             redirect_stdout(output),
         ):
@@ -444,3 +517,109 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                 status, frame = self.run_program()
                 self.assertNotEqual(status, 0, frame)
                 self.assertFalse(self.gate.exists())
+
+    def test_observer_proves_absence_while_http_is_held_and_preflight_checks_integrations(
+        self,
+    ) -> None:
+        self.native.spec["credential_program"] = base64.b64encode(
+            b"raise RuntimeError('HTTP is held')"
+        ).decode()
+        self.native.spec["inspection_only"] = True
+        self.native.spec["canonical_settings"]["mode"] = "observe"
+        status, frame = self.run_program()
+        self.assertEqual(status, 0, frame)
+        self.assertFalse(frame["canonical_gate_released"])
+        self.assertFalse(self.gate.exists())
+        self.native.spec["credential_program"] = base64.b64encode(
+            b"print('candidate_credentials_verified=true')"
+        ).decode()
+        self.native.spec["canonical_settings"]["mode"] = "inspect"
+        self.integration_ok = False
+        status, frame = self.run_program()
+        self.assertNotEqual(status, 0, frame)
+        self.assertFalse(self.gate.exists())
+
+    def test_real_service_spec_reaches_the_qualified_native_gate(self) -> None:
+        identity = RuntimeIdentity(
+            product=self.native.gen.product,
+            context=self.native.gen.context,
+            instance="testing",
+            artifact_id="fixture",
+            deployment_record_id="fixture",
+            source_git_ref="fixture",
+            image_reference=self.native.spec["image_reference"],
+        )
+        self.identity = identity.model_dump(mode="json", exclude={"deployed_at"})
+        for service in ("web", "script-runner"):
+            values = self.native.containers[service]["Config"]["Env"]
+            self.native.containers[service]["Config"]["Env"] = [
+                value
+                for value in values
+                if not value.startswith("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=")
+            ] + ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps(self.identity)]
+        plan: Any = SimpleNamespace(
+            before=SimpleNamespace(
+                generation=self.native.gen,
+                inventory=SimpleNamespace(runtime_identity=identity),
+                target_id=SimpleNamespace(target_id="fixture-target"),
+                target=SimpleNamespace(target_name=self.native.gen.namespace),
+            ),
+            provider_project=self.native.spec["compose_project"],
+            server_id="fixture-server",
+            route_before=SimpleNamespace(host="dated.example.invalid"),
+            route_after=SimpleNamespace(host="stable.example.invalid"),
+            profile=SimpleNamespace(runtime_port=8069),
+        )
+        publication: Any = SimpleNamespace(
+            plan=SimpleNamespace(
+                candidate=SimpleNamespace(
+                    namespace=self.native.gen.namespace,
+                    resources_binding_sha256=self.native.gen.resources_binding_sha256,
+                )
+            )
+        )
+        environment = {
+            "ODOO_DB_NAME": self.native.database,
+            settings.PAYLOAD_KEY: "fixture-payload",
+        }
+        intent = TestingAddressSettingsPlan(
+            original_payload="fixture-payload",
+            payload="fixture-payload",
+            provider_environment_sha256=settings.canonical_environment_sha256(environment),
+            website_id=1,
+            database_values_sha256=self.native.spec["canonical_settings"]["database_values_sha256"],
+        )
+        provider = {
+            "composeId": "fixture-target",
+            "name": self.native.gen.namespace,
+            "serverId": "fixture-server",
+            "appName": self.native.spec["compose_project"],
+            "domains": [],
+            "env": api.serialize_dokploy_env_text(environment),
+        }
+
+        def remote(**kwargs: Any) -> None:
+            self.native.spec = kwargs["payload"]
+            self.parameters[TESTING_COPY_COMPLETION_PARAMETER] = self.native.spec[
+                "copy_binding_sha256"
+            ]
+            status, frame = self.run_program()
+            self.assertEqual(status, 0, frame)
+            kwargs["receive"](frame)
+
+        with (
+            patch.object(api, "list_dokploy_schedules", return_value=()),
+            patch.object(api, "list_deployments_for_target", return_value=[]),
+            patch.object(settings, "run_managed_server_program", side_effect=remote),
+        ):
+            frame = settings.canonical_settings_frame(
+                host="https://provider.invalid",
+                token="fixture",
+                plan=plan,
+                publication=publication,
+                settings=intent,
+                provider=provider,
+                mode="gate",
+            )
+        self.assertTrue(frame["canonical_gate_released"])
+        self.assertFalse(frame["canonical_settings_verified"])

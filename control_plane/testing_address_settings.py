@@ -1,6 +1,7 @@
 import base64
 from collections.abc import Callable
 import json
+import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -15,10 +16,8 @@ from control_plane.dokploy.native_copy_stream import (
     NativeSourceUnavailable,
 )
 from control_plane.integration_readback import (
-    INTEGRATION_FAMILIES,
     INTEGRATION_READBACK_PASSED_PATH,
     INTEGRATION_READBACK_PROGRAM,
-    IntegrationReadbackPolicy,
 )
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_RESTORE_HOST_PROGRAM,
@@ -32,7 +31,10 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
     run_durable_provider_operation,
 )
-from control_plane.testing_candidate_probe import CANDIDATE_CONTAINER_PROBE
+from control_plane.testing_candidate_probe import (
+    CANDIDATE_CONTAINER_PROBE,
+    sanitized_testing_readback_policy,
+)
 
 if TYPE_CHECKING:
     from control_plane.testing_address import TestingAddressAdapter
@@ -83,6 +85,59 @@ def canonical_environment_sha256(environment: dict[str, str]) -> str:
     )
 
 
+def require_canonical_provider(
+    plan: TestingAddressPlan, settings: TestingAddressSettingsPlan, provider: api.JsonObject
+) -> None:
+    environment = api.parse_dokploy_env_text(str(provider.get("env") or ""))
+    if (
+        (
+            provider.get("composeId"),
+            provider.get("name"),
+            provider.get("serverId"),
+            provider.get("appName"),
+            provider.get("domains"),
+        )
+        != (
+            plan.before.target_id.target_id,
+            plan.before.target.target_name,
+            plan.server_id,
+            plan.provider_project,
+            [],
+        )
+        or canonical_environment_sha256(environment) != settings.provider_environment_sha256
+        or environment.get(PAYLOAD_KEY) not in {settings.original_payload, settings.payload}
+    ):
+        raise ValueError("Canonical settings cannot change another target or environment.")
+
+
+def require_canonical_workflows(host: str, token: str, plan: TestingAddressPlan) -> None:
+    schedules = api.list_dokploy_schedules(
+        host=host,
+        token=token,
+        target_id=plan.before.target_id.target_id,
+        schedule_type="compose",
+    )
+    for item in schedules:
+        history = item.get("deployments")
+        if (
+            item.get("enabled") is not False
+            or api.parse_deployment_history(history).state == "unknown"
+        ):
+            raise ValueError("Canonical settings require complete disabled target workflows.")
+        assert isinstance(history, list)
+        if any(not isinstance(row, dict) or not api.deployment_is_terminal(row) for row in history):
+            raise ValueError("Canonical settings require idle target workflows.")
+    deployments = api.list_deployments_for_target(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=plan.before.target_id.target_id,
+        require_complete=True,
+    )
+    if any(not api.deployment_is_terminal(item) for item in deployments):
+        raise ValueError("Canonical settings require settled target deployments.")
+
+
 def canonical_settings_frame(
     *,
     host: str,
@@ -91,12 +146,15 @@ def canonical_settings_frame(
     publication: TestingPublicationRecord,
     settings: TestingAddressSettingsPlan | None,
     provider: api.JsonObject,
-    mode: Literal["inspect", "gate", "readback"],
+    mode: Literal["inspect", "gate", "readback", "observe"],
     dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
 ) -> dict[str, Any]:
     identity = plan.before.inventory.runtime_identity if plan.before.inventory else None
     if identity is None:
         raise ValueError("Canonical settings require the current testing identity.")
+    require_canonical_workflows(host, token, plan)
+    if settings is not None:
+        require_canonical_provider(plan, settings, provider)
     candidate = publication.plan.candidate
     environment = api.parse_dokploy_env_text(str(provider.get("env") or ""))
     payload = (
@@ -132,11 +190,7 @@ def canonical_settings_frame(
         "data_workflow_lock_path": post_deploy.DEFAULT_DATA_WORKFLOW_LOCK_PATH,
         "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
         "readback_program": INTEGRATION_READBACK_PROGRAM,
-        "readback_spec": IntegrationReadbackPolicy(
-            families=INTEGRATION_FAMILIES,
-            allowed_integrations=(),
-            protected_shopify_store_handles=(),
-        ).encoded_spec(),
+        "readback_spec": sanitized_testing_readback_policy().encoded_spec(),
         "canonical_settings": {
             "mode": mode,
             "payload": payload,
@@ -271,60 +325,13 @@ class CanonicalAddressEffect:
             target_type="compose",
             target_id=self.plan.before.target_id.target_id,
         )
-        environment = api.parse_dokploy_env_text(str(provider.get("env") or ""))
-        if (
-            (
-                provider.get("composeId"),
-                provider.get("name"),
-                provider.get("serverId"),
-                provider.get("appName"),
-                provider.get("domains"),
-            )
-            != (
-                self.plan.before.target_id.target_id,
-                self.plan.before.target.target_name,
-                self.plan.server_id,
-                self.plan.provider_project,
-                [],
-            )
-            or canonical_environment_sha256(environment)
-            != self.settings.provider_environment_sha256
-            or environment.get(PAYLOAD_KEY)
-            not in {self.settings.original_payload, self.settings.payload}
-        ):
-            raise ValueError("Canonical settings cannot change another target or environment.")
-        schedules = api.list_dokploy_schedules(
-            host=host,
-            token=token,
-            target_id=self.plan.before.target_id.target_id,
-            schedule_type="compose",
-        )
-        for item in schedules:
-            history = item.get("deployments")
-            if (
-                item.get("enabled") is not False
-                or api.parse_deployment_history(history).state == "unknown"
-            ):
-                raise ValueError("Canonical settings require complete disabled target workflows.")
-            assert isinstance(history, list)
-            if any(
-                not isinstance(row, dict) or not api.deployment_is_terminal(row) for row in history
-            ):
-                raise ValueError("Canonical settings require idle target workflows.")
-        deployments = api.list_deployments_for_target(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=self.plan.before.target_id.target_id,
-            require_complete=True,
-        )
-        if any(not api.deployment_is_terminal(item) for item in deployments):
-            raise ValueError("Canonical settings require settled target deployments.")
+        require_canonical_provider(self.plan, self.settings, provider)
+        require_canonical_workflows(host, token, self.plan)
         return host, token, provider, publication
 
     def frame(
         self,
-        mode: Literal["inspect", "gate", "readback"],
+        mode: Literal["inspect", "gate", "readback", "observe"],
         *,
         dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
     ) -> dict[str, Any]:
@@ -368,12 +375,11 @@ class CanonicalAddressEffect:
             if deployment is not None and api.deployment_succeeded(deployment):
                 return ProviderObservation("present", 200, {"canonical_deployment_verified": True})
             return ProviderObservation("unknown")
-        frame = self.frame("readback")
-        if (
-            frame.get("canonical_settings_verified") is True
-            and frame.get("canonical_gate_released") is True
-        ):
+        frame = self.frame("observe")
+        if frame.get("canonical_gate_released") is True:
             return ProviderObservation("present", 200, {"canonical_gate_released": True})
+        if frame.get("canonical_gate_released") is False:
+            return ProviderObservation("absent", retry_safe=True, preserve_effect_checkpoint=True)
         return ProviderObservation("unknown")
 
     def apply(
@@ -439,6 +445,54 @@ class CanonicalAddressEffect:
         return ProviderMutationOutcome(200, {"canonical_gate_released": True})
 
 
+def preflight_canonical_settings(
+    adapter: TestingAddressAdapter, lease: ProviderOperationLease
+) -> None:
+    if adapter.plan.canonical_settings is None:
+        return
+    from control_plane.testing_address_storage import verify_testing_address_sources
+    from control_plane.testing_serving_copy import published_testing_copy
+
+    lease.assert_current()
+    adapter.canonical_lane_checkpoint()
+    verify_testing_address_sources(adapter.store, adapter.plan)
+    publication = published_testing_copy(
+        adapter.store, product=adapter.plan.product, context=adapter.plan.context
+    )
+    if (
+        publication is None
+        or canonical_json_sha256(publication.model_dump(mode="json"))
+        != adapter.plan.publication_sha256
+    ):
+        raise ValueError("Canonical preflight requires its original publication.")
+    host, token = source.read_dokploy_config(
+        control_plane_root=adapter.root, database_url=adapter.store.database_url
+    )
+    provider = api.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=adapter.plan.before.target_id.target_id,
+    )
+    frame = canonical_settings_frame(
+        host=host,
+        token=token,
+        plan=adapter.plan,
+        publication=publication,
+        settings=adapter.plan.canonical_settings,
+        provider=provider,
+        mode="inspect",
+    )
+    if (
+        frame.get("database_values_sha256")
+        != adapter.plan.canonical_settings.database_values_sha256
+    ):
+        raise ValueError("Canonical database values changed since review.")
+    lease.assert_current()
+    adapter.canonical_lane_checkpoint()
+    verify_testing_address_sources(adapter.store, adapter.plan)
+
+
 def apply_canonical_settings(adapter: TestingAddressAdapter, lease: ProviderOperationLease) -> None:
     if adapter.plan.canonical_settings is None:
         return
@@ -460,19 +514,32 @@ def apply_canonical_settings(adapter: TestingAddressAdapter, lease: ProviderOper
             raise NativeSourceUnavailable(
                 "Continue the original canonical settings phase with its original request and key."
             )
-    verify_canonical_settings(adapter, lease)
+    verify_canonical_settings(adapter, lease, wait_seconds=120)
 
 
 def verify_canonical_settings(
-    adapter: TestingAddressAdapter, lease: ProviderOperationLease | None = None
+    adapter: TestingAddressAdapter,
+    lease: ProviderOperationLease | None = None,
+    *,
+    wait_seconds: float = 0,
 ) -> None:
     if adapter.plan.canonical_settings is None:
         return
-    frame = CanonicalAddressEffect(adapter, lease, "gate").frame("readback")
-    if (
-        frame.get("canonical_settings_verified") is not True
-        or frame.get("canonical_gate_released") is not True
-    ):
-        raise NativeSourceUnavailable(
-            "The current Odoo canonical settings have not been independently verified."
-        )
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            frame = CanonicalAddressEffect(adapter, lease, "gate").frame("readback")
+            if (
+                frame.get("canonical_settings_verified") is True
+                and frame.get("canonical_gate_released") is True
+            ):
+                return
+        except NativeSourceUnavailable:
+            if time.monotonic() >= deadline:
+                raise
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise NativeSourceUnavailable(
+                "The current Odoo canonical settings have not been independently verified."
+            )
+        time.sleep(min(2, remaining))

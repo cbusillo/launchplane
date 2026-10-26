@@ -18,17 +18,19 @@ from control_plane.dokploy.native_copy_stream import _read_remote, NativeProgram
 from control_plane.dokploy.target_source_setup import require_empty_compose_source
 from control_plane.dokploy_target_setup_http import fetch_dokploy_compose_domains_for_target_setup
 from control_plane.integration_readback import (
-    INTEGRATION_FAMILIES,
     INTEGRATION_READBACK_PASSED_PATH,
     INTEGRATION_READBACK_PROGRAM,
-    IntegrationReadbackPolicy,
 )
 from control_plane.odoo_testing_native_source import prepare_native_testing_delivery
 from control_plane.odoo_testing_restore import generation_binding, TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.provider_operations import ProviderOperationLease
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_candidate_allocation import require_candidate_target_custody
-from control_plane.testing_candidate_probe import CANDIDATE_HOST_PROBE, CANDIDATE_CONTAINER_PROBE
+from control_plane.testing_candidate_probe import (
+    CANDIDATE_HOST_PROBE,
+    CANDIDATE_CONTAINER_PROBE,
+    sanitized_testing_readback_policy,
+)
 from control_plane.testing_candidate_runtime import TestingCandidateRuntimeInputs
 
 
@@ -84,11 +86,7 @@ def candidate_private_readiness(
         "witness_sql": "SELECT value FROM ir_config_parameter WHERE key='"
         + TESTING_COPY_COMPLETION_PARAMETER
         + "';\n",
-        "readback_spec": IntegrationReadbackPolicy(
-            families=INTEGRATION_FAMILIES,
-            allowed_integrations=(),
-            protected_shopify_store_handles=(),
-        ).encoded_spec(),
+        "readback_spec": sanitized_testing_readback_policy().encoded_spec(),
         "readback_program": base64.b64encode(INTEGRATION_READBACK_PROGRAM.encode()).decode(),
         "credential_program": base64.b64encode(CANDIDATE_CONTAINER_PROBE.encode()).decode(),
     }
