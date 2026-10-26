@@ -31103,14 +31103,24 @@ class PostgresRecordStore(HumanSessionStore):
         expected_route_binding_sha256: str = "",
         expected_provider_hold_snapshot: ProviderHoldLaneSnapshot | None = None,
     ) -> PublicIngressTransitionWriteResult:
+        from control_plane.discord_incident_summary import (
+            SUMMARY_AGGREGATE_TYPE,
+            build_discord_incident_summary_delivery,
+        )
+
         check_token = canonical_health_check_record_token(observation.check_name)
         with self._session_factory() as session:
             self._begin_serialized_write(session)
-            if expected_provider_hold_snapshot is not None:
-                if not self.database_url.startswith("sqlite"):
-                    from control_plane.service_deploy_drain import lock
+            if not self.database_url.startswith("sqlite") and (
+                expected_provider_hold_snapshot is not None
+                or any(
+                    value.aggregate_type == SUMMARY_AGGREGATE_TYPE for value in outbox_deliveries
+                )
+            ):
+                from control_plane.service_deploy_drain import lock
 
-                    lock(self, session)
+                lock(self, session)
+            if expected_provider_hold_snapshot is not None:
                 if not self._lock_odoo_stable_lane(
                     session,
                     product=observation.product,
@@ -31295,6 +31305,17 @@ class PostgresRecordStore(HumanSessionStore):
                 session.merge(observation_row)
                 session.commit()
                 return PublicIngressTransitionWriteResult(status="incident_changed")
+            enqueued_at = self._database_mutation_timestamp(session)
+            outbox_deliveries = tuple(
+                build_discord_incident_summary_delivery(
+                    policy_id=delivery.aggregate_id,
+                    destination_id=str(delivery.payload["destination_id"]),
+                    created_at=enqueued_at,
+                )
+                if delivery.aggregate_type == SUMMARY_AGGREGATE_TYPE
+                else delivery
+                for delivery in outbox_deliveries
+            )
             self._lock_outbox_dedupe_keys(
                 session,
                 dedupe_keys=tuple(delivery.dedupe_key for delivery in outbox_deliveries),

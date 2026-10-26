@@ -51,6 +51,13 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
         self.profile = base.model_copy(update={"lanes": (self.lane,)})
         self.store.write_product_profile_record(self.profile)
         self.now = datetime.now(timezone.utc)
+        self.enterContext(
+            patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: self.now.isoformat(),
+            )
+        )
         self.store.write_public_ingress_notification_policy_record(
             PublicIngressNotificationPolicyRecord(
                 policy_id="existing-alerts",

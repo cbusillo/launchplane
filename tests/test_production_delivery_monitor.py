@@ -68,6 +68,13 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.lane = self.profile.lanes[0]
         self.store.write_product_profile_record(self.profile)
         self.now = datetime.now(timezone.utc)
+        self.enterContext(
+            patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: self.now.isoformat(),
+            )
+        )
         self.head = "b" * 40
         self.current = "a" * 40
         self.transport = Mock()

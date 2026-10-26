@@ -1652,7 +1652,8 @@ and unchanged reminders use a plain-text, mention-free summary grouped by produc
 lane, check kind and failure code. Summaries reuse the notification outbox with
 aggregate type `public_ingress_discord_summary`, one record per policy,
 destination and fixed five-minute send window. A burst queues for its next
-boundary; later observations cannot move that deadline. Overdue windows fold
+boundary using its database enqueue time, so a slow probe cannot join an already
+sent batch; later observations cannot move that deadline. Overdue windows fold
 into one current window. A new critical condition still pages at once.
 
 Before delivery, both paths re-read current state. Cleared incidents and obsolete

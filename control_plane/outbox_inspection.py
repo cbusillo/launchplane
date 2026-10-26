@@ -56,7 +56,7 @@ def _delivery_routing(
         routing["inputs"] = record.payload.get("inputs", {})
     if record.kind == "public_ingress_notification":
         if record.aggregate_type == SUMMARY_AGGREGATE_TYPE:
-            return {**routing, "summary_digest": record.payload.get("summary_digest", "")}
+            return {**routing, "send_window": record.payload.get("send_window")}
         attempt = record.payload.get("attempt")
         if isinstance(attempt, dict):
             routing.update(

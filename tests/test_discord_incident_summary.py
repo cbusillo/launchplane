@@ -68,6 +68,7 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         status: Literal["pass", "fail"] = "fail",
         critical: bool = False,
         code: PublicIngressFailureCode | None = None,
+        enqueued_time: str | None = None,
     ) -> None:
         failure = (
             (code or ("http_error" if critical else "deploy_fence_held"))
@@ -95,15 +96,20 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
             ),
             summary="Measured observation",
         )
-        _store_monitor_observation(
-            record_store=self.store,
-            record=record,
-            incident_eligible=True,
-            expected_profile_sha256="",
-            recovery_observation_threshold=1,
-            notify=True,
-            notification_drivers=self.drivers,
-        )
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            return_value=f"2026-10-25T{enqueued_time}Z" if enqueued_time else record.observed_at,
+        ):
+            _store_monitor_observation(
+                record_store=self.store,
+                record=record,
+                incident_eligible=True,
+                expected_profile_sha256="",
+                recovery_observation_threshold=1,
+                notify=True,
+                notification_drivers=self.drivers,
+            )
 
     def drain(self, time: str) -> None:
         for _ in range(100):
@@ -133,6 +139,16 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
                 for value in self.store.list_public_ingress_incident_records()
             )
         )
+
+    def test_late_probe_queues_after_the_already_sent_batch(self) -> None:
+        self.observe("one")
+        self.drain("12:05:00")
+        self.observe("two", time="12:01:00", enqueued_time="12:06:00")
+        self.drain("12:06:01")
+        self.assertEqual(len(self.sent), 1)
+        self.drain("12:10:00")
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("2 conditions", str(self.sent[-1]))
 
     def test_clearing_subset_and_unchanged_reminders_do_not_repost(self) -> None:
         self.observe("one")
@@ -289,7 +305,9 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         rows = []
         for time in ("12:00:00", "12:06:00"):
             row = build_discord_incident_summary_delivery(
-                policy=self.policy, destination=self.destination, created_at=f"2026-10-25T{time}Z"
+                policy_id=self.policy.policy_id,
+                destination_id=self.destination.destination_id,
+                created_at=f"2026-10-25T{time}Z",
             )
             self.store.write_outbox_delivery_record(row)
         with patch.object(

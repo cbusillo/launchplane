@@ -352,15 +352,16 @@ class DirectNotificationOutboxTests(unittest.TestCase):
     def _probe(
         store: PostgresRecordStore, status: int, checked_at: str
     ) -> PublicIngressMonitorResult:
-        return run_public_ingress_monitor_once(
-            record_store=store,
-            checked_at=checked_at,
-            http_get=lambda _url, _timeout: HttpObservation(
-                status_code=status,
-                final_url="https://example.test",
-                redirect_count=0,
-            ),
-        )
+        with patch.object(store, "_database_mutation_timestamp", return_value=checked_at):
+            return run_public_ingress_monitor_once(
+                record_store=store,
+                checked_at=checked_at,
+                http_get=lambda _url, _timeout: HttpObservation(
+                    status_code=status,
+                    final_url="https://example.test",
+                    redirect_count=0,
+                ),
+            )
 
     @staticmethod
     def _work(

@@ -1513,8 +1513,8 @@ def _public_ingress_notification_outbox_deliveries(
                     incident, event
                 ):
                     summary = build_discord_incident_summary_delivery(
-                        policy=policy,
-                        destination=destination,
+                        policy_id=policy.policy_id,
+                        destination_id=destination.destination_id,
                         created_at=incident_event.occurred_at,
                     )
                     deliveries.append(summary)
@@ -3739,8 +3739,8 @@ def deliver_public_ingress_notification_outbox_delivery(
                         from control_plane.storage.postgres import OutboxWithIdempotencyRequest
 
                         summary = build_discord_incident_summary_delivery(
-                            policy=policy,
-                            destination=destination,
+                            policy_id=policy.policy_id,
+                            destination_id=destination.destination_id,
                             created_at=record.updated_at,
                             due_now=True,
                         )

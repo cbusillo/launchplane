@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable
 from datetime import datetime, timezone
+import json
 from typing import TYPE_CHECKING
 
 from control_plane import secrets
@@ -14,7 +15,6 @@ from control_plane.contracts.outbox_delivery import (
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentRecord,
     PublicIngressIncidentEvent,
-    PublicIngressNotificationDestination,
     PublicIngressNotificationPolicyRecord,
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
 )
@@ -84,8 +84,8 @@ def summary_covers(previous: OutboxDeliveryRecord | None, current: OutboxDeliver
 
 def build_discord_incident_summary_delivery(
     *,
-    policy: PublicIngressNotificationPolicyRecord,
-    destination: PublicIngressNotificationDestination,
+    policy_id: str,
+    destination_id: str,
     created_at: str,
     due_now: bool = False,
 ) -> OutboxDeliveryRecord:
@@ -99,20 +99,20 @@ def build_discord_incident_summary_delivery(
     )
     key = build_outbox_dedupe_key(
         kind="public_ingress_notification",
-        parts=(SUMMARY_AGGREGATE_TYPE, policy.policy_id, destination.destination_id, str(window)),
+        parts=(SUMMARY_AGGREGATE_TYPE, json.dumps([policy_id, destination_id, window])),
     )
     return OutboxDeliveryRecord(
         delivery_id=build_outbox_delivery_id(kind="public_ingress_notification", dedupe_key=key),
         kind="public_ingress_notification",
         aggregate_type=SUMMARY_AGGREGATE_TYPE,
-        aggregate_id=policy.policy_id,
+        aggregate_id=policy_id,
         dedupe_key=key,
         created_at=created_at,
         updated_at=created_at,
         next_attempt_at=ready_at,
         payload={
-            "policy_id": policy.policy_id,
-            "destination_id": destination.destination_id,
+            "policy_id": policy_id,
+            "destination_id": destination_id,
             "send_window": window,
         },
     )
@@ -171,7 +171,10 @@ def deliver_discord_incident_summary(
     if policy is None or destination is None:
         return result("delivered", action="skipped_disabled_summary")
     current = build_discord_incident_summary_delivery(
-        policy=policy, destination=destination, created_at=record.updated_at, due_now=True
+        policy_id=policy.policy_id,
+        destination_id=destination.destination_id,
+        created_at=record.updated_at,
+        due_now=True,
     )
     if int(str(record.payload["send_window"])) < int(str(current.payload["send_window"])):
         from control_plane.storage.postgres import OutboxWithIdempotencyRequest
