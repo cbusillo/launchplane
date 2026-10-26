@@ -178,6 +178,7 @@ for (const outcome of ["uncertain-pending", "uncertain-denied", "uncertain-pendi
     await waitForState(() => requests.filter(request => request.body.mode === "apply" && request.body.context === "fixture-context").length).toBe(2);
     const attempts = requests.filter(request => request.body.mode === "apply" && request.body.context === "fixture-context");
     expect(attempts[1]).toEqual(attempts[0]);
+    expect(requests.find(request => request.body.mode === "apply" && request.body.context === "second-context")!.key).not.toBe(attempts[0].key);
     await expect(page.getByLabel("Setting names")).toBeDisabled();
   });
 }

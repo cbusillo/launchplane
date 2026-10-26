@@ -31853,6 +31853,29 @@ class PostgresRecordStore(HumanSessionStore):
         )
         from control_plane.service_auth import director_agent_identity
 
+        def profile_for_request(session: Any) -> LaunchplaneProductProfileRecord | None:
+            profile = None
+            if request.scope != "global":
+                profiles = tuple(
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                )
+                owners = product_context_owner_map(profiles).get(request.context, ())
+                if set(owners) != {request.product}:
+                    raise ValueError("The product does not exclusively own this context.")
+                profile = next(p for p in profiles if p.product == request.product)
+                require_bundle_context_owner(
+                    ProductAuthorityBundle(
+                        required_product_config_target=(
+                            request.product,
+                            request.context,
+                            request.instance,
+                        )
+                    ),
+                    profiles,
+                )
+            return profile
+
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             # Match the policy writer's lock order before touching product authority.
@@ -31894,26 +31917,7 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 raise PermissionError("Identity cannot review runtime setting removal.")
 
-            profile = None
-            if request.scope != "global":
-                profiles = tuple(
-                    self._read_product_profile_payload(row.payload)
-                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
-                )
-                owners = product_context_owner_map(profiles).get(request.context, ())
-                if set(owners) != {request.product}:
-                    raise ValueError("The product does not exclusively own this context.")
-                profile = next(p for p in profiles if p.product == request.product)
-                require_bundle_context_owner(
-                    ProductAuthorityBundle(
-                        required_product_config_target=(
-                            request.product,
-                            request.context,
-                            request.instance,
-                        )
-                    ),
-                    profiles,
-                )
+            profile = profile_for_request(session)
             authority_sha256 = request_fingerprint(
                 {
                     "policy": (active.record_id, active.revision, active.policy_sha256),
@@ -32026,6 +32030,19 @@ class PostgresRecordStore(HumanSessionStore):
                 mutation=mutation,
             )
             if status == "replayed":
+                session.rollback()
+                self._begin_serialized_write(session)
+                self._lock_active_authz_policy(session)
+                if self._locked_active_authz_policy_record(session) != active:
+                    raise PermissionError(
+                        "Authority changed before replaying this removal receipt."
+                    )
+                self._lock_product_authority_bundle_write(session)
+                session.expire_all()
+                if profile_for_request(session) != profile:
+                    raise ValueError(
+                        "Product ownership changed before replaying this removal receipt."
+                    )
                 return RuntimeSettingRemovalPlan.model_validate(
                     {**reservation.response_payload, "replayed": True}
                 )

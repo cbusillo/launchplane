@@ -283,6 +283,34 @@ class RuntimeRemovalTests(unittest.TestCase):
             self.call(body, "completed")
         self.assertEqual(self.store.list_runtime_environment_records(), after)
 
+    def test_replay_rechecks_authority_after_reservation_collision_rollback(self) -> None:
+        body = self.reviewed()
+        self.call(body, "completed")
+        after = self.store.list_runtime_environment_records()
+        begin_write = self.store._begin_serialized_write
+        calls = 0
+
+        def revoke_before_replay_lock(session: object) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                payload = policy().model_dump(mode="json")
+                payload["github_humans"][0]["github_ids"] = [202]
+                self.store.compare_and_write_authz_policy_record(
+                    expected_record=self.active,
+                    replacement_record=_record(
+                        policy=LaunchplaneAuthzPolicy.model_validate(payload), revision=2
+                    ),
+                )
+            begin_write(session)
+
+        with patch.object(
+            self.store, "_begin_serialized_write", side_effect=revoke_before_replay_lock
+        ):
+            with self.assertRaises(PermissionError):
+                self.call(body, "completed")
+        self.assertEqual(self.store.list_runtime_environment_records(), after)
+
     def test_policy_drift_and_nonhuman_apply_fail_closed(self) -> None:
         body = self.reviewed()
         changed = _record(policy=policy(), revision=2)

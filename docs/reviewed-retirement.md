@@ -68,7 +68,8 @@ the separate current-state proof. A 409 `runtime_setting_removal_stale` means
 this exact attempt acquired its reservation but refused changed state before
 writing, and the transaction rolled back. The browser may settle that attempt
 and request a fresh review. The generic `runtime_setting_removal_unverified`
-response does not prove that outcome and preserves uncertain-request continuity.
+response does not prove that outcome and preserves continuity on a retry after
+an uncertain reply.
 
 Rollback custody stays inside the service's private database in the saved
 review's original record. The preview preimage is not an HTTP response and has
