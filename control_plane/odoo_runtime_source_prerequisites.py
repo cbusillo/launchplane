@@ -23,7 +23,11 @@ from control_plane.odoo_secret_references import (
     read_secret_reference_authority,
     selected_config_parameter_bindings,
 )
-from control_plane.odoo_source_prerequisite_programs import CONTAINER_PROGRAM, HOST_PROGRAM
+from control_plane.odoo_source_prerequisite_programs import (
+    CONTAINER_PROGRAM,
+    HOST_PROGRAM,
+    FailureStage,
+)
 from control_plane.release_compatibility import _files
 from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 
@@ -75,6 +79,7 @@ class OptionEvidence(BaseModel):
 class SourcePrerequisites(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     source: SourceName
+    failure_stage: FailureStage | None = None
     producer: Literal["verified", "unknown"] = "unknown"
     addon_state: Literal["installed", "unknown"] = "unknown"
     options: tuple[OptionEvidence, ...] = Field(default=(), max_length=4)
@@ -99,20 +104,24 @@ class SourcePrerequisites(BaseModel):
 class SourcePrerequisiteResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     runtime: Literal["verified", "unknown"] = "unknown"
+    failure_stage: FailureStage | None = None
     sources: tuple[SourcePrerequisites, ...] = Field(min_length=3, max_length=3)
     applied: Literal[False] = False
     values_redacted: Literal[True] = True
 
     @model_validator(mode="after")
     def fixed_sources(self) -> "SourcePrerequisiteResult":
+        if self.failure_stage is not None and self.runtime != "unknown":
+            raise ValueError("Failure stage requires unknown runtime")
         if {item.source for item in self.sources} != set(SOURCE_ADDONS):
             raise ValueError("Invalid prerequisite sources")
         return self
 
 
-def unknown_result() -> SourcePrerequisiteResult:
+def unknown_result(stage: FailureStage | None = None) -> SourcePrerequisiteResult:
     return SourcePrerequisiteResult(
-        sources=tuple(SourcePrerequisites(source=cast(SourceName, name)) for name in SOURCE_ADDONS)
+        failure_stage=stage,
+        sources=tuple(SourcePrerequisites(source=cast(SourceName, name)) for name in SOURCE_ADDONS),
     )
 
 
@@ -327,19 +336,25 @@ def diagnose_source_prerequisites(
     *, store: PrerequisiteStore, product: str, control_plane_root: Path, database_url: str | None
 ) -> SourcePrerequisiteResult:
     if not _READ_SLOTS.acquire(blocking=False):
-        return unknown_result()
+        return unknown_result("capacity")
+    stage: FailureStage = "authority"
     try:
         authority = _authority(store, product)
         profile = store.read_product_profile_record(product)
+        stage = "runtime_selection"
         selection = reads.select_stable_runtime(store, profile, "testing")
+        stage = "artifact"
         manifest = store.read_artifact_manifest(selection.identity.artifact_id)
+        stage = "runtime_connection"
         connection = reads.connect_runtime(
             store=store,
             selection=selection,
             control_plane_root=control_plane_root,
             database_url=database_url,
         )
+        stage = "producer_inventory"
         files = producer_files(manifest, connection, profile.repository)
+        stage = "runtime_inspection"
         before = reads.inspect_runtime_container(
             connection.host,
             connection.token,
@@ -348,12 +363,14 @@ def diagnose_source_prerequisites(
             connection.app_name,
             selection.identity,
         )
+        stage = "transport"
         result = runtime_prerequisites(
             connection,
             files=files,
             authority=authority,
             observed_identity=before[RUNTIME_IDENTITY_ENV_KEY],
         )
+        stage = "drift"
         reads.assert_selection_current(store, selection)
         after = reads.inspect_runtime_container(
             connection.host,
@@ -369,10 +386,10 @@ def diagnose_source_prerequisites(
             or store.read_artifact_manifest(selection.identity.artifact_id) != manifest
             or store.read_product_profile_record(product) != profile
         ):
-            return unknown_result()
+            return unknown_result("drift")
         return result
     except Exception:
         _logger.debug("Source prerequisite read unavailable.")
-        return unknown_result()
+        return unknown_result(stage)
     finally:
         _READ_SLOTS.release()

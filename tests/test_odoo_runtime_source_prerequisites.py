@@ -413,6 +413,55 @@ class PrerequisiteTests(PrerequisiteFixture):
         self.assertEqual(self.pg.close.call_count, len(self.connects))
         self.assertEqual(self.container_calls, 1)
 
+    def test_failed_prerequisites_report_only_the_failed_stage(self) -> None:
+        scenarios = (
+            ("configuration", lambda: self.config.write_text("invalid")),
+            (
+                "code_roots",
+                lambda: self.config.write_text(
+                    self.config.read_text().replace(str(self.tenant / "addons"), "/missing", 1)
+                ),
+            ),
+            (
+                "payload_provenance",
+                lambda: (
+                    self.tenant
+                    / "addons/shared"
+                    / reader.PAYLOAD_ADDON
+                    / "services/override_payload.py"
+                ).write_text(PRIVATE),
+            ),
+            (
+                "payload_decode",
+                lambda: self.env.update({ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: PRIVATE}),
+            ),
+            ("applied_parameters", lambda: setattr(self.cursor.fetchone, "return_value", ("off",))),
+            ("addon_state", lambda: self.installed.update({reader.PAYLOAD_ADDON: "uninstalled"})),
+        )
+        for stage, fail in scenarios:
+            with self.subTest(stage=stage):
+                with contextlib.ExitStack() as cleanup:
+                    files = {
+                        path: path.read_bytes()
+                        for path in (
+                            self.config,
+                            self.tenant
+                            / "addons/shared"
+                            / reader.PAYLOAD_ADDON
+                            / "services/override_payload.py",
+                        )
+                    }
+                    cleanup.callback(lambda: [path.write_bytes(raw) for path, raw in files.items()])
+                    cleanup.callback(self.env.update, self.env.copy())
+                    cleanup.callback(self.installed.update, self.installed.copy())
+                    cleanup.callback(setattr, self.cursor.fetchone, "return_value", ("on",))
+                    fail()
+                    result = self.read()
+                    self.assertEqual(result.runtime, "unknown")
+                    self.assertEqual(result.failure_stage, stage)
+                    self.assertNotIn(PRIVATE, result.model_dump_json())
+        self.assertIsNone(self.read().failure_stage)
+
     def test_runtime_source_layout_does_not_require_importable_odoo(self) -> None:
         with patch("importlib.util.find_spec", return_value=None):
             self.assertEqual(self.read().runtime, "verified")
@@ -545,6 +594,7 @@ class PrerequisiteTests(PrerequisiteFixture):
         path.write_text("# modified caller")
         result = self.read()
         self.assertEqual(result.sources[0].producer, "unknown")
+        self.assertEqual(result.sources[0].failure_stage, "source_provenance")
         self.assertEqual(result.sources[1].producer, "verified")
         path.unlink()
         target = self.root / "foreign.py"
@@ -563,6 +613,13 @@ class PrerequisiteTests(PrerequisiteFixture):
         }
         for frames in (
             [{"type": "complete", "result": {**minimal, "raw": PRIVATE}}],
+            [{"type": "complete", "result": {**minimal, "failure_stage": PRIVATE}}],
+            [
+                {
+                    "type": "complete",
+                    "result": {**minimal, "runtime": "verified", "failure_stage": "drift"},
+                }
+            ],
             [{"type": "complete", "result": minimal}, {"type": "complete", "result": minimal}],
             [{"type": "complete", "result": {**minimal, "applied": True}}],
             [{"type": "complete", "result": {**minimal, "values_redacted": False}}],
@@ -720,7 +777,9 @@ def resolve_connection_settings(values):
         for malformed in ("not-base64", base64.b64encode(b"[]").decode()):
             with self.subTest(malformed=malformed):
                 self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = malformed
-                self.assertEqual(self.read().runtime, "unknown")
+                result = self.read()
+                self.assertEqual(result.runtime, "unknown")
+                self.assertEqual(result.failure_stage, "payload_decode")
         self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = encoded
         self.assertEqual(self.read().runtime, "verified")
 
@@ -846,6 +905,13 @@ def resolve_connection_settings(values):
                     self.assertEqual(result.sources[0].producer, "unknown")
                 else:
                     self.assertEqual(result.runtime, "unknown")
+                    expected_stage = {
+                        "image": "host_inspection",
+                        "frame": "result_validation",
+                        "oversized": "host_execution",
+                        "timeout": "host_execution",
+                    }.get(drift, "drift")
+                    self.assertEqual(result.failure_stage, expected_stage)
                 self.assertNotIn(PRIVATE, result.model_dump_json())
                 self.drift = ""
                 self.inspections = 0
