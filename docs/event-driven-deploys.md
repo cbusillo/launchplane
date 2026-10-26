@@ -722,9 +722,19 @@ Successful delivery leaves the recovery set; a new event can retry an exhausted
 target with a fresh budget bound to its persisted delivery ID; duplicate deliveries
 do not refill it. Open PRs waiting for a build retain normal sweep coverage. Failed feedback
 and legacy entries without a status remain visible for supported observation rather
-than being assumed pending. Destroyed and teardown-pending preview records do not
-hide stale pending feedback; their reconciliation remains a no-op. Previews still
-requiring lifecycle work retain their existing sweep coverage and retry rules.
+than being assumed pending. A destroyed preview in the product's preview context
+also makes its failed feedback eligible for the existing bounded recovery. The
+reconcile rereads the PR before clearing a stale failure; qualified retired
+failed-feedback reads and unknown PR states use the same bound, and a confirmed
+closed PR leaves this recovery set. Apply, destroy and held-operation failures do
+not spend this retirement recovery budget. Retirement classification runs only on
+failed-result paths;
+unavailable metadata leaves the original failure intact. This lets a supported
+teardown settle Product Ops without another source-control event. Teardown-pending
+records do not qualify a failed preview as retired. Destroyed and teardown-pending
+preview records do not hide stale pending feedback; their reconciliation remains
+a no-op. Previews still requiring lifecycle work retain their existing sweep
+coverage and retry rules.
 
 ## Director steps
 
