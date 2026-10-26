@@ -730,6 +730,19 @@ def _reconcile_target(
             raise snapshot.wait_failure
 
 
+def reconcile_issue_status(*, scope: PlanningRepositoryScope, number: int) -> dict[str, Any]:
+    row: dict[str, Any] = {"repo": scope.repository, "number": number}
+    now = datetime.now(timezone.utc)
+    _reconcile_target(
+        _Target(scope.repository, number, scope=scope),
+        row,
+        merged_at=now,
+        attempted=now,
+        author_trust_available=bool(scope.trusted_author_ids),
+    )
+    return row
+
+
 def reconcile_completed_change(
     *,
     repository: str,
