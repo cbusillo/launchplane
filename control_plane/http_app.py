@@ -31,6 +31,7 @@ import secrets
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import cache
+from importlib.metadata import version as distribution_version
 from urllib.parse import unquote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, MutableMapping
 from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
@@ -4291,7 +4292,9 @@ def create_launchplane_fastapi_app(
             if isinstance(shared_record_store, PostgresRecordStore):
                 shared_record_store.close()
 
-    app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
+    app = _LaunchplaneFastAPI(
+        title="Launchplane API", version=distribution_version("launchplane"), lifespan=lifespan
+    )
     app.state.authz_policy_runtime = resolved_authz_policy_runtime
     app.add_middleware(BoundedRequestBodyMiddleware)
     enforce_human_policy_revalidation = False
