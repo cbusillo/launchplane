@@ -89,6 +89,14 @@ def interpolate(value: Any, environment: dict[str, str]) -> Any:
     return _SUBSTITUTION.sub(replace, value)
 
 
+def environment_mapping(environment: Any) -> dict[str, Any]:
+    if isinstance(environment, list):
+        environment = dict(entry.split("=", 1) for entry in environment)
+    if not isinstance(environment, dict):
+        raise TestingActivationRefusal("Testing environment is unavailable.")
+    return environment
+
+
 def qualify_compose(
     document: object, *, volumes: set[str], ports: set[int], credential_values: set[str]
 ) -> None:
@@ -201,11 +209,7 @@ def qualify_compose(
                     "Testing ports differ from the independent lane settings."
                 )
             published.add(host_port)
-        environment = service.get("environment", {})
-        if isinstance(environment, list):
-            environment = dict(entry.split("=", 1) for entry in environment)
-        if not isinstance(environment, dict):
-            raise TestingActivationRefusal("Testing environment is unavailable.")
+        environment = environment_mapping(service.get("environment", {}))
         for key, value in environment.items():
             if (
                 re.search(r"(?:PASSWORD|PASSWD|TOKEN|SECRET|CREDENTIAL|(?:^|_)KEY)$", key)
