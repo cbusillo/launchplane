@@ -283,10 +283,27 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
                 pass
         return dict(line.split("=", 1) for line in output.getvalue().splitlines())
 
+    def original_operation(self) -> Any:
+        from control_plane.http_app import idempotency_scope
+        from control_plane.service_auth import configured_local_operator_identity
+        from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
+
+        identity = configured_local_operator_identity(self.fixture.config)
+        assert identity is not None
+        record = self.fixture.store.read_idempotency_record(
+            scope=idempotency_scope(identity),
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=self.fixture.plan_id,
+        )
+        assert record is not None
+        return record
+
     async def test_original_create_resumes_after_domain_without_another_compose(self) -> None:
         first = await self.fixture.preview_apply()
         self.assertEqual(first.status_code, 409, first.text)
         self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
+        original = self.original_operation()
+        intent = self.fixture.store.read_original_mutation_intent(original)
         first_history = self.fixture.store.read_preview_record(self.fixture.preview.preview_id)
         self.assertEqual(first_history.state, "destroyed")
         before = OdooPreviewApplyEnvelope.model_validate(self.fixture.payload).apply.dry_run_plan
@@ -296,6 +313,10 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.json()["result"]["status"], "pass")
         self.assertEqual(self.mutations.count("/api/compose.create"), 1)
         self.assertEqual(self.mutations.count("/api/compose.deploy"), 1)
+        completed = self.original_operation()
+        self.assertEqual(completed.record_id, original.record_id)
+        self.assertGreater(completed.attempt, original.attempt)
+        self.assertEqual(self.fixture.store.read_original_mutation_intent(completed), intent)
         preview = self.fixture.store.read_preview_record(self.fixture.preview.preview_id)
         self.assertEqual(preview.state, "active")
         self.assertTrue(preview.serving_generation_id)
@@ -308,20 +329,9 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.mutations, mutations)
 
     async def test_partial_create_uses_only_guarded_expired_original_supersession(self) -> None:
-        from control_plane.http_app import idempotency_scope
-        from control_plane.service_auth import configured_local_operator_identity
-        from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
-
         self.stop_after = "create"
         self.assertEqual((await self.fixture.preview_apply()).status_code, 409)
-        identity = configured_local_operator_identity(self.fixture.config)
-        assert identity is not None
-        original = self.fixture.store.read_idempotency_record(
-            scope=idempotency_scope(identity),
-            route_path=ODOO_PREVIEW_APPLY_ROUTE,
-            idempotency_key=self.fixture.plan_id,
-        )
-        assert original is not None
+        original = self.original_operation()
         intent = self.fixture.store.read_original_mutation_intent(original)
         self.fixture.plan_id = "odoo-preview-plan-qualified-partial"
         self.fixture.issue_preview(self.plan())
@@ -434,6 +444,9 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         result = await self.fixture.preview_apply()
         self.assertEqual(result.status_code, 409, result.text)
         self.assertEqual(result.json()["error"]["code"], "mutation_reconciliation_required")
+        original = self.original_operation()
+        self.assertEqual(original.state, "reconcile_required")
+        self.assertEqual(original.provider_effect_phase, "domain_ensure")
         self.assertNotIn("/api/compose.delete", self.mutations)
         self.assertNotIn("/api/domain.delete", self.mutations)
         self.assertNotIn("/api/compose.deploy", self.mutations)
