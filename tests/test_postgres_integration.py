@@ -9808,6 +9808,23 @@ def _run_integration_provider_operation(
 
 
 class RealPostgresProviderOperationTests(unittest.TestCase):
+    def test_executor_exit_drain_proof_and_live_reconciliation_on_postgres(self) -> None:
+        from tests.test_event_deploy_redeploy import EventDeployRedeployTests
+
+        for scenario in (
+            "test_stopped_executor_keeps_unknown_product_outcome_without_blocking_replacement",
+            "test_reconciliation_during_live_executor_still_drains_until_executor_exits",
+            "test_executor_exit_receipt_cannot_exclude_a_later_attempt_with_the_same_owner",
+            "test_repair_drain_polls_its_own_fence_until_admitted_work_finishes",
+        ):
+            with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
+                case = EventDeployRedeployTests(scenario)
+                case.store = store
+                try:
+                    getattr(case, scenario)()
+                finally:
+                    case.doCleanups()
+
     def test_connection_isolation_original_key_recovery_on_postgres(self) -> None:
         from tests import test_odoo_connection_isolation_authority as fixtures
 

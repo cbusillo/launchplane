@@ -2073,7 +2073,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 return_value=executor,
             ),
             patch(
-                "control_plane.workflows.generic_web_post_deploy.generic_web_post_deploy_executor_for_profile",
+                "control_plane.generic_web_testing_abandonment.generic_web_post_deploy_executor_for_profile",
                 return_value=executor,
             ),
         ):

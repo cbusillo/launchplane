@@ -154,6 +154,32 @@ class _StoreFixture:
 
 
 class DurableProviderOperationRunnerTests(unittest.TestCase):
+    def test_exit_receipt_failure_preserves_success_unknown_outcome_and_original_exception(
+        self,
+    ) -> None:
+        for error in (None, ProviderMutationUnknownError("unknown"), KeyboardInterrupt("original")):
+            with self.subTest(error=type(error).__name__), TemporaryDirectory() as directory:
+                fixture = _StoreFixture(directory)
+                self.addCleanup(fixture.store.close)
+                adapter = _FakeAdapter(apply_error=error)
+                with (
+                    patch.object(
+                        fixture.store,
+                        "record_mutation_executor_exit",
+                        side_effect=OSError("receipt unavailable"),
+                    ),
+                    self.assertLogs("control_plane.provider_operations", level="WARNING"),
+                ):
+                    if isinstance(error, KeyboardInterrupt):
+                        with self.assertRaises(KeyboardInterrupt) as raised:
+                            fixture.run(adapter)
+                        self.assertIs(raised.exception, error)
+                    else:
+                        result = fixture.run(adapter)
+                        self.assertEqual(
+                            result.status, "completed" if error is None else "reconcile_required"
+                        )
+
     def test_atomic_admission_refusal_preserves_cause_and_releases_target_without_effects(
         self,
     ) -> None:
