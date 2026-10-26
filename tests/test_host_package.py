@@ -21,6 +21,7 @@ from control_plane.host_package import (
 )
 from control_plane import host_package as packages
 from control_plane.dokploy import post_deploy
+from control_plane.host_package_installer import HOST_PACKAGE_INSTALLED_MARKER
 from control_plane.host_package_runtime import (
     HOST_PACKAGE_VERSION_MARKER,
     HOST_PROGRAM_VERSION_MARKER,
@@ -141,6 +142,8 @@ class HostPackageTests(unittest.TestCase):
         scripts: dict[str, str] = {}
         outputs: dict[str, dict[str, str]] = {}
         names: list[str] = []
+        materialized: dict[str, str] = {}
+        schedule_apps: dict[str, str] = {}
 
         def upsert(**arguments: object) -> dict[str, str]:
             payload = arguments["schedule_payload"]
@@ -150,31 +153,36 @@ class HostPackageTests(unittest.TestCase):
             self.assertEqual(payload["appName"], arguments["app_name"])
             names.append(str(arguments["schedule_name"]))
             key = str(len(scripts))
+            app = str(payload["appName"])
+            self.assertNotIn(app, materialized)
+            materialized[app] = str(payload["script"])
+            schedule_apps[key] = app
             scripts[key] = str(payload["script"])
             return {"scheduleId": key}
 
         def run(**arguments: object) -> str:
-            script = scripts[str(arguments["schedule_id"])]
+            script = materialized[schedule_apps[str(arguments["schedule_id"])]]
             result = subprocess.run(
                 ["bash", "-c", script],
                 env=self.bootstrap_environment,
                 capture_output=True,
                 check=True,
             )
-            outputs["completed"] = post_deploy.extract_odoo_post_deploy_readback_markers(
-                {"logs": result.stdout.decode()}
+            outputs[schedule_apps[str(arguments["schedule_id"])]] = (
+                post_deploy.extract_odoo_post_deploy_readback_markers(
+                    {"logs": result.stdout.decode()}
+                )
             )
             return "deployment=completed"
 
         with (
-            patch.object(api, "find_matching_dokploy_schedule", return_value=None),
             patch.object(api, "upsert_dokploy_schedule", side_effect=upsert),
             patch.object(api, "run_dokploy_schedule", side_effect=run),
             patch.object(api, "dokploy_request", return_value={}),
             patch.object(
                 post_deploy,
                 "_read_odoo_post_deploy_log_markers",
-                side_effect=lambda **_: outputs["completed"],
+                side_effect=lambda **arguments: outputs[schedule_apps[arguments["schedule_id"]]],
             ),
         ):
             ensure_schedule_host_package(
@@ -196,6 +204,25 @@ class HostPackageTests(unittest.TestCase):
             )
             self.assertEqual(len(scripts), initial + 1)
             self.assertTrue(set(names[:initial]).isdisjoint(names[initial:]))
+            for witnessed in (None, "different-package"):
+                evidence = {HOST_PACKAGE_INSTALLED_MARKER: "true"}
+                if witnessed is not None:
+                    evidence[HOST_PACKAGE_VERSION_MARKER] = witnessed
+                with (
+                    patch.object(
+                        post_deploy, "_read_odoo_post_deploy_log_markers", return_value=evidence
+                    ),
+                    self.assertRaises(ValueError),
+                ):
+                    ensure_schedule_host_package(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        target_id="fixture-user",
+                        schedule_type="dokploy-server",
+                        app_name="fixture",
+                        payload={"script": host_schedule("resources", {}), "serverId": None},
+                    )
+
         archive = self.root / ".local/state/launchplane-host" / (self.package.version + ".pyz")
         self.assertEqual(archive.read_bytes(), self.package.content)
 

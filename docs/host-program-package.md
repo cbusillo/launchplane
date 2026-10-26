@@ -22,7 +22,8 @@ Native reads and uploads load a verified action-only archive in memory over the
 existing terminal stream, preserving their lack of persistent host-file effects.
 Scheduled operations first inspect the installed archive. Remote targets install
 through that existing terminal; Dokploy's primary server uses disabled manual
-bootstrap jobs with a unique installation ID in a separate package namespace,
+bootstrap jobs with a unique installation ID and request digest in each
+package namespace,
 so retained installation evidence does not fill a lane's bounded inventory. Their terminal histories stay
 with the original operation's recovery evidence; the existing mutation observer
 continues to record them. An
@@ -46,8 +47,8 @@ are removed.
 
 The archive contains no runtime records, product settings, credentials or restore
 data. Inputs continue to come from the operation's existing reviewed records.
-An old archive is retained because an interrupted operation may still name it;
-installing a new version does not authorize replaying or replacing that operation.
+Old archives are retained without automatic pruning. Installing a new version
+does not authorize replaying or replacing an operation.
 
 Each action also binds its dispatcher, program and referenced helpers. Retained storage
 provenance compares that binding and its input, so an unrelated action update

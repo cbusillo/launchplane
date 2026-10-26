@@ -1518,7 +1518,8 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
     def test_primary_host_package_bootstrap_retains_recovery_evidence(self) -> None:
         from control_plane.dokploy.host_package import ensure_schedule_host_package
         from control_plane.dokploy import post_deploy
-        from control_plane.host_package import host_schedule
+        from control_plane.host_package import host_schedule, host_package
+        from control_plane.host_package_runtime import HOST_PACKAGE_VERSION_MARKER
         from control_plane.host_package_installer import HOST_PACKAGE_INSTALLED_MARKER
 
         for store, root in self.stores():
@@ -1576,7 +1577,10 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                     patch.object(
                         post_deploy,
                         "_read_odoo_post_deploy_log_markers",
-                        return_value={HOST_PACKAGE_INSTALLED_MARKER: "true"},
+                        return_value={
+                            HOST_PACKAGE_INSTALLED_MARKER: "true",
+                            HOST_PACKAGE_VERSION_MARKER: host_package().version,
+                        },
                     ),
                     patch(
                         "control_plane.testing_replacement_recovery.source.read_dokploy_config",

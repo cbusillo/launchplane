@@ -9,6 +9,7 @@ from typing import Any
 
 from control_plane.host_package import HOST_PACKAGE_CHUNK_BYTES, host_invocation, host_package
 from control_plane.host_package_installer import HOST_PACKAGE_INSTALLED_MARKER
+from control_plane.host_package_runtime import HOST_PACKAGE_VERSION_MARKER
 
 
 HOST_PACKAGE_SCHEDULE_APP_NAME = "launchplane-host-package"
@@ -47,7 +48,9 @@ def bootstrap_script(request: dict[str, object]) -> str:
         + encoded
         + " LP_HOST_PACKAGE: <<'LP_HOST_PACKAGE'\n"
         + installer_program()
-        + "\nLP_HOST_PACKAGE\n"
+        + "\nprint("
+        + repr(HOST_PACKAGE_VERSION_MARKER + "=" + str(request["version"]))
+        + ")\nLP_HOST_PACKAGE\n"
     )
 
 
@@ -100,7 +103,13 @@ def ensure_schedule_host_package(
             + " "
             + hashlib.sha256(script.encode()).hexdigest()[:24]
         )
-        bootstrap_app = HOST_PACKAGE_SCHEDULE_APP_NAME
+        bootstrap_app = (
+            HOST_PACKAGE_SCHEDULE_APP_NAME
+            + "-"
+            + installation_id
+            + "-"
+            + hashlib.sha256(script.encode()).hexdigest()[:16]
+        )
         with (provider_mutation_guard or nullcontext)():
             schedule = api.upsert_dokploy_schedule(
                 host=host,
@@ -135,6 +144,8 @@ def ensure_schedule_host_package(
             schedule_deployment_key=deployment_id,
             deployment_id=deployment_id,
         )
+        if evidence.get(HOST_PACKAGE_VERSION_MARKER) != invocation.package_version:
+            raise ValueError("Host package installation version differs.")
         installed = evidence.get(HOST_PACKAGE_INSTALLED_MARKER)
         if installed not in {"true", "false"}:
             raise ValueError("Host package installation witness is unavailable.")
