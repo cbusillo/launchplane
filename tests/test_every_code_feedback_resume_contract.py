@@ -10,6 +10,7 @@ from control_plane.contracts.every_code_feedback_resume import (
     EveryCodeFeedbackHandoffReceiptRecord,
     EveryCodeFeedbackLaunchBinding,
     EveryCodeFeedbackPolicyDecisionProvenance,
+    EveryCodeFeedbackPullRequestOpenObservation,
     EveryCodeFeedbackRecoveryDispositionRecord,
     EveryCodeFeedbackResumeIntentRecord,
     EveryCodeFeedbackStartupReceiptRecord,
@@ -165,6 +166,44 @@ class EveryCodeFeedbackResumeContractTests(unittest.TestCase):
         }
         intent = EveryCodeFeedbackResumeIntentRecord.model_validate(values)
         self.assertTrue(intent.intent_digest)
+        legacy_payload = intent.model_dump(exclude={"issuance_policy", "open_observation"})
+        self.assertEqual(
+            EveryCodeFeedbackResumeIntentRecord.model_validate(legacy_payload).intent_digest,
+            intent.intent_digest,
+        )
+        feedback_revision = revision()
+        observation_values = {
+            "repository_id": feedback_revision.repository_id,
+            "repository_owner_id": feedback_revision.repository_owner_id,
+            "pull_request_number": feedback_revision.pull_request_number,
+            "pull_request_node_id": feedback_revision.pull_request_node_id,
+            "observed_at": T0,
+        }
+        observation = EveryCodeFeedbackPullRequestOpenObservation.model_validate(observation_values)
+        verified = EveryCodeFeedbackResumeIntentRecord.model_validate(
+            {
+                **values,
+                "schema_version": 2,
+                "issuance_policy": policy(),
+                "open_observation": observation,
+            }
+        )
+        for field in ("issuance_policy", "open_observation"):
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                EveryCodeFeedbackResumeIntentRecord.model_validate(
+                    {**verified.model_dump(), field: None}
+                )
+        changed = verified.model_dump()
+        changed["issuance_policy"]["policy_revision"] += 1
+        changed["intent_digest"] = ""
+        self.assertNotEqual(
+            EveryCodeFeedbackResumeIntentRecord.model_validate(changed).intent_digest,
+            verified.intent_digest,
+        )
+        with self.assertRaises(ValidationError):
+            EveryCodeFeedbackPullRequestOpenObservation.model_validate(
+                {**observation_values, "observed_at": "2026-09-07T12:00:00"}
+            )
         with self.assertRaises(ValidationError):
             EveryCodeFeedbackResumeIntentRecord.model_validate(
                 {**values, "expected_fencing_token": True}

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 import unittest
 
+from pydantic import ValidationError
+
 from control_plane.service_auth import GitHubHumanIdentity, GitHubHumanPolicyRule
 
 
@@ -19,6 +21,11 @@ def _identity() -> GitHubHumanIdentity:
 
 
 class GitHubHumanPolicyRuleTests(unittest.TestCase):
+    def test_policy_cannot_coerce_boolean_or_string_into_immutable_github_id(self) -> None:
+        for github_id in (True, "17", 17.0):
+            with self.subTest(github_id=github_id), self.assertRaises(ValidationError):
+                GitHubHumanPolicyRule.model_validate({"github_ids": (github_id,)})
+
     def test_every_configured_principal_selector_must_match(self) -> None:
         identity = _identity()
         rule = GitHubHumanPolicyRule(

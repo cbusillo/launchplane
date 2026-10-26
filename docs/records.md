@@ -1662,6 +1662,9 @@ queue and are not wired into live lifecycle transitions.
 Persisted receipts and recovery observations do not authorize execution or admin
 resolution. The unwired launch and provider-verification helpers are removed;
 the retained record models and storage checks preserve historical evidence.
+The retired request lease transitions and feedback-intent allocator are also
+removed. Canonical import/restore writers, historical readers, stored models,
+tables and migrations remain; removing the unused algorithms changes no data.
 
 ## Every Code Notification Records
 
