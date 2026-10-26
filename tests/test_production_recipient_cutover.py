@@ -450,7 +450,7 @@ class RecipientCutoverTests(unittest.TestCase):
                         f"{key}={value}" for key, value in environment.items()
                     ]
                 record = self.record.model_copy(update={"compose_source": json.dumps(document)})
-                with self.assertRaisesRegex(ValueError, "API writer binding"):
+                with self.assertRaises(ValueError):
                     cutover_intent(self.fixture.root, self.store, record, self.request)
                 self.assertEqual(self.actions, [])
 

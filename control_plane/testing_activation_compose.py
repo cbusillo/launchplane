@@ -93,7 +93,7 @@ def environment_mapping(environment: Any) -> dict[str, Any]:
     if isinstance(environment, list):
         environment = dict(entry.split("=", 1) for entry in environment)
     if not isinstance(environment, dict):
-        raise TestingActivationRefusal("Testing environment is unavailable.")
+        raise TestingActivationRefusal("Compose environment is unavailable.")
     return environment
 
 
