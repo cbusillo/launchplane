@@ -1325,8 +1325,12 @@ old recipients must have known automatic-deployment flags and no target
 schedules. Enabled flags are bound into the reviewed plan; apply disables only
 those exact unbound retained recipients before route publication. Every recipient
 must have automatic deployment explicitly disabled before the route writer runs.
+`409 testing_address_recipient_busy` refuses an already-held retained-target deploy
+fence during planning or execution; keep that operation and its original key.
 Active lane aliases, incomplete or nonterminal deployment histories and unresolved
-data workflows refuse preparation. This changes only the automatic-deployment
+data workflows refuse planning or publication. Preparation execution checks the
+exact recipient identity, custody, source ownership and absence of an active lane
+binding. This changes only the automatic-deployment
 flag, without deploying, stopping, deleting or releasing the retained copy.
 `409 testing_address_recipient_unverified` reports the observed
 automatic-deployment tri-state and target schedule count independently, without
@@ -1347,9 +1351,12 @@ plan. A lost update reply requires exact original-recipient observation under
 that same key. A known enabled flag permits only repeating the convergent
 `autoDeploy: false` patch after its scope is rechecked; an unknown observation
 preserves the fence. No deployment or data effect is repeated. Cancellation
-settles checkpointed preparation with that same protective patch without
-re-entering forward route admission, and never re-enables automatic deployment.
-A preparation proved never dispatched is excluded instead. Legacy saved plans
+neither sends nor adopts a recipient-preparation effect. It restores or verifies
+the route and frees the serving copy's parent fence while keeping uncertain
+preparation records on their retained-target fences. Its result names those
+targets in `retained_preparation_fences_preserved`; this is not settlement proof.
+The inverse receipt is recorded even for a no-op route restoration, preventing
+forward execution of that cancelled plan. Legacy saved plans
 keep their original digest and never acquire an unreviewed preparation step.
 The bounded census runs in the worker; dispatch rechecks its lease and physical
 fence afterward. Matching
@@ -1381,7 +1388,14 @@ It can preserve
 later inventory, runtime and unrelated profile edits while restoring the route;
 it never overwrites a different copy or binding. `mode: readback` with
 `operation: cancel` and the same key verifies the restored preimage. Completed
-cancellation permits a fresh plan and key; it does not certify public health.
+cancellation permits a fresh plan and key only when the retained-target fences
+also permit it; it does not certify public health or release an uncertain flag
+update. The current copy can continue ordinary testing deploys; uncertain retained
+targets remain unavailable for reuse while their original effect fences are held.
+After completed parent cancellation, cancel readback reports such children but
+does not settle them, and the completed parent key cannot resume them. Releasing
+that quarantine would require a separately supported original-child observation
+capability; this operation supplies no fence-clearing workaround.
 An already committed canonical publication cannot be cancelled by this path;
 retrieve its original amend result instead. Database uncertainty retains the
 original fence until the publication transaction can be observed conclusively.

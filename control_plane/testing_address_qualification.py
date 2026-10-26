@@ -8,6 +8,7 @@ import time
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_address import TestingAddressPlan, address_binding
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.dokploy import api, post_deploy, source
 from control_plane.dokploy.testing_route import (
     amend_testing_route_address,
@@ -40,6 +41,30 @@ class TestingAddressRecipientUnverified(ValueError):
             f"{schedule_count} target schedules observed. "
             "Preserve the original request, resources and operation fences."
         )
+
+
+class TestingAddressRecipientBusy(ValueError):
+    def __init__(self) -> None:
+        super().__init__(
+            "An original operation holds the retained recipient deploy fence. "
+            "Preserve that operation, its original key and the retained target fence."
+        )
+
+
+def require_available_address_recipients(
+    store: PostgresRecordStore, *, product: str, context: str, retained_ids: frozenset[str]
+) -> None:
+    for target in sorted(retained_ids):
+        origin = ProviderTargetOrigin(
+            product=product,
+            context=context,
+            instance="testing",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=target,
+        )
+        if store.list_held_provider_target_reservations(provider_target_key=origin.target_key()):
+            raise TestingAddressRecipientBusy()
 
 
 def qualify_address_domains(
@@ -326,6 +351,12 @@ def plan_testing_address(
         for key in {retirement_operation_id, reservation_operation_id}
     }
     with exclude_address_executors(store, tuple(operations)):
+        require_available_address_recipients(
+            store,
+            product=product,
+            context=context,
+            retained_ids=frozenset(str(item.target_id) for item in reservations),
+        )
         require_unbound_address_recipients(
             store, frozenset(str(item.target_id) for item in reservations)
         )

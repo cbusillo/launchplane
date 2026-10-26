@@ -41,6 +41,8 @@ def address_preimage_present(adapter: TestingAddressAdapter) -> bool:
 
 
 def cancelled_address_result(adapter: TestingAddressAdapter) -> dict[str, object]:
+    from control_plane.testing_address_preparation import pending_address_preparations
+
     return {
         "plan_sha256": adapter.plan.digest,
         "product": adapter.plan.product,
@@ -49,6 +51,7 @@ def cancelled_address_result(adapter: TestingAddressAdapter) -> dict[str, object
         "applied": False,
         "cancelled": True,
         "preimage_restored": True,
+        "retained_preparation_fences_preserved": pending_address_preparations(adapter),
     }
 
 
@@ -65,7 +68,6 @@ def cancel_testing_address(
     adapter: TestingAddressAdapter, lease: ProviderOperationLease
 ) -> ProviderMutationOutcome:
     from control_plane.testing_address import ADDRESS_EFFECT_ROUTE
-    from control_plane.testing_address_preparation import prepare_address_recipients
 
     assert isinstance(lease, ProviderEvidenceLease)
     if settled_testing_address(adapter.store, adapter.plan) is not None:
@@ -78,7 +80,6 @@ def cancel_testing_address(
         read_testing_address_recovery_copy(adapter.store, adapter.plan)
 
     guard()
-    prepare_address_recipients(adapter, lease, settle_only=True)
     original = adapter.store.read_idempotency_record(
         scope=ADDRESS_SCOPE, route_path=ADDRESS_EFFECT_ROUTE, idempotency_key=adapter.plan.digest
     )
@@ -150,11 +151,7 @@ def cancel_testing_address(
         raise NativeSourceUnavailable("The address operation has no original forward custody.")
 
     performed = not address_preimage_present(adapter)
-    inverse = adapter.store.read_idempotency_record(
-        scope=ADDRESS_SCOPE, route_path=INVERSE_ROUTE, idempotency_key=adapter.plan.digest
-    )
-    if performed or inverse is not None:
-        restore_address_preimage(adapter, lease, guard)
+    restore_address_preimage(adapter, lease, guard)
     guard()
     result = read_cancelled_address(adapter)
     return ProviderMutationOutcome(
