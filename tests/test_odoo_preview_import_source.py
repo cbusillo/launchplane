@@ -17,6 +17,10 @@ from tests.support.auth import _local_operator_policy, scoped_agent_test
 from tests.http_app_test_support import _asgi_request, _RejectingVerifier
 from tests.test_odoo_preview_apply_execution import _issued_plan
 from control_plane import secrets
+from control_plane.odoo_runtime_source_prerequisites import (
+    SourceConsumerResult,
+    SourceConsumerEvidence,
+)
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
@@ -45,7 +49,6 @@ from control_plane.odoo_preview_apply_http import (
 )
 from control_plane.odoo_preview_import_source import (
     FishbowlPreviewSource,
-    FISHBOWL_OPTIONAL_DEFAULTS,
     preview_fishbowl_clear_program,
     resolve_fishbowl_preview_source,
 )
@@ -148,6 +151,29 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.store.write_runtime_environment_record(self.runtime)
 
+        self.qualification = SourceConsumerResult(
+            runtime="verified",
+            evidence_sha256="a" * 64,
+            sources=(
+                SourceConsumerEvidence(
+                    source="fishbowl",
+                    parameters={
+                        "host": "source.example.test",
+                        "user": "readonly",
+                        "db": "inventory",
+                        "port": "3306",
+                        "ssl_verify": "True",
+                    },
+                ),
+            ),
+        )
+        qualifier = patch(
+            "control_plane.odoo_runtime_source_prerequisites.read_source_consumers",
+            side_effect=lambda **kwargs: self.qualification,
+        )
+        self.qualifier = qualifier.start()
+        self.addCleanup(qualifier.stop)
+
     def resolve(self, *, include_secret_value: bool = False) -> FishbowlPreviewSource:
         return resolve_fishbowl_preview_source(
             store=self.store,
@@ -155,6 +181,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             preview_slug="pr-42",
             copy_from=self.reference,
             include_secret_value=include_secret_value,
+            control_plane_root=self.root,
+            database_url=self.store.database_url,
         )
 
     def test_only_selected_source_enters_normal_post_deploy_payload(self) -> None:
@@ -241,6 +269,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                     profile=self.profile,
                     preview_slug=slug,
                     copy_from=reference,
+                    control_plane_root=self.root,
+                    database_url=self.store.database_url,
                     include_secret_value=True,
                 )
 
@@ -324,16 +354,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(self.resolve().authority_sha256, original.authority_sha256)
         self.store.write_dokploy_target_record(self.target)
-        self.store.write_runtime_environment_record(
-            self.runtime.model_copy(
-                update={
-                    "env": {
-                        **self.runtime.env,
-                        config_parameter_runtime_key("fishbowl.user"): "changed",
-                    },
-                }
-            )
-        )
+        self.qualification = self.qualification.model_copy(update={"evidence_sha256": "b" * 64})
         self.assertNotEqual(self.resolve().authority_sha256, original.authority_sha256)
         self.store.write_secret_record(
             self.record.model_copy(update={"current_version_id": "rotated"})
@@ -341,14 +362,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             self.resolve()
 
-    def test_incomplete_runtime_cannot_fall_back_to_database_or_override_literals(self) -> None:
-        self.store.write_runtime_environment_record(
-            self.runtime.model_copy(
-                update={
-                    "env": {config_parameter_runtime_key("fishbowl.host"): "source.example.test"},
-                }
-            )
-        )
+    def test_unqualified_source_cannot_fall_back_to_legacy_settings(self) -> None:
+        self.qualification = self.qualification.model_copy(update={"runtime": "unknown"})
         with self.assertRaises(ValueError):
             self.resolve()
 
@@ -442,49 +457,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refused.json()["error"]["code"], "authorization_denied")
         prepare.assert_not_called()
 
-    def test_context_values_instance_override_and_target_delivery_precedence(self) -> None:
-        self.store.write_runtime_environment_record(
-            RuntimeEnvironmentRecord(
-                scope="context",
-                context="cm",
-                updated_at=self.profile.updated_at,
-                env=self.runtime.env,
-            )
-        )
-        self.store.write_runtime_environment_record(
-            self.runtime.model_copy(
-                update={
-                    "env": {config_parameter_runtime_key("fishbowl.user"): "lane-reader"},
-                }
-            )
-        )
-        self.store.write_dokploy_target_record(
-            self.target.model_copy(
-                update={
-                    "env": {
-                        config_parameter_runtime_key("fishbowl.host"): "delivered.example.test"
-                    },
-                }
-            )
-        )
-        parameters = {item.key: item.value.value for item in self.resolve().parameters}
-        self.assertEqual(parameters["fishbowl.host"], "delivered.example.test")
-        self.assertEqual(parameters["fishbowl.db"], "inventory")
-        self.assertEqual(parameters["fishbowl.user"], "lane-reader")
-
-    def test_secret_owned_non_secret_parameter_refuses_stale_plain_value(self) -> None:
-        self.store.write_secret_binding(
-            self.binding.model_copy(
-                update={
-                    "binding_id": "source-host-binding",
-                    "binding_key": config_parameter_runtime_key("fishbowl.host"),
-                }
-            )
-        )
-        with self.assertRaises(ValueError):
-            self.resolve()
-
-    def test_plan_never_decrypts_and_rotated_source_becomes_stale_before_apply(self) -> None:
+    def test_plan_never_copies_password_and_rotated_source_becomes_stale_before_apply(self) -> None:
         request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
         planned = _issued_plan(request)
         inputs = planned.plan_request.model_copy(update={"fishbowl_source": self.reference})
@@ -495,8 +468,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 return_value=planned,
             ),
             patch(
-                "control_plane.secrets._decrypt_secret_value",
-                side_effect=AssertionError("planning must not decrypt"),
+                "control_plane.odoo_preview_import_source.copy_source_value",
+                side_effect=AssertionError("planning must not copy source passwords"),
             ),
         ):
             result = _build_odoo_preview_apply_inputs(
@@ -530,37 +503,36 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(refused.exception.code, "odoo_preview_plan_stale")
 
     def test_credential_shaped_non_secret_settings_are_refused(self) -> None:
-        self.store.write_runtime_environment_record(
-            self.runtime.model_copy(
-                update={
-                    "env": {
-                        **self.runtime.env,
-                        config_parameter_runtime_key(
-                            "fishbowl.host"
-                        ): "https://user:private@source.example.test",
-                    },
-                }
-            )
+        source = self.qualification.sources[0]
+        self.qualification = self.qualification.model_copy(
+            update={
+                "sources": (
+                    source.model_copy(
+                        update={
+                            "parameters": {
+                                **source.parameters,
+                                "host": "https://user:private@source.example.test",
+                            }
+                        }
+                    ),
+                )
+            }
         )
         with self.assertRaises(ValueError):
             self.resolve()
 
-    def test_absent_optional_source_settings_clear_previous_values(self) -> None:
-        self.store.write_runtime_environment_record(
-            self.runtime.model_copy(
-                update={
-                    "env": {
-                        key: value
-                        for key, value in self.runtime.env.items()
-                        if key != config_parameter_runtime_key("fishbowl.port")
-                    },
-                }
-            )
+    def test_effective_source_options_are_copied_without_local_defaults(self) -> None:
+        source = self.qualification.sources[0]
+        self.qualification = self.qualification.model_copy(
+            update={
+                "sources": (
+                    source.model_copy(update={"parameters": {**source.parameters, "port": "3499"}}),
+                )
+            }
         )
         parameters = {item.key: item.value.value for item in self.resolve().parameters}
-        self.assertEqual(parameters["fishbowl.port"], FISHBOWL_OPTIONAL_DEFAULTS["port"])
         self.assertEqual(
-            parameters["fishbowl.ssl_verify"], FISHBOWL_OPTIONAL_DEFAULTS["ssl_verify"]
+            parameters["fishbowl.port"], self.qualification.sources[0].parameters["port"]
         )
 
     def test_authority_change_during_environment_resolution_refuses_before_provider(self) -> None:
@@ -582,17 +554,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 "fishbowl_source_sha256": self.resolve().authority_sha256,
             }
         )
-        self.store.write_runtime_environment_record(
-            self.runtime.model_copy(
-                update={
-                    "env": {
-                        **self.runtime.env,
-                        "ODOO_DB_USER": "odoo",
-                        config_parameter_runtime_key("fishbowl.host"): "changed.example.test",
-                    },
-                }
-            )
-        )
+        self.qualification = self.qualification.model_copy(update={"evidence_sha256": "b" * 64})
         with (
             patch(
                 "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",

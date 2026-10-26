@@ -123,7 +123,7 @@ def code_roots(options):
         raise ValueError()
     roots.append(safe_path('/opt/launchplane/addons'))
     package=safe_path('/odoo/odoo')
-    if not safe_path(package/'__init__.py').is_file():
+    if not package.is_dir() or not safe_path(package/'release.py').is_file() or not safe_path(package/'addons').is_dir():
         raise ValueError()
     roots.extend((package/'addons',package.parent/'addons'))
     mounts=[safe_path(value) for value in spec['mounts']]
@@ -356,9 +356,7 @@ def source_result(name,module,payload_producer,payload,applied):
 """
 )
 
-CONTAINER_PROGRAM = (
-    CONTAINER_LIBRARY
-    + r"""
+CONTAINER_RUN = r"""
 def run():
     global stage
     stage='runtime_inspection'
@@ -434,7 +432,8 @@ except BaseException:
     result={**unknown,'failure_stage':stage}
 print(json.dumps(result))
 """
-)
+
+CONTAINER_PROGRAM = CONTAINER_LIBRARY + CONTAINER_RUN
 
 HOST_LIBRARY = (
     _VALIDATOR
@@ -481,9 +480,7 @@ def inspect(instance="testing"):
 """
 )
 
-HOST_PROGRAM = (
-    HOST_LIBRARY
-    + r"""
+HOST_RUN = r"""
 stage='host_inspection'
 try:
     before=inspect()
@@ -509,4 +506,5 @@ except Exception:
     result={**result,'failure_stage':stage}
 print(prefix+json.dumps({'type':'complete','result':result}),flush=True)
 """
-)
+
+HOST_PROGRAM = HOST_LIBRARY + HOST_RUN

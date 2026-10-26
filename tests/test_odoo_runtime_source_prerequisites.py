@@ -55,6 +55,8 @@ class PrerequisiteFixture(unittest.TestCase):
         self.tenant = self.root / "tenant"
         self.framework = self.root / "framework" / "odoo"
         self.framework.mkdir(parents=True)
+        (self.framework / "addons").mkdir()
+        (self.framework / "release.py").write_text("version = 'fixture'\n")
         (self.framework / "__init__.py").write_text(
             "raise AssertionError('Odoo must not be imported')"
         )
@@ -466,6 +468,12 @@ class PrerequisiteTests(PrerequisiteFixture):
     def test_runtime_source_layout_does_not_require_importable_odoo(self) -> None:
         with patch("importlib.util.find_spec", return_value=None):
             self.assertEqual(self.read().runtime, "verified")
+
+    def test_namespace_framework_without_package_initializer_remains_qualified(self) -> None:
+        (self.framework / "__init__.py").unlink()
+        result = self.read()
+        self.assertEqual(result.runtime, "verified")
+        self.assertTrue(all(source.producer == "verified" for source in result.sources))
 
     def test_override_literal_and_real_delivery_payload_are_explicit_authority(self) -> None:
         verify_key = SOURCE_PREFIXES["cm_data"] + ".ssl_verify"
