@@ -1431,11 +1431,22 @@ class OAuthLoginStateRepository(Protocol):
     def pop(self, state: str) -> OAuthLoginState | None: ...
 
 
+class LaunchplaneErrorDetails(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    blocking_deployment_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+
 class LaunchplaneErrorDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: str
     message: str
+    reason: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,79}$",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class LaunchplaneErrorResponse(BaseModel):
@@ -1444,6 +1455,9 @@ class LaunchplaneErrorResponse(BaseModel):
     status: str = "rejected"
     trace_id: str
     error: LaunchplaneErrorDetail
+    details: LaunchplaneErrorDetails | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
     records: dict[str, str] | None = Field(
         default=None,
         json_schema_extra={"x-launchplane-optional-response": True},
@@ -10491,6 +10505,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code=error.code,
                 message=str(error),
+                reason=error.code,
             ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
@@ -10662,6 +10677,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code=error.code,
                 message=str(error),
+                reason=error.code,
             ) from error
         except OdooTargetReplacementApplyIdempotencyKeyReusedError as error:
             raise _launchplane_http_error(
@@ -30101,6 +30117,8 @@ def create_launchplane_fastapi_app(
             trace_id = string_value(detail.get("trace_id", trace_id))
             code = string_value(detail.get("code", code))
             message = string_value(detail.get("message", "Launchplane request failed."))
+            reason = detail.get("reason")
+            details = detail.get("details")
             records = detail.get("records")
             authz = detail.get("authz")
             authz_evaluation = http_error.authz_evaluation
@@ -30113,6 +30131,8 @@ def create_launchplane_fastapi_app(
                 if isinstance(http_error.detail, str)
                 else "Launchplane request failed."
             )
+            reason = None
+            details = None
             records = None
             authz = None
             authz_evaluation = None
@@ -30136,9 +30156,24 @@ def create_launchplane_fastapi_app(
                 evaluation=authz_evaluation,
                 policy_provenance=authz_policy_provenance,
             )
+        error_detail = LaunchplaneErrorDetail(code=code, message=message)
+        if reason is not None:
+            try:
+                error_detail = LaunchplaneErrorDetail.model_validate(
+                    {"code": code, "message": message, "reason": reason}
+                )
+            except ValidationError:
+                logging.warning("Invalid optional refusal reason; trace_id=%s", trace_id)
+        error_details = None
+        if details is not None:
+            try:
+                error_details = LaunchplaneErrorDetails.model_validate(details)
+            except ValidationError:
+                logging.warning("Invalid optional refusal details; trace_id=%s", trace_id)
         payload = LaunchplaneErrorResponse(
             trace_id=trace_id,
-            error=LaunchplaneErrorDetail(code=code, message=message),
+            error=error_detail,
+            details=error_details,
             records=records if isinstance(records, dict) else None,
             authz=authz if isinstance(authz, dict) else None,
         )
@@ -30348,8 +30383,14 @@ def _launchplane_http_error(
     authz_evaluation: AuthzEvaluation | None = None,
     authz_policy_provenance: AuthzPolicyProvenance | None = None,
     headers: dict[str, str] | None = None,
+    reason: str | None = None,
+    details: dict[str, str] | None = None,
 ) -> LaunchplaneHTTPException:
     detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
+    if reason is not None:
+        detail["reason"] = reason
+    if details is not None:
+        detail["details"] = details
     if records is not None:
         detail["records"] = records
     if authz is not None:

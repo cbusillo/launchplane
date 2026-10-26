@@ -19,6 +19,7 @@ from threading import Event, Timer
 from typing import Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 import uuid
+import zlib
 import click
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_failure_evidence
@@ -252,14 +253,14 @@ def _read_program(
         prompt = connection.recv(timeout=_remaining(deadline))
         prompt_text = prompt.decode() if isinstance(prompt, bytes) else prompt
     loader = (
-        "import base64,json,sys,termios; a=termios.tcgetattr(0);"
+        "import base64,json,sys,termios,zlib; a=termios.tcgetattr(0);"
         "a[3]&=~(termios.ECHO|termios.ICANON|termios.IEXTEN);"
         "a[0]&=~(termios.ICRNL|termios.IXON);a[6][termios.VMIN]=1;a[6][termios.VTIME]=0;"
         "termios.tcsetattr(0,termios.TCSANOW,a);print('\\n'+sys.argv[1]+'\\n',flush=True);"
         "line=sys.stdin.readline(262145);"
         "assert line.endswith('\\n') and len(line)<=262144;v=json.loads(line);"
         "sys.argv=[sys.argv[0],v['payload'],sys.argv[2]];"
-        "exec(base64.b64decode(v['program'],validate=True))"
+        "exec(zlib.decompress(base64.b64decode(v['program'],validate=True)))"
     )
     # Replace the interactive shell before sending any private payload. The
     # loader itself disables canonical input/echo and then proves readiness;
@@ -273,7 +274,7 @@ def _read_program(
         if line == ready:
             break
     encoded = base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode()
-    encoded_program = base64.b64encode(program.encode()).decode()
+    encoded_program = base64.b64encode(zlib.compress(program.encode())).decode()
     if len(encoded) > 120 * 1024 or len(encoded_program) > 120 * 1024:
         raise NativeSourceUnavailable("The fixed remote read exceeds the transport argument bound.")
 
