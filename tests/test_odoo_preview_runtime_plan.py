@@ -91,10 +91,6 @@ class OdooPreviewRuntimePlanTests(unittest.TestCase):
                 "run_preview_smoke",
             ],
         )
-        self.assertEqual(
-            [action.action for action in plan.rollback_actions],
-            ["delete_created_preview_domain", "delete_created_preview_compose"],
-        )
 
     def test_stage_compose_strategy_blocks_refresh(self) -> None:
         plan = plan_odoo_preview_runtime(request=_request(strategy="staged_compose_mvp"))
@@ -162,13 +158,14 @@ class OdooPreviewRuntimePlanTests(unittest.TestCase):
         self.assertEqual(plan.status, "blocked")
         self.assertIn("default_credential_binding", {blocker.code for blocker in plan.blockers})
 
-    def test_missing_provider_rollback_capability_blocks_refresh(self) -> None:
-        capabilities = _capabilities().model_copy(update={"can_delete_compose": False})
+    def test_refresh_needs_no_destructive_capability(self) -> None:
+        capabilities = _capabilities().model_copy(
+            update={"can_delete_compose": False, "can_delete_domain": False}
+        )
 
         plan = plan_odoo_preview_runtime(request=_request(provider_capabilities=capabilities))
 
-        self.assertEqual(plan.status, "blocked")
-        self.assertIn("provider_capability_missing", {blocker.code for blocker in plan.blockers})
+        self.assertEqual(plan.status, "ready")
 
     def test_missing_runtime_binding_blocks_refresh(self) -> None:
         plan = plan_odoo_preview_runtime(

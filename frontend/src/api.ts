@@ -103,6 +103,7 @@ import type {
   WriteProductReviewDecisionData,
   RetryProductReviewFeedbackData,
   ReleaseReviewResponse,
+  ReleaseReviewAccessResponse,
   ReleaseReviewDecisionEnvelope,
   ReleaseRequestEnvelope,
   ReadProductionBackupGateOperationData,
@@ -917,6 +918,10 @@ export function submitOwnerSecretInput(payload: SubmitOwnerSecretInputData["body
 
 export function readReleaseReview(product: string, signal?: AbortSignal): Promise<ReleaseReviewResponse> {
   return requestJson<ReleaseReviewResponse>(`/v1/release-review?${new URLSearchParams({ product })}`, "GET", undefined, signal);
+}
+
+export function readReleaseReviewAccess(product: string, signal?: AbortSignal): Promise<ReleaseReviewAccessResponse> {
+  return requestJson<ReleaseReviewAccessResponse>(`/v1/release-review/access?${new URLSearchParams({ product })}`, "GET", undefined, signal);
 }
 
 export function writeReleaseReviewDecision(payload: ReleaseReviewDecisionEnvelope): Promise<ReleaseReviewResponse> {

@@ -16,7 +16,8 @@ than repeating the effect; provider-specific reconciliation stays behind the
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
 import logging
@@ -331,6 +332,29 @@ def provider_operation_title(provider_operation_key: str) -> str:
 
 class _ProviderOperationLeaseLostError(RuntimeError):
     pass
+
+
+@runtime_checkable
+class ProviderExecutorExitStore(Protocol):
+    def record_mutation_executor_exit(self, reservation: LaunchplaneIdempotencyRecord) -> None: ...
+
+
+@contextmanager
+def _record_executor_exit(
+    store: DurableProviderOperationStore, reservation: LaunchplaneIdempotencyRecord
+) -> Iterator[None]:
+    try:
+        yield
+    finally:
+        if isinstance(store, ProviderExecutorExitStore):
+            try:
+                store.record_mutation_executor_exit(reservation)
+            except Exception as error:
+                logging.getLogger(__name__).warning(
+                    "Provider executor exit was not recorded operation=%s cause_type=%s",
+                    reservation.record_id,
+                    type(error).__name__,
+                )
 
 
 class _ReservationHeartbeat:
@@ -685,136 +709,138 @@ def _apply_acquired(
         lease_seconds=lease_seconds,
         interval_seconds=heartbeat_interval_seconds,
     )
-    heartbeat.start()
-    try:
-        outcome = adapter.apply(provider_operation_key, heartbeat)
-    except ProviderMutationCheckpoint as checkpoint:
-        current_reservation, _ = heartbeat.stop()
+    with _record_executor_exit(store, reservation):
+        heartbeat.start()
         try:
-            held = checkpoint.persist(current_reservation)
-        except Exception:
+            outcome = adapter.apply(provider_operation_key, heartbeat)
+        except ProviderMutationCheckpoint as checkpoint:
+            current_reservation, _ = heartbeat.stop()
+            try:
+                held = checkpoint.persist(current_reservation)
+            except Exception:
+                return _mark_reconcile_required(
+                    store=store,
+                    reservation=current_reservation,
+                    reconciliation_key=reconciliation_key,
+                )
+            except BaseException:
+                _mark_reconcile_required(
+                    store=store,
+                    reservation=current_reservation,
+                    reconciliation_key=reconciliation_key,
+                )
+                raise
+            return DurableProviderOperationResult(
+                "checkpointed",
+                held,
+                202,
+                provider_operation_response_payload(
+                    trace_id=response_trace_id,
+                    records={"operation": held.record_id},
+                    result={"state": "checkpointed", "original_key_required": True},
+                ),
+            )
+        except _ProviderOperationLeaseLostError:
+            current_reservation, _ = heartbeat.stop()
+            return _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
+        except ProviderMutationRejectedError as rejection:
+            current_reservation, _ = heartbeat.stop()
+            if current_reservation.provider_effect_started_at:
+                return _mark_reconcile_required(
+                    store=store,
+                    reservation=current_reservation,
+                    reconciliation_key=reconciliation_key,
+                )
+            if not release_pre_effect_failures:
+                return _mark_reconcile_required(
+                    store=store,
+                    reservation=current_reservation,
+                    reconciliation_key=reconciliation_key,
+                )
+            release = store.release_reserved_mutation(reservation=current_reservation)
+            if release.status == "released":
+                raise rejection.cause
+            return _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
+        except ProviderMutationUnknownError as error:
+            current_reservation, _ = heartbeat.stop()
+            cause = error.__cause__
+            cause_type = (
+                type(cause).__name__
+                if type(cause)
+                in {ValueError, RuntimeError, OSError, TimeoutError, FileNotFoundError}
+                else "unclassified"
+            )
+            logging.getLogger(__name__).warning(
+                "Provider outcome unverified operation=%s trace=%s phase=%s cause_type=%s",
+                current_reservation.record_id,
+                response_trace_id,
+                current_reservation.provider_effect_phase,
+                cause_type,
+            )
             return _mark_reconcile_required(
                 store=store,
                 reservation=current_reservation,
                 reconciliation_key=reconciliation_key,
             )
         except BaseException:
+            current_reservation, _ = heartbeat.stop()
             _mark_reconcile_required(
                 store=store,
                 reservation=current_reservation,
                 reconciliation_key=reconciliation_key,
             )
             raise
-        return DurableProviderOperationResult(
-            "checkpointed",
-            held,
-            202,
-            provider_operation_response_payload(
-                trace_id=response_trace_id,
-                records={"operation": held.record_id},
-                result={"state": "checkpointed", "original_key_required": True},
-            ),
-        )
-    except _ProviderOperationLeaseLostError:
-        current_reservation, _ = heartbeat.stop()
-        return _mark_reconcile_required(
-            store=store,
-            reservation=current_reservation,
-            reconciliation_key=reconciliation_key,
-        )
-    except ProviderMutationRejectedError as rejection:
-        current_reservation, _ = heartbeat.stop()
-        if current_reservation.provider_effect_started_at:
-            return _mark_reconcile_required(
-                store=store,
-                reservation=current_reservation,
-                reconciliation_key=reconciliation_key,
-            )
-        if not release_pre_effect_failures:
-            return _mark_reconcile_required(
-                store=store,
-                reservation=current_reservation,
-                reconciliation_key=reconciliation_key,
-            )
-        release = store.release_reserved_mutation(reservation=current_reservation)
-        if release.status == "released":
-            raise rejection.cause
-        return _mark_reconcile_required(
-            store=store,
-            reservation=current_reservation,
-            reconciliation_key=reconciliation_key,
-        )
-    except ProviderMutationUnknownError as error:
-        current_reservation, _ = heartbeat.stop()
-        cause = error.__cause__
-        cause_type = (
-            type(cause).__name__
-            if type(cause) in {ValueError, RuntimeError, OSError, TimeoutError, FileNotFoundError}
-            else "unclassified"
-        )
-        logging.getLogger(__name__).warning(
-            "Provider outcome unverified operation=%s trace=%s phase=%s cause_type=%s",
-            current_reservation.record_id,
-            response_trace_id,
-            current_reservation.provider_effect_phase,
-            cause_type,
-        )
-        return _mark_reconcile_required(
-            store=store,
-            reservation=current_reservation,
-            reconciliation_key=reconciliation_key,
-        )
-    except BaseException:
-        current_reservation, _ = heartbeat.stop()
-        _mark_reconcile_required(
-            store=store,
-            reservation=current_reservation,
-            reconciliation_key=reconciliation_key,
-        )
-        raise
 
-    current_reservation, _ = heartbeat.stop()
+        current_reservation, _ = heartbeat.stop()
 
-    if outcome.provider_effect_performed and not current_reservation.provider_effect_started_at:
-        return _mark_reconcile_required(
+        if outcome.provider_effect_performed and not current_reservation.provider_effect_started_at:
+            return _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
+
+        if not outcome.durable:
+            if current_reservation.provider_effect_started_at:
+                return _mark_reconcile_required(
+                    store=store,
+                    reservation=current_reservation,
+                    reconciliation_key=reconciliation_key,
+                )
+            if not release_pre_effect_failures:
+                return _mark_reconcile_required(
+                    store=store,
+                    reservation=current_reservation,
+                    reconciliation_key=reconciliation_key,
+                )
+            release = store.release_reserved_mutation(reservation=current_reservation)
+            if release.status != "released":
+                return _mark_reconcile_required(
+                    store=store,
+                    reservation=current_reservation,
+                    reconciliation_key=reconciliation_key,
+                )
+            return DurableProviderOperationResult(
+                "unstored",
+                None,
+                outcome.response_status_code,
+                outcome.response_payload,
+            )
+
+        return _complete_or_adopt_outcome(
             store=store,
             reservation=current_reservation,
-            reconciliation_key=reconciliation_key,
+            response_trace_id=response_trace_id,
+            outcome=outcome,
         )
-
-    if not outcome.durable:
-        if current_reservation.provider_effect_started_at:
-            return _mark_reconcile_required(
-                store=store,
-                reservation=current_reservation,
-                reconciliation_key=reconciliation_key,
-            )
-        if not release_pre_effect_failures:
-            return _mark_reconcile_required(
-                store=store,
-                reservation=current_reservation,
-                reconciliation_key=reconciliation_key,
-            )
-        release = store.release_reserved_mutation(reservation=current_reservation)
-        if release.status != "released":
-            return _mark_reconcile_required(
-                store=store,
-                reservation=current_reservation,
-                reconciliation_key=reconciliation_key,
-            )
-        return DurableProviderOperationResult(
-            "unstored",
-            None,
-            outcome.response_status_code,
-            outcome.response_payload,
-        )
-
-    return _complete_or_adopt_outcome(
-        store=store,
-        reservation=current_reservation,
-        response_trace_id=response_trace_id,
-        outcome=outcome,
-    )
 
 
 class _AdoptionEvidenceOptions(TypedDict, total=False):

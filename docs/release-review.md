@@ -816,6 +816,17 @@ Its lane reservation and unknown outcome remain held; replacement does not
 authorize replay, retry or retirement. Occupied locks, active leases and effect
 families without that exclusion proof still block, ending in the bounded
 diagnostic refusal if they cannot settle. Terminal records do not block.
+The durable provider runner records an exit receipt after its adapter, heartbeat
+and final settlement attempt have ended. A matching receipt makes a
+`reconcile_required` reservation diagnostic, even while its former lease is
+unexpired. The receipt binds the request fingerprint, attempt and `lease_owner`;
+a retry cannot inherit it. The unknown product outcome and exclusive target
+reservation remain unchanged. This proof survives service restart without
+replaying or settling the product operation. Historical holds and interrupted
+executors without a receipt keep the existing drain behavior.
+Receipt persistence failure logs a bounded diagnostic and preserves the runner's
+original result or exception; missing proof remains a blocker. Completed or
+released reservations do not take the drain lock for a receipt.
 Exact-request replay, expiry reconciliation, provider
 observation, admitted heartbeats and terminal writes remain usable during the
 drain; fresh/retried effects are refused. Matching image/marker startup admits
@@ -857,6 +868,9 @@ the container health checks; failed deployment health starts a new repair fence,
 and already admitted effects must still finish before that replacement.
 Automatic service rollback
 uses the same marker-bound repair, including same-image configuration failures.
+After acquiring its fence, a repair polls that same request's draining fence
+until admitted operations finish; the original superseded marker remains bound
+to the repair intent rather than being compared with the repair's new marker.
 For a cancelled run, manually dispatch Deploy Launchplane with the compatible
 `image_reference`, a new `self_deploy_idempotency_key` and the exact
 `supersedes_deployment_marker` from `runtime.release_drain`; this uses the existing
