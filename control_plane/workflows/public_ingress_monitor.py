@@ -138,12 +138,6 @@ from control_plane.notifications import (
     public_discord_url_error,
     public_url_error,
 )
-from control_plane.discord_incident_summary import (
-    SUMMARY_AGGREGATE_TYPE,
-    build_discord_incident_summary_delivery,
-    deliver_discord_incident_summary,
-    discord_incident_needs_summary,
-)
 from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.outbound_http import resolve_public_http_destination
@@ -1520,21 +1514,7 @@ def _public_ingress_notification_outbox_deliveries(
             for destination in policy.destinations:
                 if destination.status != "enabled":
                     continue
-                if (
-                    destination.kind == "discord"
-                    and event == "resolved"
-                    and incident.severity == "warning"
-                ):
-                    continue
-                if destination.kind == "discord" and discord_incident_needs_summary(
-                    incident, event
-                ):
-                    summary = build_discord_incident_summary_delivery(
-                        policy_id=policy.policy_id,
-                        destination_id=destination.destination_id,
-                        created_at=incident_event.occurred_at,
-                    )
-                    deliveries.append(summary)
+                if destination.kind == "discord" and not _discord_incident_pages(incident, event):
                     continue
                 attempt_id = build_public_ingress_notification_attempt_id(
                     incident_id=incident.incident_id,
@@ -3716,14 +3696,17 @@ def deliver_public_ingress_notification_outbox_delivery(
 ) -> OutboxDeliveryRecord:
     delivery_record = record
     try:
-        if record.aggregate_type == SUMMARY_AGGREGATE_TYPE:
-            if record_store is None:
-                raise ValueError("Discord incident summary requires a record store")
-            return deliver_discord_incident_summary(
-                record=record,
-                record_store=record_store,
-                drivers=drivers,
-                mark_provider_started=mark_provider_started,
+        if record.aggregate_type == "public_ingress_discord_summary":
+            return record.model_copy(
+                update={
+                    "state": "failed" if record.provider_operation_key else "delivered",
+                    "action": "skipped_retired_discord_summary",
+                    "error_code": "delivery_outcome_unknown"
+                    if record.provider_operation_key
+                    else "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                }
             )
         payload = record.payload
         attempt_payload = _dict_payload(payload.get("attempt"))
@@ -3788,45 +3771,9 @@ def deliver_public_ingress_notification_outbox_delivery(
                         record=record, reason="incident_not_active"
                     )
                 event = _public_ingress_event_value(attempt_payload.get("event"))
-                if discord_incident_needs_summary(incident, event):
-                    policy = next(
-                        (
-                            value
-                            for value in _matching_notification_policies(
-                                record_store=record_store, incident=incident
-                            )
-                            if value.policy_id == attempt_payload.get("policy_id")
-                        ),
-                        None,
-                    )
-                    destination = (
-                        next(
-                            (
-                                value
-                                for value in policy.destinations
-                                if value.destination_id == destination_payload.get("destination_id")
-                                and value.kind == "discord"
-                                and value.status == "enabled"
-                            ),
-                            None,
-                        )
-                        if policy
-                        else None
-                    )
-                    if policy is not None and destination is not None:
-                        from control_plane.storage.postgres import OutboxWithIdempotencyRequest
-
-                        summary = build_discord_incident_summary_delivery(
-                            policy_id=policy.policy_id,
-                            destination_id=destination.destination_id,
-                            created_at=record.updated_at,
-                            due_now=True,
-                        )
-                        record_store.enqueue_outbox_delivery_with_idempotency(
-                            OutboxWithIdempotencyRequest(delivery=summary)
-                        )
+                if not _discord_incident_pages(incident, event):
                     return _superseded_incident_outbox_delivery(
-                        record=record, reason="discord_summary"
+                        record=record, reason="discord_page_only"
                     )
         summary_delivery_id = payload.get(PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY)
         if summary_delivery_id and summary_delivery_id != record.delivery_id:
@@ -4010,10 +3957,6 @@ class PublicIngressNotificationOutboxStore(PublicIngressMonitorStore, Protocol):
     ) -> OutboxDeliveryRecord: ...
 
     def read_secret_record(self, secret_id: str) -> SecretRecord: ...
-
-    def read_latest_discord_summary(
-        self, *, policy_id: str, destination_id: str, exclude_delivery_id: str = ""
-    ) -> OutboxDeliveryRecord | None: ...
 
     def read_public_ingress_incident_record(
         self, incident_id: str
@@ -4368,6 +4311,12 @@ def _deliver_email_notification(
     return PublicIngressNotificationDelivery(delivery_status="delivered", action="sent_email")
 
 
+def _discord_incident_pages(
+    incident: PublicIngressIncidentRecord, event: PublicIngressIncidentEvent
+) -> bool:
+    return incident.severity == "critical" and event in {"opened", "updated", "resolved"}
+
+
 def _deliver_discord_notification(
     *,
     destination: PublicIngressNotificationDestination,
@@ -4379,6 +4328,10 @@ def _deliver_discord_notification(
     notification_body: str = "",
     drill: bool = False,
 ) -> PublicIngressNotificationDelivery:
+    if not drill and not _discord_incident_pages(incident, event):
+        return PublicIngressNotificationDelivery(
+            delivery_status="skipped", action="skipped_discord_page_only"
+        )
     webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
     if not webhook_url:
         return PublicIngressNotificationDelivery(
@@ -4397,7 +4350,7 @@ def _deliver_discord_notification(
         0x2E7D32
         if event == "resolved"
         else 0xED9B20
-        if discord_incident_needs_summary(incident, event)
+        if incident.severity == "warning" or event == "reminder"
         else DISCORD_CRITICAL_ALERT_COLOR
     )
     title = (
