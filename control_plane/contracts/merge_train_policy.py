@@ -117,6 +117,12 @@ class MergeTrainEnqueuePolicy(BaseModel):
         )
         return self
 
+    @property
+    def dependency_identity_ids(self) -> frozenset[int]:
+        return frozenset(self.dependency_update_github_user_ids) | {
+            bot.github_user_id for bot in self.dependency_update_bots
+        }
+
     def dependency_bot(self, github_user_id: object) -> MergeTrainDependencyBotPolicy | None:
         if not isinstance(github_user_id, int) or isinstance(github_user_id, bool):
             return None

@@ -67,6 +67,7 @@ def main() -> int:
         report = read()
         trace = transport["public_trace_id"](report.trace_id)
         payload: dict[str, object] = {}
+        reviewed_keys: list[str] = []
         if args.mode == "dry-run":
             payload = {
                 "mode": "dry-run",
@@ -81,9 +82,10 @@ def main() -> int:
                 args.environment,
             ):
                 raise ValueError("The reviewed lane changed.")
+            reviewed_keys = saved["request"]["keys"]
             payload = {
                 "mode": "apply",
-                "keys": saved["request"]["keys"],
+                "keys": reviewed_keys,
                 "review_digest": review.result.review_digest,
                 "confirmation": f"APPLY {args.product}/{args.environment}",
             }
@@ -111,8 +113,11 @@ def main() -> int:
                 report = response
             else:
                 report = read()
-                if response.result.read_back_matches is not True or any(
-                    entry.action != "already_agrees" for entry in report.result.entries
+                if (
+                    response.result.read_back_matches is not True
+                    or not report.result.entries
+                    or {entry.key for entry in report.result.entries} != set(reviewed_keys)
+                    or any(entry.action != "already_agrees" for entry in report.result.entries)
                 ):
                     raise ValueError("Independent readback does not agree.")
         print(

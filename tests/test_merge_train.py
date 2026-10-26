@@ -396,6 +396,33 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertEqual(reasons[9], ("dependency update needs agent review",))
         self.assertIn("missing ready-to-merge label", reasons[10])
 
+    def test_dependency_candidates_are_isolated_without_original_pr_landing(self) -> None:
+        policy = _dependency_update_policy(49699333)
+        for position in (0, 1, 2):
+            with self.subTest(position=position):
+                pulls = [_pull_request(number) for number in (1, 2, 3)]
+                pulls[position] = pulls[position].model_copy(update={"actor_id": 49699333})
+                result = build_merge_train_dry_run_result(
+                    policy=policy,
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository=policy.policies[0].repository,
+                        base_branch="main",
+                        pull_requests=tuple(pulls),
+                    ),
+                    batch_landing=True,
+                    new_candidate=True,
+                )
+                self.assertEqual(result.queue_order, (1,) if position < 2 else (1, 2))
+                self.assertFalse(any(entry.requires_individual_landing for entry in result.queue))
+                self.assertTrue(all(entry.eligible for entry in result.queue))
+                self.assertTrue(
+                    all(
+                        entry.deferred_reasons
+                        for entry in result.queue
+                        if entry.number not in result.queue_order
+                    )
+                )
+
     def test_max_batch_size_caps_a_new_batch_and_leaves_the_rest_queued(self) -> None:
         snapshot = MergeTrainDryRunSnapshot(
             repository="cbusillo/sellyouroutboard",

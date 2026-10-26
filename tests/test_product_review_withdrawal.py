@@ -223,7 +223,7 @@ class ReviewWithdrawalTests(unittest.TestCase):
         self.assertEqual(self.source.deletes, 1)
         self.assertEqual(len(self.source.comments), 1)
 
-    def test_before_checkpoint_failure_can_retry_the_original_request(self) -> None:
+    def interrupt_before_checkpoint(self) -> None:
         from unittest.mock import patch
 
         plan = self.service.run(self.request, key="", trace="plan")
@@ -237,7 +237,29 @@ class ReviewWithdrawalTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.apply()
         self.assertEqual(self.source.deletes, 0)
+
+    def test_before_checkpoint_failure_can_retry_the_original_request(self) -> None:
+        self.interrupt_before_checkpoint()
         self.assertTrue(self.apply()["applied"])
+
+    def test_retry_after_client_reroute_preserves_the_new_clients_label(self) -> None:
+        self.interrupt_before_checkpoint()
+        rerouted = self.profile.model_copy(
+            update={
+                "owner": self.profile.owner.model_copy(
+                    update={"github_login": "new-client", "github_id": "987654"}
+                )
+            }
+        )
+        self.store.write_product_profile_record(rerouted)
+        self.service = ReviewWithdrawalService(
+            self.store, self.source, rerouted, actor=self.service.actor
+        )
+        result = self.service.run(self.reviewed_request, key="withdraw-1", trace="rerouted-retry")
+        self.assertFalse(result["applied"])
+        self.assertTrue(result.get("replan_required"))
+        self.assertEqual(self.source.deletes, 0)
+        self.assertIn(rerouted.owner.review_label, self.source.labels)
 
     def test_renewed_request_settles_old_key_without_deletion_then_allows_fresh_review(
         self,
