@@ -17,6 +17,7 @@ from control_plane.contracts.deploy_reference import (
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.child_process_errors import redact_untrusted_text
 from control_plane.dokploy import api
+from control_plane.runtime_platform_credentials import find_platform_credentials
 from control_plane.dokploy.runtime_evidence import (
     DokployEvidenceProviderError,
     _read_container_config,
@@ -164,6 +165,7 @@ class ApplicationRuntimeObservation:
     server_id: str = ""
     service_environment_keys: ApplicationEnvironmentKeys = ApplicationEnvironmentKeys()
     running_containers: tuple[ApplicationContainerMetadata, ...] = ()
+    service_version: int = 0
 
     @property
     def rollout_settled(self) -> bool:
@@ -308,6 +310,22 @@ def application_runtime_drift_fingerprint(
     ).hexdigest()
 
 
+def _environment_values(value: object) -> dict[str, str]:
+    if not isinstance(value, list):
+        raise DokployEvidenceProviderError("container-config")
+    result: dict[str, str] = {}
+    for row in value:
+        if not isinstance(row, str):
+            raise DokployEvidenceProviderError("container-config")
+        key, separator, item = row.partition("=")
+        if not separator or not _ENVIRONMENT_KEY.fullmatch(key) or key in result:
+            raise DokployEvidenceProviderError("container-config")
+        result[key] = item
+    if find_platform_credentials(result) or result.get("DOCKER_HOST"):
+        raise DokployEvidenceProviderError("container-config")
+    return result
+
+
 def _object(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise DokployEvidenceProviderError("container-config")
@@ -354,6 +372,7 @@ def fetch_application_runtime(
     host: str,
     token: str,
     application_id: str,
+    expected_environment: dict[str, str] | None = None,
 ) -> ApplicationRuntimeObservation:
     """Inspect the recorded server's exact service, tasks, containers and image digests.
 
@@ -362,7 +381,12 @@ def fetch_application_runtime(
     Raw provider responses never escape this reader, including environment values.
     """
     try:
-        return _fetch_application_runtime(host=host, token=token, application_id=application_id)
+        return _fetch_application_runtime(
+            host=host,
+            token=token,
+            application_id=application_id,
+            expected_environment=expected_environment,
+        )
     except click.ClickException:
         raise DokployEvidenceProviderError("target-inspect") from None
 
@@ -372,6 +396,7 @@ def _fetch_application_runtime(
     host: str,
     token: str,
     application_id: str,
+    expected_environment: dict[str, str] | None = None,
 ) -> ApplicationRuntimeObservation:
     target = api.fetch_dokploy_target_payload(
         host=host,
@@ -402,6 +427,11 @@ def _fetch_application_runtime(
     container_spec = _object(_object(spec.get("TaskTemplate")).get("ContainerSpec"))
     service_image = _image(container_spec.get("Image"))
     deployment_id = _deployment_identity(container_spec.get("Env"))
+    if (
+        expected_environment is not None
+        and _environment_values(container_spec.get("Env")) != expected_environment
+    ):
+        raise DokployEvidenceProviderError("container-config")
     replicas = _object(_object(spec.get("Mode")).get("Replicated")).get("Replicas")
     if type(replicas) is not int or replicas < 0:
         raise DokployEvidenceProviderError("container-config")
@@ -536,6 +566,13 @@ def _fetch_application_runtime(
             digests = image.get("RepoDigests")
             if image.get("Id") != image_id or not isinstance(digests, list):
                 raise DokployEvidenceProviderError("image-identity")
+            if expected_environment is not None:
+                image_environment = _object(image.get("Config")).get("Env")
+                inherited = _environment_values(
+                    [] if image_environment is None else image_environment
+                )
+                if _environment_values(config.get("Env")) != inherited | expected_environment:
+                    raise DokployEvidenceProviderError("container-config")
             matching = {
                 f"{_repository(value)}@{docker_image_digest(value)}"
                 for value in digests
@@ -589,6 +626,7 @@ def _fetch_application_runtime(
     ):
         raise DokployEvidenceProviderError("target-inspect")
     return ApplicationRuntimeObservation(
+        service_version=version,
         application_id=application_id,
         app_name=app_name,
         service_id=service_id,

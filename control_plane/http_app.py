@@ -8719,6 +8719,8 @@ def create_launchplane_fastapi_app(
                     lane_check()
                     event_check()
 
+                    runtime_binding: dict[str, object] = {}
+
                     def qualify(
                         *,
                         inspect_provider: bool,
@@ -8735,6 +8737,7 @@ def create_launchplane_fastapi_app(
                             inspect_provider=inspect_provider,
                             inspect_storage=inspect_storage,
                             before_inspection=before_inspection,
+                            runtime_binding=runtime_binding,
                         )
 
                     binding = qualify(inspect_provider=False)
