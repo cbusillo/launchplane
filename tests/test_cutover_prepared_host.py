@@ -77,3 +77,27 @@ class PreparedHostTests(unittest.IsolatedAsyncioTestCase):
             foreign = await request(client, "GET", "/", headers={"Host": "foreign.invalid"})
             self.assertEqual(foreign.status_code, 503)
             self.assertNotIn("x-launchplane-public-copy", foreign.headers)
+
+    async def test_retention_requires_durable_reconstruction_and_preserves_held_publication(
+        self,
+    ) -> None:
+        publisher = PreparedSiteDirectory(self.directory)
+        publisher.publish(self.site, "old-terminal")
+        publisher.publish(self.site, "held")
+        known = {"old-terminal": self.site, "held": self.site}
+        publisher.prune(known, protected={"held"}, serving_prepared=True)
+        self.assertFalse(publisher.path("old-terminal").exists())
+        self.assertEqual(publisher.load("held"), self.site)
+        self.assertEqual(publisher.active_pause(), "held")
+        publisher.prune(known, protected={"held"}, serving_prepared=False)
+        self.assertEqual(publisher.load("held"), self.site)
+        corrupted = self.site.model_copy(update={"content_digest": "foreign"})
+        with self.assertRaises(ValueError):
+            publisher.prune({"held": corrupted}, protected=set(), serving_prepared=False)
+        self.assertEqual(publisher.load("held"), self.site)
+        publisher.prune(known, protected=set(), serving_prepared=False)
+        self.assertFalse(publisher.path("held").exists())
+        with self.assertRaises(FileNotFoundError):
+            publisher.active_pause()
+        publisher.publish(self.site, "held")
+        self.assertEqual(publisher.load("held"), self.site)

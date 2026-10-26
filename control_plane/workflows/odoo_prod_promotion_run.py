@@ -28,7 +28,7 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     execute_odoo_prod_backup_gate,
 )
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
-from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan, ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.odoo_cutover_plan import (
     decision_bound_cutover_plan,
     resolve_profile_cutover_plan,
@@ -124,7 +124,7 @@ def admit_odoo_prod_promotion_run(
         recovery = persisted_cutover(record_store, admitted_plan)
         if admitted_plan is not None and any(
             item.odoo_cutover is not None
-            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+            and item.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
             and item.odoo_cutover.plan != admitted_plan
             for item in record_store.list_deployment_records(
                 context_name=request.context, instance_name=request.to_instance
@@ -201,7 +201,7 @@ def execute_odoo_prod_promotion_run(
         if (
             isinstance(prior, DeploymentRecord)
             and prior.odoo_cutover is not None
-            and prior.odoo_cutover.step not in {"complete", "rolled_back"}
+            and prior.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
         ):
             raise RuntimeError("Cutover remains unfinished; retain its recovery hold.")
         return _result_from_inputs(

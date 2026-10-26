@@ -39,7 +39,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     execute_odoo_stable_target_replacement_apply,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan, ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.workflows.odoo_cutover_deployment import (
@@ -148,7 +148,7 @@ def _lane_cutover_deployment(
             context_name=request.context, instance_name=request.instance
         )
         if record.odoo_cutover is not None
-        and record.odoo_cutover.step not in {"complete", "rolled_back"}
+        and record.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
     )
     if len(attempts) > 1:
         raise click.ClickException("Multiple unfinished cutovers require lane reconciliation.")

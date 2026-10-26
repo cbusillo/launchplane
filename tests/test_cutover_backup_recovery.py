@@ -164,3 +164,20 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     BoundOdooCutoverHost.backup(self.host, self.plan)
                 self.transport.assert_not_called()
+
+    def test_only_matching_terminal_capture_failure_permits_abort(self) -> None:
+        from control_plane.odoo_cutover_recovery import DefiniteBackupFailure
+
+        self.bindings["backup"] = self.binding
+        self.manifest = {
+            "state": "failed",
+            "claim": {"record_id": self.backup_id, "nonce": self.binding["nonce"]},
+        }
+        with self.assertRaises(DefiniteBackupFailure):
+            BoundOdooCutoverHost.backup(self.host, self.plan)
+        self.transport.assert_not_called()
+        self.manifest["claim"]["nonce"] = "foreign"
+        with self.assertRaises(ValueError) as caught:
+            BoundOdooCutoverHost.backup(self.host, self.plan)
+        self.assertNotIsInstance(caught.exception, DefiniteBackupFailure)
+        self.transport.assert_not_called()

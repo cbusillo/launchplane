@@ -3,6 +3,56 @@ from control_plane.contracts.prepared_public_site import PublicPauseRecord
 from control_plane.prepared_public_site import verify_snapshot
 
 
+class DefiniteBackupFailure(ValueError):
+    pass
+
+
+def backup_recovery_eligible(record: OdooCutoverRecord) -> bool:
+    if (
+        record.step not in {"backing_up", "aborting"}
+        or record.backup is not None
+        or record.maintenance is not None
+        or record.website_settings_attempted
+        or record.rollback_pause is not None
+    ):
+        return False
+    pause, site, plan = record.pause, record.public_site, record.plan
+    if pause is None:
+        return site is None and plan.compatibility.classification == "compatible"
+    if site is None:
+        return False
+    try:
+        verify_snapshot(site)
+    except ValueError:
+        return False
+    return (
+        pause.pause_id == record.record_id
+        and pause.binding == plan.old.binding == site.plan.binding
+        and site.plan.writers == plan.writers
+        and pause.content_digest == site.content_digest
+        and pause.served_mode == "prepared-public"
+        and pause.drained_at is not None
+        and len(pause.writers) == len(plan.writers)
+        and {item.writer for item in pause.writers} == set(plan.writers)
+        and all(
+            item.pause_id == pause.pause_id
+            and item.binding == pause.binding
+            and item.fenced
+            and item.active_jobs == 0
+            and item.evidence_id
+            for item in pause.writers
+        )
+        and (
+            pause.state == "drained"
+            and pause.ended_at is None
+            or record.step == "aborting"
+            and record.backup_failed
+            and pause.state in {"resuming", "complete"}
+            and pause.recovery_binding == plan.old.binding
+        )
+    )
+
+
 def startup_recovery_pause(record: OdooCutoverRecord) -> PublicPauseRecord | None:
     from control_plane.dokploy.slot_maintenance import maintenance_payload, payload_digest
 

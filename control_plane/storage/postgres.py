@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from control_plane.contracts.odoo_cutover import ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.provider_hold_attention import (
     PROVIDER_HOLD_PAGE_LIMIT,
     ProviderHoldAttentionPage,
@@ -17411,7 +17412,7 @@ class PostgresRecordStore(HumanSessionStore):
                             item.odoo_cutover
                             for item in deployments
                             if item.odoo_cutover is not None
-                            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+                            and item.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
                         ]
                         if len(unfinished) != 1:
                             continue
@@ -17421,7 +17422,10 @@ class PostgresRecordStore(HumanSessionStore):
                             or cutover.plan.production.artifact_id != record.target.artifact_id
                         ):
                             continue
-                    from control_plane.odoo_cutover_recovery import startup_recovery_pause
+                    from control_plane.odoo_cutover_recovery import (
+                        startup_recovery_pause,
+                        backup_recovery_eligible,
+                    )
 
                     if (
                         cutover is None
@@ -17430,6 +17434,7 @@ class PostgresRecordStore(HumanSessionStore):
                             and cutover.step in {"pausing", "switching", "resuming", "draining"}
                             or cutover.step in {"maintaining", "rolling_back"}
                             and startup_recovery_pause(cutover) is not None
+                            or backup_recovery_eligible(cutover)
                         )
                         or cutover.plan.new.binding.product_id != record.product
                         or cutover.plan.new.binding.environment_id != record.instance

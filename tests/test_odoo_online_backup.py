@@ -226,3 +226,21 @@ class OnlineBackupTests(unittest.TestCase):
                 OdooProdBackupCaptureEvidence.model_validate(
                     {k: v for k, v in evidence.items() if k != field}
                 )
+
+    def test_rejected_duplicate_cannot_mark_a_live_native_capture_as_failed(self) -> None:
+        self.environment["CUTOVER_CAPTURE_CLAIM"] = "1"
+        claim = self.destination.with_name(self.destination.name + ".attempt.json")
+        claim.write_text(
+            json.dumps(
+                {
+                    "record_id": self.environment["BACKUP_RECORD_ID"],
+                    "nonce": self.environment["BACKUP_NONCE"],
+                }
+            )
+        )
+        with self.assertRaises(FileExistsError):
+            self.capture()
+        self.psycopg.connect.assert_not_called()
+        self.assertFalse(
+            self.destination.with_name(self.destination.name + ".failed.json").exists()
+        )

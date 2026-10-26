@@ -25,6 +25,50 @@ print(json.dumps({'writer_id':spec['writer_id'],'backend':'odoo_cron','jobs':sor
 """
 
 
+EXECUTOR_PREFLIGHT_PROGRAM = r"""
+import ast,configparser,hashlib,json,os,runpy,sys,tempfile
+from pathlib import Path
+import psycopg2
+spec=json.load(sys.stdin)
+sys.path.insert(0,'/volumes/scripts')
+startup=runpy.run_path('/volumes/scripts/run_odoo_startup.py',run_name='executor_preflight')
+with tempfile.TemporaryDirectory() as directory:
+    arguments=type('Arguments',(),{'config_path':directory+'/odoo.conf'})()
+    settings=startup['_load_settings'](arguments)
+    startup['_write_runtime_config'](settings)
+    parser=configparser.ConfigParser(interpolation=None)
+    parser.read(settings.config_path)
+    options=dict(parser['options'])
+    if int(options.get('max_cron_threads','-1'))!=0: raise ValueError('web warming would start cron writers')
+    server_wide={name.strip() for name in options.get('server_wide_modules','base,web').split(',') if name.strip()}
+    if not server_wide <= {'base','web'}: raise ValueError('web-hosted executors lack isolated cutover support')
+    if parser.has_section('queue_job') or os.environ.get('ODOO_QUEUE_JOB_CHANNELS') or os.environ.get('QUEUE_JOB_CHANNELS'):
+        raise ValueError('HTTP-dependent queue executors are unsupported')
+    with psycopg2.connect(host=settings.database_host,port=settings.database_port,dbname=spec['database'],user=settings.database_user,password=settings.database_password,connect_timeout=10) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT value FROM ir_config_parameter WHERE key='database.uuid'")
+        if cursor.fetchone()!=(spec['database_uuid'],): raise ValueError('executor inventory database differs')
+        cursor.execute("SELECT name FROM ir_module_module WHERE state IN ('installed','to install','to upgrade','to remove')")
+        modules={row[0] for row in cursor.fetchall()} | set(spec['planned_modules']) | server_wide
+    if 'queue_job' in modules: raise ValueError('installed HTTP-dependent queue executor is unsupported')
+    import odoo
+    from odoo.tools import config
+    from odoo.modules.module import initialize_sys_path
+    config.parse_config(['-c',settings.config_path])
+    initialize_sys_path()
+    roots=[Path(path) for path in odoo.addons.__path__]
+    manifests={}
+    for name in sorted(modules):
+        paths=[root/name/'__manifest__.py' for root in roots if (root/name/'__manifest__.py').is_file()]
+        if len(paths)!=1: raise ValueError('executor module inventory is missing or ambiguous')
+        raw=paths[0].read_bytes()
+        manifest=ast.literal_eval(raw.decode())
+        if manifest.get('post_load'): raise ValueError('module starts an unqualified server-wide hook')
+        manifests[name]=hashlib.sha256(raw).hexdigest()
+    evidence=hashlib.sha256(json.dumps({'manifests':manifests,'server_wide':sorted(server_wide),'cron_threads':0},sort_keys=True).encode()).hexdigest()
+print(json.dumps({'image':spec['image'],'database_uuid':spec['database_uuid'],'modules':sorted(modules),'executor_sha256':evidence,'web_crons':False,'server_wide':sorted(server_wide)}))
+"""
+
+
 class NativeCronWriterCapabilities:
     def __init__(
         self,
@@ -41,6 +85,50 @@ class NativeCronWriterCapabilities:
                 "every logical background writer requires its own native cron capability"
             )
         self.plan, self.bindings, self.execute, self.runner = plan, bindings, execute, runner
+
+    def preflight(self, slot: OdooSlot) -> str:
+        if slot not in (self.plan.old, self.plan.new):
+            raise ValueError("executor preflight crossed the admitted artifact")
+        observed = json.loads(
+            self.execute(
+                (
+                    "docker",
+                    "exec",
+                    "-i",
+                    "-e",
+                    "ODOO_MAX_CRON_THREADS=0",
+                    self.runner(slot),
+                    "/venv/bin/python",
+                    "-c",
+                    EXECUTOR_PREFLIGHT_PROGRAM,
+                ),
+                json.dumps(
+                    {
+                        "image": slot.image,
+                        "database": slot.binding.database,
+                        "database_uuid": slot.runtime_identity.database_uuid,
+                        "planned_modules": list(self.plan.compatibility.install_modules)
+                        if slot == self.plan.new
+                        else [],
+                    }
+                ),
+            )
+        )
+        if (
+            observed.get("image") != slot.image
+            or observed.get("database_uuid") != slot.runtime_identity.database_uuid
+            or observed.get("web_crons") is not False
+            or not isinstance(observed.get("modules"), list)
+            or not observed["modules"]
+            or not isinstance(observed.get("server_wide"), list)
+            or not set(observed["server_wide"]) <= {"base", "web"}
+            or not isinstance(observed.get("executor_sha256"), str)
+            or len(observed["executor_sha256"]) != hashlib.sha256().digest_size * 2
+        ):
+            raise ValueError(
+                "native executor preflight lacks complete effective configuration/inventory"
+            )
+        return str(observed["executor_sha256"])
 
     def __call__(self, slot: OdooSlot, writer: WriterTarget) -> str:
         if writer not in self.plan.writers or slot not in (self.plan.old, self.plan.new):

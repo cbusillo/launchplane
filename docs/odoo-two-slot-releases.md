@@ -457,3 +457,55 @@ serving and original-operation forward/rollback recovery. Infrastructure backup
 provider simulation in that fixture is explicitly separate from native logical
 backup proof. It neither proves a real infrastructure backup nor activates a
 live lane. Parent #3268 still waits for its exact accepted real-release event.
+
+### Source recovery and retention
+
+Before a pause, the host checks the immutable restore image's native tools and
+PostgreSQL archive major version. It also builds each artifact's effective
+startup configuration, inventories installed and planned modules, and resolves
+their native manifests. Web warming requires zero cron threads and the supported
+`base,web` server-wide topology. Installed `queue_job`, queue configuration or
+module `post_load` hooks remain unsupported; distinct cron jobs alone cannot
+prove that an HTTP queue or integration runner is fenced. Qualify a different
+executor topology before admitting it rather than aliasing it to a cron role.
+
+The restore probe reserves cleanup time inside its outer transport budget. Every
+hash, stream, readiness observation and database command shares the earlier
+monotonic work deadline. Capacity is checked on the actual anonymous Docker data
+volume against the source database and attachment sizes before copying. The
+container runs without network access, owns its anonymous volume and enforces
+its own maximum lifetime. Docker removes it and the volume on exit, including
+when the coordinator dies. Cleanup uses the returned container ID, never a
+reusable name. A timeout or lost reply cannot attest definite termination.
+
+A native capture writes a failure witness only after its synchronous work ends
+unsuccessfully and only if that process created the original nonce claim. A
+rejected duplicate cannot write that witness. A restored-copy failure is definite
+only after cleanup reads back absence of the exact owned container. Definite
+pre-maintenance failures may enter `aborting` under the original operation,
+lease and plan. The original pause and complete drain must still agree; readiness
+of the old slot precedes the switch and writer handoff. The final `aborted` state
+records failure with the old service restored, and is terminal for deployment,
+worker and unfinished-operation readers. Started or orphaned capture, missing
+completion, mismatched/ended pause, maintenance dispatch or lost authority keeps
+the recovery hold. The worker reclaims `backing_up` and interrupted `aborting`
+under its existing delay, attempt budget and queue ordering.
+
+The host prunes filesystem bundles after a successful executor return while
+holding the original lane authority. It retains applied prepared publication
+and every unfinished record's bundles. A terminal bundle is removed only after
+the persisted deployment record reconstructs the exact verified public bytes.
+Rollback can republish those bytes. Missing or inconsistent retention evidence
+keeps the bundle and emits a warning; housekeeping does not fail a completed
+release or recovery.
+
+Disposable source checks include an opt-in native coordinator-death regression:
+
+```bash
+LAUNCHPLANE_TEST_RESTORE_IMAGE=<already-local-immutable-postgres-image> uv run --extra dev python -m unittest tests.test_cutover_restore_probe.NativeRestoreLifetimeTests
+```
+
+These checks do not qualify integrated Community 20 settings, representative Odoo
+workflow data or a real infrastructure backup provider. Those prerequisites and
+the installed forward/rollback qualification remain on #4844; #3268 retains its
+real accepted-release finish line.

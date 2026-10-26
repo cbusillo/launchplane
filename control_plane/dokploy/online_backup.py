@@ -29,7 +29,10 @@ def sync_file(path):
         os.fsync(handle.fileno())
 
 
+capture_claim_owned=False
+
 def capture():
+    global capture_claim_owned
     database_name = os.environ["DATABASE_NAME"]
     backup_dir = Path(os.environ["BACKUP_DIR"])
     root = Path(os.environ["FILESTORE_ROOT"])
@@ -48,6 +51,7 @@ def capture():
         descriptor=os.open(claim.parent,os.O_RDONLY|os.O_DIRECTORY)
         try: os.fsync(descriptor)
         finally: os.close(descriptor)
+        capture_claim_owned=True
     image_id = os.environ["IMAGE_ID"]
     if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
         raise RuntimeError("Backup requires an immutable running image identity")
@@ -197,5 +201,20 @@ def capture():
         shutil.rmtree(pin_parent)
 
 
-capture()
+try:
+    capture()
+except Exception:
+    if capture_claim_owned:
+        directory=Path(os.environ['BACKUP_DIR'])
+        claim=directory.with_name(directory.name+'.attempt.json')
+        expected={'record_id':os.environ['BACKUP_RECORD_ID'],'nonce':os.environ['BACKUP_NONCE']}
+        if claim.is_file() and not claim.is_symlink() and json.loads(claim.read_text())==expected:
+            failure=directory.with_name(directory.name+'.failed.json')
+            descriptor=os.open(failure,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            with os.fdopen(descriptor,'w') as handle:
+                json.dump(expected,handle);handle.flush();os.fsync(handle.fileno())
+            descriptor=os.open(failure.parent,os.O_RDONLY|os.O_DIRECTORY)
+            try: os.fsync(descriptor)
+            finally: os.close(descriptor)
+    raise
 """

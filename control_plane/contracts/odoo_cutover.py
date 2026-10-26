@@ -203,6 +203,8 @@ CutoverStep = Literal[
     "prepared",
     "pausing",
     "backing_up",
+    "aborting",
+    "aborted",
     "maintaining",
     "ready",
     "switching",
@@ -212,6 +214,9 @@ CutoverStep = Literal[
     "rolling_back",
     "rolled_back",
 ]
+
+
+ODOO_CUTOVER_TERMINAL_STEPS = frozenset({"complete", "rolled_back", "aborted"})
 
 
 class OdooCutoverRecord(FrozenRecord):
@@ -225,6 +230,7 @@ class OdooCutoverRecord(FrozenRecord):
     public_site: PreparedPublicSite | None = None
     pause: PublicPauseRecord | None = None
     backup: OdooRecoveryTuple | None = None
+    backup_failed: bool = False
     maintenance: OdooMaintenanceReceipt | None = None
     rollback_website_settings: OdooWebsiteSettingsReceipt | None = None
     website_settings_attempted: bool = False

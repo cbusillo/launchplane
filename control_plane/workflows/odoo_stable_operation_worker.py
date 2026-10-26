@@ -3,7 +3,7 @@ from __future__ import annotations
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
-from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan, ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 
 from dataclasses import dataclass
@@ -1822,10 +1822,10 @@ def _execute_prod_promotion_operation(
         except Exception:
             # A failed read after the known effect cannot establish completion.
             return True
-        return deployment.odoo_cutover is not None and deployment.odoo_cutover.step not in {
-            "complete",
-            "rolled_back",
-        }
+        return (
+            deployment.odoo_cutover is not None
+            and deployment.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
+        )
 
     def run(
         checkpoint_phase: Callable[[str], None],

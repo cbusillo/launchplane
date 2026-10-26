@@ -65,6 +65,40 @@ class PreparedSiteDirectory:
         if self.active_pause() != pause_id:
             raise ValueError("prepared publication readback differs")
 
+    def prune(
+        self,
+        reconstructable: dict[str, PreparedPublicSite],
+        *,
+        protected: set[str],
+        serving_prepared: bool,
+    ) -> None:
+        try:
+            active = self.active_pause()
+        except FileNotFoundError:
+            active = ""
+        if serving_prepared:
+            protected = protected | {active}
+        for pause_id, site in reconstructable.items():
+            if pause_id in protected:
+                continue
+            path = self.path(pause_id)
+            try:
+                if self.load(pause_id) != site:
+                    raise ValueError("prepared retention lacks its exact durable reconstruction")
+            except FileNotFoundError:
+                continue
+            if pause_id == active:
+                publication = self.directory / "active.json"
+                if self.active_pause() != pause_id or serving_prepared:
+                    raise ValueError("prepared publication changed during retention")
+                publication.unlink()
+            path.unlink()
+        descriptor = os.open(self.directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     def _publish(self, path: Path, payload: str, *, replace: bool) -> None:
         if path.is_symlink():
             raise ValueError("prepared publication cannot replace a symlink")

@@ -1,8 +1,10 @@
+from control_plane.contracts.odoo_cutover import ODOO_CUTOVER_TERMINAL_STEPS
 import base64
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 import json
+import logging
 import hashlib
 import os
 from pathlib import Path
@@ -14,7 +16,9 @@ from urllib.parse import urlsplit
 import yaml
 
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane, GenericWebCutoverPlan
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_cutover import (
+    ODOO_CUTOVER_TERMINAL_STEPS,
     OdooCutoverPlan,
     OdooCutoverRecord,
     OdooMaintenanceReceipt,
@@ -44,7 +48,10 @@ from control_plane.dokploy.cutover_probes import CutoverProbes
 from control_plane.dokploy.cutover_transport import CutoverHostTransport
 from control_plane.dokploy.cutover_writer_observer import NativeWriterObserver, container_addresses
 from control_plane.dokploy.cutover_writer_capabilities import NativeCronWriterCapabilities
-from control_plane.dokploy.cutover_restore_probe import verify_disposable_database_restore
+from control_plane.dokploy.cutover_restore_probe import (
+    verify_disposable_database_restore,
+    RESTORE_PREFLIGHT_PROGRAM,
+)
 from control_plane.dokploy.generic_web_cutover import WebSlotDriver
 from control_plane.dokploy.odoo_cutover import OdooSlotDriver
 from control_plane.dokploy.prepared_host import PreparedSiteDirectory
@@ -79,8 +86,8 @@ from control_plane.odoo_cutover_plan import (
     rollback_pause_identity,
 )
 from control_plane.odoo_cutover_storage import DeploymentStore
-from control_plane.odoo_cutover_recovery import startup_recovery_pause
-from control_plane.prepared_public_site import prepare_public_site
+from control_plane.odoo_cutover_recovery import startup_recovery_pause, DefiniteBackupFailure
+from control_plane.prepared_public_site import prepare_public_site, verify_snapshot
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupVerificationEvidence
 from control_plane.workflows.production_promotion_backup import (
     ODOO_PROMOTION_BACKUP_ACTION,
@@ -93,6 +100,10 @@ class CutoverHostStore(
     CutoverAuthorityStore, DeploymentStore, ProductionPromotionBackupStore, Protocol
 ):
     def write_backup_gate_record(self, record: BackupGateRecord) -> None: ...
+
+    def list_deployment_records(
+        self, *, context_name: str, instance_name: str
+    ) -> tuple[DeploymentRecord, ...]: ...
 
 
 STARTUP_CAPABILITY_PROGRAM = r"""
@@ -136,6 +147,10 @@ spec=json.load(sys.stdin); path=Path(spec['directory']); claim=path.with_name(pa
 if path.is_symlink() or claim.is_symlink() or path.resolve()!=path: raise ValueError('backup path differs')
 if (path/'manifest.json').is_file() and claim.is_file():
     print(json.dumps({'state':'captured','manifest':json.loads((path/'manifest.json').read_text()),'claim':json.loads(claim.read_text())}))
+elif path.with_name(path.name+'.failed.json').is_file():
+    failure=path.with_name(path.name+'.failed.json')
+    if failure.is_symlink() or not claim.is_file() or json.loads(failure.read_text())!=json.loads(claim.read_text()): raise ValueError('backup failure differs from original claim')
+    print(json.dumps({'state':'failed','claim':json.loads(claim.read_text())}))
 elif claim.exists() or path.exists() and (not path.is_dir() or any(path.iterdir())): print(json.dumps({'state':'uncertain'}))
 else: print(json.dumps({'state':'absent'}))
 """
@@ -472,7 +487,20 @@ class BoundOdooCutoverHost:
                 session.get("address") not in old_addresses for session in database["sessions"]
             ):
                 raise ValueError("inactive candidate or unknown database writers are not fenced")
+        dump_version = self.transport.read(
+            ("docker", "exec", self.runner(plan.old), "pg_dump", "--version"), None
+        )
+        dump_major = int(dump_version.split()[2].split(".")[0])
+        tools = json.loads(
+            self.transport(
+                ("python3", "-c", RESTORE_PREFLIGHT_PROGRAM),
+                json.dumps({"image": self.runtime.restore_image, "dump_major": dump_major}),
+            )
+        )
+        if tools != {"restore_tools": True}:
+            raise ValueError("immutable restore tools lack qualified native preflight")
         self.startup_capability(plan.old)
+        self.native_writer_capability.preflight(plan.old)
         for writer in plan.writers:
             self.native_writer_capability(plan.old, writer)
         rendered = render_odoo_app_slot_compose(
@@ -544,8 +572,39 @@ class BoundOdooCutoverHost:
                     continue
                 self.target(slot, target.writer)
             yield
+            try:
+                self.prune_prepared()
+            except (OSError, ValueError, KeyError):
+                logging.getLogger(__name__).warning("Prepared bundle retention remains incomplete.")
         finally:
             self.admitted = False
+
+    def prune_prepared(self) -> None:
+        reconstructable: dict[str, PreparedPublicSite] = {}
+        protected: set[str] = set()
+        for deployment in self.store.list_deployment_records(
+            context_name=self.plan.new.runtime_identity.context,
+            instance_name=self.plan.new.binding.environment_id,
+        ):
+            record = deployment.odoo_cutover
+            if (
+                record is None
+                or record.plan.route_id != self.plan.route_id
+                or record.public_site is None
+            ):
+                continue
+            verify_snapshot(record.public_site)
+            for pause in (record.pause, record.rollback_pause):
+                if pause is None:
+                    continue
+                reconstructable[pause.pause_id] = record.public_site
+                if record.step not in ODOO_CUTOVER_TERMINAL_STEPS:
+                    protected.add(pause.pause_id)
+        self.prepared_store().prune(
+            reconstructable,
+            protected=protected,
+            serving_prepared=self.route.observed_target() == self.lane.prepared_origin,
+        )
 
     def prepare_candidate(self, plan: OdooCutoverPlan) -> None:
         self.guard()
@@ -561,6 +620,8 @@ class BoundOdooCutoverHost:
         )
         self.startup_capability(plan.new)
         self.writers.fence_candidate()
+        self.preflight(plan)
+        self.native_writer_capability.preflight(plan.new)
 
     def prepare_public(self, plan: OdooCutoverPlan) -> PreparedPublicSite:
         self.guard()
@@ -752,6 +813,7 @@ class BoundOdooCutoverHost:
         for target in {target.container: target for target in targets}.values():
             self.writers._stop(target)
         self.writers.require_drained(targets)
+        self.native_writer_capability.preflight(slot)
         web_writer = next(writer for writer in plan.writers if writer.kind == "web")
         web = self.target(slot, web_writer)
         if not self.writers._running(web):
@@ -921,6 +983,12 @@ class BoundOdooCutoverHost:
             captured = {
                 key: manifest["manifest"][key] for key in OdooProdBackupCaptureEvidence.model_fields
             }
+        elif (
+            manifest.get("state") == "failed"
+            and original_attempt
+            and manifest.get("claim") == {"record_id": backup_id, "nonce": binding["nonce"]}
+        ):
+            raise DefiniteBackupFailure("original native capture terminated unsuccessfully")
         elif manifest.get("state") != "absent":
             raise ValueError("original coherent capture is uncertain; it cannot be repeated")
         else:

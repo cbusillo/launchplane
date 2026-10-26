@@ -15,7 +15,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan, ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan, persisted_cutover
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
@@ -222,7 +222,7 @@ def execute_odoo_prod_promotion(
         source_tuple = _read_source_tuple(record_store=record_store, request=request)
         if any(
             item.odoo_cutover is not None
-            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+            and item.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
             and (cutover_plan is None or item.odoo_cutover.plan != cutover_plan)
             for item in record_store.list_deployment_records(
                 context_name=request.context, instance_name=request.to_instance
@@ -360,11 +360,11 @@ def execute_odoo_prod_promotion(
             error_message=replacement_result.error_message,
         )
     except click.ClickException as error:
-        if recovery is not None and recovery.step in {"complete", "rolled_back"}:
+        if recovery is not None and recovery.step in ODOO_CUTOVER_TERMINAL_STEPS:
             # A stable release key owns its completed audit record. A refused
             # replay must not replace that history with a new failure record.
             raise
-        if recovery is not None and recovery.step not in {"complete", "rolled_back"}:
+        if recovery is not None and recovery.step not in ODOO_CUTOVER_TERMINAL_STEPS:
             raise RuntimeError("Cutover remains unfinished; retain its recovery hold.") from error
         from control_plane.lane_movement import LaneMovementRefused
 

@@ -107,6 +107,18 @@ def execute_odoo_cutover_deployment(
                 record_store, plan, plan.website_settings, verified=False
             ),
         )
+    if record.step == "aborted":
+        persisted = record_store.read_deployment_record(deployment_id)
+        persisted.deploy.status = "fail"
+        persisted.deploy.finished_at = record.ended_at.isoformat() if record.ended_at else ""
+        record_store.write_deployment_record(persisted)
+        return OdooCutoverApplyResult(
+            deployment_record_id=deployment_id,
+            deploy_status="fail",
+            post_deploy_status="skipped",
+            health_status="skipped",
+            error_message="Backup verification failed; the original serving slot was restored before maintenance.",
+        )
     if record.step != "complete" or record.readiness is None or record.route is None:
         raise ValueError("cutover does not have verified completed traffic/writer evidence")
     record_website_application(record_store, plan, plan.website_settings, verified=True)

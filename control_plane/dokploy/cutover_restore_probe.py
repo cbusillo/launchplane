@@ -1,69 +1,95 @@
 import json
 
 from control_plane.dokploy.slot_maintenance import ContainerCommand
+from control_plane.odoo_cutover_recovery import DefiniteBackupFailure
+
+
+RESTORE_PREFLIGHT_PROGRAM = r"""
+import json,subprocess,sys
+spec=json.load(sys.stdin)
+command=['docker','run','--rm','--pull','never','--network','none','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--entrypoint','/bin/sh',spec['image'],'-ec',"command -v timeout; command -v docker-entrypoint.sh; command -v postgres; command -v pg_isready; command -v pg_restore; command -v psql; command -v tar; command -v sha1sum; command -v df; pg_restore --version; timeout --signal=KILL 1 sh -c 'exit 0'"]
+result=subprocess.run(command,capture_output=True,timeout=30)
+if result.returncode: raise ValueError('immutable restore artifact lacks bounded native tools')
+versions=[line for line in result.stdout.decode().splitlines() if line.startswith('pg_restore ')]
+if len(versions)!=1 or int(versions[0].split()[2].split('.')[0])!=spec['dump_major']: raise ValueError('restore tools differ from capture PostgreSQL major')
+print(json.dumps({'restore_tools':True}))
+"""
 
 
 RESTORE_PROBE_PROGRAM = r"""
 import json,re,subprocess,sys,time
 spec=json.load(sys.stdin)
+cleanup_seconds=min(30,max(2,spec['timeout_seconds']//5))
+work_seconds=spec['timeout_seconds']-cleanup_seconds-2
+if work_seconds<1: raise ValueError('restore budget has no reserved cleanup time')
+deadline=time.monotonic()+work_seconds
+container=None
+cleaned=False
+failure=None
+result=None
+def remaining():
+    value=deadline-time.monotonic()
+    if value<=0: raise TimeoutError('isolated restore work deadline expired')
+    return value
 def run(argv,**kwargs):
-    result=subprocess.run(['docker',*argv],capture_output=True,**kwargs)
-    if result.returncode: raise RuntimeError('isolated backup restore probe failed')
-    return result.stdout
-name=spec['container']; owner=spec['record']; volume=name+'-data'; deadline_seconds=spec['timeout_seconds']
-images=json.loads(run(['image','inspect',spec['image']]))
-if len(images)!=1: raise ValueError('restore probe image is unavailable')
-existing=json.loads(run(['ps','-a','--filter','name=^/'+name+'$','--format','{{json .}}']).decode().strip() or 'null')
-if existing:
-    value=json.loads(run(['inspect',name]))[0]
-    if value['Config']['Labels'].get('launchplane.cutover-restore')!=owner or value['Config']['Image']!=spec['image'] or value['HostConfig']['NetworkMode']!='none' or any(mount.get('Type') not in ('tmpfs','volume') or mount.get('Type')=='volume' and (mount.get('Name')!=volume or mount.get('Destination')!='/var/lib/postgresql/data') for mount in value.get('Mounts',[])):
-        raise ValueError('restore probe name is owned by another resource')
-    run(['rm','-f',name])
-volumes=json.loads(run(['volume','ls','--filter','name=^'+volume+'$','--format','{{json .}}']).decode().strip() or 'null')
-if volumes:
-    value=json.loads(run(['volume','inspect',volume]))[0]
-    if value.get('Labels',{}).get('launchplane.cutover-restore')!=owner: raise ValueError('restore volume belongs to another resource')
-    run(['volume','rm',volume])
-run(['volume','create','--label','launchplane.cutover-restore='+owner,volume])
-run(['create','--name',name,'--label','launchplane.cutover-restore='+owner,'--network','none','--user','postgres','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--tmpfs','/var/lib/postgresql:rw,mode=1777','--mount','type=volume,src='+volume+',dst=/var/lib/postgresql/data','--tmpfs','/tmp:rw,mode=1777','--tmpfs','/var/run/postgresql:rw,mode=1777','-e','PGDATA=/var/lib/postgresql/data/pgdata','-e','POSTGRES_HOST_AUTH_METHOD=trust',spec['image']])
-try:
-    run(['start',name])
-    deadline=time.monotonic()+60
-    while subprocess.run(['docker','exec',name,'pg_isready','-U','postgres'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode:
-        if time.monotonic()>=deadline: raise TimeoutError('isolated database did not become ready')
-        time.sleep(.5)
-    if run(['exec',spec['runner'],'sha256sum',spec['dump']]).decode().split()[0]!=spec['database_dump_sha256']: raise ValueError('restore input differs from verified capture')
-    source=subprocess.Popen(['docker','exec',spec['runner'],'cat',spec['dump']],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    response=subprocess.run(['docker',*argv],capture_output=True,timeout=remaining(),**kwargs)
+    if response.returncode: raise RuntimeError('isolated backup restore probe failed')
+    return response.stdout
+def pipe(source_command,destination):
+    source=subprocess.Popen(['docker',*source_command],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     try:
-        restored=subprocess.run(['docker','exec','-i',name,'pg_restore','--exit-on-error','--no-owner','--no-acl','-U','postgres','-d','postgres'],stdin=source.stdout,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=deadline_seconds)
+        response=subprocess.run(['docker',*destination],stdin=source.stdout,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=remaining())
         source.stdout.close()
-        if source.wait(timeout=10) or restored.returncode: raise RuntimeError('logical archive could not be restored')
+        if source.wait(timeout=remaining()) or response.returncode: raise RuntimeError('isolated restore stream failed')
     finally:
-        if source.poll() is None: source.kill();source.wait()
+        if source.poll() is None:
+            source.kill()
+            source.wait(timeout=cleanup_seconds)
+try:
+    source_size=int(run(['exec','-e','DATABASE_NAME='+spec['database'],spec['runner'],'/venv/bin/python','-c',"import os,psycopg2; c=psycopg2.connect(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_DB_PORT','5432'),dbname=os.environ['DATABASE_NAME'],user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],connect_timeout=10); q=c.cursor();q.execute('SELECT pg_database_size(current_database()) + COALESCE(sum(file_size),0) FROM ir_attachment');print(q.fetchone()[0])"]).decode().strip())
+    container=run(['run','-d','--rm','--pull','never','--label','launchplane.cutover-restore='+spec['record'],'--network','none','--user','postgres','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--tmpfs','/var/lib/postgresql:rw,mode=1777','--mount','type=volume,dst=/var/lib/postgresql/data','--tmpfs','/tmp:rw,mode=1777','--tmpfs','/var/run/postgresql:rw,mode=1777','-e','PGDATA=/var/lib/postgresql/data/pgdata','-e','POSTGRES_HOST_AUTH_METHOD=trust','--entrypoint','timeout',spec['image'],'--signal=KILL',str(work_seconds),'docker-entrypoint.sh','postgres']).decode().strip()
+    if not re.fullmatch('[0-9a-f]{64}',container): raise ValueError('restore allocation has no exact container identity')
+    available=int(run(['exec',container,'df','-PB1','/var/lib/postgresql/data']).decode().splitlines()[-1].split()[3])
+    if source_size<=0 or available < source_size*2: raise ValueError('isolated Docker storage lacks restore staging capacity')
+    while True:
+        response=subprocess.run(['docker','exec',container,'pg_isready','-U','postgres'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=remaining())
+        if response.returncode==0: break
+        time.sleep(min(.5,remaining()))
+    if run(['exec',spec['runner'],'sha256sum',spec['dump']]).decode().split()[0]!=spec['database_dump_sha256']: raise ValueError('restore input differs from verified capture')
+    pipe(['exec',spec['runner'],'cat',spec['dump']],['exec','-i',container,'pg_restore','--exit-on-error','--no-owner','--no-acl','-U','postgres','-d','postgres'])
     if run(['exec',spec['runner'],'sha256sum',spec['dump']]).decode().split()[0]!=spec['database_dump_sha256']: raise ValueError('restore input changed during verification')
     if run(['exec',spec['runner'],'sha256sum',spec['filestore']]).decode().split()[0]!=spec['filestore_sha256']: raise ValueError('filestore differs from verified capture')
-    run(['exec',name,'mkdir','/var/lib/postgresql/data/restore-filestore'])
-    source=subprocess.Popen(['docker','exec',spec['runner'],'cat',spec['filestore']],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
-    try:
-        extracted=subprocess.run(['docker','exec','-i',name,'tar','--no-same-owner','--no-same-permissions','-xzf','-','-C','/var/lib/postgresql/data/restore-filestore'],stdin=source.stdout,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=deadline_seconds)
-        source.stdout.close()
-        if source.wait(timeout=10) or extracted.returncode: raise RuntimeError('filestore archive could not be restored')
-    finally:
-        if source.poll() is None: source.kill();source.wait()
-    attachments=run(['exec',name,'psql','-U','postgres','-d','postgres','-At','-F','|','-c',"SELECT store_fname,checksum FROM ir_attachment WHERE store_fname IS NOT NULL"]).decode().splitlines()
+    run(['exec',container,'mkdir','/var/lib/postgresql/data/restore-filestore'])
+    pipe(['exec',spec['runner'],'cat',spec['filestore']],['exec','-i',container,'tar','--no-same-owner','--no-same-permissions','-xzf','-','-C','/var/lib/postgresql/data/restore-filestore'])
+    attachments=run(['exec',container,'psql','-U','postgres','-d','postgres','-At','-F','|','-c',"SELECT store_fname,checksum FROM ir_attachment WHERE store_fname IS NOT NULL"]).decode().splitlines()
     checks=[]
     for attachment in attachments:
+        remaining()
         path,checksum=attachment.split('|')
         if not re.fullmatch(r'[0-9a-f]{2}/[0-9a-f]{40}',path) or not re.fullmatch(r'[0-9a-f]{40}',checksum): raise ValueError('restored attachment has no verifiable filestore binding')
         checks.append(checksum+'  /var/lib/postgresql/data/restore-filestore/'+spec['database']+'/'+path+'\n')
-    if checks: run(['exec','-i',name,'sha1sum','--check','--status'],input=''.join(checks).encode())
+    if checks: run(['exec','-i',container,'sha1sum','--check','--status'],input=''.join(checks).encode())
     if run(['exec',spec['runner'],'sha256sum',spec['filestore']]).decode().split()[0]!=spec['filestore_sha256']: raise ValueError('filestore input changed during verification')
-    observed=run(['exec',name,'psql','-U','postgres','-d','postgres','-Atc',"SELECT value FROM ir_config_parameter WHERE key='database.uuid'"]).decode().strip()
+    observed=run(['exec',container,'psql','-U','postgres','-d','postgres','-Atc',"SELECT value FROM ir_config_parameter WHERE key='database.uuid'"]).decode().strip()
     if observed!=spec['database_uuid']: raise ValueError('restored database identity differs')
-    print(json.dumps({'restored_database_uuid':observed,'database_dump_sha256':spec['database_dump_sha256'],'filestore_archive_sha256':spec['filestore_sha256']},sort_keys=True))
+    result={'restored_database_uuid':observed,'database_dump_sha256':spec['database_dump_sha256'],'filestore_archive_sha256':spec['filestore_sha256']}
+except Exception as error:
+    failure=error
 finally:
-    run(['rm','-f',name])
-    run(['volume','rm',volume])
+    if container and re.fullmatch('[0-9a-f]{64}',container):
+        cleanup_deadline=time.monotonic()+cleanup_seconds
+        removed=subprocess.run(['docker','rm','-f','-v',container],capture_output=True,timeout=max(.1,cleanup_deadline-time.monotonic())/2)
+        inventory=subprocess.run(['docker','ps','-a','--no-trunc','--filter','id='+container,'--format','{{.ID}}'],capture_output=True,timeout=max(.1,cleanup_deadline-time.monotonic()))
+        cleaned=inventory.returncode==0 and not inventory.stdout.strip()
+    elif container is None:
+        cleaned=False
+if failure is not None:
+    if cleaned: print(json.dumps({'status':'failed','terminated':True}))
+    else: raise failure
+elif not cleaned:
+    raise RuntimeError('isolated restore cleanup is uncertain')
+else:
+    print(json.dumps(result,sort_keys=True))
 """
 
 
@@ -97,6 +123,8 @@ def verify_disposable_database_restore(
     value: dict[str, str] = json.loads(
         execute(("python3", "-c", RESTORE_PROBE_PROGRAM), json.dumps(request))
     )
+    if value == {"status": "failed", "terminated": True}:
+        raise DefiniteBackupFailure("isolated restore failed after verified termination")
     if value != {
         "restored_database_uuid": database_uuid,
         "database_dump_sha256": dump_sha256,
