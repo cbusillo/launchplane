@@ -151,23 +151,22 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
             patch.object(api, "fetch_dokploy_target_payload", side_effect=self.provider)
         )
         self.enterContext(patch.object(api, "list_dokploy_schedules", return_value=()))
-        self.enterContext(patch.object(api, "list_deployments_for_target", return_value=[]))
+        self.enterContext(
+            patch.object(
+                api,
+                "list_deployments_for_target",
+                side_effect=lambda **_kwargs: [
+                    {"deploymentId": "fixture", "status": self.deployment_status}
+                ],
+            )
+        )
         self.enterContext(patch.object(api, "update_dokploy_target_env", side_effect=self.update))
         self.enterContext(patch.object(api, "trigger_deployment", side_effect=self.deploy))
-        self.enterContext(patch.object(api, "wait_for_target_deployment", return_value="done"))
         self.enterContext(
             patch.object(
                 api,
                 "deployment_for_target_by_title",
-                side_effect=lambda **kwargs: (
-                    {
-                        "deploymentId": "canonical",
-                        "status": self.deployment_status,
-                        "title": kwargs["title"],
-                    }
-                    if self.deployment_visible
-                    else None
-                ),
+                side_effect=AssertionError("Compose completion must use native runtime proof"),
             )
         )
         self.enterContext(
@@ -204,6 +203,8 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.deployment_visible = True
 
     def frame(self, **kwargs: Any) -> dict[str, object]:
+        if kwargs["mode"] == "observe" and not self.deployment_visible:
+            raise NativeSourceUnavailable("Fixture still has the original runtime payload")
         if kwargs["mode"] == "inspect" and self.reject_preflight:
             raise NativeSourceUnavailable("Fixture integration preflight refused")
         if kwargs["mode"] == "gate":
@@ -309,11 +310,25 @@ class CanonicalAddressRecoveryTests(unittest.TestCase):
         self.lost = "deployment"
         with self.assertRaises(NativeSourceUnavailable):
             self.run_address(False)
-        self.deployment_visible = True
         self.deployment_status = "failed"
         with self.assertRaises(NativeSourceUnavailable):
             self.run_address(False)
         self.assertEqual(self.events, ["environment", "deployment"])
+        self.deployment_visible = True
+        self.assertEqual(self.run_address(False).status, "completed")
+        self.assertEqual(self.events, ["environment", "deployment", "gate"])
+
+    def test_running_deployment_prevents_adoption_of_a_visible_runtime(self) -> None:
+        self.lost = "deployment"
+        with self.assertRaises(NativeSourceUnavailable):
+            self.run_address(False)
+        self.deployment_visible = True
+        self.deployment_status = "running"
+        with self.assertRaises((NativeSourceUnavailable, ValueError)):
+            self.run_address(False)
+        self.assertEqual(self.events, ["environment", "deployment"])
+        self.deployment_status = "done"
+        self.assertEqual(self.run_address(False).status, "completed")
 
 
 class CanonicalAddressProgramTests(unittest.TestCase):
@@ -558,6 +573,7 @@ class CanonicalAddressProgramTests(unittest.TestCase):
                 if not value.startswith("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=")
             ] + ["LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps(self.identity)]
         plan: Any = SimpleNamespace(
+            context=self.native.gen.context,
             before=SimpleNamespace(
                 generation=self.native.gen,
                 inventory=SimpleNamespace(runtime_identity=identity),
@@ -580,15 +596,29 @@ class CanonicalAddressProgramTests(unittest.TestCase):
         )
         environment = {
             "ODOO_DB_NAME": self.native.database,
-            settings.PAYLOAD_KEY: "fixture-payload",
+            settings.PAYLOAD_KEY: base64.b64encode(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "context": plan.context,
+                        "instance": "testing",
+                        "config_parameters": [
+                            {
+                                "key": "web.base.url",
+                                "value": {
+                                    "source": "literal",
+                                    "value": "https://" + plan.route_before.host,
+                                },
+                            }
+                        ],
+                        "website_bootstrap": {
+                            "name": "Fixture",
+                            "canonical_url": "https://" + plan.route_before.host,
+                        },
+                    }
+                ).encode()
+            ).decode(),
         }
-        intent = TestingAddressSettingsPlan(
-            original_payload="fixture-payload",
-            payload="fixture-payload",
-            provider_environment_sha256=settings.canonical_environment_sha256(environment),
-            website_id=1,
-            database_values_sha256=self.native.spec["canonical_settings"]["database_values_sha256"],
-        )
         provider = {
             "composeId": "fixture-target",
             "name": self.native.gen.namespace,
@@ -607,19 +637,45 @@ class CanonicalAddressProgramTests(unittest.TestCase):
             self.assertEqual(status, 0, frame)
             kwargs["receive"](frame)
 
+        def runtime_payload(payload: str) -> None:
+            environment[settings.PAYLOAD_KEY] = payload
+            provider["env"] = api.serialize_dokploy_env_text(environment)
+            self.environment[settings.PAYLOAD_KEY] = payload
+            for service in ("web", "script-runner"):
+                values = self.native.containers[service]["Config"]["Env"]
+                self.native.containers[service]["Config"]["Env"] = [
+                    value for value in values if not value.startswith(settings.PAYLOAD_KEY + "=")
+                ] + [settings.PAYLOAD_KEY + "=" + payload]
+
         with (
             patch.object(api, "list_dokploy_schedules", return_value=()),
             patch.object(api, "list_deployments_for_target", return_value=[]),
             patch.object(settings, "run_managed_server_program", side_effect=remote),
+            patch.object(
+                settings,
+                "CANDIDATE_CONTAINER_PROBE",
+                "print('candidate_credentials_verified=true')",
+            ),
         ):
-            frame = settings.canonical_settings_frame(
+            runtime_payload(environment[settings.PAYLOAD_KEY])
+            intent = settings.plan_canonical_settings(
                 host="https://provider.invalid",
                 token="fixture",
                 plan=plan,
                 publication=publication,
-                settings=intent,
                 provider=provider,
-                mode="gate",
             )
+            self.assertNotEqual(intent.original_payload, intent.payload)
+            for mode in ("inspect", "gate", "observe"):
+                runtime_payload(intent.original_payload if mode == "inspect" else intent.payload)
+                frame = settings.canonical_settings_frame(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    plan=plan,
+                    publication=publication,
+                    settings=intent,
+                    provider=provider,
+                    mode=mode,
+                )
         self.assertTrue(frame["canonical_gate_released"])
         self.assertFalse(frame["canonical_settings_verified"])

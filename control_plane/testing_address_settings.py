@@ -365,16 +365,8 @@ class CanonicalAddressEffect:
         if not provider_effect_phase:
             return ProviderObservation("absent", retry_safe=True)
         if self.phase == "deployment":
-            deployment = api.deployment_for_target_by_title(
-                host=host,
-                token=token,
-                target_type="compose",
-                target_id=self.plan.before.target_id.target_id,
-                title=self.title(),
-            )
-            if deployment is not None and api.deployment_succeeded(deployment):
-                return ProviderObservation("present", 200, {"canonical_deployment_verified": True})
-            return ProviderObservation("unknown")
+            self.frame("observe")
+            return ProviderObservation("present", 200, {"canonical_deployment_verified": True})
         frame = self.frame("observe")
         if frame.get("canonical_gate_released") is True:
             return ProviderObservation("present", 200, {"canonical_gate_released": True})
@@ -429,15 +421,18 @@ class CanonicalAddressEffect:
                     title=self.title(),
                 )
             )
-            api.wait_for_target_deployment(
-                host=host,
-                token=token,
-                target_type="compose",
-                target_id=self.plan.before.target_id.target_id,
-                before_key="",
-                timeout_seconds=180,
-                deployment_title=self.title(),
-            )
+            deadline = time.monotonic() + 180
+            while True:
+                try:
+                    self.frame("observe")
+                    break
+                except (NativeSourceUnavailable, ValueError):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise NativeSourceUnavailable(
+                            "The original canonical deployment has no qualified runtime proof."
+                        ) from None
+                    time.sleep(min(2, remaining))
             return ProviderMutationOutcome(200, {"canonical_deployment_verified": True})
         frame = self.frame("gate", dispatch_guard=checkpoint)
         if frame.get("canonical_gate_released") is not True:

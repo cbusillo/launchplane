@@ -1434,9 +1434,14 @@ or environment effects, as well as at the gate. The operation never invokes modu
 updates, data restoration, user normalization or API-key provisioning. Before
 recreating, the existing private readiness probe verifies current local
 credentials without a login or credential write. No secret or other provider
-environment value is added. The original request and key own every phase;
-an uncertain deploy trigger is observed by its original title and never blindly
-repeated. A committed address cannot be cancelled to bypass an unfinished
+environment value is added. The original request and key own every phase.
+Compose may omit deployment titles, so completion requires the qualified running
+containers to carry the distinct planned payload, original immutable runtime
+identity and private resources, with complete settled deployment histories.
+Apply polls that observation after one trigger; recovery uses the same positive
+proof without another trigger. Old payloads, failed jobs without that proof and
+incomplete observations remain UNKNOWN. No elapsed-time window grants a retry.
+A committed address cannot be cancelled to bypass an unfinished
 settings phase.
 
 `canonical_settings_verified` requires an independent read of the current
@@ -1447,6 +1452,8 @@ fresh startup and database readback; timeout retains the original continuation
 without redeploying. Readback proves the reviewed deployment at that time; a
 later legitimate deployment needs its own current verification. Editing override intent resets its old
 apply evidence; the canonical result does not certify unrelated pending intent.
+Readback holds the same synchronous lane lock while obtaining native and public
+proof, so concurrent maintenance waits or refuses rather than interleaving.
 Historical saved plans omit this settings step and retain their original digest
 and behavior. They never acquire an unreviewed write. The operation does not
 replace the current copy, restore data, start a retained recipient or delete an
