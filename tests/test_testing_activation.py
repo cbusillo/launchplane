@@ -643,6 +643,73 @@ class ActivationTests(unittest.TestCase):
                     self.assertEqual(result.response_status_code, 202)
                     self.assertTrue(reservation.provider_effect_started_at)
 
+    def test_compose_preflight_denial_preserves_no_effect_operation(self) -> None:
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from control_plane.disposable_lane_collection import collect_testing_resource_facts
+        from control_plane.dokploy import native_copy_stream
+        from tests.support.disposable_lanes import record_safety
+
+        self.retained_collection_fixture()
+        facts = collect_testing_resource_facts(
+            self.store,
+            root=self.root,
+            product=self.product,
+            context=self.context,
+            now=datetime.now(timezone.utc),
+        )
+        assert facts is not None
+        record_safety(self.store, self.product, self.context, "testing", usage="unknown", **facts)
+        adapter = self.retained_deploy_adapter()
+        adapter._recorded_artifact = True
+        effects = []
+
+        def execute(**arguments: Any) -> None:
+            arguments["before_provider_mutation"]("provider_dispatch_prepared")
+            arguments["before_provider_mutation"]("target_update")
+            effects.append("provider-write")
+
+        adapter._deploy_provider = SimpleNamespace(
+            provider_id="dokploy",
+            delegated_executor="control-plane.dokploy",
+            execute_artifact_deploy=execute,
+        )
+        before = self.store.list_deployment_records()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        denial = native_copy_stream.NativeSourceAuthorizationDenied("fixture-read-denied")
+        with patch.object(native_copy_stream, "_read_remote", side_effect=denial):
+            with self.assertRaises(native_copy_stream.NativeSourceAuthorizationDenied) as refused:
+                run_durable_provider_operation(
+                    store=self.store,
+                    scope=self.scope,
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="compose-preflight-denied",
+                    request_fingerprint="d" * 64,
+                    lease_owner="compose-preflight-worker",
+                    response_trace_id="preflight-denied",
+                    adapter=adapter,
+                )
+        self.assertIs(refused.exception, denial)
+        new_records = [row for row in self.store.list_deployment_records() if row not in before]
+        self.assertEqual(len(new_records), 1)
+        self.assertEqual(new_records[0].deploy.status, "pending")
+        self.assertEqual(
+            self.store.read_environment_inventory(
+                context_name=self.context, instance_name="testing"
+            ),
+            inventory,
+        )
+        self.assertEqual(effects, [])
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=self.scope,
+                route_path="/v1/drivers/generic-web/deploy",
+                idempotency_key="compose-preflight-denied",
+            )
+        )
+
     def test_retained_compose_read_failures_preserve_denials_and_unknown_facts(self) -> None:
         import click
         from datetime import datetime, timezone

@@ -296,6 +296,45 @@ class RetainedComposeInspectionTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             inspect_retained_compose(self.spec, self.docker)
 
+    def test_image_retag_metadata_does_not_change_qualification(self) -> None:
+        expected = inspect_retained_compose(self.spec, self.docker)
+        for image in self.images.values():
+            image["Metadata"] = {"LastTagTime": "new-tag-time"}
+            image["RepoTags"] = ["unrelated-preview:tag"]
+            image["RepoDigests"].append("unrelated@sha256:" + "f" * 64)
+        self.assertEqual(inspect_retained_compose(self.spec, self.docker), expected)
+
+        def retag(*arguments: str) -> str:
+            result = self.docker(*arguments)
+            if arguments[:2] == ("image", "inspect"):
+                self.images[arguments[2]]["Metadata"]["LastTagTime"] += "-again"
+            return result
+
+        self.assertEqual(inspect_retained_compose(self.spec, retag), expected)
+
+    def test_swarm_read_only_administrative_parents_keep_allocations_protected(self) -> None:
+        template: dict[str, Any] = {"TaskTemplate": {"ContainerSpec": {"Mounts": []}}}
+        allocation = Path(next(iter(self.volumes.values()))["Mountpoint"])
+        for version in ("Spec", "PreviousSpec"):
+            for source, read_only, allowed in (
+                (self.root, True, True),
+                (self.root, False, False),
+                (allocation.parent, True, False),
+                (allocation, True, False),
+            ):
+                with self.subTest(version=version, source=source, read_only=read_only):
+                    row: dict[str, Any] = {"ID": "service-fixture", "Spec": deepcopy(template)}
+                    row[version] = deepcopy(template)
+                    row[version]["TaskTemplate"]["ContainerSpec"]["Mounts"] = [
+                        {"Type": "bind", "Source": str(source), "ReadOnly": read_only}
+                    ]
+                    self.swarm_services = {"service-fixture": row}
+                    if allowed:
+                        self.assertTrue(inspect_retained_compose(self.spec, self.docker))
+                    else:
+                        with self.assertRaises(ValueError):
+                            inspect_retained_compose(self.spec, self.docker)
+
     def test_concurrent_inventory_drift_refuses(self) -> None:
         reads = 0
 

@@ -1668,6 +1668,7 @@ class GenericWebDeployProviderMutationAdapter:
             compose_custody_sha256,
         )
         from control_plane.storage.postgres import PostgresRecordStore
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
         if not isinstance(self._record_store, PostgresRecordStore):
             raise DisposableLaneSafetyUnknown("Compose qualification requires durable custody.")
@@ -1698,6 +1699,8 @@ class GenericWebDeployProviderMutationAdapter:
                 raise DisposableLaneSafetyUnknown("Physical Compose qualification changed.")
             self._require_standing_testing_admission()
             self._standing_compose_proof = (authority, facts["isolation_evidence"])
+        except NativeSourceAuthorizationDenied as error:
+            raise ProviderMutationRejectedError(error) from error
         except (FileNotFoundError, ValueError) as error:
             raise DisposableLaneSafetyUnknown(
                 "Compose first-effect qualification is unavailable."

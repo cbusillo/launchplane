@@ -110,6 +110,24 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
     credentials = set(spec["credentials"])
     ports: set[int] = set()
     images: dict[str, dict[str, Any]] = {}
+
+    def foreign_bind_overlaps(backing: Path, read_only: bool) -> bool:
+        if read_only and any(backing in path.parent.parents for path in paths):
+            return False
+        return any(
+            backing == path or backing in path.parents or path in backing.parents for path in paths
+        ) or (backing.exists() and (backing.stat().st_dev, backing.stat().st_ino) in identities)
+
+    def image_facts(identifier: str, required: set[str]) -> dict[str, Any]:
+        image = read("image", "inspect", identifier)[0]
+        if image["Id"] != identifier or not required <= set(image["RepoDigests"]):
+            raise ValueError("Actual image identity unavailable")
+        return {
+            "Id": image["Id"],
+            "RepoDigests": sorted(required),
+            "Config": {"Env": image["Config"]["Env"]},
+        }
+
     for identifier, row in rows.items():
         if row.get("Id") != identifier:
             raise ValueError("Container identity changed")
@@ -158,24 +176,13 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
                 if mount.get("Source")
                 else None
             )
-            if (
-                not belongs
-                and mount.get("Type") == "bind"
-                and mount.get("RW") is False
-                and backing is not None
-                and any(backing in path.parent.parents for path in paths)
+            if not belongs and (
+                mount.get("Name") in volumes
+                or backing is not None
+                and foreign_bind_overlaps(
+                    backing, mount.get("Type") == "bind" and mount.get("RW") is False
+                )
             ):
-                continue
-            overlaps = backing is not None and any(
-                backing == path or backing in path.parents or path in backing.parents
-                for path in paths
-            )
-            aliases = (
-                backing is not None
-                and backing.exists()
-                and (backing.stat().st_dev, backing.stat().st_ino) in identities
-            )
-            if not belongs and (mount.get("Name") in volumes or overlaps or aliases):
                 raise ValueError("Storage shared outside testing recipient")
         bindings = host["PortBindings"] or {}
         if not isinstance(bindings, dict):
@@ -233,11 +240,10 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
         expected_env = service.get("environment", {})
         if isinstance(expected_env, list):
             expected_env = dict(value.split("=", 1) for value in expected_env)
-        image = read("image", "inspect", row["Image"])[0]
-        if image["Id"] != row["Image"] or (
-            "@sha256:" in service["image"] and service["image"] not in image["RepoDigests"]
-        ):
-            raise ValueError("Actual image identity unavailable")
+        required = set(images.get(row["Image"], {}).get("RepoDigests", []))
+        if "@sha256:" in service["image"]:
+            required.add(service["image"])
+        image = image_facts(row["Image"], required)
         defaults = image["Config"]["Env"]
         if not isinstance(defaults, list) or any(
             not isinstance(value, str) or "=" not in value for value in defaults
@@ -361,14 +367,7 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
                     if not isinstance(source, str) or not Path(source).is_absolute():
                         raise ValueError("Service mount backing unavailable")
                     backing = Path(source).resolve()
-                    if mount.get("ReadOnly") is True and any(
-                        backing in path.parents for path in paths
-                    ):
-                        continue
-                    if not Path(source).is_absolute() or any(
-                        backing == path or backing in path.parents or path in backing.parents
-                        for path in paths
-                    ):
+                    if foreign_bind_overlaps(backing, mount.get("ReadOnly") is True):
                         raise ValueError("Service overlaps testing storage")
                 elif mount.get("Type") != "tmpfs":
                     raise ValueError("Service mount inventory unavailable")
@@ -397,7 +396,7 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
         identifiers() != containers
         or any(container(key) != row for key, row in rows.items())
         or any(read("volume", "inspect", key)[0] != row for key, row in volumes.items())
-        or any(read("image", "inspect", key)[0] != row for key, row in images.items())
+        or any(image_facts(key, set(row["RepoDigests"])) != row for key, row in images.items())
     ):
         raise ValueError("Physical inventory changed")
     return hashlib.sha256(
