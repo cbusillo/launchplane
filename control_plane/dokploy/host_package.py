@@ -11,6 +11,9 @@ from control_plane.host_package import HOST_PACKAGE_CHUNK_BYTES, host_invocation
 from control_plane.host_package_installer import HOST_PACKAGE_INSTALLED_MARKER
 
 
+HOST_PACKAGE_SCHEDULE_APP_NAME = "launchplane-host-package"
+
+
 def installation_requests(version: str) -> list[dict[str, object]]:
     package = host_package()
     if version != package.version:
@@ -97,25 +100,7 @@ def ensure_schedule_host_package(
             + " "
             + hashlib.sha256(script.encode()).hexdigest()[:24]
         )
-        bootstrap_app = app_name
-        existing = api.find_matching_dokploy_schedule(
-            host=host,
-            token=token,
-            target_id=target_id,
-            schedule_type=schedule_type,
-            schedule_name=name,
-            app_name=bootstrap_app,
-        )
-        if existing is not None:
-            if existing.get("script") != script or existing.get("enabled") is not False:
-                raise ValueError("Host package bootstrap provenance differs.")
-            history = api.read_dokploy_schedule_baseline(
-                host=host,
-                token=token,
-                schedule_id=api.schedule_key(existing),
-            )
-            if any(not api.deployment_is_terminal(row) for row in history):
-                raise ValueError("Host package bootstrap is not quiescent.")
+        bootstrap_app = HOST_PACKAGE_SCHEDULE_APP_NAME
         with (provider_mutation_guard or nullcontext)():
             schedule = api.upsert_dokploy_schedule(
                 host=host,

@@ -152,7 +152,12 @@ def host_command(action: str, spec: dict[str, object]) -> str:
     arguments = [
         action,
         "--program-version",
-        program_version(action, compact, package.programs),
+        program_version(
+            action,
+            compact,
+            package.programs,
+            Path(__file__).with_name("host_package_runtime.py").read_bytes(),
+        ),
         "--input",
         "-",
     ]

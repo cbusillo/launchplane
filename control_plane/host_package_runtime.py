@@ -24,9 +24,9 @@ def program_names(value: object) -> set[str]:
     return set()
 
 
-def program_version(action: str, spec: object, programs: dict[str, str]) -> str:
+def program_version(action: str, spec: object, programs: dict[str, str], runtime: bytes) -> str:
     sources = {name: programs[name] for name in program_names(spec) | {action}}
-    return hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(runtime + json.dumps(sources, sort_keys=True).encode()).hexdigest()
 
 
 def expand(value: object, archive: zipfile.ZipFile) -> object:
@@ -70,7 +70,9 @@ def main(package_content: bytes | None = None) -> None:
             name: archive.read("programs/" + name + ".py").decode()
             for name in program_names(raw) | {actions[arguments.action]}
         }
-        action_version = program_version(arguments.action, raw, programs)
+        action_version = program_version(
+            arguments.action, raw, programs, archive.read("__main__.py")
+        )
         if arguments.program_version and action_version != arguments.program_version:
             raise ValueError("Packaged host action version differs")
         spec = expand(raw, archive)

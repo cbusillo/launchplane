@@ -41,6 +41,7 @@ from control_plane.testing_replacement_recovery import (
     recover_stranded_testing_replacements,
     testing_replacement_recovery_read,
 )
+from control_plane.dokploy.host_package import HOST_PACKAGE_SCHEDULE_APP_NAME
 from control_plane.testing_legacy_replacement_inspection import inspect_legacy_replacement
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerStore,
@@ -666,7 +667,8 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                             unrelated_schedules: list[api.JsonValue] = [
                                 {
                                     "scheduleId": f"unrelated-schedule-{index}",
-                                    "appName": f"other-lane-{index}",
+                                    "name": f"host-package-{index}",
+                                    "appName": HOST_PACKAGE_SCHEDULE_APP_NAME,
                                     "enabled": True,
                                 }
                                 for index in range(80)

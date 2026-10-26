@@ -146,6 +146,8 @@ class HostPackageTests(unittest.TestCase):
             payload = arguments["schedule_payload"]
             assert isinstance(payload, dict)
             api.validate_dokploy_schedule_script(payload)
+            self.assertNotEqual(payload["appName"], "fixture")
+            self.assertEqual(payload["appName"], arguments["app_name"])
             names.append(str(arguments["schedule_name"]))
             key = str(len(scripts))
             scripts[key] = str(payload["script"])
@@ -297,29 +299,35 @@ class HostPackageTests(unittest.TestCase):
                 },
             ),
         ):
-            post_deploy.run_manual_data_schedule(
-                host="https://provider.invalid",
-                token="fixture",
-                target_definition=source.DokployTargetDefinition(
-                    context="fixture", instance="testing", target_id="fixture"
-                ),
-                schedule_lookup_id="fixture",
-                schedule_type="server",
-                schedule_name="fixture",
-                schedule_app_name="fixture",
-                schedule_payload={"script": host_schedule("resources", {})},
-                resolved_schedule_execution_timeout_seconds=120,
-                before_provider_mutation=lambda _: events.append("effect"),
-                provider_mutation_guard=guard,
-            )
-        self.assertEqual(events, ["install", "enter", "effect", "exit"])
+            for prepared in (None, self.package.version, "different-package"):
+                events.clear()
+                post_deploy.run_manual_data_schedule(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    target_definition=source.DokployTargetDefinition(
+                        context="fixture", instance="testing", target_id="fixture"
+                    ),
+                    schedule_lookup_id="fixture",
+                    schedule_type="server",
+                    schedule_name="fixture",
+                    schedule_app_name="fixture",
+                    schedule_payload={"script": host_schedule("resources", {})},
+                    resolved_schedule_execution_timeout_seconds=120,
+                    installed_host_package_version=prepared,
+                    before_provider_mutation=lambda _: events.append("effect"),
+                    provider_mutation_guard=guard,
+                )
+                expected = ["enter", "effect", "exit"]
+                if prepared != self.package.version:
+                    expected.insert(0, "install")
+                self.assertEqual(events, expected)
 
     def test_installer_failure_reports_source_sites_without_path_values(self) -> None:
         from control_plane.dokploy.host_package import bootstrap_script, installer_program
         from control_plane.dokploy.native_copy_stream import NativeProgramFailed
 
         result = subprocess.run(
-            ["bash", "-c", bootstrap_script({"version": "invalid", "mode": "require"})],
+            ["bash", "-c", bootstrap_script({"version": "invalid", "mode": "inspect"})],
             env=self.bootstrap_environment,
             capture_output=True,
             check=False,

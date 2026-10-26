@@ -22,7 +22,8 @@ Native reads and uploads load a verified action-only archive in memory over the
 existing terminal stream, preserving their lack of persistent host-file effects.
 Scheduled operations first inspect the installed archive. Remote targets install
 through that existing terminal; Dokploy's primary server uses disabled manual
-bootstrap jobs with a unique installation ID. Their terminal histories stay
+bootstrap jobs with a unique installation ID in a separate package namespace,
+so retained installation evidence does not fill a lane's bounded inventory. Their terminal histories stay
 with the original operation's recovery evidence; the existing mutation observer
 continues to record them. An
 installed archive skips the upload. Installation runs before environment changes or source capture. Short authority guards cover
@@ -48,11 +49,11 @@ data. Inputs continue to come from the operation's existing reviewed records.
 An old archive is retained because an interrupted operation may still name it;
 installing a new version does not authorize replaying or replacing that operation.
 
-Each action also binds its own program and referenced helpers. Retained storage
+Each action also binds its dispatcher, program and referenced helpers. Retained storage
 provenance compares that binding and its input, so an unrelated action update
 does not invalidate an existing preparation. The previous exact resource heredoc
-format remains recognizable. An explicitly retained schedule can verify its older installed archive; missing
-original code is refused rather than silently replaced.
+format remains recognizable. The installer can verify an older installed archive; missing original code is
+refused rather than silently replaced. This does not add an operation-replay path.
 
 The existing program behavior tests execute the installed archive for restore,
 rehearsal, resource and preview operations. Package tests exercise isolated
