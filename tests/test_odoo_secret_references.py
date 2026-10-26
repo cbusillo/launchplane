@@ -703,7 +703,7 @@ class SecretReferenceScriptTests(unittest.TestCase):
                     "entries": [
                         {
                             "key": key,
-                            "runtime_key": config_parameter_secret_env_key(key),
+                            "runtime_key": f"fixture.{key}",
                             "action": action,
                         }
                         for key in keys
