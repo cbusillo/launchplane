@@ -507,6 +507,7 @@ class NativeSourceTransportTests(unittest.TestCase):
         frames: list[dict[str, object]] = []
         payload: dict[str, object] = {"fixture": "private-fixture" * 5000}
         program = "import sys,json,base64; value=json.loads(base64.b64decode(sys.argv[1])); print(sys.argv[2]+json.dumps({'type':'complete','length':len(value['fixture'])}),flush=True)"
+        program = repr("fixture program" * 20000) + "\n" + program
         try:
             transport._read_program(
                 Terminal(),
