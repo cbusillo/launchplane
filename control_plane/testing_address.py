@@ -35,6 +35,8 @@ from control_plane.testing_address_qualification import (
     address_transport,
     exclude_address_executors,
     qualify_address_domains,
+    require_idle_address_recipients,
+    require_unbound_address_recipients,
 )
 from control_plane.testing_address_storage import (
     commit_testing_address,
@@ -75,6 +77,9 @@ def address_plan_result(plan: TestingAddressPlan, *, applied: bool) -> dict[str,
         "applied": applied,
         "retained_operation_fences_unchanged": True,
         "original_copy_preserved": True,
+        "disable_retained_automatic_deployment": sorted(
+            target for target, enabled in plan.retained_automation.items() if enabled
+        ),
     }
 
 
@@ -118,6 +123,11 @@ class TestingAddressAdapter:
     def provider_guard(self) -> None:
         host, token = source.read_dokploy_config(
             control_plane_root=self.root, database_url=self.store.database_url
+        )
+        retained_ids = frozenset(str(item.target_id) for item in self.plan.reservations)
+        require_unbound_address_recipients(self.store, retained_ids)
+        require_idle_address_recipients(
+            host=host, token=token, context=self.plan.context, retained_ids=retained_ids
         )
         try:
             digest, projects = qualify_address_domains(
@@ -239,6 +249,8 @@ class TestingAddressAdapter:
             raise ValueError("The original address cancellation must finish before a fresh plan.")
 
     def apply_original(self, operation_lease: ProviderOperationLease) -> None:
+        from control_plane.testing_address_preparation import prepare_address_recipients
+
         self.require_forward_operation()
 
         def guard() -> None:
@@ -254,6 +266,7 @@ class TestingAddressAdapter:
             if original_effect is None:
                 raise ProviderMutationRejectedError(error) from error
             raise
+        prepare_address_recipients(self, operation_lease)
         execution = (
             TestingRouteExecutionIntent.model_validate(
                 self.store.read_original_mutation_intent(original_effect).get("address_execution")

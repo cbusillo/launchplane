@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import Field, model_validator
+from pydantic import Field, StrictBool, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.prepared_public_site import FrozenRecord
@@ -34,6 +34,9 @@ class TestingAddressPlan(FrozenRecord):
     server_id: str
     provider_project: str
     retained_projects: tuple[str, ...] = Field(min_length=1)
+    retained_automation: dict[str, StrictBool] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
     recipient_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     domain_inventory_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     operation_sha256: dict[str, str]
@@ -75,6 +78,12 @@ class TestingAddressPlan(FrozenRecord):
         ):
             raise ValueError(
                 "Canonical address custody must retain every distinct original operation and recipient."
+            )
+        if self.retained_automation and set(self.retained_automation) != {
+            item.target_id for item in self.reservations
+        }:
+            raise ValueError(
+                "Automatic-deploy preparation requires every exact retained recipient."
             )
         if before.aliases or after.aliases != (before.host,) or after.host == before.host:
             raise ValueError("A canonical address change retains its single original hostname.")

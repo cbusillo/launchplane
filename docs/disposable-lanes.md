@@ -1309,8 +1309,9 @@ allocation or generation that actually reserves the requested hostname. These
 may be different operations. Production is outside this operation.
 
 Use `mode: dry-run` first. The service saves an immutable private plan and returns
-its `plan_sha256`, current target ID, new canonical hostname and retained original
-hostname. Review that result, then send the same request with `mode: apply`,
+its `plan_sha256`, current target ID, new canonical hostname, retained original
+hostname and `disable_retained_automatic_deployment` target IDs. Review that result,
+then send the same request with `mode: apply`,
 `reviewed_plan_sha256`, and one stable `Idempotency-Key`. `mode: readback` uses the
 same reviewed hash. The installed Launchplane service helper's transport supplies
 the existing credential; no provider credential, caller-supplied topology or new
@@ -1320,8 +1321,18 @@ The reviewed reason is retained in the immutable plan and applied receipt.
 The plan requires exact retained hostname custody in the same product/context,
 a superseded original recipient operation, complete credential-visible provider
 domain membership, and stopped recipients on the existing testing server. The
-old recipients must have automatic deployment explicitly disabled and no target
-schedules. `409 testing_address_recipient_unverified` reports the observed
+old recipients must have known automatic-deployment flags and no target
+schedules. Enabled flags are bound into the reviewed plan; apply disables only
+those exact unbound retained recipients before route publication. Every recipient
+must have automatic deployment explicitly disabled before the route writer runs.
+`409 testing_address_recipient_busy` refuses an already-held retained-target deploy
+fence during planning or execution; keep that operation and its original key.
+Active lane aliases, incomplete or nonterminal deployment histories and unresolved
+data workflows refuse planning or publication. Preparation execution checks the
+exact recipient identity, custody, source ownership and absence of an active lane
+binding. This changes only the automatic-deployment
+flag, without deploying, stopping, deleting or releasing the retained copy.
+`409 testing_address_recipient_unverified` reports the observed
 automatic-deployment tri-state and target schedule count independently, without
 provider values. The shared schedule reader accepts only a complete object
 array; absent, malformed or wrapped inventories refuse rather than becoming an
@@ -1335,6 +1346,18 @@ The retained recipient facts form the comparison digest. Unrelated provider
 membership is not part of that digest. A full census runs immediately before
 each actual route dispatch, including retries of an unsent or busy writer.
 A continuing original that only observes its recorded writer needs no new census.
+Recipient preparation has durable per-target receipts under the original address
+plan. A lost update reply requires exact original-recipient observation under
+that same key. A known enabled flag permits only repeating the convergent
+`autoDeploy: false` patch after its scope is rechecked; an unknown observation
+preserves the fence. No deployment or data effect is repeated. Cancellation
+neither sends nor adopts a recipient-preparation effect. It restores or verifies
+the route and frees the serving copy's parent fence while keeping uncertain
+preparation records on their retained-target fences. Its result names those
+targets in `retained_preparation_fences_preserved`; this is not settlement proof.
+The inverse receipt is recorded even for a no-op route restoration, preventing
+forward execution of that cancelled plan. Legacy saved plans
+keep their original digest and never acquire an unreviewed preparation step.
 The bounded census runs in the worker; dispatch rechecks its lease and physical
 fence afterward. Matching
 applied or dormant TCP routers also refuse qualification because
@@ -1365,7 +1388,14 @@ It can preserve
 later inventory, runtime and unrelated profile edits while restoring the route;
 it never overwrites a different copy or binding. `mode: readback` with
 `operation: cancel` and the same key verifies the restored preimage. Completed
-cancellation permits a fresh plan and key; it does not certify public health.
+cancellation permits a fresh plan and key only when the retained-target fences
+also permit it; it does not certify public health or release an uncertain flag
+update. The current copy can continue ordinary testing deploys; uncertain retained
+targets remain unavailable for reuse while their original effect fences are held.
+After completed parent cancellation, cancel readback reports such children but
+does not settle them, and the completed parent key cannot resume them. Releasing
+that quarantine would require a separately supported original-child observation
+capability; this operation supplies no fence-clearing workaround.
 An already committed canonical publication cannot be cancelled by this path;
 retrieve its original amend result instead. Database uncertainty retains the
 original fence until the publication transaction can be observed conclusively.
