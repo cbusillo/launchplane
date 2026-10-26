@@ -158,7 +158,7 @@ def _save_once(
     store.write_idempotency_record_once(record)
     saved = _record(store, request, planning=planning)
     if saved is None or saved.request_fingerprint != fingerprint:
-        raise ValueError("The original delivery belongs to a different request or administrator.")
+        raise ValueError("The original delivery belongs to a different request or caller.")
     return saved
 
 

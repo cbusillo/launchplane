@@ -405,12 +405,16 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         value.assert_not_called()
 
     def agent_app(
-        self, *, instances: tuple[str, ...] = ("testing",), token_label: str = "local-owner-write"
+        self,
+        *,
+        instances: tuple[str, ...] = ("testing",),
+        token_label: str = "local-owner-write",
+        configured_origin: bool = True,
     ) -> FastAPI:
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             record_store_factory=lambda: self.store,
-            human_session_manager=self.sessions,
+            human_session_manager=self.sessions if configured_origin else None,
             authz_policy=LaunchplaneAuthzPolicy(
                 schema_version=2,
                 local_operators=(
@@ -584,6 +588,14 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
                     "service_origin": "https://other.example",
                 }
             },
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        response = await _asgi_request(
+            self.agent_app(configured_origin=False),
+            "POST",
+            DELIVERY_ROUTE,
+            headers=headers,
+            payload=body,
         )
         self.assertEqual(response.status_code, 403, response.text)
         reviewed = await _asgi_request(
