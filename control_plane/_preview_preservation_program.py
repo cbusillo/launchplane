@@ -3,11 +3,13 @@ from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
 from control_plane.dokploy.memory_capacity import observe_memory_headroom
 import inspect
 
+PREVIEW_PRESERVATION_CLEANUP_SECONDS = 60
 
 PREVIEW_PRESERVATION_PROGRAM = (
     SNAPSHOT_FILES_LIBRARY
     + PREVIEW_FILESTORE_LIBRARY
     + inspect.getsource(observe_memory_headroom)
+    + f"\nPRESERVATION_CLEANUP_SECONDS = {PREVIEW_PRESERVATION_CLEANUP_SECONDS!r}\n"
     + r"""
 import base64
 from contextlib import contextmanager
@@ -17,6 +19,21 @@ import stat
 import sys
 import tarfile
 import time
+
+cleanup_deadline = None
+
+
+@contextmanager
+def preservation_cleanup():
+    global deadline, cleanup_deadline
+    work_deadline = deadline
+    if cleanup_deadline is None:
+        cleanup_deadline = time.monotonic() + PRESERVATION_CLEANUP_SECONDS
+    deadline = cleanup_deadline
+    try:
+        yield
+    finally:
+        deadline = work_deadline
 
 
 def docker(*arguments: str, stdin: bytes | None = None) -> bytes:
@@ -276,7 +293,8 @@ def restore_verification(path: Path, image: str) -> int:
         return int(database_query(identifier, 'preservation_check',
             b"SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p');\n"))
     finally:
-        verification_resources(name, image)
+        with preservation_cleanup():
+            verification_resources(name, image)
 
 
 def sync_preservation_parent(path: Path) -> None:
@@ -324,7 +342,8 @@ def preservation_database(database: dict):
         yield
     finally:
         if started:
-            docker('stop', '-t', '30', database['Id'])
+            with preservation_cleanup():
+                docker('stop', '-t', '30', database['Id'])
 
 
 def preserve(path: Path, source: dict) -> dict:
@@ -464,7 +483,7 @@ def execute() -> dict:
 
 try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
-    deadline = time.monotonic() + spec['timeout_seconds']
+    deadline = time.monotonic() + max(1, spec['timeout_seconds'] - 2 * PRESERVATION_CLEANUP_SECONDS)
     receipt = execute()
     print(sys.argv[2] + json.dumps({'type': 'complete', 'preservation_id': spec['preservation_id'],
         'source': receipt['source'], 'volume_binding': receipt['volume_binding'],

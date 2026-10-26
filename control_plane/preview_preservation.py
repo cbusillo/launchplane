@@ -313,7 +313,10 @@ def run_preview_preservation(
     effect_checkpoint: Callable[[str], None] | None = None,
     mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> dict[str, object]:
-    from control_plane._preview_preservation_program import PREVIEW_PRESERVATION_PROGRAM
+    from control_plane._preview_preservation_program import (
+        PREVIEW_PRESERVATION_CLEANUP_SECONDS,
+        PREVIEW_PRESERVATION_PROGRAM,
+    )
     from control_plane.clean_testing_snapshot import snapshot_storage_budget
     from control_plane.dokploy.memory_capacity import preview_host_memory_floor
     from control_plane.dokploy.native_copy_stream import _read_remote
@@ -396,7 +399,7 @@ def run_preview_preservation(
             "timeout_seconds": timeout_seconds,
         },
         receive=frames.append,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=timeout_seconds + PREVIEW_PRESERVATION_CLEANUP_SECONDS,
         dispatch_guard=dispatch,
     )
     check()

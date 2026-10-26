@@ -178,6 +178,35 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         self.assertFalse(self.containers["database"]["State"]["Running"])
         self.assertFalse(self.path.exists())
 
+    def test_cold_database_refusals_restore_stopped_state(self) -> None:
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock(side_effect=TimeoutError())
+        with self.assertRaises(TimeoutError):
+            self.preserve()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.namespace["wait_database"] = Mock()
+        self.namespace["database_query"] = Mock(return_value='["foreign", "postgres"]')
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_cleanup_uses_one_budget_after_work_deadline_expires(self) -> None:
+        namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
+        namespace.update(deadline=time.monotonic() - 10, spec={}, wait_database=Mock())
+        database = {"Id": "fixture-db", "State": {"Running": False}}
+        complete = subprocess.CompletedProcess([], 0, b"", b"")
+        with patch.object(subprocess, "run", return_value=complete) as run:
+            with self.assertRaises(TimeoutError):
+                with namespace["preservation_database"](database):
+                    raise TimeoutError()
+            cleanup_timeout = run.call_args.kwargs["timeout"]
+            command = run.call_args.args[0]
+            self.assertGreater(cleanup_timeout, int(command[command.index("-t") + 1]))
+            with namespace["preservation_cleanup"]():
+                first_deadline = namespace["deadline"]
+            with namespace["preservation_cleanup"]():
+                self.assertEqual(namespace["deadline"], first_deadline)
+
     def test_started_database_must_leave_the_memory_floor_available(self) -> None:
         self.containers["database"]["State"]["Running"] = False
         self.namespace["wait_database"] = Mock()

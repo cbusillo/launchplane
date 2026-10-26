@@ -221,10 +221,11 @@ storage custody. Other host aliases and privileged runtime shapes remain held.
 It stops that preview's unserved application containers under its durable
 provider lease. If its exclusively owned database is stopped, it starts only
 that database for the bounded dump after storage and capacity qualification.
-Memory headroom is checked again after startup. On success or failure it stops
-a database that it started; a previously running database stays running.
-An interrupted capture retains its original operation for recovery; it never
-restarts the application.
+Memory headroom is checked again after startup. On completion or a reported
+failure it stops a database that it started; a previously running database stays
+running. Capture reserves a shared cleanup budget for verifier removal and that
+database stop. Process death or transport loss retains the original operation's
+uncertainty fence and requires same-key recovery; it never restarts the application.
 The existing memory floor and disk reserve remain in force. It captures a
 bounded PostgreSQL dump and full filestore archive inside the same Docker
 host, hashes both and verifies every archived attachment. It restores the dump
