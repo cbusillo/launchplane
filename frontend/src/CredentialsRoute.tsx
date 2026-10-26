@@ -33,18 +33,17 @@ export function CredentialsRoute({ admin }: { admin: boolean }) {
     loader, "credential-inventory", admin, true,
   );
   useEffect(() => {
-    if (!admin) return;
+    if (!admin || state.phase === "denied") return;
     const timer = window.setInterval(refresh, 60_000);
     return () => window.clearInterval(timer);
-  }, [admin, refresh]);
-  const visibleState = state.statusCode === 401 || state.statusCode === 403 ? { ...state, data: null, phase: "denied" as const } : state;
-  const inventory = visibleState.data?.inventory;
+  }, [admin, state.phase, refresh]);
+  const inventory = state.data?.inventory;
   const stale = inventory?.stale || !inventory?.fresh_until || Date.now() > Date.parse(inventory.fresh_until);
   return <EngineeringRouteFrame view="credentials" title="Credentials" icon={KeyRound}
     description="Credential names, fingerprints and restrictions, with collection coverage and drift. Values stay in their existing stores."
-    actions={admin ? <EngineeringResourceControls state={visibleState} refresh={refresh} cancel={cancel} refreshLabel="Refresh credentials" /> : undefined}>
+    actions={admin ? <EngineeringResourceControls state={state} refresh={refresh} cancel={cancel} refreshLabel="Refresh credentials" /> : undefined}>
     {!admin ? <p role="alert">Sign in as an administrator to view credentials.</p> : <>
-      <EngineeringResourceGate state={visibleState} refresh={refresh} noun="credential inventory">{() => null}</EngineeringResourceGate>
+      <EngineeringResourceGate state={state} refresh={refresh} noun="credential inventory">{() => null}</EngineeringResourceGate>
       {inventory ? <div className="credential-inventory">
         <section className="credentials-summary" aria-label="Collection status" role="status" data-stale={stale} data-coverage={inventory.coverage} data-result={inventory.collection_status} data-confirmed={!state.stale}>
           <h2>{state.stale ? "Collection status unconfirmed" : inventory.collection_status === "never" ? "No collection received" : inventory.collection_status === "failed" ? "Latest collection failed" : stale ? "Collection is stale" : "Latest collection received"}</h2>

@@ -42,7 +42,8 @@ workflow identities cannot read or publish the Director-wide inventory. Browser
 writes retain normal CSRF checks. Successful and error responses are `no-store`.
 The browser has only read/refresh controls, refreshes once a minute and ages the
 snapshot against the service's expiry timestamp even when refresh fails. A failed
-refresh marks status unconfirmed. A 401 or 403 removes the cached inventory.
+refresh marks status unconfirmed. A 401 or 403 removes the cached inventory and
+pauses automatic reads; explicit refresh can recover when access returns.
 
 ## Collection and recurring delivery
 
@@ -66,12 +67,11 @@ uv run launchplane-credential-inventory \
   --catalog /Users/cbusillo/Developer/codex-skills
 ```
 
-The command uses the catalog's existing authentication configuration. An explicit
-`--config /absolute/operator-config.json` keeps that helper's normal environment
-isolation; use `--env-config /absolute/existing-auth.env` to name its existing
-authentication source. No file or key is copied. An unattended schedule with
-`--config` requires that explicit `--env-config` path because it cannot inherit
-the launching shell's exports. Its output contains only collection
+The command and collector both use the catalog helper's default authentication
+configuration. No publisher-specific authentication override exists, so collection
+and delivery use the same source selection. An unattended job needs the catalog's
+existing default configuration available without shell exports. No file or key is
+copied. Its output contains only collection
 status and a receipt id, or a bounded delivery failure. It makes no automatic
 transport retry. Exit 0 means a collection was accepted (including drift/partial
 coverage); 1 means a failed attempt was accepted; 2 means delivery did not confirm.
@@ -100,6 +100,10 @@ the exact LaunchAgent; retain its last report as historical evidence:
 ```bash
 launchctl bootout "gui/$(id -u)/com.launchplane.credential-inventory"
 ```
+
+Schedule generation failures exit 64 with `schedule_refused` and a bounded reason
+(`already_exists`, `parent_unavailable`, `uv_unavailable` or `write_failed`).
+Generation attempts no collection or service call.
 
 Source delivery does not prove a running schedule or an accepted live snapshot.
 Verify the loaded job with `launchctl print` and the accepted receipt/page through

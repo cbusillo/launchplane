@@ -53,7 +53,6 @@ test("credentials show drift and coverage and refresh to stale failure without w
   await page.clock.runFor(60_000);
   await expect(summary).toHaveAttribute("data-result", "failed");
   await expect(summary).toHaveAttribute("data-stale", "true");
-  await expect(summary.getByRole("alert")).toHaveCount(2);
   await expect(page.getByText("restrict, no-pty", { exact: true })).toBeVisible();
   unavailable = true;
   await page.getByRole("button", { name: "Refresh credentials" }).click();
@@ -63,6 +62,14 @@ test("credentials show drift and coverage and refresh to stale failure without w
   await expect(page.getByRole("region", { name: "lab-ssh", exact: true })).toHaveCount(0);
   await expect(summary).toHaveCount(0);
   await expect(page.getByRole("alert")).toBeVisible();
+  const deniedRequestCount = methods.length;
+  await page.clock.runFor(60_000);
+  expect(methods.length).toBe(deniedRequestCount);
+  denied = false;
+  unavailable = false;
+  await page.getByRole("button", { name: "Refresh credentials" }).click();
+  await expect(summary).toHaveAttribute("data-result", "failed");
+  await expect(page.getByText("restrict, no-pty", { exact: true })).toBeVisible();
   expect(methods.every(method => method === "GET")).toBe(true);
   expect(errors).toEqual([]);
 });

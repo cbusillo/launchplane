@@ -72,6 +72,10 @@ def collection_at(now: datetime) -> CredentialCollection:
 class CredentialInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.now = datetime.now(timezone.utc)
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.collector_path = Path(directory.name) / "collector.py"
+        self.collector_path.touch()
 
     def test_metadata_contract_rejects_values_at_every_depth_and_false_absence(self) -> None:
         collection = collection_at(self.now)
@@ -166,18 +170,19 @@ class CredentialInventoryTests(unittest.TestCase):
                 ),
             ):
                 result = collector.collect_inventory(
-                    collector=Path("collector.py"), catalog=Path("catalog")
+                    collector=self.collector_path, catalog=Path("catalog")
                 )
                 self.assertEqual(result.status, "collected")
         unsafe = snapshot.model_dump(mode="json")
         unsafe["value"] = "private-fixture"
-        for code, content in (
-            (3, snapshot.model_dump_json()),
-            (0, json.dumps(unsafe)),
-            (0, "broken"),
+        for code, content, reason in (
+            (3, snapshot.model_dump_json(), "collector_failed"),
+            (0, json.dumps(unsafe), "invalid_snapshot"),
+            (0, "broken", "invalid_snapshot"),
+            (0, " " * (collector.MAX_REPORT_BYTES + 1), "report_too_large"),
         ):
             with (
-                self.subTest(code=code, content=content),
+                self.subTest(code=code, reason=reason),
                 patch.object(
                     subprocess,
                     "run",
@@ -188,17 +193,23 @@ class CredentialInventoryTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     collector.collect_inventory(
-                        collector=Path("collector.py"), catalog=Path("catalog")
-                    ).status,
-                    "failed",
+                        collector=self.collector_path, catalog=Path("catalog")
+                    ).failure_reason,
+                    reason,
                 )
         with patch.object(subprocess, "run", side_effect=subprocess.TimeoutExpired("collector", 1)):
             self.assertEqual(
                 collector.collect_inventory(
-                    collector=Path("collector.py"), catalog=Path("catalog")
-                ).status,
-                "failed",
+                    collector=self.collector_path, catalog=Path("catalog")
+                ).failure_reason,
+                "collector_timeout",
             )
+        self.assertEqual(
+            collector.collect_inventory(
+                collector=self.collector_path.with_name("missing.py"), catalog=Path("catalog")
+            ).failure_reason,
+            "collector_unavailable",
+        )
 
     def test_publisher_confirms_only_its_own_receipt_and_schedule_preserves_explicit_paths(
         self,
@@ -220,13 +231,11 @@ class CredentialInventoryTests(unittest.TestCase):
                 create=True,
             ) as request,
         ):
-            self.assertEqual(
-                collector.publish_inventory(collection, helper=helper, config=None), receipt
-            )
+            self.assertEqual(collector.publish_inventory(collection, helper=helper), receipt)
             self.assertEqual(request.call_args.kwargs["body"], collection.model_dump(mode="json"))
             request.return_value = {"status": "ok", "receipt_id": "private-fixture"}
             with self.assertRaises(ValueError):
-                collector.publish_inventory(collection, helper=helper, config=None)
+                collector.publish_inventory(collection, helper=helper)
             with patch.object(
                 helper, "resolve_settings", return_value={"service_url": "https://fixture.invalid"}
             ) as settings:
@@ -234,24 +243,18 @@ class CredentialInventoryTests(unittest.TestCase):
                 collector.publish_inventory(
                     collection,
                     helper=helper,
-                    config="settings.json",
-                    env_config="existing-auth.env",
                 )
-                self.assertEqual(settings.call_args.args[0].env_config, "existing-auth.env")
+                self.assertIsNone(settings.call_args.args[0].env_config)
+                self.assertIsNone(settings.call_args.args[0].config)
         with TemporaryDirectory() as directory:
             root = Path(directory)
             args = argparse.Namespace(
                 collector=root / "collector.py",
                 catalog=root / "catalog",
                 manifest=root / "metadata.json",
-                config=str(root / "operator.json"),
-                env_config=None,
             )
             output = root / "schedule.plist"
             with patch.object(shutil, "which", return_value="/usr/local/bin/uv"):
-                with self.assertRaises(ValueError):
-                    collector.write_launch_agent(args, output)
-                args.env_config = str(root / "existing-auth.env")
                 collector.write_launch_agent(args, output)
                 with output.open("rb") as stream:
                     job = plistlib.load(stream)
@@ -259,8 +262,6 @@ class CredentialInventoryTests(unittest.TestCase):
                     args.collector,
                     args.catalog,
                     args.manifest,
-                    Path(args.config),
-                    Path(args.env_config),
                 ):
                     self.assertIn(str(path.resolve()), job["ProgramArguments"])
                 with self.assertRaises(FileExistsError):
@@ -286,6 +287,41 @@ class CredentialInventoryTests(unittest.TestCase):
             ):
                 self.assertEqual(collector.main(), 2)
                 self.assertNotIn("private-fixture", str(printed.call_args_list))
+
+    def test_schedule_refusal_never_attempts_collection_or_delivery(self) -> None:
+        for error, reason in (
+            (FileExistsError(), "already_exists"),
+            (FileNotFoundError(), "parent_unavailable"),
+            (ValueError(), "uv_unavailable"),
+            (PermissionError(), "write_failed"),
+        ):
+            with (
+                self.subTest(reason=reason),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "publisher",
+                        "--collector",
+                        "fixture",
+                        "--catalog",
+                        "catalog",
+                        "--write-launch-agent",
+                        "schedule.plist",
+                    ],
+                ),
+                patch.object(collector, "write_launch_agent", side_effect=error),
+                patch.object(collector, "collect_inventory") as collect,
+                patch.object(collector, "operator_helper") as helper,
+                patch("builtins.print") as printed,
+            ):
+                self.assertEqual(collector.main(), 64)
+                self.assertEqual(
+                    json.loads(printed.call_args.args[0]),
+                    {"status": "schedule_refused", "reason": reason},
+                )
+                collect.assert_not_called()
+                helper.assert_not_called()
 
 
 class CredentialInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
