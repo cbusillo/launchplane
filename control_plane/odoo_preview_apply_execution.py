@@ -718,6 +718,14 @@ def _original_supersession_is_quiescent(
     ):
         return False
     try:
+        from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
+
+        if reservation.route_path == PREVIEW_IDLE_ROUTE:
+            from control_plane.preview_idle import idle_reservation_is_quiescent
+
+            return idle_reservation_is_quiescent(
+                store, reservation, profile.product, request.apply.dry_run_plan.compose_ref, root
+            )
         original = original_preview_intent(reservation, profile=profile, store=store)
     except ValueError:
         return False

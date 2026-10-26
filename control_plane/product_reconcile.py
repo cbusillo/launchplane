@@ -1863,6 +1863,23 @@ def reconcile_preview_target(
     retained_intent_invalid = False
     for reservation in held[:100]:
         classified = classify_preview_reservation(reservation, profile=profile, store=record_store)
+        from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
+
+        if reservation.route_path == PREVIEW_IDLE_ROUTE:
+            if classified.get("target_pull_request_number") != pull_request_number:
+                continue
+            recovery.append(
+                recover_held_preview(
+                    store=record_store,
+                    reservation=reservation,
+                    profile=profile,
+                    root=control_plane_root,
+                    observe=preview_hooks.observe_apply,
+                )
+                if control_plane_root is not None and isinstance(record_store, PostgresRecordStore)
+                else classified
+            )
+            continue
         try:
             original = original_preview_intent(reservation, profile=profile, store=record_store)
         except ValueError:

@@ -2413,14 +2413,12 @@ def as_json_object(value: JsonValue) -> JsonObject | None:
 
 
 def extract_schedules(raw_payload: JsonValue) -> list[JsonObject]:
-    if isinstance(raw_payload, list):
-        return _collect_object_items(raw_payload)
-    if isinstance(raw_payload, dict):
-        for key_name in ("data", "schedules", "items", "result"):
-            nested_items = raw_payload.get(key_name)
-            if isinstance(nested_items, list):
-                return _collect_object_items(nested_items)
-    return []
+    if not isinstance(raw_payload, list):
+        raise click.ClickException("Dokploy schedule inventory is unavailable.")
+    schedules = _collect_object_items(raw_payload)
+    if len(schedules) != len(raw_payload):
+        raise click.ClickException("Dokploy schedule inventory is incomplete.")
+    return schedules
 
 
 def extract_deployments(raw_payload: JsonValue) -> list[JsonObject]:

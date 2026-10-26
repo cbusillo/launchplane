@@ -93,17 +93,17 @@ def _update_qualifies(
             and _DIGEST.fullmatch(update.get("newDigest", ""))
         )
     old, new = update.get("currentVersion", ""), update.get("newVersion", "")
-    return update.get("updateType") == _version_update_type(old, new) and _within_major(old, new)
+    return update.get("updateType") == _version_update_type(old, new)
 
 
 def _version_update_type(old_version: str, new_version: str) -> str:
     old, new = _VERSION.match(old_version), _VERSION.match(new_version)
-    if old is None or new is None:
+    if old is None or new is None or old.group("suffix") != new.group("suffix"):
         return ""
     if old.group("major") != new.group("major"):
-        return "major"
+        return ""
     if (old.group("minor") or "0") != (new.group("minor") or "0"):
-        return "minor"
+        return "minor" if old.group("major") != "0" else ""
     return "patch"
 
 
@@ -136,16 +136,3 @@ def _previous_version(message: str, *, name: str, new_version: str) -> str:
     )
     found = {match.group("old") for pattern in patterns for match in re.finditer(pattern, message)}
     return found.pop() if len(found) == 1 else ""
-
-
-def _within_major(old_version: str, new_version: str) -> bool:
-    old = _VERSION.match(old_version)
-    new = _VERSION.match(new_version)
-    if old is None or new is None or old.group("suffix") != new.group("suffix"):
-        return False
-    if old.group("major") != new.group("major"):
-        return False
-    # Before 1.0, a minor bump is a breaking change under semver.
-    if old.group("major") == "0" and (old.group("minor") or "0") != (new.group("minor") or "0"):
-        return False
-    return True

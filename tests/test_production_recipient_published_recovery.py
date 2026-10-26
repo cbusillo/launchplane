@@ -213,11 +213,21 @@ class PublishedRecoveryTests(unittest.TestCase):
         assert_committed_receipt_survives_later_drift(self)
 
     def test_stale_committed_receipt_remains_nonqualifying_after_drift(self) -> None:
-        future = datetime.now(timezone.utc) + timedelta(seconds=CAPTURE_WITNESS_MAX_AGE_SECONDS + 1)
-        with patch(
-            "control_plane.production_recipient_published_recovery.datetime", wraps=datetime
-        ) as clock:
-            clock.now.return_value = future
+        capture = self.host
+
+        def capture_then_expire(*args: Any, **kwargs: Any) -> Any:
+            evidence = capture(*args, **kwargs)
+            clock.now.return_value = datetime.fromtimestamp(
+                int(evidence["recipient_recovery_epoch"]) / 1000, timezone.utc
+            ) + timedelta(seconds=CAPTURE_WITNESS_MAX_AGE_SECONDS + 1)
+            return evidence
+
+        with (
+            patch(
+                "control_plane.production_recipient_published_recovery.datetime", wraps=datetime
+            ) as clock,
+            patch.object(self, "host", side_effect=capture_then_expire),
+        ):
             assert_committed_receipt_survives_later_drift(self, recovered=False)
 
     def test_optional_provider_fields_preserve_qualification(self) -> None:

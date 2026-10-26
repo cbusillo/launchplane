@@ -242,9 +242,14 @@ checked-in destination catalog.
 
 The publisher reconciles an invitation only if the current Client's saved
 acceptance names the exact candidate now in production and its saved release
-run has passed. Equal versions alone, held
-approval, a running/stopped release, and missing evidence cannot complete an
-invitation. The existing invitation is marked released without another mention,
+run has finished: it passed, or it stopped on a failed or cancelled step with
+nothing still running or awaiting reconciliation. A stopped run settles with a
+line saying whether its promotion went live and which step did not complete, and
+that nothing is needed from the Client. It claims only what the run recorded, not
+what production serves now; the release record reports that. A stopped release that never reached
+production keeps its request open, since the Client can Accept again. Equal
+versions alone, held approval, a running release, and missing evidence cannot
+complete an invitation. The existing invitation is marked settled without another mention,
 with the saved acceptance linked and the original text and delivery receipts
 retained in a collapsed history section. Historical mentions are neutralized.
 Completed or replaced comments and their preserved receipts are excluded from
@@ -1174,3 +1179,34 @@ file storage reserved for tests and rehearsal. Deployments must migrate the
 database before serving the new routes. The retired change-impact, `product-owner-policy`, and manager-preview evaluators
 and administration routes are deleted. Their historical records remain readable
 and cannot satisfy this release gate.
+
+### Product issue release waits
+
+The planning writer attaches a `release` pointer with `wait` or `create`,
+using `--release-product`, `--release-commit` and `--release-next-action`.
+It binds the first `--waiting-for` / `--ends-when` pair, shows the product and
+source commit in the visible summary and preserves independent waits.
+
+After a passed accepted forward release matches production, the completion
+worker searches for that visible summary in repositories covered by the
+product repository's existing planning authority. Full trusted wait records
+remain authoritative. The required source commit must equal or precede the
+released commit; another product or a later commit stays waiting. Failed runs,
+temporary hotfix decisions and rollback runs do not resolve these waits.
+
+Only the current production decision is rechecked, at thirty-minute intervals;
+a changed production version is checked immediately. Historical release records remain settled. Search indexing is eventual:
+a newly recorded or newly indexed wait is found on a later pass without a cutoff.
+Incomplete search coverage and individual failures remain explicit and retryable;
+independent repositories can progress. The adapter uses the existing GraphQL
+reader and search pagination, without crawling every open issue or comment.
+
+The configured planning token's provider-confirmed bot identity must already be
+a trusted wait author before any comment is posted. Resolution records the
+release evidence and conditional next action, then reuses status reconciliation.
+It does not close the issue or claim production verification. Its marker applies
+only to the previous wait state it observed, preserving a newer recorded wait;
+selected states remain self-contained when copied by claim or status writers.
+A later rollback does not retract a completed release event or its follow-up.
+Update catalog readers and deploy the matching planning-package pin before
+recording release pointers.

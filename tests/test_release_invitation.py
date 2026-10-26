@@ -17,7 +17,11 @@ from control_plane.contracts.release_review import (
     ReleaseReviewItem,
     ReleaseReviewStatus,
 )
-from control_plane.client_release import ClientReleaseRunView, ClientReleaseStepView
+from control_plane.client_release import (
+    ClientReleaseRunView,
+    ClientReleaseStepKind,
+    ClientReleaseStepView,
+)
 from control_plane.contracts.odoo_website_settings import (
     OdooWebsiteSettings,
     OdooWebsiteSettingsIntent,
@@ -2422,6 +2426,50 @@ class ReleaseInvitationTests(unittest.TestCase):
             accepted.model_copy(update={"release_start": ""})
         )
         self.publish()
+        self.assertEqual(self.edits, [])
+
+    def stopped_run(
+        self, accepted: ReleaseReviewDecisionRecord, failed_step: str
+    ) -> ClientReleaseRunView:
+        return ClientReleaseRunView(
+            decision_record_id=accepted.record_id,
+            rollback_drill=True,
+            state="stopped",
+            steps=tuple(
+                ClientReleaseStepView(
+                    step=name,
+                    kind=kind,
+                    status="fail" if name == failed_step else "pass",
+                    operation_id=f"operation-{name}",
+                )
+                for kind, name in cast(
+                    tuple[tuple[ClientReleaseStepKind, str], ...],
+                    (("backup", "backup-1"), ("promote", "promote-1"), ("rollback", "rollback-1")),
+                )
+            ),
+        )
+
+    def test_live_release_with_failed_rollback_drill_settles_and_closes(self) -> None:
+        self.publish()
+        accepted, reader = self.complete_release()
+        reader.return_value = self.stopped_run(accepted, "rollback-1")
+        self.publish()
+        settled = self.comments[0]["body"]
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertIn("rollback drill", settled)
+        self.assertIn(accepted.release_issue_url, settled)
+        self.assertNotIn("@site-owner", settled)
+
+    def test_stopped_release_that_never_went_live_keeps_request_open(self) -> None:
+        self.publish()
+        production = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="prod"
+        )
+        accepted, reader = self.complete_release()
+        self.store.write_release_tuple_record(production)
+        reader.return_value = self.stopped_run(accepted, "promote-1")
+        self.publish()
+        self.assertEqual(self.issues[0]["state"], "open")
         self.assertEqual(self.edits, [])
 
     def test_wrong_run_evidence_cannot_settle(self) -> None:
