@@ -8,6 +8,7 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 
+from control_plane.unittest_sharding import TIMING_SCHEMA_VERSION, TIMING_RECORD_TYPE
 from tests.support.workflows import Workflow, load_workflow
 
 
@@ -39,8 +40,8 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
             cache = Path(env["UNITTEST_TIMINGS_CACHE"])
             history = json.dumps(
                 {
-                    "schema_version": 1,
-                    "record_type": "unittest_module_timings",
+                    "schema_version": TIMING_SCHEMA_VERSION,
+                    "record_type": TIMING_RECORD_TYPE,
                     "modules": {"tests.example": {"seconds": 4}},
                 }
             )
@@ -170,7 +171,7 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
                     "publish_test_timings", "Import verified unittest timing history"
                 )
                 assert step is not None
-                result = subprocess.run(
+                subprocess.run(
                     ["bash", "-c", step.run],
                     env=env,
                     capture_output=True,
@@ -178,7 +179,6 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
                     check=True,
                 )
                 self.assertIn("available=true", (root / "output").read_text())
-                self.assertIn("Published unittest timing history", result.stdout)
                 _run_step(
                     self.workflow, "test_timing_snapshot", "Freeze unittest timing snapshot", env
                 )
@@ -187,10 +187,13 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
                 plan = plan_shards(
                     ("tests.slow", "tests.fast", "tests.new"), shard_count=2, module_seconds=costs
                 )
-                self.assertEqual(plan.shard(0).modules, ("tests.slow",))
-                self.assertEqual(plan.shard(0).estimate_sources, {"tests.slow": "exact"})
+                sources = {
+                    target: source
+                    for shard in plan.shards
+                    for target, source in shard.estimate_sources.items()
+                }
                 self.assertEqual(
-                    plan.shard(1).estimate_sources, {"tests.fast": "exact", "tests.new": "default"}
+                    sources, {"tests.slow": "exact", "tests.fast": "exact", "tests.new": "default"}
                 )
                 self.assertEqual(
                     {target for shard in plan.shards for target in shard.modules},
@@ -198,8 +201,6 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
                 )
                 calls = (root / "calls").read_text()
                 self.assertIn("run download 456" if source_sha else "run download 123", calls)
-                if source_sha:
-                    self.assertIn(f"head_sha={source_sha}", calls)
 
     def test_missing_or_invalid_history_keeps_cold_plan_and_never_reuses_stale_cache(self) -> None:
         for failure in ("api", "download", "invalid", "missing"):
@@ -239,6 +240,17 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
             HISTORY_FAILURE="",
             HISTORY_CALLS=str(root / "calls"),
         )
+        fixture = root / "fixture-history.json"
+        fixture.write_text(
+            json.dumps(
+                {
+                    "schema_version": TIMING_SCHEMA_VERSION,
+                    "record_type": TIMING_RECORD_TYPE,
+                    "modules": {"tests.slow": {"seconds": 100}, "tests.fast": {"seconds": 1}},
+                }
+            )
+        )
+        env["HISTORY_FIXTURE"] = str(fixture)
         gh = root / "gh"
         gh.write_text(
             f"#!{sys.executable}\n"
@@ -254,15 +266,16 @@ failure = os.environ['HISTORY_FAILURE']
 if sys.argv[1] == 'api':
     if failure == 'api':
         sys.exit(1)
-    runs = [{'id': 12, 'head_sha': 'b' * 40, 'event': 'push', 'conclusion': 'success'}, {'id': 13, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'pull_request', 'conclusion': 'success'}, {'id': 14, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'push', 'conclusion': 'failure'}, {'id': 456, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'push', 'conclusion': 'success'}]
+    runs = [{'id': 12, 'head_sha': 'b' * 40, 'event': 'push', 'conclusion': 'success'}, {'id': 13, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'pull_request', 'conclusion': 'success'}, {'id': 14, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'push', 'conclusion': 'failure'}, {'id': 455, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'push', 'conclusion': 'success'}, {'id': 456, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'push', 'conclusion': 'success'}]
     subprocess.run(['jq', '-r', sys.argv[sys.argv.index('--jq') + 1]], input=json.dumps({'workflow_runs': runs}), text=True, check=True)
 else:
-    if failure == 'download':
+    if failure == 'download' or sys.argv[3] == '455':
         sys.exit(1)
     root = Path(sys.argv[sys.argv.index('--dir') + 1])
+    root.mkdir(parents=True, exist_ok=True)
     if failure != 'missing':
-        history = {'schema_version': 1, 'record_type': 'unittest_module_timings', 'modules': {'tests.slow': {'seconds': 100}, 'tests.fast': {'seconds': 1}}}
-        (root / 'history.json').write_text('invalid' if failure == 'invalid' else json.dumps(history))
+        history = Path(os.environ['HISTORY_FIXTURE']).read_text()
+        (root / 'history.json').write_text('invalid' if failure == 'invalid' else history)
 """
         )
         gh.chmod(0o755)

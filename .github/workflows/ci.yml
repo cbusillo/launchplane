@@ -929,7 +929,7 @@ jobs:
           set -euo pipefail
           snapshot_directory="$(mktemp -d "${RUNNER_TEMP}/unittest-timing-snapshot.XXXXXX")"
           printf 'UNITTEST_TIMING_SNAPSHOT_DIR=%s\n' "${snapshot_directory}" >> "${GITHUB_ENV}"
-          if [ -f "${UNITTEST_TIMINGS_CACHE}" ] && bash scripts/validate-unittest-history.sh "${UNITTEST_TIMINGS_CACHE}"; then
+          if [ -f "${UNITTEST_TIMINGS_CACHE}" ] && bash scripts/import-unittest-history.sh validate "${UNITTEST_TIMINGS_CACHE}"; then
             cp "${UNITTEST_TIMINGS_CACHE}" "${snapshot_directory}/history.json"
           else
             echo "::warning::No valid unittest timing history; planning all discovered tests with default estimates."
@@ -1144,6 +1144,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Import verified unittest timing history
         id: history

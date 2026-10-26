@@ -587,20 +587,15 @@ forms:
 
 ### Timing history across verified trees
 
-The aggregate uploads `unittest-timing-history` only after complete frozen-plan
-coverage succeeds. On main, `publish_test_timings` publishes that history into
-the default-branch cache for push, scheduled and manual full runs. When main
-reuses a verified tree, the proof supplies its source SHA; publication imports
-the history artifact from a successful push CI run of that SHA in this
-repository. Candidate refs consume the default-branch cache without publishing
-into its scope.
+Skipping test execution on a verified tree must preserve its measured planning
+inputs whenever its history artifact exists. The validated coverage aggregate
+is published as `unittest-timing-history`; main imports it from successful push
+CI for the verified source SHA and saves it in the default-branch cache. Full
+main runs publish their own aggregate. Publication is advisory and bounded to
+five minutes outside `ci-gate`; missing history warns and leaves a complete cold
+plan. The existing Python timing reader validates history before it is frozen.
 
-Timing publication is advisory, bounded to five minutes and independent of
-`ci-gate`. A missing/expired artifact, API failure, invalid history or cache miss
-warns and leaves the next plan cold; it never qualifies tests or changes the
-coverage gate. Snapshot jobs clear residual cache files before restore and
-freeze only validated history. Matching targets use measured costs, while new
-targets keep default estimates. The reuse invariant is that skipping test
-execution preserves its measured planning inputs whenever its artifact exists.
-Inspect the frozen plan's `timing_source_counts` to distinguish measured reuse
-from cold fallback before comparing candidate wall time and runner waits.
+Inspect the frozen plan's `timing_source_counts` to distinguish exact measured
+costs, parent estimates and default fallback before comparing candidate wall
+time, per-shard execution and runner waits. Timing hints never replace discovered
+test inventory or frozen-plan coverage checks.
