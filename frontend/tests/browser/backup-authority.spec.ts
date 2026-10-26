@@ -1,5 +1,5 @@
 import { waitForState, expect, test } from "./state";
-for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain", "uncertain-stale", "stale", "stale-read", "unavailable-read", "read-only", "other-lane"]) {
+for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain", "uncertain-stale", "stale", "stale-read", "read-only", "other-lane"]) {
   test(`server-held backup policy handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -12,7 +12,7 @@ for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain"
       effective_at: "2026-10-01T00:00:00Z", review_after: "2027-01-01T00:00:00Z", plan_digest: "c".repeat(64), result_status: "ok" };
     let status = "planned";
     const requests: Array<{ body: unknown }> = [];
-    const unavailableReason = outcome === "stale-read" ? "This proposal no longer matches current backup protection. Request a new proposal." : outcome === "unavailable-read" ? "Current backup protection could not be checked. Refresh before approving." : null;
+    const unavailableReason = outcome === "stale-read" ? "Approval is unavailable because backup protection changed or could not be checked. Refresh, or ask an agent for a new proposal." : null;
     const proposal = () => ({ operation_id: operationId, status, protection: outcome === "other-lane" ? { ...protection, context: "another-context" } : protection, can_approve: status === "planned" && !unavailableReason, can_decline: status === "planned", approval_unavailable_reason: status === "planned" ? unavailableReason : null });
     const context = page.context();
     await context.route("**/v1/auth/session", r => r.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "fixture-csrf", identity: { ...fixtures.identity, role: outcome === "read-only" ? "read_only" : "admin" } } }));

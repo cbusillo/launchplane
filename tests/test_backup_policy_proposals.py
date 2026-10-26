@@ -202,7 +202,9 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
                 self.payload["request"]["authority"] = authority
                 self.payload["source_event_id"] = f"review-boundary-{window}"
                 operation_id = await self.propose()
-                with patch("datetime.datetime", wraps=datetime) as clock:
+                with patch(
+                    "control_plane.privileged_operation_registry.datetime", wraps=datetime
+                ) as clock:
                     clock.now.return_value = boundary - timedelta(microseconds=1)
                     response = await self.read_proposals()
                     current = next(
@@ -633,7 +635,7 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         before = self.store.read_privileged_operation_record(operation_id)
         events = self.store.list_privileged_operation_event_records(operation_id=operation_id)
         with patch(
-            "control_plane.backup_policy_proposals.plan_backup_policy_proposal",
+            "control_plane.storage.postgres.PostgresRecordStore.list_production_backup_policy_records",
             side_effect=LookupError("private provider diagnostics"),
         ):
             response = await self.read_proposals()

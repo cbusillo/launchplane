@@ -90,16 +90,11 @@ def register_backup_policy_proposal_routes(
         if can_approve:
             try:
                 require_current_backup_policy_plan(record_store=record_store, record=record)
-            except (ValueError, PrivilegedOperationPlannerError):
+            except (TypeError, ValueError, LookupError, PrivilegedOperationPlannerError):
                 can_approve = False
                 approval_unavailable_reason = (
-                    "This proposal no longer matches current backup protection. "
-                    "Request a new proposal."
-                )
-            except (TypeError, LookupError):
-                can_approve = False
-                approval_unavailable_reason = (
-                    "Current backup protection could not be checked. Refresh before approving."
+                    "Approval is unavailable because backup protection changed or could not be "
+                    "checked. Refresh, or ask an agent for a new proposal."
                 )
         return BackupPolicyProposalReview(
             operation_id=record.operation_id,
