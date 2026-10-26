@@ -284,6 +284,59 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(recovered.status, "adopted")
         self.assertEqual(read_status(self.store)["rehearsal_checkpoints"], ())
 
+    def test_checkpoint_admission_rechecks_original_owner_and_lease(self) -> None:
+        from control_plane.rehearsal_deploy_resume import persist_checkpoint
+        from control_plane.service_deploy_drain import read_status
+        from tests.test_client_release_redeploy import _prepare
+
+        for change in ("owner", "expired"):
+            with self.subTest(change=change):
+                fixture = RehearsalScenario()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                prepared = fixture.record.model_copy(
+                    update={"state": "prepared", "compose_id": "own-compose"}
+                )
+                fixture.store.compare_and_write_odoo_upgrade_rehearsal(fixture.record, prepared)
+                adapter = fixture.adapter("execute")
+
+                def remote_apply(operation_key: str, lease: Any) -> Any:
+                    lease.checkpoint_effect("execute")
+                    _prepare(fixture.store)
+                    adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+                def race(adapter: Any, reservation: Any, schedule: str, deployment: str) -> Any:
+                    if change == "owner":
+                        fixture.store.write_idempotency_record(
+                            reservation.model_copy(update={"lease_owner": "replacement-owner"})
+                        )
+                        with self.assertRaises(ValueError):
+                            persist_checkpoint(adapter, reservation, schedule, deployment)
+                    else:
+                        with (
+                            patch.object(
+                                fixture.store,
+                                "_database_mutation_timestamp",
+                                return_value=reservation.lease_expires_at,
+                            ),
+                            self.assertRaises(ValueError),
+                        ):
+                            persist_checkpoint(adapter, reservation, schedule, deployment)
+                    raise RuntimeError("checkpoint admission refused")
+
+                with (
+                    patch.object(adapter, "apply", side_effect=remote_apply),
+                    patch(
+                        "control_plane.rehearsal_deploy_resume.persist_checkpoint", side_effect=race
+                    ),
+                ):
+                    held = fixture.run_operation(adapter, "checkpoint-race")
+                self.assertEqual(held.status, "reconcile_required")
+                self.assertEqual(read_status(fixture.store)["rehearsal_checkpoints"], ())
+                self.assertEqual(
+                    fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared
+                )
+
     def test_failed_checkpoint_storage_keeps_original_journal_recoverable(self) -> None:
         from control_plane.service_deploy_drain import read_status
         from tests.test_client_release_redeploy import _prepare
@@ -569,6 +622,23 @@ class RehearsalScenario(unittest.TestCase):
             self.assertEqual(read["retained_upgrade_logs"]["runtime"], [])
             self.assertNotIn(text, str(read))
             self.assertIn(text, json.dumps(result))
+            if with_child:
+                child["attempt_sha256"] = canonical_json_sha256({"operation_key": "other"})
+                with (
+                    patch.object(
+                        adapter,
+                        "run_script",
+                        return_value={"rehearsal_result": json.dumps(result).encode().hex()},
+                    ),
+                    self.assertRaises(RehearsalRefused),
+                ):
+                    adapter.host(
+                        record,
+                        "observe",
+                        lambda: None,
+                        operation_key=operation,
+                        inspect_capture=True,
+                    )
 
     def test_host_accepts_only_content_free_mismatch_evidence_for_its_exact_operation(self) -> None:
         import json
@@ -1442,6 +1512,69 @@ class RehearsalScenario(unittest.TestCase):
             )
         self.assertEqual(self.store.list_held_provider_target_reservations(), before)
         self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), prepared)
+
+    def test_capture_inspection_preserves_the_reviewed_action(self) -> None:
+        import io
+        import json
+        import sys
+        from contextlib import redirect_stdout
+
+        adapter = self.adapter("validate-business")
+        program = (
+            "import base64, json, sys\nprint(json.dumps(json.loads(base64.b64decode(sys.argv[1]))))"
+        )
+        output = io.StringIO()
+        with patch(
+            "control_plane.odoo_upgrade_rehearsal.rehearsal_host_program", return_value=program
+        ):
+            script = adapter.host_script(
+                self.record.model_copy(update={"compose_id": "own-compose"}),
+                "observe",
+                inspect_capture=True,
+            )
+        with redirect_stdout(output), patch.object(sys, "argv", []):
+            exec(compile(python_heredoc(script), "<transport>", "exec"), {})
+        spec = json.loads(output.getvalue())
+        self.assertEqual(spec["action"], adapter.request.action)
+        self.assertTrue(spec["inspect_capture"])
+
+    def test_failure_events_include_nested_host_frames(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
+
+        record = self.record.model_copy(update={"compose_id": "own-compose"})
+        checkpoint = datetime.now(timezone.utc).isoformat()
+        log = [f'  File "{REHEARSAL_HOST_FILENAME}", line 3, in inner', "RuntimeError: failed"]
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"serverId": record.server_id, "appName": record.rehearsal_id},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", record.server_id, "", record.server_id),
+            ),
+            patch.object(
+                api, "find_matching_dokploy_schedule", return_value={"scheduleId": "owned"}
+            ),
+            patch.object(
+                api,
+                "dokploy_request",
+                return_value=[
+                    {"deploymentId": "nested-failure", "createdAt": checkpoint, "status": "error"}
+                ],
+            ),
+            patch.object(api, "fetch_dokploy_deployment_logs", return_value=log),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_host_program",
+                return_value="def outer():\n    def inner():\n        raise RuntimeError('failed')\n    inner()\n",
+            ),
+        ):
+            events, complete = self.adapter("execute").failure_events(record, checkpoint)
+        self.assertTrue(complete)
+        self.assertEqual(events[0]["failure_locations"], [{"function": "inner", "line": 3}])
+        self.assertEqual(events[0]["failure_frames"], ["inner"])
 
     def test_failure_events_keep_process_deaths_and_project_actual_host_tracebacks(
         self,

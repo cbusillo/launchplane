@@ -379,6 +379,46 @@ class BusinessValidationAdapterTests(unittest.TestCase):
             "fixture-trace",
         )
 
+    def test_validation_requires_switched_copy_and_cannot_rewrite_a_prior_attempt(self) -> None:
+        result = {
+            "state": "switched",
+            "copies": [item.model_dump(mode="json") for item in self.record.copies],
+            "elapsed_seconds": {},
+            "business_validation": receipt(self.plan),
+        }
+        for state in ("prepared", "upgraded"):
+            changed = self.record.model_copy(update={"state": state})
+            self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.record, changed)
+            with self.subTest(state=state), self.assertRaises(RehearsalRefused):
+                from control_plane.odoo_upgrade_rehearsal import require_rehearsal_transition
+
+                require_rehearsal_transition(changed, "validate-business")
+            self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(changed, self.record)
+        self.adapter.publish(self.record, result)
+        current = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+        assert current is not None
+        self.adapter.publish(current, result)
+        current = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+        assert current is not None
+        changed_result = {
+            **result,
+            "business_validation": {
+                **result["business_validation"],
+                "checks": [
+                    {
+                        "key": "delivered",
+                        "passed": True,
+                        "records": [{"model": "sale.order", "id": 35}],
+                    }
+                ],
+            },
+        }
+        with self.assertRaises(RehearsalRefused):
+            self.adapter.publish(current, changed_result)
+        self.assertEqual(
+            self.fixture.store.read_odoo_upgrade_rehearsal(current.rehearsal_id), current
+        )
+
     def test_plan_binds_copy_candidate_without_a_business_payload(self) -> None:
         self.assertEqual(self.request.intent(), self.fixture.request.intent())
         self.assertEqual(self.adapter.inputs()[0], self.record)
@@ -975,6 +1015,29 @@ class BusinessValidationHostTests(unittest.TestCase):
 
 
 class BusinessValidationClientTests(unittest.TestCase):
+    def test_failed_validation_receipt_exits_unsuccessfully(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        fixture = RehearsalClientTests()
+        self.addCleanup(fixture.doCleanups)
+        for mode in ("apply", "readback"):
+            with self.subTest(mode=mode):
+                code, result, post = fixture.call(
+                    mode,
+                    action="validate-business",
+                    saved_review=True,
+                    response_result={
+                        "action": "validate-business",
+                        "completed": True,
+                        "public_route": False,
+                        "business_host_frozen": False,
+                        "business_validation": {"passed": False},
+                    },
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(result["status"], "failed")
+                post.assert_called_once()
+
     def test_a_prior_failed_scenario_cannot_make_an_inert_review_or_other_operation_fail(
         self,
     ) -> None:
