@@ -1,4 +1,4 @@
-import hashlib
+import hmac
 import json
 
 from control_plane.application_state_volume import ApplicationStateVolumeAdapter
@@ -10,6 +10,11 @@ from control_plane.contracts.deploy_reference import (
 from control_plane.dokploy.fresh_application import require_fresh_application_runtime
 from control_plane.dokploy.api import JsonObject
 from control_plane.dokploy.api import parse_dokploy_env_text
+from control_plane.dokploy import source
+from control_plane.dokploy.application_runtime import (
+    fetch_application_runtime,
+    application_runtime_matches,
+)
 from control_plane.generic_web_testing_inputs import prepare_testing_inputs, testing_input_authority
 from control_plane.runtime_platform_credentials import (
     looks_like_credential,
@@ -17,7 +22,9 @@ from control_plane.runtime_platform_credentials import (
 )
 
 
-def serving_application_credential_hashes(adapter: ApplicationStateVolumeAdapter) -> dict[str, str]:
+def require_managed_serving_credentials(
+    adapter: ApplicationStateVolumeAdapter, values: dict[str, str]
+) -> None:
     profile = adapter.store.read_product_profile_record(adapter.product)
     lane = next(
         lane
@@ -25,15 +32,18 @@ def serving_application_credential_hashes(adapter: ApplicationStateVolumeAdapter
         if (lane.context, lane.instance) == (adapter.request.context, "testing")
     )
     authority = testing_input_authority(adapter.store, profile, lane)
-    values = prepare_testing_inputs(adapter.store, profile, lane, authority).environment.values
+    managed = prepare_testing_inputs(adapter.store, profile, lane, authority).environment.values
     refuse_platform_credentials(
-        values, target="testing application", source="managed testing inputs"
+        managed, target="testing application", source="managed testing inputs"
     )
-    return {
-        key: hashlib.sha256(value.encode()).hexdigest()
+    refuse_platform_credentials(values, target="testing application", source="provider runtime")
+    if values.get("DOCKER_HOST") or any(
+        looks_like_credential(key, value)
+        and not hmac.compare_digest(value.encode(), managed.get(key, "").encode())
         for key, value in values.items()
-        if looks_like_credential(key, value)
-    }
+        if value
+    ):
+        raise ValueError("Serving credentials have no current managed testing supplier.")
 
 
 def current_application_deployment(adapter: ApplicationStateVolumeAdapter) -> DeploymentRecord:
@@ -65,7 +75,8 @@ def current_application_deployment(adapter: ApplicationStateVolumeAdapter) -> De
     for other in store.list_deployment_records(context_name=context, instance_name="testing"):
         if (
             other.record_id == deployment.record_id
-            or other.deployed_target != deployment.deployed_target
+            or other.deployed_target is not None
+            and other.deployed_target.target_id != provider.target_id
         ):
             continue
         if other.deploy.status == "pending" or (
@@ -76,7 +87,10 @@ def current_application_deployment(adapter: ApplicationStateVolumeAdapter) -> De
 
 
 def require_serving_application_provider(
-    adapter: ApplicationStateVolumeAdapter, live: JsonObject, deployment: DeploymentRecord
+    adapter: ApplicationStateVolumeAdapter,
+    live: JsonObject,
+    deployment: DeploymentRecord,
+    runtime_binding: dict[str, object],
 ) -> None:
     phase = json.loads(adapter._progress_phase())
     if deployment.artifact_identity is None:
@@ -111,15 +125,36 @@ def require_serving_application_provider(
     ):
         raise ValueError("The serving application differs from its completed deployment.")
     values = parse_dokploy_env_text(str(live["env"]))
-    refuse_platform_credentials(values, target="testing application", source="provider runtime")
-    allowed = serving_application_credential_hashes(adapter)
-    if values.get("DOCKER_HOST") or any(
-        looks_like_credential(key, value)
-        and allowed.get(key) != hashlib.sha256(value.encode()).hexdigest()
-        for key, value in values.items()
-        if value
+    require_managed_serving_credentials(adapter, values)
+    host, token = source.read_dokploy_config(control_plane_root=adapter.root)
+    observed = fetch_application_runtime(
+        host=host,
+        token=token,
+        application_id=str(live["applicationId"]),
+        expected_environment=values,
+    )
+    if (
+        observed.application_id != live["applicationId"]
+        or observed.app_name != live["appName"]
+        or observed.server_id != adapter.request.server_id
+        or observed.desired_replicas != 1
+        or observed.service_version < 1
+        or not application_runtime_matches(
+            observed,
+            artifact_reference=deployment.artifact_identity.artifact_id,
+            provider_reference=image,
+            deployment_record_id=deployment.record_id,
+        )
     ):
-        raise ValueError("Serving credentials have no current managed testing supplier.")
+        raise ValueError("The current serving runtime is unproved.")
+    binding: dict[str, object] = {
+        "service_id": observed.service_id,
+        "service_version": observed.service_version,
+        "container_ids": sorted(item.container_id for item in observed.running_containers),
+    }
+    if runtime_binding and runtime_binding != binding:
+        raise ValueError("The serving runtime changed during qualification.")
+    runtime_binding.update(binding)
     require_fresh_application_runtime(
         {
             **live,

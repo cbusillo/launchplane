@@ -49,6 +49,7 @@ def qualify_application_staging_lift(
     inspect_provider: bool,
     inspect_storage: bool = False,
     before_inspection: Callable[[str], None] | None = None,
+    runtime_binding: dict[str, object] | None = None,
 ) -> str:
     """Return a current DB binding after all unchanged allocation checks pass."""
     if not is_application_staging_lift(store, request):
@@ -83,6 +84,19 @@ def qualify_application_staging_lift(
     provider = store.read_provider_target_record(
         context_name=request.context, instance_name=request.instance
     )
+    from control_plane.contracts.testing_activation import TestingActivationRecord
+
+    activations = list(store.list_testing_application_activations(request.product, request.context))
+    legacy = store.read_testing_activation(request.product, request.context)
+    if legacy is not None:
+        activations.append(legacy)
+    for payload in activations:
+        activation = TestingActivationRecord.model_validate(payload)
+        if (
+            not activation.published
+            and activation.retained_target_id.target_id == target_id.target_id
+        ):
+            raise ValueError("An unpublished activation retains this application's interlock.")
     physical_targets: tuple[ProviderTargetRecord | DokployTargetIdRecord, ...] = (
         *store.list_physical_provider_target_records(),
         *store.list_dokploy_target_id_records(),
@@ -167,7 +181,9 @@ def qualify_application_staging_lift(
         )
         inputs = testing_input_authority(store, profile, lane)
     binding = adapter.qualify_testing_continuation(
-        inspect_provider=inspect_provider, serving_deployment=serving
+        inspect_provider=inspect_provider,
+        serving_deployment=serving,
+        runtime_binding=runtime_binding,
     )
     if inspect_storage:
         from control_plane.application_testing_storage import inspect_application_testing_storage
@@ -177,7 +193,10 @@ def qualify_application_staging_lift(
                 "Host inspection requires its live execution and authority checkpoint."
             )
         inspect_application_testing_storage(
-            adapter, checkpoint=before_inspection, serving_deployment=serving
+            adapter,
+            checkpoint=before_inspection,
+            serving_deployment=serving,
+            runtime_binding=runtime_binding,
         )
     from control_plane.http_routes.mutation_support import request_fingerprint
 

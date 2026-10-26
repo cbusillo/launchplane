@@ -229,6 +229,11 @@ class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
             DeploymentEvidence,
         )
         from control_plane.contracts.runtime_identity import RuntimeIdentity
+        from control_plane.dokploy.application_runtime import (
+            ApplicationRuntimeObservation,
+            ApplicationContainerMetadata,
+            ApplicationEnvironmentKeys,
+        )
 
         provider = self.store.read_provider_target_record(
             context_name=self.context, instance_name="testing"
@@ -281,6 +286,32 @@ class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
             applicationStatus="done",
             endpointSpecSwarm={"Mode": "dnsrr"},
         )
+        self.runtime_observer = self.enterContext(
+            patch(
+                "control_plane.application_serving_hold.fetch_application_runtime",
+                return_value=ApplicationRuntimeObservation(
+                    application_id=self.live["applicationId"],
+                    app_name=self.live["appName"],
+                    service_id="serving-service",
+                    service_image=artifact.artifact_id,
+                    service_deployment_record_id=record.record_id,
+                    desired_replicas=1,
+                    rollout_state="completed",
+                    rollout_started_at="",
+                    running_container_images=((artifact.artifact_id,),),
+                    running_container_deployment_record_ids=(record.record_id,),
+                    running_container_health=("",),
+                    pending_task_count=0,
+                    server_id=self.payload["server_id"],
+                    service_version=1,
+                    running_containers=(
+                        ApplicationContainerMetadata(
+                            "a" * 64, "serving-task", ApplicationEnvironmentKeys()
+                        ),
+                    ),
+                ),
+            )
+        )
 
     def private_domain(self) -> dict[str, Any]:
         """Hydrated domain.one defaults for the supported private-origin creation."""
@@ -307,6 +338,98 @@ class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
 
 
 class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
+    async def test_unpublished_activation_retaining_current_recipient_keeps_interlock(self) -> None:
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRecord,
+            TestingActivationRequest,
+        )
+        from control_plane.contracts.testing_application import (
+            TestingApplicationSpecification,
+            TestingApplicationState,
+        )
+
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        binding = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        activation = TestingActivationRecord(
+            product=self.profile.product,
+            context=self.context,
+            actor="original-actor",
+            scope="original-scope",
+            request=TestingActivationRequest(
+                context=self.context,
+                preparation_key="original-preparation",
+                interlock_record_sha256="a" * 64,
+                source_commit="a" * 40,
+                volume_keys={},
+                port_keys=(),
+                reason="Retain original activation custody",
+                application=TestingApplicationSpecification(
+                    runtime_port=self.profile.runtime_port,
+                    health_path="/health",
+                    network_name="fixture-network",
+                    state=TestingApplicationState(kind="none"),
+                ),
+            ),
+            plan_sha256="a" * 64,
+            namespace="original-recipient",
+            preparation_record_id="original-preparation",
+            retained_target=target,
+            retained_target_id=binding,
+            retained_provider=provider,
+            retained_reservations=(),
+            configuration_sha256="b" * 64,
+            compose_source="",
+            image_reference="registry.example.invalid/site@sha256:" + "a" * 64,
+        )
+        payload = activation.model_dump(mode="json")
+        for legacy in (False, True):
+            with (
+                self.subTest(legacy=legacy),
+                patch.object(
+                    self.store,
+                    "list_testing_application_activations",
+                    return_value=() if legacy else (payload,),
+                ),
+                patch.object(
+                    self.store, "read_testing_activation", return_value=payload if legacy else None
+                ),
+            ):
+                result = await self._reviewed_application_lift()
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ),
+                    target,
+                )
+        independent = activation.model_copy(
+            update={
+                "retained_target_id": binding.model_copy(
+                    update={"target_id": "independent-original"}
+                ),
+                "retained_provider": provider.model_copy(
+                    update={"target_id": "independent-original"}
+                ),
+            }
+        )
+        with patch.object(
+            self.store,
+            "list_testing_application_activations",
+            return_value=(independent.model_dump(mode="json"),),
+        ):
+            result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertFalse(activation.published)
+        self.assert_production_unchanged()
+
     async def test_serving_application_lifts_without_deploy_or_reconcile_and_replays(self) -> None:
         await self.prepare_application_hold()
         self.serve_application()
@@ -412,17 +535,46 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         await self.prepare_application_hold()
         self.serve_application()
         current = self.store.read_deployment_record("serving-deployment")
-        self.store.write_deployment_record(
-            current.model_copy(
-                update={
-                    "record_id": "newer-attempt",
-                    "deploy": current.deploy.model_copy(update={"status": "pending"}),
-                }
-            )
+        assert current.deployed_target is not None
+        for target in (
+            current.deployed_target,
+            current.deployed_target.model_copy(update={"display_name": "previous-name"}),
+            None,
+        ):
+            with self.subTest(target=target):
+                self.store.write_deployment_record(
+                    current.model_copy(
+                        update={
+                            "record_id": "newer-attempt",
+                            "resolved_target": None,
+                            "deployed_target": target,
+                            "deploy": current.deploy.model_copy(update={"status": "pending"}),
+                        }
+                    )
+                )
+                result = await self._reviewed_application_lift()
+                self.assertEqual(result.status_code, 409, result.text)
+        self.storage_inspector.assert_not_called()
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.assert_production_unchanged()
+
+    async def test_serving_runtime_change_after_storage_read_keeps_hold(self) -> None:
+        from dataclasses import replace
+
+        await self.prepare_application_hold()
+        self.serve_application()
+        observed = self.runtime_observer.return_value
+        self.storage_inspector.side_effect = lambda *_args, **_kwargs: setattr(
+            self.runtime_observer,
+            "return_value",
+            replace(observed, service_version=observed.service_version + 1),
         )
         result = await self._reviewed_application_lift()
         self.assertEqual(result.status_code, 409, result.text)
-        self.storage_inspector.assert_not_called()
         self.assertIsNotNone(
             self.store.read_dokploy_target_record(
                 context_name=self.context, instance_name="testing"
@@ -2145,3 +2297,4 @@ class ServingApplicationHoldProtectionTests(_ApplicationStateVolumeFixture):
     )
     test_application_continuation_preserves_foreign_staff_and_protected_data = ApplicationStateVolumeTests.test_application_continuation_preserves_foreign_staff_and_protected_data
     test_application_continuation_rechecks_ownership_under_authority_lock = ApplicationStateVolumeTests.test_application_continuation_rechecks_ownership_under_authority_lock
+    test_unpublished_activation_retaining_current_recipient_keeps_interlock = ApplicationStateVolumeTests.test_unpublished_activation_retaining_current_recipient_keeps_interlock

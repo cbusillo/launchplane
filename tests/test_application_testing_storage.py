@@ -8,7 +8,6 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import unittest
-import hashlib
 from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
@@ -40,7 +39,6 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
         self.list_calls = 0
         self.volume_rows: dict[str, object] = {}
         self.services: dict[str, object] = {}
-        self.images: dict[str, object] = {}
         self.tasks: dict[str, object] = {}
 
     def docker(self, command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -57,8 +55,6 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
             output = json.dumps([self.services[arguments[-1]]])
         elif arguments[:2] == ["service", "ps"]:
             output = "\n".join(self.tasks)
-        elif arguments[:2] == ["image", "inspect"]:
-            output = json.dumps([self.images[arguments[-1]]])
         elif arguments[:2] == ["node", "ls"]:
             output = json.dumps({"ID": "local-node", "Self": True})
         elif arguments[0] == "info":
@@ -105,8 +101,9 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
 
     def prepare_serving(self) -> None:
         self.spec.update(
-            image="registry.example.invalid/site@sha256:" + "a" * 64,
-            deployment="serving-deployment",
+            service_id="serving-service",
+            service_version=1,
+            container_ids=["a" * 64],
             mount_path="/var/lib/example",
         )
         backing = self.root / "volumes" / self.spec["volume"] / "_data"
@@ -121,13 +118,12 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
         }
         self.services[self.spec["application"]] = {
             "ID": "serving-service",
+            "Version": {"Index": 1},
             "Spec": {
                 "Name": self.spec["application"],
                 "Mode": {"Replicated": {"Replicas": 1}},
                 "TaskTemplate": {
                     "ContainerSpec": {
-                        "Image": self.spec["image"],
-                        "Env": ["LAUNCHPLANE_DEPLOYMENT_RECORD_ID=" + self.spec["deployment"]],
                         "Mounts": [
                             {
                                 "Type": "volume",
@@ -159,12 +155,9 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
                 }
             ],
             "state": "running",
-            "env": ["LAUNCHPLANE_DEPLOYMENT_RECORD_ID=" + self.spec["deployment"]],
-            "image": "fixture-image",
             "ports": None,
             "privileged": False,
         }
-        self.images["fixture-image"] = {"RepoDigests": [self.spec["image"]]}
         self.tasks["serving-task"] = {
             "ID": "serving-task",
             "ServiceID": "serving-service",
@@ -173,42 +166,16 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
             "Status": {"State": "running", "ContainerStatus": {"ContainerID": identifier}},
         }
 
-    def test_serving_credentials_match_managed_testing_inputs_in_service_and_container(
-        self,
-    ) -> None:
+    def test_serving_bound_version_and_forged_task_labels_remain_fenced(self) -> None:
         self.prepare_serving()
-        value = "fixture-managed-testing-token"
-        self.spec["credential_hashes"] = {
-            "DISCORD_TOKEN": hashlib.sha256(value.encode()).hexdigest()
-        }
         service = self.services[self.spec["application"]]
-        container = self.containers["a" * 64]
-        assert isinstance(service, dict) and isinstance(container, dict)
-        service["Spec"]["TaskTemplate"]["ContainerSpec"]["Env"].append("DISCORD_TOKEN=" + value)
-        container["env"].append("DISCORD_TOKEN=" + value)
-        self.assertEqual(self.run_program()["testing_resources_ok"], "true")
-        for rows in (service["Spec"]["TaskTemplate"]["ContainerSpec"]["Env"], container["env"]):
-            with self.subTest(rows=rows):
-                rows[-1] = "DISCORD_TOKEN=foreign-production-token"
-                self.assertEqual(self.run_program()["testing_resources_ok"], "false")
-                rows[-1] = "DISCORD_TOKEN=" + value
-
-    def test_serving_unmanaged_credentials_and_forged_task_labels_remain_fenced(self) -> None:
-        self.prepare_serving()
+        assert isinstance(service, dict)
+        service["Version"]["Index"] += 1
+        self.assertEqual(self.run_program()["testing_resources_ok"], "false")
+        service["Version"]["Index"] -= 1
         container = self.containers["a" * 64]
         assert isinstance(container, dict)
-        original = deepcopy(container)
-        for key, value in (
-            ("DISCORD_TOKEN", "untracked-live-token"),
-            ("DATABASE_URL", "postgres://user:live@production/db"),
-            ("DOKPLOY_TOKEN", "platform-token"),
-        ):
-            with self.subTest(key=key):
-                container["env"] = [*original["env"], key + "=" + value]
-                self.assertEqual(self.run_program()["testing_resources_ok"], "false")
-        container["env"] = original["env"]
-        container["state"] = "exited"
-        container["labels"] = {**original["labels"], "com.docker.swarm.task.id": "forged-task"}
+        container["labels"]["com.docker.swarm.task.id"] = "forged-task"
         self.assertEqual(self.run_program()["testing_resources_ok"], "false")
 
     def test_serving_local_volume_qualifies_and_preserves_its_contents(self) -> None:
@@ -252,9 +219,6 @@ class ApplicationTestingStorageProgramTests(unittest.TestCase):
                 self.volume_rows[self.spec["volume"]] = {**original, **changes}
                 self.assertEqual(self.run_program()["testing_resources_ok"], "false")
         self.volume_rows[self.spec["volume"]] = original
-        self.images["fixture-image"] = {"RepoDigests": ["different-image"]}
-        self.assertEqual(self.run_program()["testing_resources_ok"], "false")
-        self.images["fixture-image"] = {"RepoDigests": [self.spec["image"]]}
         self.change_inventory = True
         self.assertEqual(self.run_program()["testing_resources_ok"], "false")
 

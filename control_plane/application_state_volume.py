@@ -293,7 +293,11 @@ class ApplicationStateVolumeAdapter:
         return adapter
 
     def qualify_testing_continuation(
-        self, *, inspect_provider: bool, serving_deployment: DeploymentRecord | None = None
+        self,
+        *,
+        inspect_provider: bool,
+        serving_deployment: DeploymentRecord | None = None,
+        runtime_binding: dict[str, object] | None = None,
     ) -> str:
         """Verify the adopted allocation; history alone never attests its current state."""
         from control_plane.application_state_volume_retention import require_state_volume_owner
@@ -323,7 +327,13 @@ class ApplicationStateVolumeAdapter:
                     require_serving_application_provider,
                 )
 
-                require_serving_application_provider(self, live, serving_deployment)
+                if runtime_binding is None:
+                    raise ValueError(
+                        "Serving continuation requires its execution-local runtime binding."
+                    )
+                require_serving_application_provider(
+                    self, live, serving_deployment, runtime_binding
+                )
             target = self.store.read_dokploy_target_record(
                 context_name=self.request.context, instance_name="testing"
             )
