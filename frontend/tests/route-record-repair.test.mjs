@@ -29,3 +29,22 @@ test("punctuation-distinct lane scopes and operations cannot alias recovery", ()
   assert.notEqual(repairOperationScope(scope, "domain"), repairOperationScope(scope, "binding"));
   assert.notEqual(repairOperationScope(scope, "domain"), repairOperationScope({ ...scope, context: "example:testing" }, "domain"));
 });
+
+test("an unchanged binding verdict requires the same current and proposed record", async () => {
+  const { checkedRepairReview } = await import("../src/route-record-repair.ts");
+  const record = { ...scope, record_sha256: "b".repeat(64), provider_target: { target_name: "Testing destination" },
+    ingress: { provider: "edge", endpoint_key: "testing-edge" }, tls: { owner: "launchplane" } };
+  const review = { ...scope, operation: "reconcile-route-binding", status: "unchanged", binding_operation: "none",
+    plan_sha256: "a".repeat(64), applied: false, expected_confirmation: "reviewed-binding",
+    current_domains: [], proposed_domains: [], source_records: [], findings: [],
+    expected_current: { state: "present", record_sha256: record.record_sha256 },
+    current_record_sha256: record.record_sha256, current_record: record, proposed_record: record };
+  const response = value => ({ status: "accepted", trace_id: "binding-review", review: value });
+  assert.equal(checkedRepairReview(response(review), scope, "binding"), review);
+  for (const inconsistent of [
+    { current_record: null, current_record_sha256: "", expected_current: { state: "absent", record_sha256: "" } },
+    { expected_current: { state: "present", record_sha256: "c".repeat(64) } },
+    { proposed_record: { ...record, record_sha256: "c".repeat(64) } },
+    { proposed_record: null }, { binding_operation: "create" },
+  ]) assert.throws(() => checkedRepairReview(response({ ...review, ...inconsistent }), scope, "binding"));
+});

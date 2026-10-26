@@ -189,7 +189,10 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     <label className="product-config-field">Reason<input aria-label={`${title} reason`} value={reason} disabled={locked} onChange={event => edited(event.target.value)} /></label>
     <button type="button" className="button button-secondary" disabled={locked || !reason.trim()} onClick={() => void inspect()}>Review {title.toLowerCase()}</button>
     {review && <div className="product-owner-plan route-repair-review" aria-label={`${title} review`}>
-      <p><strong>{review.status === "ready" ? "Ready for your decision" : review.status === "unchanged" ? "Already matches; no change needed" : "Evidence blocks this decision"}</strong></p>
+      <p><strong>{review.status === "ready" ? "Ready for your decision" : review.status === "unchanged"
+        ? review.operation === "repair-domain-authority" ? "Stored domains match provider hosts" : "Stored route binding matches current evidence"
+        : "Evidence blocks this decision"}</strong></p>
+      {review.operation === "repair-domain-authority" && review.status === "unchanged" && <p>Check Route binding separately to verify the route record.</p>}
       {review.operation === "repair-domain-authority" && <p>Destination: <strong>{review.target_name}</strong> · {review.target_type}. Primary domain after repair: <strong>{review.proposed_primary_domain}</strong>.</p>}
       <div className="route-repair-comparison"><DomainList label="Current stored domains" domains={review.current_domains} /><DomainList label="Proposed domains" domains={review.proposed_domains} /></div>
       {review.operation === "repair-domain-authority" ? <DomainList label="Observed provider hosts" domains={review.observed_domains} /> : <>

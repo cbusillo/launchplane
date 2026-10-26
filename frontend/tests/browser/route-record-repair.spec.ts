@@ -29,7 +29,7 @@ function bindingReview(applied: boolean, stored = false): RouteBindingRepairRevi
 }
 type Scenario = "saved" | "blocked" | "unchanged" | "denied" | "role-only" | "read-only" | "uncertain" | "stale" | "uncertain-stale" | "uncertain-conflict" | "readback-denied" | "readback-failed" |
   "storage-unavailable" | "missing-request" | "receipt-mismatch" | "receipt-digest-mismatch" | "current-drift" | "refresh" | "readback-refresh" | "edit" | "leave" |
-  "persistent-refusal" | "changed-confirmation";
+  "persistent-refusal" | "changed-confirmation" | "missing-binding";
 
 async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
   await page.goto("/ui/products?fixture=empty");
@@ -102,7 +102,9 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
       findings: [{ code: "missing_edge_join", detail: "The terminal audit does not join an active edge endpoint." }] };
     if (scenario === "current-drift" && !applying && stored) review = review.operation === "repair-domain-authority"
       ? { ...review, current_domains: ["other.example.invalid"] }
-      : { ...review, current_record_sha256: "d".repeat(64), current_record: { ...bindingRecord(), record_sha256: "d".repeat(64) } };
+      : { ...review, expected_current: { state: "present", record_sha256: "d".repeat(64) }, current_record_sha256: "d".repeat(64),
+        current_record: { ...bindingRecord(), record_sha256: "d".repeat(64) }, proposed_record: { ...bindingRecord(), record_sha256: "d".repeat(64) } };
+    if (scenario === "missing-binding") review = { ...bindingReview(false), status: "unchanged", binding_operation: "none" };
     const response = { status: 202, json: { status: "accepted", trace_id: applying ? "apply-trace" : "review-trace", records: {},
       replayed: applying && applies.length > 1, original_trace_id: applying && applies.length > 1 ? "original-apply-trace" : null,
       result: { mode: body.mode }, review } };
@@ -112,6 +114,16 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
   await page.goto("/ui/products/atlas-commerce/environments/testing/actions");
   return { calls, environmentReads: () => environmentReads, releaseReview: () => releaseReview, panel: page.getByRole("region", { name: kind === "domain" ? "Domain authority" : "Route binding", exact: true }) };
 }
+
+test("binding card refuses an unchanged verdict with no stored binding", async ({ page }) => {
+  const { panel, calls } = await fixture(page, "binding", "missing-binding");
+  await panel.getByLabel("Route binding reason", { exact: true }).fill("Verify the stored route binding.");
+  await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
+  await expect(panel.getByRole("status")).toBeVisible();
+  await expect(panel.getByLabel("Route binding review", { exact: true })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Apply reviewed route binding", exact: true })).toHaveCount(0);
+  expect(calls.map(call => call.body.mode)).toEqual(["dry-run"]);
+});
 
 for (const kind of ["domain", "binding"] as const) {
   const title = kind === "domain" ? "Domain authority" : "Route binding";
