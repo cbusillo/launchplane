@@ -106,11 +106,7 @@ def odoo_release_continuation_allows(
 def odoo_rollback_continuation_allows(
     store: object, operation: OdooProdRollbackOperationRecord
 ) -> bool:
-    from control_plane.client_release import (
-        _client_release_authority,
-        client_release_grant_allows,
-    )
-    from control_plane.release_review import release_version
+    from control_plane.client_release import _client_release_authority, rejection_rollback_target
 
     if not isinstance(store, PostgresRecordStore):
         return False
@@ -118,16 +114,12 @@ def odoo_rollback_continuation_allows(
     if covered is None:
         return False
     profile, decision = covered
-    if not odoo_release_wrote_production(operation):
-        try:
-            begun_release = (
-                release_version(store=store, profile=profile, instance="prod")
-                == decision.checklist.candidate
-            )
-        except (FileNotFoundError, ValueError):
+    expected_artifact = decision.checklist.production.artifact_id
+    if decision.release_start == "rollback":
+        rejected_target = rejection_rollback_target(store, profile, before_decision=decision)
+        if rejected_target is None or rejected_target.artifact_identity is None:
             return False
-        if not begun_release:
-            return client_release_grant_allows(store, operation.authorization)
+        expected_artifact = rejected_target.artifact_identity.artifact_id
     try:
         deployment = store.read_deployment_record(operation.target.deployment_record_id)
     except FileNotFoundError:
@@ -135,7 +127,7 @@ def odoo_rollback_continuation_allows(
     return (
         profile.driver_id == "odoo"
         and operation.idempotency_scope == "client-release"
-        and operation.target.artifact_id == decision.checklist.production.artifact_id
+        and operation.target.artifact_id == expected_artifact
         and deployment.context == operation.context
         and deployment.instance == operation.instance
         and deployment_record_passed(deployment)

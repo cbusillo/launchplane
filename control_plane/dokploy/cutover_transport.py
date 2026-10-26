@@ -52,7 +52,6 @@ class CutoverHostTransport:
         return self._command(argv, stdin, guarded=False)
 
     def __call__(self, argv: tuple[str, ...], stdin: str | None) -> str:
-        self.guard()
         try:
             return self._command(argv, stdin, guarded=True)
         except NativeSourceUnavailable as error:

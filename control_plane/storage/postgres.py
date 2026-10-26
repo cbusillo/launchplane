@@ -17424,17 +17424,29 @@ class PostgresRecordStore(HumanSessionStore):
                         or not (
                             cutover.step
                             in {
+                                "preparing",
+                                "prepared",
                                 "pausing",
                                 "ready",
                                 "switching",
                                 "resuming",
                                 "draining",
                                 "complete",
-                                "rolled_back",
                             }
                             or maintenance_reconciliation_eligible(cutover)
-                            or cutover.step == "rolling_back"
-                            and startup_recovery_pause(cutover) is not None
+                            or model_type is OdooProdRollbackOperationRecord
+                            and (
+                                cutover.step == "rolled_back"
+                                or cutover.step == "rolling_back"
+                                and (
+                                    startup_recovery_pause(cutover) is not None
+                                    or cutover.plan.compatibility.classification == "compatible"
+                                    and not cutover.website_settings_attempted
+                                    and cutover.rollback_pause is None
+                                    and cutover.maintenance is not None
+                                    and cutover.backup is not None
+                                )
+                            )
                             or abort_reconciliation_eligible(cutover)
                         )
                         or cutover.plan.new.binding.product_id != record.product

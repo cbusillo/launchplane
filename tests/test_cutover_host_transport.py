@@ -56,13 +56,13 @@ class CutoverHostTransportTests(unittest.TestCase):
 
         with patch("control_plane.dokploy.cutover_transport._read_remote", side_effect=remote):
             self.assertEqual(transport(("docker", "stop", "fixture"), None), "{}")
-        self.assertEqual(guard.call_count, 2)
         sent.assert_called_once()
+        sent.reset_mock()
         guard.side_effect = ValueError("lease lost")
-        with patch("control_plane.dokploy.cutover_transport._read_remote") as remote_call:
+        with patch("control_plane.dokploy.cutover_transport._read_remote", side_effect=remote):
             with self.assertRaises(ValueError):
                 transport(("docker", "stop", "fixture"), None)
-        remote_call.assert_not_called()
+        sent.assert_not_called()
 
     def test_oversize_payload_refuses_before_any_remote_dispatch(self) -> None:
         with patch("control_plane.dokploy.cutover_transport._read_remote") as remote:

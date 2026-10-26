@@ -370,11 +370,19 @@ def names_director(store: object, decision: ReleaseReviewDecisionRecord) -> bool
 
 
 def rejection_rollback_target(
-    store: PostgresRecordStore, profile: LaunchplaneProductProfileRecord
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    *,
+    before_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> DeploymentRecord | None:
     """The newest Client-accepted release with a passing production deployment."""
 
     owner = profile.owner.github_id
+    cutoff = (
+        parse_launchplane_mutation_timestamp(before_decision.decided_at, field_name="decided_at")
+        if before_decision is not None
+        else None
+    )
     deployments = store.list_deployment_records(
         context_name=_prod_context(profile), instance_name="prod"
     )
@@ -384,6 +392,9 @@ def rejection_rollback_target(
             or not owner
             or decision.actor_github_id != owner
             or decision.checklist.owner_github_id != owner
+            or cutoff is not None
+            and parse_launchplane_mutation_timestamp(decision.decided_at, field_name="decided_at")
+            > cutoff
         ):
             continue
         version = decision.checklist.candidate
@@ -462,8 +473,6 @@ def live_temporary_hotfix(
 def _covering_decision(
     store: object, product: str, *, decision_record_id: str = "", recovering: bool = False
 ) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
-    """The product and its newest decision, when that decision still starts a release."""
-
     record_store = cast(PostgresRecordStore, store)
     try:
         profile = record_store.read_product_profile_record(product)
@@ -543,8 +552,6 @@ def _client_release_authority(
     *,
     recovering: bool = False,
 ) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
-    """Read the covering authority and its production boundary independently of testing."""
-
     if authorization.grant not in RELEASE_DECISION_GRANTS or authorization.instances != ("prod",):
         return None
     covered = _covering_decision(
@@ -561,7 +568,18 @@ def _client_release_authority(
     expected = _decision_caller(decision)
     try:
         record_store = cast(PostgresRecordStore, store)
-        production = release_version(store=record_store, profile=profile, instance="prod")
+        production = (
+            None
+            if recovering
+            else release_version(store=record_store, profile=profile, instance="prod")
+        )
+        production_artifact = (
+            production.artifact_id
+            if production is not None
+            else record_store.read_release_tuple_record(
+                context_name=context, channel_name="prod"
+            ).artifact_id
+        )
     except (FileNotFoundError, ValueError):
         return None
     if (
@@ -575,11 +593,11 @@ def _client_release_authority(
     if decision.release_start == "rollback":
         # The rejected hotfix's candidate is live until the rollback restores the
         # Client's last accepted release; testing may already carry newer work.
-        target = rejection_rollback_target(record_store, profile)
+        target = rejection_rollback_target(record_store, profile, before_decision=decision)
         return (
             covered
             if target is not None
-            and production.artifact_id
+            and production_artifact
             in (
                 checklist.candidate.artifact_id,
                 target.artifact_identity.artifact_id if target.artifact_identity else "",
@@ -588,10 +606,11 @@ def _client_release_authority(
         )
     return (
         covered
-        if production
-        in (
-            checklist.production,
-            checklist.candidate,
+        if (
+            production_artifact
+            in (checklist.production.artifact_id, checklist.candidate.artifact_id)
+            if recovering
+            else production in (checklist.production, checklist.candidate)
         )
         else None
     )
@@ -954,7 +973,10 @@ def _read_client_release_continuation(
         except ClientReleaseNotReady:
             blocked_reason = "The retained recipient inverse's saved baseline or owned publication rows changed. Reconcile its existing release before restoring production."
     if not blocked_reason and decision.release_start == "rollback" and state == "waiting":
-        if native_inverse is None and rejection_rollback_target(store, profile) is None:
+        if (
+            native_inverse is None
+            and rejection_rollback_target(store, profile, before_decision=decision) is None
+        ):
             blocked_reason = "No Client-accepted release has a passing production deployment to roll back to. An admin must roll back by hand."
     elif not blocked_reason and profile.driver_id == "odoo" and state == "waiting":
         try:
@@ -1789,7 +1811,7 @@ def _queue_rejection_rollback(
         )
         if recipient_operation is not None:
             return recipient_operation
-    deployment = rejection_rollback_target(store, profile)
+    deployment = rejection_rollback_target(store, profile, before_decision=decision)
     if deployment is None or deployment.artifact_identity is None:
         raise ClientReleaseNotReady("rollback_target_missing")
     grant = client_release_grant(

@@ -142,10 +142,14 @@ and continuation of that admitted release, not another deployment attempt: it
 preserves the attempt number, phase and checkpoint history. One production-write
 checkpoint separates fresh admission from continuation. Dispatch guards read the
 current lease, original decision, ownership or Director authority, production
-identity and recovery pin without appending checkpoints. Testing freshness,
+identity and recovery pin without appending checkpoints. Production identity uses
+the admitted artifacts, not website metadata that the release itself updates.
+Testing freshness,
 release holds and release windows gate the start; they do not strand a release
 after its first production write. Changed ownership, revoked authority and
-foreign production identity still refuse effects.
+foreign production identity still refuse effects. A refused inverse retains its
+reconciliation hold without effects; the service never adopts another caller or
+turns revocation into an automatic Director override.
 
 Recovery reuses the stored candidate, classification, website snapshots and
 original passing logical backup. Fresh requests still use current admission and
@@ -159,7 +163,12 @@ its original cutover provenance for the same read-only completion path.
 Unfinished work retains the lane hold. Reconciliation yields to pending release
 queues, including rollback and replacement, and waits 30 seconds after the last
 update, including after denial. That delay survives worker restarts and lets
-other eligible lanes run. Switch-back intent retains its original start time.
+other eligible lanes run. Preparation and compatible settings-free inverse
+interruptions use that same original-operation continuation. A Client rejection
+retains the canonical last accepted release at its rejecting decision as the
+inverse target, including when multiple temporary hotfixes were stacked. A later
+acceptance cannot retarget the original inverse. Switch-back intent retains its original
+start time.
 The direct promotion route uses the original logical-backup identity for a
 stable recovery key; queued releases retain their operation identity.
 

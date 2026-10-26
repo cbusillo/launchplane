@@ -69,6 +69,16 @@ class ProductionPromotionBackupTests(unittest.TestCase):
     ) -> None:
         self.run_cutover_worker("restart")
 
+    def test_begun_settings_cutover_preserves_original_authority_while_settings_are_pending(
+        self,
+    ) -> None:
+        self.run_cutover_worker("settings-testing")
+
+    def test_settings_cutover_restart_preserves_original_authority_after_lost_maintenance_response(
+        self,
+    ) -> None:
+        self.run_cutover_worker("settings-restart")
+
     def run_cutover_worker(self, scenario: str) -> None:
         from control_plane.contracts.backup_gate_record import BackupGateRecord
         from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -84,6 +94,8 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         from tests.support.profiles import _odoo_preview_profile_payload
 
         store = self.capture()
+        website_settings = scenario.startswith("settings-")
+        scenario = scenario.removeprefix("settings-")
         client = scenario != "operator"
         provider = IsolatedCutoverProvider(self.root / "cutover", database_changing=client)
         self.addCleanup(provider.engine.dispose)
@@ -118,7 +130,9 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             {
                 "instance": "prod",
                 "context": "example-product",
-                "base_url": "http://fixture.invalid",
+                "base_url": "https://fixture.invalid"
+                if website_settings
+                else "http://fixture.invalid",
                 "health_url": "http://fixture.invalid/launchplane/health",
                 "odoo_cutover": config.model_dump(mode="json"),
             }
@@ -169,6 +183,31 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             from control_plane.release_review import build_release_review
             from tests.test_release_review import github_read
 
+            if website_settings:
+                from control_plane.contracts.odoo_instance_override_record import (
+                    OdooInstanceOverrideRecord,
+                    OdooOverrideApplyResult,
+                )
+                from tests.test_odoo_cutover_website_settings import snapshot
+
+                original_settings = snapshot(pair, production=True)
+                candidate_settings = snapshot(pair)
+                store.write_odoo_instance_override_record(
+                    OdooInstanceOverrideRecord(
+                        context="example-product",
+                        instance="prod",
+                        website_settings=candidate_settings,
+                        last_apply=OdooOverrideApplyResult(
+                            attempted=True,
+                            status="pass",
+                            applied_at=datetime.now(UTC).isoformat(),
+                            website_settings=original_settings,
+                            website_settings_verified=True,
+                        ),
+                        updated_at=datetime.now(UTC).isoformat(),
+                    )
+                )
+
             current_profile = store.read_product_profile_record("example-product")
             review = build_release_review(store=store, profile=current_profile, read=github_read)
             assert review.checklist is not None
@@ -185,6 +224,13 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 release_issue_url="https://github.com/example/site/issues/99",
             )
             store.write_release_review_decision_record(accepted)
+            if website_settings:
+                self.assertEqual(accepted.checklist.production_website_settings, original_settings)
+                self.assertEqual(accepted.checklist.website_settings, candidate_settings)
+                self.assertNotEqual(
+                    accepted.checklist.production.website_settings_sha256,
+                    accepted.checklist.candidate.website_settings_sha256,
+                )
             store.write_deployment_record(
                 DeploymentRecord(
                     record_id=old_identity.deployment_record_id,
@@ -219,6 +265,10 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             release_id=request.request_id,
         )
         assert plan is not None
+        if website_settings:
+            from control_plane.odoo_cutover_plan import decision_bound_cutover_plan
+
+            plan = decision_bound_cutover_plan(plan, accepted)
         provider.cutover = plan
         provider.target = plan.old
         provider.binding = plan.old.binding
@@ -471,6 +521,28 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 def maintenance(current: Any) -> Any:
                     nonlocal response_lost
                     receipt = original_maintenance(current)
+                    if website_settings:
+                        from control_plane.contracts.odoo_cutover import OdooWebsiteSettingsReceipt
+
+                        pending_settings = store.read_odoo_instance_override_record(
+                            context_name=request.context, instance_name="prod"
+                        )
+                        self.assertFalse(pending_settings.last_apply.website_settings_verified)
+                        assert current.website_settings is not None
+                        digest = current.website_settings.settings.digest
+                        receipt = receipt.model_copy(
+                            update={
+                                "website_settings": OdooWebsiteSettingsReceipt(
+                                    binding=current.new.binding,
+                                    image=current.new.image,
+                                    settings_sha256=digest,
+                                    startup_settings_sha256=digest,
+                                    retained_startup_settings_sha256=digest,
+                                    committed=True,
+                                )
+                            }
+                        )
+                        provider.maintenance_receipt = receipt
                     drift()
                     observe_dispatch()
                     if scenario == "restart" and not response_lost:

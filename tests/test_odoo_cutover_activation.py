@@ -235,6 +235,19 @@ class OdooCutoverActivationTests(unittest.TestCase):
                 )
 
             self.assertIsNone(claim("worker-a"))
+            for step in ("preparing", "prepared"):
+                with self.subTest(step=step):
+                    deployment.odoo_cutover = progress.model_copy(update={"step": step})
+                    store.write_deployment_record(deployment)
+                    prepared_claim = claim("preparation-worker")
+                    self.assertIsNotNone(
+                        prepared_claim, "original preparation must remain resumable"
+                    )
+                    assert prepared_claim is not None
+                    self.assertEqual(prepared_claim.attempt, held.attempt)
+                    self.assertEqual(prepared_claim.phase, held.phase)
+                    self.assertEqual(prepared_claim.checkpoints, held.checkpoints)
+                    store.write_odoo_prod_promotion_operation_record(held)
             for step, error in (("maintaining", "TimeoutError"),):
                 deployment.odoo_cutover = progress.model_copy(update={"step": step, "error": error})
                 store.write_deployment_record(deployment)
@@ -243,6 +256,9 @@ class OdooCutoverActivationTests(unittest.TestCase):
             store.write_deployment_record(deployment)
             self.assertIsNotNone(claim("worker-a"))
             store.write_odoo_prod_promotion_operation_record(held)
+            deployment.odoo_cutover = progress.model_copy(update={"step": "rolled_back"})
+            store.write_deployment_record(deployment)
+            self.assertIsNone(claim("unreachable-promotion-inverse"))
             deployment.odoo_cutover = progress
             store.write_deployment_record(deployment)
             with ThreadPoolExecutor(max_workers=2) as workers:

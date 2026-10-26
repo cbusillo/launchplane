@@ -197,6 +197,34 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                             claimed_at="2026-10-27T00:00:00Z",
                         )
                     )
+                if rollback:
+                    plain_plan = OdooCutoverPlan.model_validate(
+                        {**pair.model_dump(), "website_settings": None}
+                    )
+                    plain = progress.model_copy(
+                        update={
+                            "plan": plain_plan,
+                            "maintenance": provider.maintenance(plain_plan),
+                            "website_settings_attempted": False,
+                            "rollback_pause": None,
+                            "public_site": None,
+                        }
+                    )
+                    self.assertIsNone(startup_recovery_pause(plain))
+                    store.write_deployment_record(
+                        deployment.model_copy(update={"odoo_cutover": plain})
+                    )
+                    plain_claim = claim(
+                        lease_owner="plain-inverse",
+                        lease_expires_at="2026-10-27T00:05:00Z",
+                        claimed_at="2026-10-27T00:00:00Z",
+                    )
+                    assert plain_claim is not None
+                    self.assertEqual(plain_claim.operation_id, held.operation_id)
+                    self.assertEqual(plain_claim.attempt, held.attempt)
+                    self.assertEqual(plain_claim.checkpoints, held.checkpoints)
+                    assert isinstance(held, OdooProdRollbackOperationRecord)
+                    store.write_odoo_prod_rollback_operation_record(held)
                 store.write_deployment_record(deployment)
                 claimed = claim(
                     lease_owner="worker",

@@ -2171,6 +2171,12 @@ def _execute_prod_rollback_operation(
         boundary_effects=frozenset(),
         run=run,
         terminal=terminal,
+        retain_denied_hold=lambda: (
+            bool(odoo_release_recovery_source(operation))
+            or odoo_release_wrote_production(
+                record_store.read_odoo_prod_rollback_operation_record(operation.operation_id)
+            )
+        ),
         reconciling=reconciling,
     )
 
