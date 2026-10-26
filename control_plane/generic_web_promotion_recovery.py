@@ -1,6 +1,7 @@
 """Inspect and adopt one existing Client release; never repeat a provider effect."""
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,7 +43,7 @@ from control_plane.generic_web_promotion_provider_adapter import (
 )
 from control_plane.provider_operations import build_provider_operation_key
 from control_plane.release_review import checklist_digest
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import MutationReservationAdoptionResult, PostgresRecordStore
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployRuntimeArtifactProvider,
     build_generic_web_provider_target_key,
@@ -65,6 +66,33 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 class PromotionRecoveryConflict(ValueError):
     """The stored release does not identify one authoritative promotion."""
+
+
+def adopt_inspected_promotion(
+    *,
+    store: PostgresRecordStore,
+    inspection: "PromotionInspection",
+    trace_id: str,
+    recovery_receipt: Mapping[str, object],
+) -> MutationReservationAdoptionResult:
+    if inspection.action not in {"adopt_promotion", "adopt_rollback"}:
+        raise ValueError("The original release outcome is unproved.")
+    return store.adopt_reconciled_mutation(
+        reservation=inspection.reservation,
+        response_status_code=202,
+        response_trace_id=trace_id,
+        response_payload={
+            "status": "accepted",
+            "trace_id": trace_id,
+            "records": {},
+            "result": inspection.result,
+            "recovery": dict(recovery_receipt),
+        },
+        expected_promotion_evidence=inspection.evidence,
+        promotion_recovery_inventory=inspection.inventory,
+        promotion_recovery_record=inspection.promotion,
+        promotion_recovery_deployments=inspection.deployments,
+    )
 
 
 @dataclass
