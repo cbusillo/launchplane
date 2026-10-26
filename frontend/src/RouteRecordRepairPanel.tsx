@@ -10,7 +10,6 @@ import {
   repairRequest, repairStorageKey, verifyRepairReceipt,
   type RepairKind, type RepairRequest, type RepairResponse, type RepairReview, type RepairScope,
   type ExternalIngress,
-  reviewedExternalIngress,
 } from "./route-record-repair";
 
 function executeRepair(request: RepairRequest, options: BrowserOperationOptions): Promise<RepairResponse> {
@@ -82,14 +81,11 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   const [externalDomains, setExternalDomains] = useState(savedExternal?.domains.join(", ") ?? "");
   const [custodian, setCustodian] = useState(savedExternal?.custodian ?? "");
   const [evidenceUrl, setEvidenceUrl] = useState(savedExternal?.evidence_url ?? "");
-  const [custodyDirty, setCustodyDirty] = useState(false);
-  const [custodyConflict, setCustodyConflict] = useState(false);
+  const [custodyDirty, setCustodyDirty] = useState(Boolean(pending));
   const recordedCustody = JSON.stringify(recordedExternal ?? null);
-  const custodyBaseline = useRef(JSON.stringify(savedExternal ?? null));
-  const draftExternal: ExternalIngress | undefined = externalDomains.trim() ? {
+  const externalIngress: ExternalIngress | undefined = externalDomains.trim() ? {
     domains: externalDomains.split(/[\s,]+/).filter(Boolean), custodian: custodian.trim(), evidence_url: evidenceUrl.trim(),
   } : undefined;
-  const externalIngress = reviewedExternalIngress(draftExternal, recordedExternal);
   const [review, setReview] = useState<RepairReview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [message, setMessage] = useState("");
@@ -117,29 +113,19 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     },
   });
   const recovering = apply.state.requiresIdempotencyContinuity;
-  const recoveryWasActive = useRef(recovering);
   const busy = readback === "pending" || [plan.state.phase, apply.state.phase].some(phase => phase === "queued" || phase === "submitting");
   const locked = !admin || busy || recovering || otherActive;
-  function loadRecordedCustody() {
+  useEffect(() => {
+    if (kind !== "binding" || recovering || custodyDirty) return;
     setExternalDomains(recordedExternal?.domains.join(", ") ?? "");
     setCustodian(recordedExternal?.custodian ?? "");
     setEvidenceUrl(recordedExternal?.evidence_url ?? "");
-    setCustodyDirty(false); setCustodyConflict(false);
-  }
-  useEffect(() => {
-    const settledRecovery = recoveryWasActive.current && !recovering;
-    recoveryWasActive.current = recovering;
-    if (kind !== "binding" || recovering || custodyBaseline.current === recordedCustody) return;
-    custodyBaseline.current = recordedCustody;
-    if (!settledRecovery) { revision.current += 1; setReview(null); setConfirmed(false); }
-    if (custodyDirty || settledRecovery && apply.state.phase !== "succeeded") setCustodyConflict(true);
-    else loadRecordedCustody();
-  }, [recordedCustody, recovering]);
+  }, [recordedCustody, recovering, custodyDirty]);
   useEffect(() => { setActive(busy); }, [busy]);
   useEffect(() => {
     revision.current += 1;
     if (!recovering) { setReview(null); setConfirmed(false); }
-  }, [refreshToken]);
+  }, [refreshToken, recordedCustody]);
   useEffect(() => {
     if (!recovering && apply.state.failure?.statusCode === 409 && apply.state.failure.code === "stale") {
       revision.current += 1; setReview(null); setConfirmed(false); setPending(null); setAccepted(null);
@@ -161,7 +147,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     try { sessionStorage.removeItem(storageKey); } catch { /* Local release does not promise durable browser storage cleanup. */ }
   }
   async function inspect() {
-    if (locked || custodyConflict || !reason.trim() || !apply.reset()) return;
+    if (locked || !reason.trim() || !apply.reset()) return;
     setReview(null); setConfirmed(false); setMessage(""); setAccepted(null); setReadback("idle");
     const generation = ++revision.current;
     const response = await plan.run(repairRequest(scope, kind, reason, undefined, externalIngress));
@@ -225,14 +211,8 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
       <label className="product-config-field">Proxy custodian<input aria-label="Proxy custodian" value={custodian} disabled={locked} onChange={event => { setCustodyDirty(true); setCustodian(event.target.value); edited(reason); }} /></label>
       <label className="product-config-field">Configuration evidence URL<input aria-label="Configuration evidence URL" value={evidenceUrl} disabled={locked} onChange={event => { setCustodyDirty(true); setEvidenceUrl(event.target.value); edited(reason); }} /></label>
     </details>}
-    {kind === "binding" && custodyConflict && <div role="status">
-      <p>The saved custody changed while you were editing. Current domains: {recordedExternal?.domains.join(", ") || "none"}. Current custodian: {recordedExternal?.custodian || "none"}.</p>
-      {recordedExternal && <p><a href={recordedExternal.evidence_url} target="_blank" rel="noreferrer">Current configuration report</a></p>}
-      <button className="button button-secondary" disabled={locked} onClick={loadRecordedCustody}>Use saved custody</button>
-      <button className="button button-secondary" disabled={locked} onClick={() => setCustodyConflict(false)}>Keep my custody edits</button>
-    </div>}
     {kind === "binding" && externalIngress && <p>Applying this decision attests the custodian's current report. Review the report before confirming. Each hostname must keep passing its strict health and TLS checks.</p>}
-    <button type="button" className="button button-secondary" disabled={locked || custodyConflict || !reason.trim()} onClick={() => void inspect()}>Review {title.toLowerCase()}</button>
+    <button type="button" className="button button-secondary" disabled={locked || !reason.trim()} onClick={() => void inspect()}>Review {title.toLowerCase()}</button>
     {review && <div className="product-owner-plan route-repair-review" aria-label={`${title} review`}>
       <p><strong>{review.status === "ready" ? "Ready for your decision" : review.status === "unchanged"
         ? review.operation === "repair-domain-authority" ? "Stored domains match provider hosts" : "Stored route binding matches current evidence"

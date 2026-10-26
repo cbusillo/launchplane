@@ -329,11 +329,6 @@ def read_check_runtime_verification(
     base_url = split_ingress_check_base_url(lane, requested_url) if split_check else ""
     if base_url:
         requested_urls.add(base_url)
-    custody_sha256 = (
-        binding.external_custody_sha256(urlsplit(requested_url).hostname or "")
-        if split_check and binding is not None
-        else ""
-    )
     external_check = bool(
         hosts
         and binding
@@ -405,7 +400,6 @@ def read_check_runtime_verification(
                     visited_urls=item.visited_urls,
                     hosts=hosts,
                 )
-                and item.external_custody_sha256 == custody_sha256
                 for item in observation.targets
                 if item.target in {"base_url", "health_url"}
             )

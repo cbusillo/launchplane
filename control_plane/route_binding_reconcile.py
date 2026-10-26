@@ -476,23 +476,30 @@ def build_route_binding_candidate(
     managed_domains = domains
     split_profile = None
     if request.external_ingress is not None:
-        if not request.external_ingress.attested_at:
-            request = request.model_copy(
-                update={
-                    "external_ingress": request.external_ingress.model_copy(
-                        update={"attested_at": request.evaluated_at}
-                    )
-                }
-            )
+        previous = current_record.external_ingress if current_record else None
+        attested_at = (
+            previous.attested_at
+            if previous is not None
+            and previous.model_dump(exclude={"attested_at"})
+            == request.external_ingress.model_dump(exclude={"attested_at"})
+            else request.evaluated_at
+        )
+        request = request.model_copy(
+            update={
+                "external_ingress": request.external_ingress.model_copy(
+                    update={"attested_at": attested_at}
+                )
+            }
+        )
         assert request.external_ingress is not None
-        if not _parse_utc_timestamp(request.external_ingress.attested_at) <= _parse_utc_timestamp(
-            request.evaluated_at
+        if not request.allow_authority_change and (
+            previous is None or request.external_ingress != previous
         ):
             return _blocked_plan(
                 findings=(
                     RouteBindingReconcileFinding(
-                        code="external_attestation_not_current",
-                        detail="The external custody timestamp cannot be in the future.",
+                        code="split_ingress_authority_change_requires_review",
+                        detail="Split ingress custody changes require the signed-in administrator's review.",
                     ),
                 ),
                 current_record=current_record,
@@ -737,6 +744,21 @@ def build_route_binding_candidate(
             ingress_audit=audit_record,
             product_profile=split_profile,
         ),
+    )
+
+
+def route_binding_monitoring_projection(
+    profile: LaunchplaneProductProfileRecord, context: str, instance: str
+) -> tuple[object, ...]:
+    lane = next(
+        (lane for lane in profile.lanes if (lane.context, lane.instance) == (context, instance)),
+        None,
+    )
+    return (
+        profile.is_active,
+        profile.driver_id,
+        profile.public_website,
+        *((lane.base_url, lane.health_url, lane.health_monitoring) if lane else (None,)),
     )
 
 

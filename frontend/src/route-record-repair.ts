@@ -9,10 +9,6 @@ export interface RepairScope { product: string; context: string; instance: strin
 export type RepairReview = DokployDomainRepairReview | RouteBindingRepairReview;
 export type RepairResponse = SetupDokployTargetResponse | ReconcileRouteBindingResponse;
 export type ExternalIngress = NonNullable<EnvironmentRouteBindingReadModel["external_ingress"]>;
-export function reviewedExternalIngress(draft: ExternalIngress | undefined, recorded: ExternalIngress | undefined): ExternalIngress | undefined {
-  return draft && recorded && draft.custodian === recorded.custodian && draft.evidence_url === recorded.evidence_url &&
-    JSON.stringify([...draft.domains].sort()) === JSON.stringify([...recorded.domains].sort()) ? recorded : draft;
-}
 interface CommonRequest {
   mode: "dry-run" | "apply"; product: string; context: string; instance: string;
   reason: string; confirmation: string; browser_review: BrowserRouteRepairRequest;
@@ -28,7 +24,8 @@ export function repairOperationScope(scope: RepairScope, kind: RepairKind): stri
 }
 export function repairStorageKey(scope: string): string { return `launchplane:route-repair-request:${scope}`; }
 export function repairRequest(scope: RepairScope, kind: RepairKind, reason: string, review?: RepairReview, externalIngress?: ExternalIngress): RepairRequest {
-  const reviewedExternal = review?.operation === "reconcile-route-binding" ? review.proposed_record?.external_ingress : undefined;
+  const external = review?.operation === "reconcile-route-binding" ? review.proposed_record?.external_ingress : externalIngress;
+  const reviewedExternal = external ? { domains: external.domains, custodian: external.custodian, evidence_url: external.evidence_url } : undefined;
   const common = {
     context: scope.context, instance: scope.instance, reason: reason.trim(),
     mode: review ? "apply" as const : "dry-run" as const,
@@ -75,8 +72,7 @@ export function parseStoredRepairRequest(value: string | null, scope: RepairScop
     }
     if (request.product !== scope.product || !expectedCurrent(request.expected_current)) return null;
     if (Object.hasOwn(request, "external_ingress") && (!object(request.external_ingress) ||
-        !exactKeys(request.external_ingress, ["domains", "custodian", "evidence_url", ...(Object.hasOwn(request.external_ingress, "attested_at") ? ["attested_at"] : [])]) ||
-        (Object.hasOwn(request.external_ingress, "attested_at") && (typeof request.external_ingress.attested_at !== "string" || !request.external_ingress.attested_at)) ||
+        !exactKeys(request.external_ingress, ["domains", "custodian", "evidence_url"]) ||
         !strings(request.external_ingress.domains) || !request.external_ingress.domains.length ||
         typeof request.external_ingress.custodian !== "string" || !request.external_ingress.custodian.trim() ||
         typeof request.external_ingress.evidence_url !== "string" || !request.external_ingress.evidence_url.startsWith("https://"))) return null;

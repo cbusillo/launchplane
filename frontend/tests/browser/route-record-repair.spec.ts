@@ -147,7 +147,7 @@ test("split ingress review preserves both custodians through save and readback @
   await expect(panel).toHaveAttribute("data-readback", "verified");
   const bodies = calls.map(call => call.body as unknown as { external_ingress: { domains: string[]; custodian: string; evidence_url: string; attested_at?: string } });
   for (const body of bodies) expect(body.external_ingress).toMatchObject(bodies[0].external_ingress);
-  expect(bodies[1].external_ingress.attested_at).toBe(bindingRecord().updated_at);
+  expect(bodies[1].external_ingress).not.toHaveProperty("attested_at");
   expect(bodies.at(-1)?.external_ingress).toEqual(bodies[1].external_ingress);
 });
 
@@ -181,15 +181,13 @@ for (const mode of ["pristine", "dirty", "uncertain", "refused"] as const) {
       await expect(panel.getByLabel("Configuration evidence URL", { exact: true })).toHaveValue(successor.evidence_url);
     } else if (mode === "dirty") {
       await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue("My edited custodian");
-      await expect(review).toBeDisabled();
-      await panel.getByRole("button", { name: "Keep my custody edits", exact: true }).click();
       await expect(review).toBeEnabled();
       await review.click();
       await expect(panel.getByLabel("Route binding review", { exact: true })).toBeVisible();
       expect((state.calls.at(-1)!.body as unknown as { external_ingress: typeof original }).external_ingress.custodian).toBe("My edited custodian");
       await refresh({ ...successor, custodian: "Another saved successor" });
-      await panel.getByRole("button", { name: "Use saved custody", exact: true }).click();
-      await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue("Another saved successor");
+      await expect(panel.getByLabel("Route binding review", { exact: true })).toHaveCount(0);
+      await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue("My edited custodian");
     } else {
       await expect(review).toBeDisabled();
       await page.reload();
@@ -201,9 +199,7 @@ for (const mode of ["pristine", "dirty", "uncertain", "refused"] as const) {
         await expect(panel).toHaveAttribute("data-recovery", "false");
         await panel.getByRole("button", { name: "Edit external custody", exact: true }).click();
         await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue("My edited custodian");
-        await expect(panel.getByRole("button", { name: "Review route binding", exact: true })).toBeDisabled();
-        await panel.getByRole("button", { name: "Use saved custody", exact: true }).click();
-        await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue(successor.custodian);
+        await expect(panel.getByRole("button", { name: "Review route binding", exact: true })).toBeEnabled();
       } else await expect(panel).toHaveAttribute("data-readback", "verified");
       const applies = state.calls.filter(call => call.body.mode === "apply");
       expect(applies[1]).toEqual(applies[0]);

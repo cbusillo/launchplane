@@ -290,14 +290,6 @@ class EnvironmentRouteBindingRecord(BaseModel):
             return RouteBindingTls(owner="external")
         return self.tls
 
-    def external_custody_sha256(self, domain_name: str) -> str:
-        if self.external_ingress is None or domain_name not in self.external_ingress.domains:
-            return ""
-        payload = json.dumps(
-            self.external_ingress.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-        )
-        return hashlib.sha256(payload.encode()).hexdigest()
-
     @property
     def binding_key(self) -> str:
         return build_route_binding_key(

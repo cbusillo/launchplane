@@ -1653,40 +1653,6 @@ def _placement_warnings(
     return tuple(warnings)
 
 
-def _tls_snapshot_matches_current_authority(
-    binding: EnvironmentRouteBindingRecord,
-    tls: PublicIngressTlsObservation,
-    provenance: DataProvenance,
-) -> bool:
-    captured = tls.recorded
-    domain = next(
-        (domain for domain in binding.domains if domain.domain_name == captured.domain_name), None
-    )
-    if (
-        binding.external_ingress is None
-        or domain is None
-        or provenance.freshness_status not in {"recorded", "verified"}
-    ):
-        return False
-    ingress = binding.ingress_for_domain(domain.domain_name)
-    ownership = binding.tls_for_domain(domain.domain_name)
-    return (
-        bool(captured.source_record_ids)
-        and bool(captured.source_versions)
-        and captured.domain_role == domain.role
-        and captured.route_binding_status == binding.status
-        and captured.owner == ownership.owner
-        and captured.ingress_provider == ingress.provider
-        and captured.termination_kind == ingress.termination_kind
-        and captured.provider_evidence == ownership.provider_evidence
-        and captured.source_kind == binding.source.source_kind
-        and captured.source_label == binding.source.source_label
-        and captured.source_record_ids == binding.source.source_record_ids
-        and captured.source_versions == binding.source.source_versions
-        and captured.external_custody_sha256 == binding.external_custody_sha256(domain.domain_name)
-    )
-
-
 def _tls_warnings(
     *,
     route_binding: EnvironmentRouteBindingRecord | None,
@@ -1771,12 +1737,30 @@ def _tls_warnings(
                     ),
                 )
             )
-        if _effective_freshness(
-            tls.recorded.freshness_status,
-            stale_after=tls.recorded.stale_after,
-            now=now,
-        ) == "stale" and not _tls_snapshot_matches_current_authority(
-            route_binding, tls, authority_provenance
+        external = route_binding.external_ingress
+        custody_current = (
+            not external
+            or projection.domain_name not in external.domains
+            or (
+                (observed_at := _parse_timestamp(tls.probe.observed_at)) is not None
+                and (attested_at := _parse_timestamp(external.attested_at)) is not None
+                and observed_at > attested_at
+            )
+        )
+        snapshot_current = (
+            external is not None
+            and not warnings
+            and authority_provenance.freshness_status in {"recorded", "verified"}
+            and bool(tls.recorded.source_versions)
+            and tls.recorded.source_versions == route_binding.source.source_versions
+            and tls.recorded.source_record_ids == route_binding.source.source_record_ids
+        )
+        if not custody_current or (
+            _effective_freshness(
+                tls.recorded.freshness_status, stale_after=tls.recorded.stale_after, now=now
+            )
+            == "stale"
+            and not snapshot_current
         ):
             warnings.append(
                 _warning(

@@ -315,7 +315,6 @@ class PublicIngressMonitorTarget:
     private_tls_ca_pem: str = ""
     route_binding_sha256: str = ""
     allowed_https_hosts: tuple[str, ...] = ()
-    external_custody_sha256: str = ""
     recovery_observation_threshold: int = 1
     resolution_failure_code: PublicIngressFailureCode | None = None
     resolution_failure_summary: str = ""
@@ -755,9 +754,6 @@ def _health_check_monitor_target(
         allowed_https_hosts=split_ingress_custody_hosts(binding, health_url)
         if domain_check
         else (),
-        external_custody_sha256=binding.external_custody_sha256(urlsplit(health_url).hostname or "")
-        if domain_check and binding is not None
-        else "",
         profile_sha256=product_profile_record_sha256(profile),
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         incident_eligible=product_lane_monitoring_incident_eligible(
@@ -2613,10 +2609,6 @@ def check_public_ingress_target(
             tls_get=tls_get,
             checked_at=checked_at,
         )
-        if target.check_kind == "public_http" and target.external_custody_sha256:
-            url_observation = url_observation.model_copy(
-                update={"external_custody_sha256": target.external_custody_sha256}
-            )
         if (
             target.check_kind == "public_http"
             and target.resolution_failure_code is None
@@ -3511,7 +3503,6 @@ def _tls_monitor_targets(
                 tls_source_label=route_binding.source.source_label,
                 tls_source_record_ids=route_binding.source.source_record_ids,
                 tls_source_versions=dict(route_binding.source.source_versions),
-                external_custody_sha256=route_binding.external_custody_sha256(domain.domain_name),
                 tls_refreshed_at=route_binding.source.refreshed_at,
                 tls_recorded_at=route_binding.updated_at,
                 tls_freshness_status=route_binding.source.freshness_status,
@@ -3572,7 +3563,6 @@ def _tls_observation(
             source_label=target.tls_source_label,
             source_record_ids=target.tls_source_record_ids,
             source_versions=dict(target.tls_source_versions or {}),
-            external_custody_sha256=target.external_custody_sha256,
             refreshed_at=target.tls_refreshed_at,
             recorded_at=target.tls_recorded_at,
             freshness_status=target.tls_freshness_status,

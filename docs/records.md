@@ -948,7 +948,9 @@ an ORM column/table or remains only in the evidence payload.
   ambiguous or stale source stays blocked. Split authority can be saved only
   through the signed-in administrator's reviewed Route binding card, with
   CSRF, exact review digest, current-record CAS and atomic source comparisons,
-  including the public product profile. Custodian or domain changes cannot be
+  including the lane's URLs and monitoring policy, product driver, public-site
+  intent and active state. Unrelated profile edits do not invalidate the decision.
+  Custodian or domain changes cannot be
   hidden in an evidence refresh. The custody timestamp records the reviewed
   decision; continued qualification comes from current strict HTTP/runtime and
   TLS observations, without a calendar re-attestation step. The operation
@@ -969,8 +971,10 @@ an ORM column/table or remains only in the evidence payload.
   The route-record SHA fences incident
   transitions; persisted HTTP observations are evaluated against current check
   URLs, monitoring intent, deployment identity, profile and relevant source dates.
-  Per-host external-custody digests in HTTP and TLS evidence also invalidate old
-  observations when a custodian or report changes within the same timestamp.
+  Custody timestamps are server-derived: unchanged custody keeps its original
+  receipt, while changed custody uses the decision time regardless of caller input.
+  External HTTP and TLS observations must strictly follow that time, including
+  edits and observations within the same recorded second.
   Each HTTPS redirect must stay within the requested hostname's custody set.
   The transport checks each hop before connecting and retains the visited URLs;
   old redirected observations without that evidence cannot verify custody.
@@ -983,8 +987,9 @@ an ORM column/table or remains only in the evidence payload.
   projections all agree with the stored binding. Missing, changed, conflicting
   or unavailable sources retain the stale-evidence warning. This adds no job,
   periodic authority write or renewal action. TLS snapshots use the same current
-  authority proof only when their per-host authority, custody digest and exact
-  source identities/versions still agree; certificate probe freshness is checked
+  authority proof only when their per-host authority and exact source
+  identities/versions still agree and the probe follows the custody decision;
+  certificate probe freshness is checked
   separately. Unchanged browser reviews preserve the recorded custody receipt. An explicit evidence refresh that
   adopts newer source versions requires subsequent probes for the affected
   authority dates. Custodian-reported configuration remains distinct from

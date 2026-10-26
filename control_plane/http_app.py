@@ -22207,28 +22207,15 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-        split_evidence_refresh = (
-            binding_request.mode == "apply"
-            and (policy_authorized or director_evidence_refresh)
-            and reconcile_plan.record is not None
-            and reconcile_plan.record.external_ingress is not None
-            and not isinstance(identity, GitHubHumanIdentity)
-            and control_plane_route_binding_reconcile.is_evidence_only_route_binding_refresh(
-                reconcile_plan
-            )
-        )
-        if (
-            binding_request.mode == "apply"
-            and reconcile_plan.record is not None
-            and reconcile_plan.record.external_ingress is not None
-            and not isinstance(identity, GitHubHumanIdentity)
-            and not split_evidence_refresh
+        if binding_request.mode == "apply" and any(
+            finding.code == "split_ingress_authority_change_requires_review"
+            for finding in reconcile_plan.findings
         ):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Split ingress authority requires the signed-in administrator's reviewed decision.",
+                message="Split ingress custody changes require the signed-in administrator's review.",
             )
         if (
             director_evidence_refresh
@@ -22336,7 +22323,7 @@ def create_launchplane_fastapi_app(
         if (
             binding_request.browser_review is not None
             or director_evidence_refresh
-            or split_evidence_refresh
+            or reconcile_plan.record.external_ingress is not None
         ):
             assert isinstance(record_store, PostgresRecordStore)
             try:
@@ -22351,7 +22338,7 @@ def create_launchplane_fastapi_app(
                 control_plane_route_binding_reconcile.RouteBindingSourceChanged,
                 ProductContextOwnershipError,
             ) as error:
-                if director_evidence_refresh or split_evidence_refresh:
+                if director_evidence_refresh:
                     raise _launchplane_http_error(
                         status_code=409,
                         trace_id=trace_id,

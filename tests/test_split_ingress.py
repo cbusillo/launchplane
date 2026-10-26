@@ -107,11 +107,7 @@ def split_observation(
     observed = _http_observation(
         domain_name=domain, monitoring_intent="public", runtime_identity_status=status
     )
-    custody = binding.external_custody_sha256(domain)
-    targets = tuple(
-        target.model_copy(update={"external_custody_sha256": custody})
-        for target in observed.targets
-    )
+    targets = observed.targets
     base = split_ingress_check_base_url(profile.lanes[0], observed.targets[0].url)
     if base:
         targets += (
@@ -119,7 +115,6 @@ def split_observation(
                 target="base_url",
                 url=base,
                 final_url=base,
-                external_custody_sha256=custody,
                 status="pass",
                 http_status=200,
                 summary="Homepage is healthy.",
@@ -317,7 +312,10 @@ class SplitIngressTests(unittest.TestCase):
         replacement = binding.model_copy(
             update={
                 "external_ingress": binding.external_ingress.model_copy(
-                    update={"custodian": "Successor at the same timestamp"}
+                    update={
+                        "custodian": "Successor at the same timestamp",
+                        "attested_at": observations[1].observed_at,
+                    }
                 )
             }
         )
@@ -938,7 +936,10 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         route = "/v1/route-bindings/reconcile"
 
         async def save(candidate: dict[str, Any], key: str) -> dict[str, Any]:
-            review = (await self.post(route, candidate)).json()["review"]
+            with patch(
+                "control_plane.http_app.utc_now_timestamp", return_value="2026-10-26T20:00:00Z"
+            ):
+                review = (await self.post(route, candidate)).json()["review"]
             self.assertEqual(review["status"], "ready", review)
             proposed = review["proposed_record"]
             apply_payload = {
@@ -953,9 +954,16 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                     "reviewed_plan_sha256": review["plan_sha256"],
                 },
             }
-            applied = await self.post(route, apply_payload, key)
+            with patch(
+                "control_plane.http_app.utc_now_timestamp", return_value="2026-10-26T20:00:01Z"
+            ):
+                applied = await self.post(route, apply_payload, key)
             self.assertEqual(applied.status_code, 202, applied.text)
             saved_record: dict[str, Any] = applied.json()["review"]["proposed_record"]
+            if saved_record.get("external_ingress"):
+                self.assertEqual(
+                    saved_record["external_ingress"]["attested_at"], "2026-10-26T20:00:01Z"
+                )
             return saved_record
 
         await save(payload, "create-split-custody")
@@ -965,6 +973,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                 **payload["external_ingress"],
                 "custodian": "Successor custodian",
                 "evidence_url": "https://example.test/new-report",
+                "attested_at": "2025-01-01T00:00:00Z",
             },
         }
         updated = await save(changed, "update-split-custody")
@@ -1008,6 +1017,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                         if key not in {"mode", "browser_review"}
                     },
                     "evaluated_at": "2026-07-20T00:00:00Z",
+                    "allow_authority_change": True,
                 }
             ),
         )
@@ -1086,13 +1096,14 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                     },
                     "external_ingress": external,
                     "evaluated_at": evaluated_at,
+                    "allow_authority_change": True,
                 }
             ),
         )
         self.assertEqual(planned.status, "ready", planned.findings)
         assert planned.record is not None
         assert planned.record.external_ingress is not None
-        self.assertEqual(planned.record.external_ingress.attested_at, external["attested_at"])
+        self.assertEqual(planned.record.external_ingress.attested_at, evaluated_at)
         with patch.object(self.store, "read_route_binding_record", return_value=planned.record):
             refresh = plan_route_binding_reconcile(
                 record_store=self.store,
@@ -1135,6 +1146,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                         if key not in {"mode", "browser_review"}
                     },
                     "evaluated_at": "2026-07-20T00:00:00Z",
+                    "allow_authority_change": True,
                     "external_ingress": {
                         **payload["external_ingress"],
                         "attested_at": "2025-07-01T00:00:00Z",
@@ -1261,7 +1273,10 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         changed_custody = current.model_copy(
             update={
                 "external_ingress": current.external_ingress.model_copy(
-                    update={"custodian": "Successor, same timestamp"}
+                    update={
+                        "custodian": "Successor, same timestamp",
+                        "attested_at": evaluated.isoformat(),
+                    }
                 )
             }
         )
@@ -1285,40 +1300,51 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
         self.assertEqual(changed.provider_recorded.trust_state, "stale")
         self.assertTrue(any(w.code == "stale_route_authority" for w in changed.warnings))
 
-    async def test_profile_change_during_commit_settles_without_binding(self) -> None:
+    async def test_commit_fences_monitoring_but_allows_unrelated_profile_edits(self) -> None:
         payload = self.seed_split()
         route = "/v1/route-bindings/reconcile"
-        review = (await self.post(route, payload)).json()["review"]
         original = self.store.reconcile_route_binding_record
+        profile = self.store.read_product_profile_record(payload["product"])
+        changed_lane = profile.lanes[0].model_copy(
+            update={"health_url": "https://app.example.test/changed"}
+        )
+        for index, (changed, expected_status) in enumerate(
+            (
+                (profile.model_copy(update={"lanes": (changed_lane,)}), 409),
+                (profile.model_copy(update={"display_name": "Changed after review"}), 202),
+            )
+        ):
+            with self.subTest(expected_status=expected_status):
+                self.store.write_product_profile_record(profile)
+                review = (await self.post(route, payload)).json()["review"]
 
-        def change_profile(*args: Any, **kwargs: Any) -> Any:
-            profile = self.store.read_product_profile_record(payload["product"])
-            self.store.write_product_profile_record(
-                profile.model_copy(update={"display_name": "Changed after review"})
-            )
-            return original(*args, **kwargs)
+                def change_profile(*args: Any, **kwargs: Any) -> Any:
+                    self.store.write_product_profile_record(changed)
+                    return original(*args, **kwargs)
 
-        with patch.object(self.store, "reconcile_route_binding_record", side_effect=change_profile):
-            response = await self.post(
-                route,
-                {
-                    **payload,
-                    "external_ingress": review["proposed_record"]["external_ingress"],
-                    "mode": "apply",
-                    "reason": "Record both routes.",
-                    "confirmation": review["expected_confirmation"],
-                    "browser_review": {
-                        "product": payload["product"],
-                        "reviewed_plan_sha256": review["plan_sha256"],
-                    },
-                },
-                "split-profile-changed",
-            )
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(response.json()["error"]["code"], "stale")
-        with self.assertRaises(FileNotFoundError):
-            self.store.read_route_binding_record(
-                product=payload["product"],
-                context_name=payload["context"],
-                instance_name=payload["instance"],
-            )
+                with patch.object(
+                    self.store, "reconcile_route_binding_record", side_effect=change_profile
+                ):
+                    response = await self.post(
+                        route,
+                        {
+                            **payload,
+                            "mode": "apply",
+                            "reason": "Record both routes.",
+                            "confirmation": review["expected_confirmation"],
+                            "browser_review": {
+                                "product": payload["product"],
+                                "reviewed_plan_sha256": review["plan_sha256"],
+                            },
+                        },
+                        f"split-profile-changed-{index}",
+                    )
+                self.assertEqual(response.status_code, expected_status, response.text)
+                if expected_status == 409:
+                    self.assertEqual(response.json()["error"]["code"], "stale")
+                    with self.assertRaises(FileNotFoundError):
+                        self.store.read_route_binding_record(
+                            product=payload["product"],
+                            context_name=payload["context"],
+                            instance_name=payload["instance"],
+                        )
