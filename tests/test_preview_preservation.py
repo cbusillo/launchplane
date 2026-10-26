@@ -190,22 +190,30 @@ class PreviewPreservationProgramTests(unittest.TestCase):
             self.preserve()
         self.assertFalse(self.containers["database"]["State"]["Running"])
 
-    def test_cleanup_uses_one_budget_after_work_deadline_expires(self) -> None:
-        namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
-        namespace.update(deadline=time.monotonic() - 10, spec={}, wait_database=Mock())
-        database = {"Id": "fixture-db", "State": {"Running": False}}
-        complete = subprocess.CompletedProcess([], 0, b"", b"")
-        with patch.object(subprocess, "run", return_value=complete) as run:
-            with self.assertRaises(TimeoutError):
-                with namespace["preservation_database"](database):
-                    raise TimeoutError()
-            cleanup_timeout = run.call_args.kwargs["timeout"]
-            command = run.call_args.args[0]
-            self.assertGreater(cleanup_timeout, int(command[command.index("-t") + 1]))
-            with namespace["preservation_cleanup"]():
-                first_deadline = namespace["deadline"]
-            with namespace["preservation_cleanup"]():
-                self.assertEqual(namespace["deadline"], first_deadline)
+    def test_each_cleanup_keeps_its_grace_after_work_or_earlier_cleanup_expires(self) -> None:
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
+                clock = Mock(return_value=100.0)
+                namespace.update(deadline=90.0, spec={}, wait_database=Mock())
+                database = {"Id": "fixture-db", "State": {"Running": False}}
+                complete = subprocess.CompletedProcess([], 0, b"", b"")
+                with (
+                    patch.object(subprocess, "run", return_value=complete) as run,
+                    patch.object(time, "monotonic", clock),
+                ):
+                    try:
+                        with namespace["preservation_database"](database):
+                            with namespace["preservation_cleanup"]():
+                                earlier_cleanup_deadline = namespace["deadline"]
+                            clock.return_value = earlier_cleanup_deadline + 1
+                            if failed:
+                                raise TimeoutError()
+                    except TimeoutError:
+                        self.assertTrue(failed)
+                    cleanup_timeout = run.call_args.kwargs["timeout"]
+                    command = run.call_args.args[0]
+                    self.assertGreater(cleanup_timeout, int(command[command.index("-t") + 1]))
 
     def test_started_database_must_leave_the_memory_floor_available(self) -> None:
         self.containers["database"]["State"]["Running"] = False

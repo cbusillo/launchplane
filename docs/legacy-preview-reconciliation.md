@@ -223,8 +223,8 @@ provider lease. If its exclusively owned database is stopped, it starts only
 that database for the bounded dump after storage and capacity qualification.
 Memory headroom is checked again after startup. On completion or a reported
 failure it stops a database that it started; a previously running database stays
-running. Capture reserves a shared cleanup budget for verifier removal and that
-database stop. Process death or transport loss retains the original operation's
+running. Verifier removal and that database stop each have their own bounded
+cleanup window outside the work budget. Process death or transport loss retains the original operation's
 uncertainty fence and requires same-key recovery; it never restarts the application.
 The existing memory floor and disk reserve remain in force. It captures a
 bounded PostgreSQL dump and full filestore archive inside the same Docker

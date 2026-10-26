@@ -399,7 +399,7 @@ def run_preview_preservation(
             "timeout_seconds": timeout_seconds,
         },
         receive=frames.append,
-        timeout_seconds=timeout_seconds + PREVIEW_PRESERVATION_CLEANUP_SECONDS,
+        timeout_seconds=timeout_seconds + 2 * PREVIEW_PRESERVATION_CLEANUP_SECONDS,
         dispatch_guard=dispatch,
     )
     check()

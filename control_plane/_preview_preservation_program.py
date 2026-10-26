@@ -20,16 +20,11 @@ import sys
 import tarfile
 import time
 
-cleanup_deadline = None
-
-
 @contextmanager
 def preservation_cleanup():
-    global deadline, cleanup_deadline
+    global deadline
     work_deadline = deadline
-    if cleanup_deadline is None:
-        cleanup_deadline = time.monotonic() + PRESERVATION_CLEANUP_SECONDS
-    deadline = cleanup_deadline
+    deadline = time.monotonic() + PRESERVATION_CLEANUP_SECONDS
     try:
         yield
     finally:
@@ -483,7 +478,7 @@ def execute() -> dict:
 
 try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
-    deadline = time.monotonic() + max(1, spec['timeout_seconds'] - 2 * PRESERVATION_CLEANUP_SECONDS)
+    deadline = time.monotonic() + spec['timeout_seconds']
     receipt = execute()
     print(sys.argv[2] + json.dumps({'type': 'complete', 'preservation_id': spec['preservation_id'],
         'source': receipt['source'], 'volume_binding': receipt['volume_binding'],
