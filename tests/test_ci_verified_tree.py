@@ -101,9 +101,18 @@ class VerifiedTreeWorkflowTests(unittest.TestCase):
                 check=True,
                 timeout=10,
             )
-            value = output.read_text().strip()
-            self.assertIn(value, ("verified=true", "verified=false"))
-            return value == "verified=true"
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+            if values["verified"] == "true":
+                expected_source = (
+                    self.head
+                    if ref == "refs/heads/main"
+                    and self.responses[self.current_checks] == {"check_runs": []}
+                    else self.candidate
+                )
+                self.assertEqual(values["source_sha"], expected_source)
+            else:
+                self.assertNotIn("source_sha", values)
+            return values["verified"] == "true"
 
     def test_main_reuses_an_up_to_date_pr_tree_but_new_candidates_run_full_ci(self) -> None:
         self.assertTrue(self.proof(ref="refs/heads/main"))

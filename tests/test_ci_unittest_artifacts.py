@@ -1,8 +1,10 @@
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -35,12 +37,19 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
             root = Path(directory)
             env = _environment(root)
             cache = Path(env["UNITTEST_TIMINGS_CACHE"])
-            cache.write_text("current history")
+            history = json.dumps(
+                {
+                    "schema_version": 1,
+                    "record_type": "unittest_module_timings",
+                    "modules": {"tests.example": {"seconds": 4}},
+                }
+            )
+            cache.write_text(history)
             _run_step(self.workflow, "test_timing_snapshot", "Freeze unittest timing snapshot", env)
             first = _artifact_path(
                 self.workflow, "test_timing_snapshot", "Upload unittest timing snapshot", env
             )
-            self.assertEqual((first / "history.json").read_text(), "current history")
+            self.assertEqual((first / "history.json").read_text(), history)
 
             cache.unlink()
             _run_step(self.workflow, "test_timing_snapshot", "Freeze unittest timing snapshot", env)
@@ -49,7 +58,7 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
             )
             self.assertNotEqual(first, second)
             self.assertFalse((second / "history.json").exists())
-            self.assertEqual((first / "history.json").read_text(), "current history")
+            self.assertEqual((first / "history.json").read_text(), history)
 
     def test_downloads_and_failed_shard_upload_do_not_reuse_previous_files(self) -> None:
         with TemporaryDirectory() as directory:
@@ -147,6 +156,117 @@ class UnittestArtifactWorkflowTests(unittest.TestCase):
                                 self.workflow, job, "Download unittest timings", env
                             )
                             self.assertEqual(options["--results-dir"], str(results))
+
+    def test_imported_verified_history_balances_matching_targets_after_cache_loss(self) -> None:
+        from control_plane.unittest_sharding import plan_shards, read_module_timings
+
+        for source_sha in ("", "a" * 40):
+            with self.subTest(reused=bool(source_sha)), TemporaryDirectory() as directory:
+                root = Path(directory)
+                env = _environment(root)
+                self._mock_history_download(root, env)
+                env["SOURCE_SHA"] = source_sha
+                step = self.workflow.step_named(
+                    "publish_test_timings", "Import verified unittest timing history"
+                )
+                assert step is not None
+                result = subprocess.run(
+                    ["bash", "-c", step.run],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn("available=true", (root / "output").read_text())
+                self.assertIn("Published unittest timing history", result.stdout)
+                _run_step(
+                    self.workflow, "test_timing_snapshot", "Freeze unittest timing snapshot", env
+                )
+                snapshot = Path(env["UNITTEST_TIMING_SNAPSHOT_DIR"])
+                costs = read_module_timings(snapshot / "history.json")
+                plan = plan_shards(
+                    ("tests.slow", "tests.fast", "tests.new"), shard_count=2, module_seconds=costs
+                )
+                self.assertEqual(plan.shard(0).modules, ("tests.slow",))
+                self.assertEqual(plan.shard(0).estimate_sources, {"tests.slow": "exact"})
+                self.assertEqual(
+                    plan.shard(1).estimate_sources, {"tests.fast": "exact", "tests.new": "default"}
+                )
+                self.assertEqual(
+                    {target for shard in plan.shards for target in shard.modules},
+                    {"tests.slow", "tests.fast", "tests.new"},
+                )
+                calls = (root / "calls").read_text()
+                self.assertIn("run download 456" if source_sha else "run download 123", calls)
+                if source_sha:
+                    self.assertIn(f"head_sha={source_sha}", calls)
+
+    def test_missing_or_invalid_history_keeps_cold_plan_and_never_reuses_stale_cache(self) -> None:
+        for failure in ("api", "download", "invalid", "missing"):
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                root = Path(directory)
+                env = _environment(root)
+                self._mock_history_download(root, env)
+                env["SOURCE_SHA"] = "a" * 40
+                env["HISTORY_FAILURE"] = failure
+                Path(env["UNITTEST_TIMINGS_CACHE"]).write_text("stale")
+                step = self.workflow.step_named(
+                    "publish_test_timings", "Import verified unittest timing history"
+                )
+                assert step is not None
+                result = subprocess.run(
+                    ["bash", "-c", step.run],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertEqual((root / "output").read_text(), "available=false\n")
+                self.assertIn("::warning::", result.stdout)
+                _run_step(
+                    self.workflow, "test_timing_snapshot", "Freeze unittest timing snapshot", env
+                )
+                self.assertFalse(
+                    (Path(env["UNITTEST_TIMING_SNAPSHOT_DIR"]) / "history.json").exists()
+                )
+
+    @staticmethod
+    def _mock_history_download(root: Path, env: dict[str, str]) -> None:
+        env.update(
+            SOURCE_SHA="",
+            GITHUB_OUTPUT=str(root / "output"),
+            REPOSITORY="example/control",
+            HISTORY_FAILURE="",
+            HISTORY_CALLS=str(root / "calls"),
+        )
+        gh = root / "gh"
+        gh.write_text(
+            f"#!{sys.executable}\n"
+            + r"""
+import json
+import os
+from pathlib import Path
+import sys
+import subprocess
+with Path(os.environ['HISTORY_CALLS']).open('a') as calls:
+    calls.write(' '.join(sys.argv[1:]) + '\n')
+failure = os.environ['HISTORY_FAILURE']
+if sys.argv[1] == 'api':
+    if failure == 'api':
+        sys.exit(1)
+    runs = [{'id': 12, 'head_sha': 'b' * 40, 'event': 'push', 'conclusion': 'success'}, {'id': 13, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'pull_request', 'conclusion': 'success'}, {'id': 14, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'push', 'conclusion': 'failure'}, {'id': 456, 'head_sha': os.environ['SOURCE_SHA'], 'event': 'push', 'conclusion': 'success'}]
+    subprocess.run(['jq', '-r', sys.argv[sys.argv.index('--jq') + 1]], input=json.dumps({'workflow_runs': runs}), text=True, check=True)
+else:
+    if failure == 'download':
+        sys.exit(1)
+    root = Path(sys.argv[sys.argv.index('--dir') + 1])
+    if failure != 'missing':
+        history = {'schema_version': 1, 'record_type': 'unittest_module_timings', 'modules': {'tests.slow': {'seconds': 100}, 'tests.fast': {'seconds': 1}}}
+        (root / 'history.json').write_text('invalid' if failure == 'invalid' else json.dumps(history))
+"""
+        )
+        gh.chmod(0o755)
+        env["PATH"] = f"{root}{os.pathsep}{env['PATH']}"
 
 
 def _environment(root: Path) -> dict[str, str]:
