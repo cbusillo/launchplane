@@ -5,10 +5,12 @@ import os
 from pathlib import Path
 import shutil
 import time
+import threading
 from typing import Any
 import unittest
 from unittest.mock import patch
 from urllib.request import ProxyHandler, Request, build_opener
+from urllib.error import HTTPError
 
 from cryptography.fernet import Fernet
 
@@ -122,6 +124,8 @@ class InstalledOdooCutoverTests(unittest.TestCase):
         self.environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"] = base64.b64encode(
             json.dumps(override).encode()
         ).decode()
+        if not self.config.get("website_settings", True):
+            self.environment.pop("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64")
         self.old_project = self.prefix + "-old"
         self.new_project = self.prefix + "-new"
         self.projects.extend((self.old_project, self.new_project))
@@ -171,11 +175,12 @@ class InstalledOdooCutoverTests(unittest.TestCase):
                 "all",
                 "--stop-after-init",
                 "-i",
-                "website,cutover_probe,launchplane_runtime_health,launchplane_settings",
+                "website,cutover_probe,launchplane_runtime_health"
+                + (",launchplane_settings" if self.config.get("website_settings", True) else ""),
             )
         )
         self.sql(
-            "UPDATE website SET domain='http://fixture.invalid'; UPDATE ir_cron SET active=false; INSERT INTO ir_config_parameter(key,value) VALUES ('printnode.api_key','inert-lane-sentinel') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value"
+            "UPDATE website SET domain='http://fixture.invalid'; UPDATE ir_cron SET active=false; INSERT INTO ir_config_parameter(key,value) VALUES ('printnode.api_key','inert-lane-sentinel'),('odoo_devkit.credential_boundary_commit','isolated-initial-committed-boundary') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value"
         )
         self.command(
             (
@@ -232,7 +237,7 @@ class InstalledOdooCutoverTests(unittest.TestCase):
         self.operation = self.create_operation()
         self.original_operation_id = self.operation.operation_id
         self.checkpoints: list[str] = []
-        self.plan = self.seed_plan(self.manifests[1])
+        self.plan = self.seed_plan(self.manifests[2 if self.config.get("database_changing") else 1])
 
     def command(self, argv: tuple[str, ...], stdin: str | None = None) -> str:
         return self.remote.read(argv, stdin)
@@ -418,7 +423,11 @@ class InstalledOdooCutoverTests(unittest.TestCase):
                 ) as response:
                     if response.status == 200:
                         return
-            except Exception:
+            except HTTPError as error:
+                error.close()
+                if time.monotonic() >= deadline:
+                    raise
+            except OSError:
                 if time.monotonic() >= deadline:
                     raise
             time.sleep(1)
@@ -536,7 +545,6 @@ class InstalledOdooCutoverTests(unittest.TestCase):
                     "website",
                     "cutover_probe",
                     "launchplane_runtime_health",
-                    "launchplane_settings",
                 ],
                 readiness_routes=[
                     dict(path="/", kind="homepage", contains="Isolated Odoo release"),
@@ -626,9 +634,10 @@ class InstalledOdooCutoverTests(unittest.TestCase):
             release_id=self.operation.request.request_id,
         )
         assert plan is not None
-        plan = OdooCutoverPlan.model_validate(
-            {**plan.model_dump(), "website_settings": snapshot(plan)}
-        )
+        if self.config.get("website_settings", True):
+            plan = OdooCutoverPlan.model_validate(
+                {**plan.model_dump(), "website_settings": snapshot(plan)}
+            )
         gate = self.backup_fixture.require(self.store)
         self.store.write_promotion_record(
             PromotionRecord(
@@ -675,6 +684,63 @@ class InstalledOdooCutoverTests(unittest.TestCase):
                     )
                 )
 
+    def observe_public_continuity(self) -> None:
+        self.public_samples: list[dict[str, Any]] = []
+        self.public_errors: list[str] = []
+        stop = threading.Event()
+
+        def observe() -> None:
+            opener = build_opener(ProxyHandler({}))
+            while not stop.is_set():
+                try:
+                    with opener.open(
+                        Request("http://fixture.invalid/", headers={"Host": "fixture.invalid"}),
+                        timeout=5,
+                    ) as response:
+                        body = response.read()
+                        pause = response.headers.get("x-launchplane-pause-id", "")
+                        if response.status != 200 or b"Isolated Odoo release" not in body:
+                            self.public_errors.append("public root did not serve the declared site")
+                        self.public_samples.append(dict(status=response.status, pause_id=pause))
+                    if pause:
+                        try:
+                            with opener.open(
+                                Request(
+                                    "http://fixture.invalid/fixture-submit",
+                                    data=b"message=must-stay-paused",
+                                    headers={"Host": "fixture.invalid"},
+                                ),
+                                timeout=5,
+                            ) as response:
+                                self.public_errors.append("prepared serving accepted a submission")
+                        except HTTPError as error:
+                            if error.code != 423:
+                                self.public_errors.append(
+                                    "prepared submission did not return its pause response"
+                                )
+                            error.close()
+                except HTTPError as error:
+                    self.public_errors.append("public root status " + str(error.code))
+                    error.close()
+                except OSError as error:
+                    self.public_errors.append(type(error).__name__)
+                stop.wait(0.2)
+
+        thread = threading.Thread(target=observe)
+        thread.start()
+
+        def finish() -> None:
+            stop.set()
+            thread.join(10)
+            if thread.is_alive():
+                raise TimeoutError("public fixture observer did not stop")
+            (self.root / "public-observations.json").write_text(
+                json.dumps(dict(samples=self.public_samples, errors=self.public_errors), indent=2)
+            )
+
+        self.finish_public_observation = finish
+        self.addCleanup(finish)
+
     def test_installed_host_forward_rollback_native_writers_and_durable_pause(self) -> None:
         self.assertIsNone(shutil.which("docker"))
         factory = service_odoo_cutover_factory(self.store, self.root)
@@ -689,24 +755,47 @@ class InstalledOdooCutoverTests(unittest.TestCase):
             ),
         )
         progress = DeploymentCutoverStore(self.store, deployment)
+        self.observe_public_continuity()
         with bind_cutover_execution(self.plan, self.checkpoint):
             completed = execute_odoo_cutover(
                 self.plan, progress, provider, record_id=cutover_record_id(self.plan)
             )
         self.assertEqual(completed.step, "complete")
         self.assertIsNotNone(completed.backup)
+        if completed.pause is not None:
+            self.assertEqual(
+                {item.writer for item in completed.pause.writers}, set(self.plan.writers)
+            )
+            self.assertTrue(
+                all(
+                    item.evidence_id and item.fenced and item.active_jobs == 0
+                    for item in completed.pause.writers
+                )
+            )
         self.native_tick(self.new_project)
-        restarted = factory(self.plan)
-        with bind_cutover_execution(self.plan, self.checkpoint):
-            rolled = rollback_compatible_cutover(progress, restarted, completed.record_id)
-        self.assertEqual(rolled.step, "rolled_back")
-        self.native_tick(self.old_project)
+        if self.config.get("database_changing"):
+            with self.assertRaisesRegex(ValueError, "coherent"):
+                rollback_compatible_cutover(progress, factory(self.plan), completed.record_id)
+            rolled = completed
+        else:
+            restarted = factory(self.plan)
+            with bind_cutover_execution(self.plan, self.checkpoint):
+                rolled = rollback_compatible_cutover(progress, restarted, completed.record_id)
+            self.assertEqual(rolled.step, "rolled_back")
+            self.native_tick(self.old_project)
         self.assertEqual(
             self.store.read_odoo_prod_promotion_operation_record(
                 self.original_operation_id
             ).idempotency_key,
             self.operation.idempotency_key,
         )
+        self.finish_public_observation()
+        self.assertTrue(self.public_samples)
+        self.assertEqual(self.public_errors, [])
+        if completed.pause is not None:
+            self.assertTrue(
+                any(sample["pause_id"] == completed.record_id for sample in self.public_samples)
+            )
         (self.root / "result.json").write_text(
             json.dumps(
                 {
@@ -714,6 +803,7 @@ class InstalledOdooCutoverTests(unittest.TestCase):
                     "operation_id": self.original_operation_id,
                     "cutover": rolled.model_dump(mode="json"),
                     "checkpoint_count": len(self.checkpoints),
+                    "website_settings_qualified": self.config.get("website_settings", True),
                 },
                 indent=2,
             )

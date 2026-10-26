@@ -1,5 +1,5 @@
 import base64
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 import json
@@ -140,12 +140,12 @@ else: print(json.dumps({'state':'captured','manifest':json.loads((path/'manifest
 
 
 class GuardedFileRoute(TraefikFileRoute):
-    def __init__(self, target: TraefikRouteTarget, plan: OdooCutoverPlan) -> None:
+    def __init__(self, target: TraefikRouteTarget, guard: Callable[[], None]) -> None:
         super().__init__(target)
-        self.plan = plan
+        self.guard = guard
 
     def publish(self, backend: str, *, expected: tuple[str, ...]) -> str:
-        require_cutover_execution(self.plan)
+        self.guard()
         return super().publish(backend, expected=expected)
 
 
@@ -202,7 +202,7 @@ class BoundOdooCutoverHost:
             TraefikRouteTarget(
                 route_id=plan.route_id, host=plan.host, **self.runtime.route.model_dump()
             ),
-            plan,
+            self.guard,
         )
         prepared_root = os.environ.get("LAUNCHPLANE_PREPARED_PUBLIC_ROOT", "")
         if (
@@ -476,6 +476,11 @@ class BoundOdooCutoverHost:
 
     @contextmanager
     def exclusive(self, plan: OdooCutoverPlan) -> Iterator[None]:
+        with api.guard_dokploy_mutations(self.guard), self.exclusive_state(plan):
+            yield
+
+    @contextmanager
+    def exclusive_state(self, plan: OdooCutoverPlan) -> Iterator[None]:
         if plan != self.plan:
             raise ValueError("host execution crossed its original plan")
         self.guard()

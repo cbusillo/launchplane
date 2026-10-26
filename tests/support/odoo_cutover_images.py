@@ -29,7 +29,7 @@ def docker(*arguments: str, program: str | None = None, timeout: int = 180) -> s
 
 
 def build_fixture_images(
-    root: Path, *, base_image: str, inputs: Path, prefix: str
+    root: Path, *, base_image: str, inputs: Path, prefix: str, include_settings: bool = True
 ) -> tuple[ArtifactIdentityManifest, ...]:
     template = Path(__file__).parent / "cutover_probe"
     base = json.loads(docker("image", "inspect", base_image))[0]
@@ -59,6 +59,8 @@ def build_fixture_images(
         "print(json.dumps({k:sorted(v) for k,v in g.items()}))",
     )
     graph: dict[str, list[str]] = json.loads(graph_text)
+    if not include_settings:
+        graph.pop("launchplane_settings", None)
     graph["cutover_probe"] = ["website"]
     modules = tuple(
         ReleaseModuleDeclaration(name=name, depends=tuple(depends))
@@ -123,7 +125,8 @@ def build_fixture_images(
         build.mkdir()
         addon = build / "addon" / "cutover_probe"
         shutil.copytree(template, addon)
-        shutil.copytree(inputs / "launchplane_settings", build / "addon/launchplane_settings")
+        if include_settings:
+            shutil.copytree(inputs / "launchplane_settings", build / "addon/launchplane_settings")
         for path in addon.glob("*.py.in"):
             path.rename(path.with_suffix(""))
         metadata_path = addon / "__manifest__.py"
@@ -161,7 +164,8 @@ def build_fixture_images(
             name,
             files=tuple(files),
             modules=modules,
-            install_modules=("cutover_probe", "launchplane_runtime_health", "launchplane_settings"),
+            install_modules=("cutover_probe", "launchplane_runtime_health")
+            + (("launchplane_settings",) if include_settings else ()),
         )
         assert manifest.source_build is not None
         manifest.source_build.run_id = run_id

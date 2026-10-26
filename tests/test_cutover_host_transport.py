@@ -1,4 +1,5 @@
 import base64
+from collections.abc import Callable
 import unittest
 from unittest.mock import Mock, patch
 
@@ -84,3 +85,52 @@ class CutoverHostTransportTests(unittest.TestCase):
             checkpoint.assert_called_once()
             with self.assertRaises(ValueError):
                 require_cutover_execution(plan)
+
+    def test_provider_observer_cannot_dispatch_after_the_original_guard_changes(self) -> None:
+        from control_plane.dokploy import api
+
+        guard = Mock()
+
+        def observe(
+            host: str, path: str, payload: api.JsonObject, send: Callable[[], api.JsonValue]
+        ) -> api.JsonValue:
+            guard.side_effect = ValueError("original lease lost during provider preparation")
+            return send()
+
+        with patch.object(api, "_dokploy_request", return_value={}) as dispatch:
+            with api.observe_dokploy_mutations(observe), api.guard_dokploy_mutations(guard):
+                with self.assertRaises(ValueError):
+                    api.dokploy_request(
+                        host="https://provider.invalid",
+                        token="inert",
+                        path="/api/compose.update",
+                        method="POST",
+                        payload={"composeId": "original"},
+                    )
+            dispatch.assert_not_called()
+            api.dokploy_request(
+                host="https://provider.invalid", token="inert", path="/api/compose.one"
+            )
+            dispatch.assert_called_once()
+
+    def test_local_route_publication_rechecks_its_bound_lane_guard(self) -> None:
+        from control_plane.dokploy.cutover_host import GuardedFileRoute
+        from control_plane.dokploy.traefik_cutover import TraefikFileRoute, TraefikRouteTarget
+
+        with TemporaryDirectory() as temporary:
+            target = TraefikRouteTarget(
+                route_id="fixture",
+                host="fixture.invalid",
+                route_file=Path(temporary) / "route.yaml",
+                api_url="http://proxy.invalid",
+                entrypoints=("web",),
+                tls=False,
+            )
+            guard = Mock(side_effect=ValueError("bound lane authority changed"))
+            route = GuardedFileRoute(target, guard)
+            with (
+                patch.object(TraefikFileRoute, "publish") as publish,
+                self.assertRaises(ValueError),
+            ):
+                route.publish("http://candidate.invalid", expected=("http://serving.invalid",))
+            publish.assert_not_called()
