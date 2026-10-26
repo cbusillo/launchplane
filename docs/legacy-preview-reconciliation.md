@@ -207,6 +207,13 @@ executor locks, recovery grace, target ownership and provider quiescence still
 apply. Another held operation, an existing lifecycle record, known use, an only
 copy report, shared production resources or a target alias refuses admission.
 
+The original operation can outlive its issued plan's expiry. Only a
+framework-qualified retry of that exact preserving destroy, with its current
+lease, retained intent and preservation-phase checkpoint, may continue after
+expiry. It still rebuilds and compares current plan authority and rechecks
+preservation custody before effects. A fresh expired plan or another operation
+cannot use that continuation; retain the original key.
+
 An older original without a clean snapshot can use its retained, scoped server
 schedule binding. If that binding is absent, the preserving operation captures
 and retains the same binding before effects. Missing or conflicting server
@@ -214,8 +221,18 @@ evidence refuses preservation; old intents are not rewritten.
 
 The service qualifies an unserved plain preview with exclusively owned data,
 log and database volumes. Unexpected data, addon files, sessions, logs,
-additional databases, mounts or consumers remain held. It stops only that
-preview's unserved application containers under its durable provider lease.
+additional databases, writable mounts or consumers remain held. Existing
+read-only runner bind mounts outside the data volumes are neither copied nor
+deleted; the runner is never started. Docker host-gateway aliases do not change
+storage custody. Other host aliases and privileged runtime shapes remain held.
+It stops that preview's unserved application containers under its durable
+provider lease. If its exclusively owned database is stopped, it starts only
+that database for the bounded dump after storage and capacity qualification.
+Memory headroom is checked again after startup. On completion or a reported
+failure it stops a database that it started; a previously running database stays
+running. Verifier removal and that database stop each have their own bounded
+cleanup window outside the work budget. Process death or transport loss retains the original operation's
+uncertainty fence and requires same-key recovery; it never restarts the application.
 The existing memory floor and disk reserve remain in force. It captures a
 bounded PostgreSQL dump and full filestore archive inside the same Docker
 host, hashes both and verifies every archived attachment. It restores the dump
@@ -236,13 +253,6 @@ Every subsequent destructive checkpoint and lifecycle adoption verifies the
 retained copy. Reopened applications, changed storage or changed original
 filestore block deletion. Only preservation phases with positive source and
 execution readback can resume an interrupted capture under its original key.
-That inspected continuation revalidates the current plan authority while allowing
-the original admission plan to have expired. Fresh expired plans remain refused;
-the original plan, request and key are never replaced.
-After capture, a provider-proven retry-safe destroy phase can continue after
-expiry only when the complete retained copy verifies again.
-An interruption before the first effect checkpoint uses ordinary retry and
-expiry handling without requiring a retained copy that has not been captured.
 Other uncertain phases retain the normal provider-observation fence. After
 provider absence, the complete copy remains verifiable without deleted source
 containers. Actual successful destroy writes the normal destroyed lifecycle;

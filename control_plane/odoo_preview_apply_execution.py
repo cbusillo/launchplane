@@ -51,6 +51,7 @@ from control_plane.provider_operations import (
     ProviderObservation,
     ProviderObservationOutcome,
     ProviderOperationLease,
+    ProviderEvidenceLease,
     ProviderTargetSupersession,
     provider_operation_response_payload,
     provider_operation_title,
@@ -118,7 +119,6 @@ class OdooPreviewProviderMutationAdapter:
         )
         self.execution_check: Callable[[], None] = lambda: None
         self.schedule_binding: dict[str, object] | None = None
-        self._continuing_preservation = False
 
     def capture_schedule_binding(self) -> None:
         from control_plane.dokploy import post_deploy, source
@@ -228,7 +228,6 @@ class OdooPreviewProviderMutationAdapter:
         reconciliation_key: str,
     ) -> ProviderObservation:
         del reconciliation_key
-        self._continuing_preservation = False
         self.execution_check()
         observation_outcome, driver_result, retry_safe = self._observe_apply(
             control_plane_root_path=self._control_plane_root,
@@ -245,15 +244,10 @@ class OdooPreviewProviderMutationAdapter:
             )
             from control_plane.storage.postgres import PostgresRecordStore
 
-            capture_retry = (
-                provider_effect_phase in PREVIEW_PRESERVATION_PHASES
+            if (
+                self._apply_request.preserve_original_reservation_id
+                and provider_effect_phase in PREVIEW_PRESERVATION_PHASES
                 and observation_outcome != "present"
-            )
-            verified_retry = (
-                bool(provider_effect_phase) and observation_outcome == "absent" and retry_safe
-            )
-            if self._apply_request.preserve_original_reservation_id and (
-                capture_retry or verified_retry
             ):
                 run_preview_preservation(
                     store=cast(PostgresRecordStore, self._record_store),
@@ -262,11 +256,10 @@ class OdooPreviewProviderMutationAdapter:
                     original_reservation_id=self._apply_request.preserve_original_reservation_id,
                     operation_record_id=self._deployment_record_id,
                     control_plane_root=self._control_plane_root,
-                    mode="inspect" if capture_retry else "verify",
+                    mode="inspect",
                     timeout_seconds=self._apply_request.apply.timeout_seconds,
                     check=self.execution_check,
                 )
-                self._continuing_preservation = True
                 return ProviderObservation(
                     outcome="absent", retry_safe=True, preserve_effect_checkpoint=True
                 )
@@ -396,7 +389,12 @@ class OdooPreviewProviderMutationAdapter:
                 provider_lease_check=lease.assert_current,
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
-                **({"continuing_preservation": True} if self._continuing_preservation else {}),
+                **(
+                    {"recovery_reservation": lease.evidence_reservation()}
+                    if self._apply_request.preserve_original_reservation_id
+                    and isinstance(lease, ProviderEvidenceLease)
+                    else {}
+                ),
                 **(
                     {"qualify_existing_preview": True, "provider_mutation_guard": mutation_guard}
                     if self._qualify_existing_preview

@@ -396,7 +396,7 @@ def refresh_odoo_preview_issued_plan(
     issued_plan: OdooPreviewApplyInputsResult,
     database_url: str | None,
     observed_at: datetime | None = None,
-    continuing_preservation: bool = False,
+    retained_preservation_retry: bool = False,
 ) -> OdooPreviewApplyEnvelope:
     provenance = issued_plan.plan_provenance
     if provenance is None:
@@ -413,7 +413,7 @@ def refresh_odoo_preview_issued_plan(
             code="odoo_preview_plan_mismatch",
             message="Odoo preview plan issuance timestamp is in the future.",
         )
-    if resolved_observed_at >= provenance.expires_at and not continuing_preservation:
+    if resolved_observed_at >= provenance.expires_at and not retained_preservation_retry:
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_plan_expired",
             message="Odoo preview plan has expired; request fresh apply inputs.",
@@ -465,8 +465,10 @@ def execute_odoo_preview_apply_result(
     propagate_domain_lookup_error: bool = False,
     qualify_existing_preview: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
-    continuing_preservation: bool = False,
+    recovery_reservation: object = None,
 ) -> dict[str, object]:
+    from control_plane.preview_preservation import is_retained_preservation_retry
+
     current_request = refresh_odoo_preview_issued_plan(
         control_plane_root=control_plane_root_path,
         record_store=record_store,
@@ -474,7 +476,14 @@ def execute_odoo_preview_apply_result(
         request=request,
         issued_plan=issued_plan,
         database_url=database_url,
-        continuing_preservation=continuing_preservation,
+        retained_preservation_retry=is_retained_preservation_retry(
+            store=record_store,
+            profile=profile,
+            issued_plan=issued_plan,
+            request=request,
+            operation_record_id=deployment_record_id,
+            reservation=recovery_reservation,
+        ),
     )
     if current_request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
         raise ValueError("Odoo preview apply repository does not match product profile.")
