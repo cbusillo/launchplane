@@ -33,18 +33,18 @@ def collect_inventory(
 ) -> CredentialCollection:
     snapshot = None
     failure_reason: CollectionFailure | None = None
-    with TemporaryDirectory(prefix="credential-metadata-") as directory:
-        command = [
-            sys.executable,
-            str(collector),
-            "--catalog",
-            str(catalog),
-            "--output",
-            str(Path(directory) / "inventory.md"),
-        ]
-        if manifest:
-            command.extend(["--manifest", str(manifest)])
-        try:
+    try:
+        with TemporaryDirectory(prefix="credential-metadata-") as directory:
+            command = [
+                sys.executable,
+                str(collector),
+                "--catalog",
+                str(catalog),
+                "--output",
+                str(Path(directory) / "inventory.md"),
+            ]
+            if manifest:
+                command.extend(["--manifest", str(manifest)])
             if not collector.is_file():
                 raise FileNotFoundError
             completed = subprocess.run(
@@ -56,14 +56,17 @@ def collect_inventory(
                 failure_reason = "report_too_large"
             else:
                 snapshot = CredentialSnapshot.model_validate_json(completed.stdout)
-        except OSError:
-            failure_reason = "collector_unavailable"
-        except subprocess.TimeoutExpired:
-            failure_reason = "collector_timeout"
-        except ValidationError:
-            failure_reason = "invalid_snapshot"
+    except OSError:
+        failure_reason = "collector_unavailable"
+    except subprocess.TimeoutExpired:
+        failure_reason = "collector_timeout"
+    except ValidationError:
+        failure_reason = "invalid_snapshot"
+    attempted_at = datetime.now(timezone.utc)
+    if snapshot is not None and snapshot.generated_at > attempted_at:
+        snapshot, failure_reason = None, "invalid_snapshot"
     return CredentialCollection(
-        attempted_at=datetime.now(timezone.utc),
+        attempted_at=attempted_at,
         status="collected" if snapshot else "failed",
         snapshot=snapshot,
         failure_reason=failure_reason,
@@ -125,21 +128,28 @@ def write_launch_agent(args: argparse.Namespace, output: Path) -> None:
     ]
     if args.manifest:
         arguments.extend(["--manifest", str(args.manifest.resolve())])
-    with output.open("xb") as stream:
-        plistlib.dump(
-            {
-                "Label": "com.launchplane.credential-inventory",
-                "ProgramArguments": arguments,
-                "WorkingDirectory": str(root),
-                "RunAtLoad": True,
-                "StartInterval": COLLECTION_INTERVAL_SECONDS,
-                "ProcessType": "Background",
-                "EnvironmentVariables": {
-                    "PATH": str(Path(uv).parent) + ":/opt/homebrew/bin:/usr/bin:/bin"
-                },
+    content = plistlib.dumps(
+        {
+            "Label": "com.launchplane.credential-inventory",
+            "ProgramArguments": arguments,
+            "WorkingDirectory": str(root),
+            "RunAtLoad": True,
+            "StartInterval": COLLECTION_INTERVAL_SECONDS,
+            "ProcessType": "Background",
+            "EnvironmentVariables": {
+                "PATH": str(Path(uv).parent) + ":/opt/homebrew/bin:/usr/bin:/bin"
             },
-            stream,
-        )
+        },
+    )
+    created = False
+    try:
+        with output.open("xb") as stream:
+            created = True
+            stream.write(content)
+    except BaseException:
+        if created:
+            output.unlink(missing_ok=True)
+        raise
 
 
 def main() -> int:

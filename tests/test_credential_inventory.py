@@ -323,6 +323,30 @@ class CredentialInventoryTests(unittest.TestCase):
                 collect.assert_not_called()
                 helper.assert_not_called()
 
+    def test_local_io_failure_reports_collection_failure_and_removes_partial_schedule(self) -> None:
+        with patch.object(collector, "TemporaryDirectory", side_effect=OSError("disk full")):
+            report = collector.collect_inventory(
+                collector=self.collector_path, catalog=Path("catalog")
+            )
+            self.assertEqual(report.failure_reason, "collector_unavailable")
+        output = self.collector_path.with_name("schedule.plist")
+        args = argparse.Namespace(
+            collector=self.collector_path, catalog=output.parent, manifest=None
+        )
+
+        def fail_write(_content: bytes) -> None:
+            output.touch()
+            raise OSError("disk full")
+
+        with (
+            patch.object(shutil, "which", return_value="/usr/local/bin/uv"),
+            patch.object(Path, "open") as opening,
+        ):
+            opening.return_value.__enter__.return_value.write.side_effect = fail_write
+            with self.assertRaises(OSError):
+                collector.write_launch_agent(args, output)
+        self.assertFalse(output.exists())
+
 
 class CredentialInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_browser_requires_current_named_administrator(self) -> None:
@@ -393,13 +417,16 @@ class CredentialInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_product_scoped_agent_and_anonymous_cannot_read_or_publish(self) -> None:
         with _database_app(_local_admin_policy()) as (_store, _record, app):
             async with lifespan_client(app) as client:
-                for headers in ({}, {"Authorization": "Bearer reader-token"}):
+                for headers, expected in (
+                    ({}, 401),
+                    ({"Authorization": "Bearer reader-token"}, 403),
+                ):
                     with self.subTest(headers=headers):
                         read = await client.get(INVENTORY_ROUTE, headers=headers)
-                        self.assertIn(read.status_code, (401, 403))
+                        self.assertEqual(read.status_code, expected)
                         write = await client.post(
                             INVENTORY_ROUTE,
                             headers=headers,
                             json=collection_payload(datetime.now(timezone.utc)),
                         )
-                        self.assertIn(write.status_code, (401, 403))
+                        self.assertEqual(write.status_code, expected)

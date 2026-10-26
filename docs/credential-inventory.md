@@ -58,6 +58,10 @@ raw exception text. Empty or null rotation dates normalize to unknown. Temporary
 removed when collection ends. Raw stdout, stderr and transport exceptions are
 never printed. No credential is created, copied, moved or exported.
 
+Keep the publisher checkout on the deployed service version. Receipt confirmation
+uses their shared snapshot model; a model mismatch is a delivery failure even if
+the service accepted a newer projection. No mismatched receipt is treated as proof.
+
 For the approved Chris-Studio collector, after this service capability is
 deployed, run from the stable Launchplane checkout:
 

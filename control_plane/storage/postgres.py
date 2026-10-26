@@ -8970,7 +8970,6 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneIdempotencyRow,
             filters=tuple(filters),
             order_by=(
-                LaunchplaneIdempotencyRow.created_at.desc(),
                 LaunchplaneIdempotencyRow.payload["response_payload"]["attempted_at"]
                 .as_string()
                 .desc(),
