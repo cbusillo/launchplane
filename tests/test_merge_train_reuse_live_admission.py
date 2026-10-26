@@ -24,7 +24,10 @@ from control_plane.merge_train_controller_run_once import (
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient, merge_train_construction_ref
 from control_plane.storage.filesystem import FilesystemRecordStore
-from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.merge_train_policy_fixtures import (
+    build_test_merge_train_policy_record,
+    dependency_repository_policy,
+)
 from tests.support.repository_evidence import (
     BASE_SHA,
     HEAD_SHA,
@@ -102,6 +105,9 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
         )
         transport = _AdmissionTransport()
         client = GitHubMergeTrainClient(transport=transport)
+        client.begin_snapshot_pass(
+            policy=dependency_repository_policy(20, repository=REPOSITORY), read_only=False
+        )
         collapse_record = None
         if has_stack_collapse:
             collapse_record = MergeTrainStackCollapsePlanRecord.model_validate(
@@ -335,6 +341,13 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
                     not has_stack_collapse,
                 )
                 transport.check_conclusion = "success"
+                transport.commit_author = {"id": 20, "type": "Bot"}
+                with self.assertRaises(MergeAdmissionDeniedError) as source_denied:
+                    guard.build_proposal(**facts)
+                self.assertEqual(
+                    source_denied.exception.reason_code, "head_check_reuse_unavailable"
+                )
+                transport.commit_author = transport.user
                 admission = guard.admit(**facts)
                 self.assertEqual(admission.expected_effect_sha, candidate.candidate_sha)
                 self.assertEqual(admission.readiness.technical_checks.head_sha, HEAD_SHA)
