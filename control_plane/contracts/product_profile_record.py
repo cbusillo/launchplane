@@ -918,6 +918,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
         )
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
+        if self.preview.override_env:
+            raise ValueError(
+                "Use managed product configuration with instance preview instead of preview.override_env."
+            )
         legacy_extensions = self.preview.transport_extension == "verireel-postgres" or any(
             lane.generic_web_extensions.verification_extension == "verireel-testing"
             for lane in self.lanes
@@ -1030,7 +1034,9 @@ def product_context_owner_map(
     """Map each lane or historical context, case-folded, to the products using it."""
     owners: dict[str, set[str]] = {}
     for profile in profiles:
-        contexts = {lane.context for lane in profile.lanes} | set(profile.historical_contexts)
+        contexts = {lane.context for lane in product_config_targets(profile)} | set(
+            profile.historical_contexts
+        )
         for context in contexts:
             if context.strip():
                 owners.setdefault(context.strip().lower(), set()).add(profile.product)
@@ -1050,6 +1056,23 @@ def is_exclusive_product_context(
     )
 
 
+def product_config_targets(
+    profile: LaunchplaneProductProfileRecord,
+) -> tuple[ProductLaneProfile, ...]:
+    if not profile.preview.enabled or not profile.preview.context.strip():
+        return profile.lanes
+    return (*profile.lanes, ProductLaneProfile(context=profile.preview.context, instance="preview"))
+
+
+def product_config_target(
+    profile: LaunchplaneProductProfileRecord, environment: str
+) -> ProductLaneProfile:
+    for target in product_config_targets(profile):
+        if target.instance == environment.strip():
+            return target
+    raise FileNotFoundError("Product configuration scope was not found.")
+
+
 def product_target_owner_products(
     profiles: Iterable[LaunchplaneProductProfileRecord], *, context: str, instance: str = ""
 ) -> frozenset[str]:
@@ -1061,6 +1084,6 @@ def product_target_owner_products(
         for profile in profiles
         if any(
             lane.context.strip().lower() == context.lower() and lane.instance.strip() == instance
-            for lane in profile.lanes
+            for lane in product_config_targets(profile)
         )
     )

@@ -97,6 +97,116 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         }
         self.app = self.make_app()
 
+    def test_copy_to_preview_uses_the_existing_secret_path_and_stays_isolated(self) -> None:
+        from control_plane.runtime_environments import (
+            resolve_preview_runtime_environment_from_store,
+        )
+
+        from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="preview-copy-policy",
+                status="active",
+                source="test",
+                updated_at="2026-10-26T00:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="REPAIRSHOPR_TOKEN",
+                        secret_class="shared_safe",
+                        allowed_contexts=(self.profile.preview.context,),
+                        allowed_instances=("preview",),
+                    ),
+                ),
+            )
+        )
+        self.payload["instance"] = "preview"
+        result = apply_product_config_bundle(
+            record_store=self.store,
+            payload=self.payload,
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        safety = result["runtime_key_safety"]
+        assert isinstance(safety, dict)
+        self.assertEqual(safety["status"], "pass")
+        preview = resolve_preview_runtime_environment_from_store(
+            record_store=self.store,
+            context_name=self.profile.preview.context,
+            template_values={},
+        )
+        self.assertEqual(preview.values["REPAIRSHOPR_TOKEN"], "source-only-test-token")
+        preview_records = self.store.list_secret_records(instance_name="preview")
+        self.assertEqual(len(preview_records), 1)
+        self.assertNotEqual(preview_records[0].secret_id, self.source.secret_id)
+        self.assertEqual(self.store.read_secret_record(self.source.secret_id), self.source)
+
+    async def test_preview_configuration_uses_existing_http_read_and_apply_routes(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductSecretConfigRequirement
+
+        from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="preview-app-policy",
+                status="active",
+                source="test",
+                updated_at="2026-10-26T00:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="APP_PASSWORD",
+                        secret_class="preview",
+                        allowed_contexts=(self.profile.preview.context,),
+                        allowed_instances=("preview",),
+                    ),
+                ),
+            )
+        )
+        self.profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key="APP_PASSWORD",
+                context=self.profile.preview.context,
+                instance="preview",
+            ),
+        )
+        self.store.write_product_profile_record(self.profile)
+        headers = {"Authorization": "Bearer test-operator-token"}
+        config = await _asgi_request(
+            self.app,
+            "GET",
+            "/v1/products/example-site/environments/preview/config-status",
+            headers=headers,
+        )
+        self.assertEqual(config.status_code, 200, config.text)
+        self.assertEqual(config.json()["config_status"]["environment"], "preview")
+        payload: dict[str, object] = {
+            "mode": "dry-run",
+            "reason": "Preview configuration",
+            "managed_secrets": [
+                {
+                    "binding_key": "APP_PASSWORD",
+                    "integration": "runtime_environment",
+                    "value": "preview-only-test-password",
+                }
+            ],
+        }
+        route = "/v1/products/example-site/environments/preview/config/apply"
+        dry_run = await _asgi_request(self.app, "POST", route, headers=headers, payload=payload)
+        self.assertEqual(dry_run.status_code, 202, dry_run.text)
+        applied = await _asgi_request(
+            self.app,
+            "POST",
+            route,
+            headers={**headers, "Idempotency-Key": "preview-config-once"},
+            payload={**payload, "mode": "apply", "confirmation": "APPLY example-site/preview"},
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertNotIn("preview-only-test-password", dry_run.text + applied.text)
+        self.assertEqual(self.store.read_secret_record(self.source.secret_id), self.source)
+        self.assertFalse(self.store.list_runtime_environment_records(instance_name="testing"))
+        self.assertFalse(self.store.list_runtime_environment_records(instance_name="prod"))
+
     def make_app(self, *, source_read: bool = True, standing_read: bool = False) -> FastAPI:
         actions: tuple[str, ...] = (
             "product_config.plan",

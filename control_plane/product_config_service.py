@@ -23,6 +23,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
     product_target_owner_products,
+    product_config_targets,
     product_config_requirement_applies_to_lane,
 )
 from control_plane.runtime_key_safety import (
@@ -80,7 +81,7 @@ def resolve_product_config_profile(
         return profile
     if not context or not any(
         lane.context.strip() == context and (not instance or lane.instance.strip() == instance)
-        for lane in profile.lanes
+        for lane in product_config_targets(profile)
     ):
         raise ProductConfigOwnershipMismatchError(
             "Product config target is not owned by the named product.",

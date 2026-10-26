@@ -901,7 +901,8 @@ in `runtime_environment`. The source binding key is the destination binding key;
 renaming a token to bypass integration key safety is not supported. Neither a
 source product nor another secret store can be supplied. Site-shared sources
 may be selected when that source lane has no configured exact binding. Ambiguous,
-disabled, missing or superseded sources are refused. Copies to previews are refused.
+disabled, missing or superseded sources are refused. Copies to the managed
+`preview` scope use the same checks and must pass preview key-safety policy.
 An explicit class on the source must allow the destination lane; a `prod_only`
 source cannot be copied to testing by relabelling its destination `shared_safe`.
 
@@ -1002,3 +1003,33 @@ deployed: the provider copy stays in place and already holds the same value, and
 a later live-target runtime sync delivers it from the managed secret. A
 production secret adopted as `shared_safe` with a sharing reason can then be
 copied to testing by reference, as described above.
+
+## Shared preview settings
+
+Every product with previews enabled has a configuration target named `preview`,
+in its configured preview context. It is a settings scope, not a stable lane or
+an individual PR's runtime identity. Use the existing product-config UI and
+`product-config-dry-run` / `product-config-apply` helpers with top-level
+`instance: preview`. Plain settings use an `instance` runtime-environment record;
+managed runtime secrets use `context_instance`, also with instance `preview`.
+The product workspace's **Preview settings** link opens the same runtime-setting
+and managed-secret forms used for stable environments. Expected secret bindings
+can be declared for this context and instance through the existing expected-config
+operation.
+
+Preview refreshes retain their template baseline, then overlay only the exact
+preview instance's settings and secrets. Global and context-shared secrets are
+excluded. The existing runtime key-safety policy must permit a preview secret
+before it is decrypted; production-only and testing-only classes cannot be
+copied into this scope. `copy_from` supports the preview target through the same
+product ownership, source-read authorization, version and sharing-evidence checks
+as other product configuration. Preview settings never participate in testing
+or production resolution. Changes take effect on the next preview refresh.
+
+The release migration moves existing `preview.override_env` values into the
+managed preview record and adds their preview-specific expected-key declarations.
+It removes the values from the profile. Conflicting managed values, retired keys
+or ambiguous product ownership abort the transaction, preserving both sources for
+review. Product-profile writes reject nonempty `preview.override_env`; use the
+managed product-config path for all subsequent changes. Historical profile
+snapshots remain readable. The old one-key profile editor is retired.

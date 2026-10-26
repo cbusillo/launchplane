@@ -1,3 +1,4 @@
+import { PreviewSettingsRoute } from "./PreviewSettingsRoute";
 import {
   AlertCircle,
   AlertTriangle,
@@ -75,7 +76,7 @@ import type {
 
 type ConditionTone = "pass" | "warning" | "danger" | "unknown";
 
-export function ProductEnvironmentRoute({
+function StableProductEnvironmentRoute({
   environmentKey,
   fixtureMode,
   productKey,
@@ -1128,4 +1129,11 @@ function errorResource<T>(data: T | null, error: unknown): ResourceState<T> {
     traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
     statusCode: error instanceof LaunchplaneApiError ? error.statusCode : 503,
   };
+}
+
+export function ProductEnvironmentRoute(props: Parameters<typeof StableProductEnvironmentRoute>[0]) {
+  if (props.environmentKey === "preview") {
+    return <PreviewSettingsRoute product={props.productKey} view={props.view} refreshToken={props.refreshToken} />;
+  }
+  return <StableProductEnvironmentRoute {...props} />;
 }

@@ -10,6 +10,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     is_exclusive_product_context,
     product_context_owner_map,
+    product_config_targets,
 )
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.contracts.secret_record import SecretScope, SecretSharingReason
@@ -69,8 +70,11 @@ def require_product_lanes(
     profile = next((item for item in profiles if item.product == product), None)
     owners = product_context_owner_map(profiles)
     if profile is None or any(
-        instance not in {"prod", "testing", "dev"}
-        or not any(lane.context == context and lane.instance == instance for lane in profile.lanes)
+        instance not in {"prod", "testing", "dev", "preview"}
+        or not any(
+            lane.context == context and lane.instance == instance
+            for lane in product_config_targets(profile)
+        )
         or not is_exclusive_product_context(context=context, product=product, owners=owners)
         for context, instance in routes
     ):
@@ -156,8 +160,8 @@ def product_secret_bindings(
     if profile is None:
         raise ProductSecretCopyError("Product secret bindings require an existing product.")
     owners = product_context_owner_map(profiles)
-    contexts = {lane.context for lane in profile.lanes}
-    lane_routes = {(lane.context, lane.instance) for lane in profile.lanes}
+    contexts = {lane.context for lane in product_config_targets(profile)}
+    lane_routes = {(lane.context, lane.instance) for lane in product_config_targets(profile)}
     records = {
         record.secret_id: record
         for record in store.list_secret_records(

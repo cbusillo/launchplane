@@ -63,6 +63,7 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_incident_eligible,
     product_lane_monitoring_probe_effective,
     product_config_requirement_applies_to_lane,
+    product_config_target,
 )
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupAuthorityStatus,
@@ -109,6 +110,16 @@ from control_plane.preview_inventory_evidence import (
     PreviewInventoryEvidence,
     read_preview_inventory_evidence,
 )
+
+
+class PreviewSettingsReadStore(Protocol):
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
+    def list_secret_bindings(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[SecretBinding, ...]: ...
 
 
 ActionAllowed = Callable[[str, str, str, tuple[str, ...]], bool]
@@ -890,13 +901,37 @@ def build_product_environment_config_status(
     write_prerequisites: ProductConfigWritePrerequisites = ProductConfigWritePrerequisites(),
 ) -> ProductEnvironmentConfigStatus:
     profile = record_store.read_product_profile_record(product)
-    lane = _find_lane(profile=profile, environment=environment)
+    lane = product_config_target(profile, environment)
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
-    lane_summary = _read_product_lane_summary(
-        record_store=record_store,
-        profile=profile,
-        lane=lane,
-    )
+    lane_summary: LaunchplaneLaneSummary | None
+    if lane.instance == "preview":
+        lane_summary = LaunchplaneLaneSummary(
+            context=lane.context,
+            instance=lane.instance,
+            runtime_environment_records=tuple(
+                record
+                for record in cast(
+                    PreviewSettingsReadStore, record_store
+                ).list_runtime_environment_records(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+                if record.scope == "instance" and record.instance == "preview"
+            ),
+            secret_bindings=tuple(
+                binding
+                for binding in cast(PreviewSettingsReadStore, record_store).list_secret_bindings(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+                if binding.context == lane.context and binding.instance == "preview"
+            ),
+            provenance=DataProvenance(source_kind="record", freshness_status="recorded"),
+        )
+    else:
+        lane_summary = _read_product_lane_summary(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+        )
     provenance = (
         lane_summary.provenance if lane_summary is not None else _missing_lane_provenance(lane)
     )

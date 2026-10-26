@@ -122,6 +122,9 @@ class _GenericWebPreviewStore:
             return bindings[:limit]
         return bindings
 
+    def list_secret_records(self, **_: object) -> tuple[object, ...]:
+        return ()
+
     def list_runtime_environment_records(
         self,
         *,
@@ -138,6 +141,13 @@ class _GenericWebPreviewStore:
                     env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://syo-preview.example.test"},
                     updated_at="2026-05-10T05:30:00Z",
                     source_label="test",
+                ),
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context=self.profile.preview.context,
+                    instance="preview",
+                    env={"NODE_ENV": "production"},
+                    updated_at="2026-10-26T00:00:00Z",
                 ),
             )
         return tuple(
@@ -176,7 +186,6 @@ def _profile(
             required_template_env_keys=("SMTP_HOST",),
             copied_env_keys=("SMTP_FROM",),
             omitted_env_keys=("PUBLIC_URL",),
-            override_env={"NODE_ENV": "production"},
             preview_url_env_keys=("PUBLIC_URL",),
             preview_domain_env_keys=("PUBLIC_DOMAIN",),
             required_provider_fields=("dockerImage", "username"),
@@ -209,7 +218,6 @@ def _odoo_compose_profile() -> LaunchplaneProductProfileRecord:
             slug_template="pr-{number}",
             app_name_prefix="cm-odoo-preview",
             template_instance="testing",
-            override_env={"ODOO_INSTALL_MODULES": "cm_custom,cm_website"},
             preview_url_env_keys=("WEB_BASE_URL",),
         ),
         updated_at="2026-05-09T15:00:00Z",

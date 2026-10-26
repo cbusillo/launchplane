@@ -650,13 +650,13 @@ def _product_config_secret_input(
     secret_class: RuntimeSecretClass | None = None
     if (
         requirement.integration == "runtime_environment"
-        and runtime_key_safety_environment_class(lane.instance) == "testing"
+        and runtime_key_safety_environment_class(lane.instance) in {"testing", "preview"}
         and integration_key_markers is not None
         and not is_integration_runtime_key(
             requirement.binding_key, extra_markers=integration_key_markers
         )
     ):
-        secret_class = "testing"
+        secret_class = "preview" if lane.instance == "preview" else "testing"
     return ProductConfigSecretInput(
         scope="context_instance",
         context=lane.context,

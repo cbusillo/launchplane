@@ -1290,13 +1290,22 @@ def _odoo_preview_service_environment(
             database_url=database_url,
         ).values
     )
-    environment_values = dict(template_values)
-    runtime_platform_credentials.refuse_platform_credentials(
-        preview_profile.override_env,
-        target=f"{profile.product} preview {plan.compose_name}",
-        source="the product profile preview override_env",
+    preview_environment = (
+        control_plane_runtime_environments.resolve_preview_runtime_environment_from_store(
+            record_store=cast(
+                control_plane_runtime_environments.SiteRuntimeEnvironmentStore, record_store
+            ),
+            context_name=preview_profile.context,
+            template_values=template_values,
+        )
     )
-    environment_values.update(preview_profile.override_env)
+    environment_values = dict(preview_environment.values)
+    payload_key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+    encoded_preview = (
+        environment_values.get(payload_key, "")
+        if payload_key in preview_environment.setting_keys | preview_environment.secret_keys
+        else ""
+    )
     try:
         template_override_record = cast(Any, record_store).read_odoo_instance_override_record(
             context_name=preview_profile.context,
@@ -1380,6 +1389,7 @@ def _odoo_preview_service_environment(
             key: value
             for key, value in template_values.items()
             if environment_values.get(key) == value
+            and key not in preview_environment.setting_keys | preview_environment.secret_keys
         },
     )
     for key in omitted_keys:
@@ -1417,7 +1427,12 @@ def _odoo_preview_service_environment(
         environment_values.update(import_source.environment)
         environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "true"
         omitted_keys = tuple(key for key in omitted_keys if key not in import_source.environment)
-    _merge_preview_addon_settings(environment_values, profile=profile, record_store=record_store)
+    _merge_preview_addon_settings(
+        environment_values,
+        profile=profile,
+        record_store=record_store,
+        encoded_preview=encoded_preview,
+    )
     if preview_profile.clean_testing_snapshot:
         environment_values.update(
             {
@@ -1445,10 +1460,13 @@ def _odoo_preview_service_environment(
 
 
 def _merge_preview_addon_settings(
-    environment: dict[str, str], *, profile: LaunchplaneProductProfileRecord, record_store: object
+    environment: dict[str, str],
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    record_store: object,
+    encoded_preview: str,
 ) -> None:
     key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
-    encoded_preview = profile.preview.override_env.get(key, "")
     if not encoded_preview.strip() or environment.get(key) == encoded_preview:
         return
     try:

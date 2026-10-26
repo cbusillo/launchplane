@@ -766,7 +766,6 @@ from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTa
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.preview_override_authorization import (
-    director_preview_override_allowed,
     director_preview_snapshot_allowed,
 )
 from control_plane.product_testing_restore_policy import director_testing_storage_allowed
@@ -818,7 +817,6 @@ from control_plane.runtime_key_safety_http import (
     apply_runtime_key_safety_policy_route,
 )
 from control_plane.runtime_key_safety import (
-    RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
@@ -12578,28 +12576,12 @@ def create_launchplane_fastapi_app(
         if director_conditional_write and not (
             scan_activation or snapshot_activation or storage_update
         ):
-            try:
-                integration_key_markers = latest_active_runtime_key_safety_policy(
-                    cast(RuntimeKeySafetyPolicyReadStore, record_store)
-                ).integration_key_markers
-            except (AttributeError, ValueError):
-                integration_key_markers = ()
-            list_bindings = getattr(record_store, "list_secret_bindings", None)
-            if not callable(list_bindings) or not director_preview_override_allowed(
-                existing=existing_profile,
-                replacement=profile,
-                secret_bindings=tuple(list_bindings(limit=None)),
-                integration_key_markers=integration_key_markers,
-            ):
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message=(
-                        "Director agents may conditionally change only bounded preview settings "
-                        "or testing storage requirements."
-                    ),
-                )
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Director agents may conditionally change only scan activation, preview snapshot policy or testing storage requirements. Use product-config for preview settings.",
+            )
         if profile.release_request != (
             existing_profile.release_request if existing_profile is not None else None
         ):
@@ -16381,7 +16363,7 @@ def create_launchplane_fastapi_app(
             and config_profile.production_use == "live"
             # The profile's live status describes production, not its owned
             # testing lane. Target ownership and instance scope are checked above.
-            and product_config_request.instance != TESTING_INSTANCE
+            and product_config_request.instance not in {TESTING_INSTANCE, "preview"}
             and product_config_request.odoo_business_hours is None
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
@@ -16895,11 +16877,9 @@ def create_launchplane_fastapi_app(
         )
         try:
             profile = database_store.read_product_profile_record(product.strip())
-            lane = next(
-                candidate
-                for candidate in profile.lanes
-                if candidate.instance == environment.strip()
-            )
+            from control_plane.contracts.product_profile_record import product_config_target
+
+            lane = product_config_target(profile, environment)
         except (FileNotFoundError, StopIteration) as error:
             raise _launchplane_http_error(
                 status_code=404,

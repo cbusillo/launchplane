@@ -84,7 +84,14 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             }
         )
         environment = dict(profile.preview.override_env)
-        _merge_preview_addon_settings(environment, profile=profile, record_store=object())
+        _merge_preview_addon_settings(
+            environment,
+            profile=profile,
+            record_store=object(),
+            encoded_preview=profile.preview.override_env.get(
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+            ),
+        )
         self.assertEqual(environment, profile.preview.override_env)
 
     def test_generated_preview_payload_preserves_addon_safety_checks(self) -> None:
@@ -190,6 +197,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     environment,
                     profile=preview_profile,
                     record_store=store,
+                    encoded_preview=payload,
                 )
             self.assertEqual(environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY], generated)
         allowed = [
@@ -213,7 +221,14 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             }
         )
         environment = {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: generated}
-        _merge_preview_addon_settings(environment, profile=profile, record_store=store)
+        _merge_preview_addon_settings(
+            environment,
+            profile=profile,
+            record_store=store,
+            encoded_preview=profile.preview.override_env.get(
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+            ),
+        )
         self.assertEqual(
             json.loads(base64.b64decode(environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))[
                 "addon_settings"
@@ -228,6 +243,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: generated},
                 profile=production_template,
                 record_store=store,
+                encoded_preview=profile.preview.override_env.get(
+                    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+                ),
             )
 
     def test_preview_addon_settings_reject_malformed_payload_without_echoing_values(self) -> None:
@@ -268,6 +286,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     },
                     profile=profile,
                     record_store=object(),
+                    encoded_preview=profile.preview.override_env.get(
+                        ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+                    ),
                 )
             self.assertNotIn(payload, str(refusal.exception))
             self.assertNotIn("private-input", str(refusal.exception))

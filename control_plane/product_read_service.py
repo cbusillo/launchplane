@@ -112,9 +112,9 @@ def build_product_environment_read_service_result(
     if params.get("config_status") == "true":
         environment = params["environment"]
         try:
-            lane = next(
-                candidate for candidate in profile.lanes if candidate.instance == environment
-            )
+            from control_plane.contracts.product_profile_record import product_config_target
+
+            lane = product_config_target(profile, environment)
             config_status = build_product_environment_config_status(
                 record_store=record_store,
                 product=product,
