@@ -60,14 +60,39 @@ permissions are unchanged.
 Missing qualification returns `409 testing_deploy_safety_unknown`, rather than
 an authorization denial. Use the existing disposable-lane observations `inspect`
 and `collect` routes below to review its current binding and authoritative facts.
-The generic collector currently supplies protective holds and target-alias facts;
-positive custody and resource qualification comes from the supported Odoo
-generation inspector. A conventional application without those facts needs the
+The generic collector supplies protective holds and target-alias facts. Positive
+custody and resource qualification comes from the supported Odoo generation
+inspector or the retained Compose inspection below. A conventional application
+without those facts needs the
 authoritative application custody/isolation collector prerequisite
 [#4372](https://github.com/cbusillo/launchplane/issues/4372), related to the broader
 [#3611](https://github.com/cbusillo/launchplane/issues/3611). Caller assertions,
 saved environment inputs and a failed health check cannot fill that gap. Native
 deployment has no service dry-run mode; preparation is not execution proof.
+
+Retained generic-web Compose testing lanes use the same `inspect` and reviewed
+`collect` path. Collection requires the current recipient's published, qualified
+activation and its original completed allocation. It reuses the activation's
+configuration, retained-reservation, safe-input and provider-render checks, with
+the image and generated identity fields from the current deployment inventory.
+It then reads the registered host through the existing private transport. The
+fixed program checks every extant container, including stopped containers, actual
+mounts and bound ports, current image/environment inputs and allocation-labeled
+local volume backing. Testing credential values are compared with production's
+provider inputs and other containers' actual environments. The complete inspected
+inventory and service authority must remain unchanged across the read.
+
+Populated allocated volumes remain in place. The original qualified empty
+allocation and unchanged source/input custody establish reproducibility; the
+read neither empties storage nor restarts a process. It publishes only current
+resource facts with the existing expiration and binding. It leaves occupancy
+UNKNOWN and preserves recorded use, needed-copy and shared-resource protections.
+Missing custody, unsupported mounts, changed inputs or incomplete physical reads
+supply no positive resource fact. Provider authorization refusals remain denials.
+Before its first provider effect, a standing Compose testing deployment repeats
+the same read and compares it with the collected proof. Drift refuses forward
+work. Existing original-operation fences and release qualification remain
+independent; collection does not retry a failed key or start a release.
 
 The Odoo generation collector can qualify current resources and copy custody
 while an `isolation_staging` hold remains set. It uses the same generation

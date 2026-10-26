@@ -1647,6 +1647,41 @@ class GenericWebDeployProviderMutationAdapter:
                 raise DisposableLaneSafetyUnknown(
                     "The prepared testing recipient or inputs changed."
                 )
+            if definition.target_type == "compose":
+                from control_plane.testing_compose_resources import collect_compose_resource_facts
+                from control_plane.storage.postgres import PostgresRecordStore
+
+                if not isinstance(self._record_store, PostgresRecordStore):
+                    raise DisposableLaneSafetyUnknown(
+                        "Compose qualification requires durable custody."
+                    )
+                facts = collect_compose_resource_facts(
+                    self._record_store,
+                    root=self._control_plane_root,
+                    product=profile.product,
+                    context=lane.context,
+                )
+                evidence = lane_store.read_disposable_lane_safety(
+                    profile.product, lane.context, lane.instance
+                )
+                if (
+                    evidence is None
+                    or not facts
+                    or facts["isolation_evidence"] != evidence.isolation_evidence
+                ):
+                    raise DisposableLaneSafetyUnknown("Physical Compose qualification changed.")
+                if (
+                    require_disposable_lane(
+                        lane_store,
+                        product=profile.product,
+                        context=lane.context,
+                        instance=lane.instance,
+                        recovery=True,
+                    )
+                    != binding
+                ):
+                    raise DisposableLaneSafetyUnknown("Compose safety changed during inspection.")
+
         except (FileNotFoundError, ValueError) as error:
             raise DisposableLaneSafetyUnknown(
                 "Standing testing deployment lacks current lane qualification."

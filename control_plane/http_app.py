@@ -23779,7 +23779,7 @@ def create_launchplane_fastapi_app(
                 )
                 resource_facts: dict[str, str] | None = None
                 if (
-                    profile.driver_id == "odoo"
+                    profile.driver_id in {"odoo", "generic-web"}
                     and observation.instance == "testing"
                     and facts.production_resources != "shared"
                 ):
@@ -23790,6 +23790,7 @@ def create_launchplane_fastapi_app(
                             product=profile.product,
                             context=observation.context,
                             now=store.disposable_lane_observation_time(),
+                            root=resolved_control_plane_root,
                         )
                     except NativeSourceAuthorizationDenied:
                         raise _launchplane_http_error(
