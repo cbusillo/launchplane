@@ -22,7 +22,11 @@ from control_plane.odoo_preview_apply_execution import (
     prepare_odoo_preview_apply_operation,
     preview_execution_lock_name,
 )
-from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope, ODOO_PREVIEW_APPLY_ROUTE
+from control_plane.odoo_preview_apply_http import (
+    OdooPreviewApplyEnvelope,
+    OdooPreviewPlanProvenanceError,
+    ODOO_PREVIEW_APPLY_ROUTE,
+)
 from control_plane.preview_reservation_recovery import (
     classify_preview_reservation,
     held_preview_reservations,
@@ -303,6 +307,27 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 self.assertEqual(result["settlement"], "adopted")
                 observer.assert_called_once()
                 write.assert_not_called()
+
+    def test_original_without_optional_preservation_field_still_observes_and_adopts(self) -> None:
+        with self.store._session_factory() as session:
+            row = session.scalar(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.scope == self.reservation.scope,
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == self.reservation.record_id,
+                )
+            )
+            assert row is not None
+            payload = json.loads(json.dumps(row.payload))
+            payload["response_payload"]["original_intent"]["apply_request"].pop(
+                "preserve_original_reservation_id", None
+            )
+            row.payload = payload
+            session.commit()
+        observer = Mock(return_value=("present", {"status": "fail"}, False))
+        result = self.recover(observe=observer)
+        self.assertEqual(result["settlement"], "adopted")
+        observer.assert_called_once()
 
     def remove_original_intent(self) -> None:
         with self.store._session_factory() as session:
@@ -1058,6 +1083,103 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                     )
                 )
                 schedules.assert_not_called()
+
+    def test_unowned_snapshot_refresh_preserves_original_before_reservation(self) -> None:
+        from control_plane.odoo_preview_apply_http import issue_odoo_preview_apply_plan
+
+        request = self.request.model_copy(deep=True)
+        self.profile.preview.clean_testing_snapshot = True
+        request.apply.dry_run_plan.compose_ref = "retained-compose"
+        issued = issue_odoo_preview_apply_plan(
+            result=_issued_plan(request), plan_id="new-existing-preview-plan"
+        )
+        assert issued.plan_provenance is not None
+        execute = Mock(return_value={"status": "fail", "provider_effect_attempted": True})
+        quiescence = Mock(return_value=False)
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=request,
+            issued_plan=issued,
+            reservation_scope=self.reservation.scope,
+            idempotency_key=issued.plan_provenance.plan_id,
+            request_fingerprint="new-existing-preview",
+            trace_id="new-existing-preview",
+            execute_apply=execute,
+            supersession_is_quiescent=quiescence,
+        )
+        original = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                return_value="retained-compose",
+            ),
+        ):
+            result = operation.run(self.store)
+        self.assertEqual(result.status, "target_busy")
+        self.assertTrue(quiescence.call_args.kwargs["require_snapshot_custody"])
+        execute.assert_not_called()
+        current = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+        assert current is not None and original is not None
+        self.assertEqual(current.state, "reconcile_required")
+        self.assertEqual(
+            current.model_dump(exclude={"state", "updated_at"}),
+            original.model_dump(exclude={"state", "updated_at"}),
+        )
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=operation.reservation_scope,
+                route_path=operation.route_path,
+                idempotency_key=operation.idempotency_key,
+            )
+        )
+
+    def test_unqualified_preservation_reference_preserves_original_before_reservation(self) -> None:
+        from control_plane.odoo_preview_apply_http import issue_odoo_preview_apply_plan
+
+        request = self.request.model_copy(deep=True)
+        request.apply.dry_run_plan.compose_ref = "retained-compose"
+        request.apply.dry_run_plan.operation = "destroy"
+        request.preserve_original_reservation_id = self.reservation.record_id
+        issued = issue_odoo_preview_apply_plan(
+            result=_issued_plan(request), plan_id="new-existing-preview-plan"
+        )
+        assert issued.plan_provenance is not None
+        execute = Mock(return_value={"status": "fail", "provider_effect_attempted": True})
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=request,
+            issued_plan=issued,
+            reservation_scope=self.reservation.scope,
+            idempotency_key=issued.plan_provenance.plan_id,
+            request_fingerprint="new-existing-preview",
+            trace_id="new-existing-preview",
+            execute_apply=execute,
+            supersession_is_quiescent=Mock(return_value=True),
+        )
+        original = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                return_value="retained-compose",
+            ),
+            self.assertRaises(OdooPreviewPlanProvenanceError),
+        ):
+            operation.run(self.store)
+        execute.assert_not_called()
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.reservation.record_id), original
+        )
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=operation.reservation_scope,
+                route_path=operation.route_path,
+                idempotency_key=operation.idempotency_key,
+            )
+        )
 
     def test_guarded_supersession_retains_both_intents_and_refuses_stale_or_active_proof(
         self,

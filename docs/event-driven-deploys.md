@@ -299,6 +299,15 @@ reservation. The webhook request never waits on a deploy.
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
+  - A snapshot Odoo preview without its Launchplane lifecycle record needs
+    native restore custody before a refresh can supersede its original operation.
+    The receipt, physical storage binding and database witness must prove an
+    owned restore; unknown data leaves the original held. The same inspection
+    runs before provider effects, including when a creation plan adopts an
+    existing compose. Completed copies retain their data, and interrupted
+    owned attempts stay pinned to their original snapshot. Observation and
+    recovery of the original key remain available. An unowned legacy copy
+    uses the [preserving destroy](legacy-preview-reconciliation.md#unrecorded-odoo-resources-with-retained-original-intent).
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.

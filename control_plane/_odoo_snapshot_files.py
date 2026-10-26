@@ -9,6 +9,7 @@ import selectors
 import subprocess
 import json
 import tempfile
+import time
 
 inherited_lock_descriptors = ()
 
@@ -21,12 +22,13 @@ def snapshot_file_digest(path):
     return digest.hexdigest()
 
 
-def capture_snapshot_file(arguments, path, bound, error_tail_limit=16385):
+def capture_snapshot_file(arguments, path, bound, error_tail_limit=16385, timeout_seconds=None):
     process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         pass_fds=inherited_lock_descriptors)
     errors = b''
     error_bytes = 0
     size = 0
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
     try:
         with path.open('xb') as output:
             os.chmod(path, 0o600)
@@ -34,7 +36,9 @@ def capture_snapshot_file(arguments, path, bound, error_tail_limit=16385):
                 selector.register(process.stdout, selectors.EVENT_READ, 'capture')
                 selector.register(process.stderr, selectors.EVENT_READ, 'error')
                 while selector.get_map():
-                    for event, _ in selector.select():
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise RuntimeError('Source copy exceeded its execution budget')
+                    for event, _ in selector.select(timeout=1 if deadline is not None else None):
                         chunk = os.read(event.fd, 65536)
                         if not chunk:
                             selector.unregister(event.fileobj)
