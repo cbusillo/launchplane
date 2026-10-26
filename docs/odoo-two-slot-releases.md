@@ -501,7 +501,7 @@ Original inverse recovery deliberately continues under its original guards,
 with the persisted reconciliation delay, after the forward budget is exhausted.
 Before activation, #4844 must inject a persistent inverse failure and its repair,
 prove recovery can finish beyond that budget, and prove replay cannot start
-another upgrade, choose a new target or owner, or starve other lanes. This source
+another upgrade, choose a new target or admitted caller, or starve other lanes. This source
 choice preserves cleanup when the forward attempt budget has been spent.
 
 Before a pause, guarded candidate preparation acquires the pinned immutable restore
