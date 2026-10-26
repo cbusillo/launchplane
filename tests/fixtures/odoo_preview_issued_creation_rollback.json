@@ -1,0 +1,41 @@
+{
+  "runtime_plan": {
+    "rollback_actions": [
+      {
+        "action": "delete_created_preview_domain",
+        "target": "https://pr-42.cm-preview.example.test"
+      },
+      {
+        "action": "delete_created_preview_compose",
+        "target": "odoo-tenant-cm-pr-42"
+      }
+    ]
+  },
+  "dry_run_plan": {
+    "rollback_operations": [
+      {
+        "name": "domain_delete",
+        "method": "POST",
+        "path": "/api/domain.delete",
+        "alternate_paths": [],
+        "target": "pr-42.cm-preview.example.test",
+        "payload_keys": [
+          "domainId"
+        ],
+        "secret_payload": false
+      },
+      {
+        "name": "compose_delete",
+        "method": "POST",
+        "path": "/api/compose.delete",
+        "alternate_paths": [],
+        "target": "${created.composeId:odoo-tenant-cm-pr-42}",
+        "payload_keys": [
+          "composeId",
+          "deleteVolumes"
+        ],
+        "secret_payload": false
+      }
+    ]
+  }
+}

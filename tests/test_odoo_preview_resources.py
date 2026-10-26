@@ -66,6 +66,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
                 {
                     "Name": item["Name"],
                     "Driver": item["Driver"],
+                    "Project": self.spec["project"],
                     "Mountpoint": item["Mountpoint"],
                     "HasOptions": bool(item.get("Options")),
                     "Device": (item.get("Options") or {}).get("device"),
@@ -104,6 +105,64 @@ class PreviewResourceInspectionTests(unittest.TestCase):
             except SystemExit as error:
                 status = error.code if isinstance(error.code, int) else 1
         return status, dict(line.split("=", 1) for line in output.getvalue().splitlines())
+
+    def retain_unregistered_fixture_backings(self) -> None:
+        retained = self.root / "retained"
+        retained.mkdir()
+        for name, volume in self.volumes.items():
+            original = Path(volume["Mountpoint"]).parent
+            original.rename(retained / name)
+            volume["Mountpoint"] = str(retained / name / "_data")
+
+    def test_unstarted_requires_absent_containers_and_plain_storage(self) -> None:
+        self.spec["unstarted"] = True
+        self.retain_unregistered_fixture_backings()
+        saved_volumes = dict(self.volumes)
+        saved_containers = dict(self.containers)
+        self.volumes.clear()
+        self.containers.clear()
+        self.assertEqual(self.run_program()[0], 0)
+        self.containers.update(saved_containers)
+        self.assertNotEqual(self.run_program()[0], 0)
+        self.containers.clear()
+        self.volumes.update(saved_volumes)
+        self.assertNotEqual(self.run_program()[0], 0)
+        self.assertTrue(
+            all((Path(v["Mountpoint"]) / "needed-data").exists() for v in self.volumes.values())
+        )
+
+    def test_unstarted_refuses_unregistered_needed_backing(self) -> None:
+        self.spec["unstarted"] = True
+        self.containers.clear()
+        needed = Path(next(iter(self.volumes.values()))["Mountpoint"]) / "needed-data"
+        self.volumes.clear()
+        for pending in ("", "preview-data-filestore"):
+            with self.subTest(pending=pending):
+                spec = {**self.spec, "pending_filestore": pending}
+                if pending:
+                    spec["volumes"] = [*self.spec["volumes"], pending]
+                self.assertNotEqual(self.run_program(spec)[0], 0)
+                self.assertTrue(needed.is_file())
+
+    def test_unstarted_refuses_storage_appearing_during_inventory(self) -> None:
+        self.spec["unstarted"] = True
+        self.retain_unregistered_fixture_backings()
+        volume = next(iter(self.volumes.items()))
+        self.volumes.clear()
+        self.containers.clear()
+        inspect = self.docker
+        inventories = 0
+
+        def changing(command: list[str], **kwargs: Any) -> Any:
+            nonlocal inventories
+            if command[1:3] == ["volume", "ls"]:
+                inventories += 1
+                if inventories == 2:
+                    self.volumes[volume[0]] = volume[1]
+            return inspect(command, **kwargs)
+
+        with patch.object(self, "docker", side_effect=changing):
+            self.assertNotEqual(self.run_program()[0], 0)
 
     def test_destroy_allows_missing_volumes_and_own_host_bindings(self) -> None:
         self.spec["operation"] = "destroy"
@@ -609,13 +668,13 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
         from tests.test_odoo_preview_apply_execution import _refresh_payload
         from tests.test_odoo_preview_runtime import _environment_values
 
-        for late in (False, True):
-            with self.subTest(late=late), ExitStack() as stack:
+        for late, creating in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(late=late, creating=creating), ExitStack() as stack:
                 apply = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply
                 apply = apply.model_copy(
                     update={
                         "dry_run_plan": apply.dry_run_plan.model_copy(
-                            update={"compose_ref": "preview-target"}
+                            update={} if creating else {"compose_ref": "preview-target"}
                         ),
                         "environment_values": _environment_values(),
                     }
@@ -660,7 +719,7 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
                     )
                 )
                 failure = click.ClickException("Foreign production mount appeared")
-                stack.enter_context(
+                inspection = stack.enter_context(
                     patch(
                         "control_plane.odoo_preview_resources.require_existing_preview_resources",
                         side_effect=[None, failure] if late else failure,
@@ -677,6 +736,7 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
                     qualify_existing_preview=True,
                 )
                 self.assertEqual(result.status, "fail")
+                inspection.assert_called()
                 self.assertEqual(result.provider_effect_attempted, late)
                 deploy.assert_not_called()
                 if late:
