@@ -45,6 +45,14 @@ class BackupPolicyDecisionAuthorizationError(PermissionError):
     pass
 
 
+def require_current_backup_policy_plan(
+    *, record_store: object, record: PrivilegedOperationRecord
+) -> None:
+    fresh = plan_backup_policy_proposal(record_store, record.request)
+    if fresh != record.evidence:
+        raise ValueError("Backup authority changed; a new proposal is required.")
+
+
 def propose_backup_policy(
     *,
     record_store: object,
@@ -180,9 +188,7 @@ def decide_backup_policy(
             now=now,
         )
     if record.status == "planned":
-        fresh = plan_backup_policy_proposal(record_store, record.request)
-        if fresh != record.evidence:
-            raise ValueError("Backup authority changed; a new proposal is required.")
+        require_current_backup_policy_plan(record_store=record_store, record=record)
     assert isinstance(record.evidence, BackupPolicyHumanEvidence)
     approval = PrivilegedOperationApproval(
         approver=actor,

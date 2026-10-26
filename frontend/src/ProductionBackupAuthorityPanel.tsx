@@ -99,6 +99,7 @@ function BackupProposal({ proposal, admin, fixtureMode, displayName, onChanged, 
       {target.change === "revised" ? " This changes the backup location or its settings." : target.change === "new" ? " This adds a backup target." : " Existing target retained."}
     </li>)}</ul>
     <p>Launchplane checked this proposal and will check it again before saving.</p>
+    {proposal.approval_unavailable_reason ? <p role="status">{proposal.approval_unavailable_reason}</p> : null}
     <p role="status" aria-label="Backup authority result">{proposal.status === "executed" ? "Backup policy approved. No capture or release was started." : proposal.status === "cancelled" ? "Backup policy proposal declined." : ["approved", "executing"].includes(proposal.status) ? "Approved. Launchplane is recording the backup policy." : proposal.status === "execution_failed" ? "The policy could not be recorded. Ask for a fresh proposal after checking the recorded outcome." : "Pending your decision."}</p>
     <OperationNotice state={operation.state} label="Backup policy decision" />
     {proposal.status === "planned" ? <div className="product-config-actions">
