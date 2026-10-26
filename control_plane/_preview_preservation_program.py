@@ -139,9 +139,18 @@ def preview_containers(source: dict) -> dict:
     }
     for service, expected in destinations.items():
         host = selected[service]['HostConfig']
+        mounts = selected[service]['Mounts']
+        extra = [mount for mount in mounts if mount.get('Destination') not in expected]
+        if any(service != 'script-runner' or mount.get('Type') != 'bind'
+            or mount.get('RW') is not False or not isinstance(mount.get('Destination'), str)
+            or mount['Destination'] == '/' or mount['Destination'].startswith('/volumes')
+            for mount in extra):
+            raise RuntimeError('Preview preservation has unowned writable storage')
         if (host.get('NetworkMode') == 'host' or host.get('PidMode') == 'host'
-            or host.get('Privileged') or host.get('Devices') or host.get('ExtraHosts')
-            or set(mount.get('Destination') for mount in selected[service]['Mounts']) != set(expected)):
+            or host.get('Privileged') or host.get('Devices')
+            or any(not isinstance(value, str) or not value.endswith(':host-gateway')
+                for value in host.get('ExtraHosts') or [])
+            or set(mount.get('Destination') for mount in mounts if mount not in extra) != set(expected)):
             raise RuntimeError('Preview preservation runtime isolation is unavailable')
         for destination, role in expected.items():
             mounts = [mount for mount in selected[service]['Mounts'] if mount.get('Destination') == destination]
@@ -296,7 +305,7 @@ def initialize_pending_preservation(temporary: Path, owner: dict) -> None:
 def preserve(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
     database = containers['database']
-    if not database['State']['Running'] or database.get('ExecIDs', 'unknown') not in (None, []):
+    if database.get('ExecIDs', 'unknown') not in (None, []):
         raise RuntimeError('Preview preservation database custody is unavailable')
     binding = preview_attempt_binding(source['compose_project'], source['database_name'],
         source['preview_volumes'], spec['authority'])
@@ -319,11 +328,6 @@ def preserve(path: Path, source: dict) -> dict:
         raise RuntimeError('Preview preservation lacks reviewed memory headroom')
     if total > budget['filestore_bytes'] or space.f_bavail * space.f_frsize < budget['reserve_bytes'] + 2 * budget['database_bytes'] + total:
         raise RuntimeError('Preview preservation lacks reviewed storage headroom')
-    expected_databases = sorted([source['database_name'], 'postgres'])
-    actual_databases = json.loads(database_query(database['Id'], 'postgres',
-        b'SELECT json_agg(datname ORDER BY datname) FROM pg_database WHERE NOT datistemplate;\n'))
-    if actual_databases != expected_databases:
-        raise RuntimeError('Preview preservation has additional database custody')
     temporary = path.with_name('.pending-' + path.name)
     if pending_preservation(temporary, source, binding, database['Image']):
         verification_resources('lp-preview-preserve-' + spec['preservation_id'][:32], database['Image'])
@@ -337,6 +341,14 @@ def preserve(path: Path, source: dict) -> dict:
     require_unserved_web(containers['web'])
     for service in ('web', 'script-runner'):
         docker('stop', '-t', '30', containers[service]['Id'])
+    if not database['State']['Running']:
+        docker('start', database['Id'])
+        wait_database(database['Id'])
+    expected_databases = sorted([source['database_name'], 'postgres'])
+    actual_databases = json.loads(database_query(database['Id'], 'postgres',
+        b'SELECT json_agg(datname ORDER BY datname) FROM pg_database WHERE NOT datistemplate;\n'))
+    if actual_databases != expected_databases:
+        raise RuntimeError('Preview preservation has additional database custody')
     other_connections = database_query(database['Id'], source['database_name'],
         b"SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend';\n")
     if other_connections != '0':
@@ -376,7 +388,7 @@ def preserve(path: Path, source: dict) -> dict:
 def inspect_pending_preservation(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
     database = containers['database']
-    if not database['State']['Running'] or database.get('ExecIDs', 'unknown') not in (None, []):
+    if database.get('ExecIDs', 'unknown') not in (None, []):
         raise RuntimeError('Preview preservation database execution is unavailable')
     require_unserved_web(containers['web'])
     binding = preview_attempt_binding(source['compose_project'], source['database_name'],

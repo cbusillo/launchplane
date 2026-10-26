@@ -154,6 +154,18 @@ class PreviewPreservationProgramTests(unittest.TestCase):
             any(call[0] == "rm" or call[:2] == ("volume", "rm") for call in self.calls)
         )
 
+    def test_stopped_original_database_is_captured_without_starting_application(self) -> None:
+        for container in self.containers.values():
+            container["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock()
+        receipt = self.preserve()
+        self.assertTrue(receipt["database_restore_verified"])
+        self.assertEqual(
+            [call for call in self.calls if call[0] == "start"], [("start", "database")]
+        )
+        self.assertFalse(self.containers["web"]["State"]["Running"])
+        self.assertFalse(self.containers["script-runner"]["State"]["Running"])
+
     def test_owned_interrupted_capture_can_resume_without_touching_original(self) -> None:
         self.restored.side_effect = RuntimeError("interrupted")
         with self.assertRaises(RuntimeError):
@@ -381,6 +393,72 @@ class _PreservationVerifierEngine:
                 status = 0 if user == "postgres" else 1
                 output = b"3" if status == 0 else b""
         return subprocess.CompletedProcess(arguments, status, output, b"")
+
+
+class PreviewPreservationRuntimeShapeTests(unittest.TestCase):
+    def test_existing_runner_read_only_binds_are_not_owned_or_exported_storage(self) -> None:
+        namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
+        source: dict[str, Any] = {
+            "compose_project": "fixture-preview",
+            "database_name": "fixture_db",
+            "preview_volumes": {role: f"fixture-{role}" for role in ("data", "logs", "database")},
+        }
+        destinations = {
+            "database": {"/var/lib/postgresql/data": "database"},
+            "web": {"/volumes/data": "data", "/volumes/logs": "logs"},
+            "script-runner": {"/volumes/data": "data", "/volumes/logs": "logs"},
+        }
+        containers: dict[str, dict[str, Any]] = {
+            service: {
+                "Id": service,
+                "ExecIDs": None,
+                "Config": {
+                    "Labels": {"com.docker.compose.service": service},
+                    "Env": ["PLATFORM_INSTANCE=preview", f"ODOO_DB_NAME={source['database_name']}"],
+                },
+                "HostConfig": {
+                    "ExtraHosts": ["fixture-host:host-gateway"] if service == "web" else []
+                },
+                "Mounts": [
+                    {
+                        "Type": "volume",
+                        "Name": source["preview_volumes"][role],
+                        "Destination": destination,
+                    }
+                    for destination, role in mounts.items()
+                ],
+            }
+            for service, mounts in destinations.items()
+        }
+        extra = {"Type": "bind", "Destination": "/root/.ssh", "RW": False}
+        containers["script-runner"]["Mounts"].append(extra)
+
+        def docker(*arguments: str) -> bytes:
+            if arguments[0] == "inspect":
+                return json.dumps([containers[arguments[1]]]).encode()
+            if arguments[-1].startswith("volume="):
+                role = next(
+                    role
+                    for role, name in source["preview_volumes"].items()
+                    if arguments[-1] == f"volume={name}"
+                )
+                return ("database" if role == "database" else "web\nscript-runner").encode()
+            return "\n".join(containers).encode()
+
+        namespace["docker"] = docker
+        self.assertEqual(set(namespace["preview_containers"](source)), set(containers))
+        for invalid in (
+            {"RW": True},
+            {"Type": "volume"},
+            {"Destination": "/volumes/data/filestore"},
+        ):
+            with self.subTest(invalid=invalid):
+                original = dict(extra)
+                extra.update(invalid)
+                with self.assertRaises(RuntimeError):
+                    namespace["preview_containers"](source)
+                extra.clear()
+                extra.update(original)
 
 
 class PreviewPreservationVerifierCustodyTests(unittest.TestCase):

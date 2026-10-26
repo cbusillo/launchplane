@@ -214,8 +214,15 @@ evidence refuses preservation; old intents are not rewritten.
 
 The service qualifies an unserved plain preview with exclusively owned data,
 log and database volumes. Unexpected data, addon files, sessions, logs,
-additional databases, mounts or consumers remain held. It stops only that
-preview's unserved application containers under its durable provider lease.
+additional databases, writable mounts or consumers remain held. Existing
+read-only runner bind mounts outside the data volumes are neither copied nor
+deleted; the runner is never started. Docker host-gateway aliases do not change
+storage custody. Other host aliases and privileged runtime shapes remain held.
+It stops that preview's unserved application containers under its durable
+provider lease. If its exclusively owned database is stopped, it starts only
+that database for the bounded dump after storage and capacity qualification.
+An interrupted capture retains its original operation and observed database
+state for recovery; it never restarts the application.
 The existing memory floor and disk reserve remain in force. It captures a
 bounded PostgreSQL dump and full filestore archive inside the same Docker
 host, hashes both and verifies every archived attachment. It restores the dump
