@@ -333,7 +333,8 @@ class PrerequisiteFixture(unittest.TestCase):
         if command[:3] == ["docker", "image", "inspect"]:
             reference = (
                 self.fixture.identity.image_reference
-                if self.drift != "image" and not (self.drift == "image_after" and self.inspections > 1)
+                if self.drift != "image"
+                and not (self.drift == "image_after" and self.inspections > 1)
                 else "foreign@sha256:" + "f" * 64
             )
             return subprocess.CompletedProcess(
