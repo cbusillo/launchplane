@@ -40,6 +40,7 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         self.active_schedule = False
         self.storage_appears = False
         self.host_volumes: set[str] = set()
+        self.host_volume_projects: dict[str, str | None] = {}
         self.template_id = "preview-template"
         self.server_id = "preview-server"
         self.environment_id = "preview-environment"
@@ -267,6 +268,9 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
                     "Name": name,
                     "Driver": "local",
                     "HasOptions": False,
+                    "Project": self.host_volume_projects.get(
+                        name, (self.compose or {}).get("appName")
+                    ),
                     "Mountpoint": str(self.fixture.root.resolve() / "volumes" / name / "_data"),
                 }
             )
@@ -492,6 +496,34 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         with patch("control_plane.preview_filestore.prepare_preview_filestore", return_value=None):
             self.assertIsNotNone(self.plan().runtime_plan.target)
         self.assertEqual(needed.read_text(), "preserve me")
+
+    async def test_snapshot_partial_allocation_requires_each_project_owner(self) -> None:
+        self.assertEqual((await self.fixture.preview_apply()).status_code, 409)
+        self.enable_clean_snapshot()
+        assert self.compose is not None
+        for key in ("ODOO_LOG_VOLUME", "ODOO_DB_VOLUME"):
+            name = self.environment[key]
+            directory = self.fixture.root.resolve() / "volumes" / name / "_data"
+            directory.mkdir(parents=True)
+            self.host_volumes.add(name)
+            try:
+                for project in ("foreign-project", None, self.compose["appName"]):
+                    with self.subTest(resource=key, project=project):
+                        self.host_volume_projects[name] = project
+                        with patch(
+                            "control_plane.preview_filestore.prepare_preview_filestore",
+                            return_value={
+                                "name": self.environment["ODOO_DATA_VOLUME"] + "-filestore"
+                            },
+                        ):
+                            plan = self.plan()
+                        self.assertEqual(
+                            plan.runtime_plan.target is None, project == self.compose["appName"]
+                        )
+            finally:
+                self.host_volumes.remove(name)
+                directory.rmdir()
+                directory.parent.rmdir()
 
     async def test_deployed_recipient_is_refused_before_snapshot_host_work(self) -> None:
         self.assertEqual((await self.fixture.preview_apply()).status_code, 409)

@@ -66,6 +66,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
                 {
                     "Name": item["Name"],
                     "Driver": item["Driver"],
+                    "Project": self.spec["project"],
                     "Mountpoint": item["Mountpoint"],
                     "HasOptions": bool(item.get("Options")),
                     "Device": (item.get("Options") or {}).get("device"),

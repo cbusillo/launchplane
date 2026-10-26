@@ -349,7 +349,7 @@ def docker(*arguments):
 
 # Query only needed metadata. Do not collect container environment values,
 # arbitrary labels, or driver options that may hold credentials.
-VOLUME_FORMAT = '{"Name":{{json .Name}},"Driver":{{json .Driver}},"HasOptions":{{if .Options}}true{{else}}false{{end}},"Device":{{if .Options}}{{json (index .Options "device")}}{{else}}null{{end}},"Overlay":{{if .Options}}{{if eq (index .Options "type") "overlay"}}{{json .Options}}{{else}}null{{end}}{{else}}null{{end}},"Anonymous":{{$anon := false}}{{range $key,$value := .Labels}}{{if eq $key "com.docker.volume.anonymous"}}{{$anon = true}}{{end}}{{end}}{{$anon}},"Mountpoint":{{json .Mountpoint}}}'
+VOLUME_FORMAT = '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Project":{{if .Labels}}{{json (index .Labels "com.docker.compose.project")}}{{else}}null{{end}},"HasOptions":{{if .Options}}true{{else}}false{{end}},"Device":{{if .Options}}{{json (index .Options "device")}}{{else}}null{{end}},"Overlay":{{if .Options}}{{if eq (index .Options "type") "overlay"}}{{json .Options}}{{else}}null{{end}}{{else}}null{{end}},"Anonymous":{{$anon := false}}{{range $key,$value := .Labels}}{{if eq $key "com.docker.volume.anonymous"}}{{$anon = true}}{{end}}{{end}}{{$anon}},"Mountpoint":{{json .Mountpoint}}}'
 CONTAINER_FORMAT = '{"Id":{{json .Id}},"Config":{"Labels":{"com.docker.compose.project":{{if (index .Config "Labels")}}{{json (index (index .Config "Labels") "com.docker.compose.project")}}{{else}}null{{end}}},"Volumes":{{json (index .Config "Volumes")}}},"HostConfig":{"PortBindings":{{json .HostConfig.PortBindings}},"NetworkMode":{{json .HostConfig.NetworkMode}}},"Mounts":{{json .Mounts}}}'
 
 
@@ -423,6 +423,8 @@ def main():
         absent = set(spec.get("absent_volumes", [])) if pending else names
         if not absent.issubset(names) or absent & existing_names:
             raise RuntimeError("Unstarted preview has retained storage")
+        if any(volume(name).get("Project") != spec["project"] for name in names & existing_names):
+            raise RuntimeError("Unstarted preview storage ownership differs")
         root = Path(docker("info", "--format", "{{.DockerRootDir}}").strip())
         if root.resolve(strict=True) != root.absolute():
             raise RuntimeError("Docker storage root is aliased")
