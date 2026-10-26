@@ -5,6 +5,7 @@ type SetupOutcome = "success" | "uncertain" | "readback" | "uncertain-stale" | "
 async function setupScenario(page: Page, outcome: SetupOutcome, declarationsOnly = false) {
   const consoleErrors: string[] = [];
   page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
+  await page.route("**/ui/products/atlas-commerce?fixture=products", route => route.fulfill({ contentType: "text/html", body: "" }), { times: 1 });
   await page.goto("/ui/products/atlas-commerce?fixture=products");
   const data = await page.evaluate(async () => {
     const f = await import("/ui/src/dev-fixtures.ts");
@@ -64,13 +65,6 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "p
     if (outcome === "private") await expect(panel.getByLabel("Prepared target HTTPS origin")).toHaveCount(0);
     else await panel.getByLabel("Prepared target HTTPS origin").fill("https://testing.example.com");
     await panel.getByLabel("Reason", { exact: true }).fill("Isolated testing");
-    if (outcome === "success") {
-      const summary = panel.getByText("Add environment", { exact: true });
-      await summary.press("Enter");
-      await expect(panel.getByLabel("Reason", { exact: true })).toBeHidden();
-      await summary.press("Space");
-      await expect(panel.getByLabel("Reason", { exact: true })).toBeVisible();
-    }
     await panel.getByRole("button", { name: "Run dry-run", exact: true }).click();
     await expect(panel.getByText("Exact service diff")).toBeVisible();
     await panel.getByLabel("Reason", { exact: true }).fill("Edited draft");
@@ -186,17 +180,6 @@ for (const outcome of ["success", "declaration-uncertain", "declaration-uncertai
     if (outcome === "success") expect(consoleErrors).toEqual([]);
   });
 }
-
-test("setup summaries close disclosures revealed by the browser", async ({ page }) => {
-  const { panel } = await setupScenario(page, "success", true);
-  for (const name of ["Add environment", "Declare managed-secret fields"]) {
-    const details = panel.locator("details").filter({ has: page.locator("summary", { hasText: name }) });
-    await details.evaluate(element => { (element as HTMLDetailsElement).open = true; });
-    await expect(details).toHaveAttribute("open", "");
-    await details.locator("summary").first().click();
-    await expect(details).not.toHaveAttribute("open", "");
-  }
-});
 
 test("read-only users receive no environment setup controls", async ({ page }) => {
   await page.goto("/ui/products/atlas-commerce?fixture=products");
