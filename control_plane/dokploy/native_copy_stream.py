@@ -253,14 +253,16 @@ def _read_program(
         prompt = connection.recv(timeout=_remaining(deadline))
         prompt_text = prompt.decode() if isinstance(prompt, bytes) else prompt
     loader = (
-        "import base64,json,sys,termios,zlib; a=termios.tcgetattr(0);"
+        "import base64,json,os,runpy,sys,termios,zlib; a=termios.tcgetattr(0);"
         "a[3]&=~(termios.ECHO|termios.ICANON|termios.IEXTEN);"
         "a[0]&=~(termios.ICRNL|termios.IXON);a[6][termios.VMIN]=1;a[6][termios.VTIME]=0;"
         "termios.tcsetattr(0,termios.TCSANOW,a);print('\\n'+sys.argv[1]+'\\n',flush=True);"
         "line=sys.stdin.readline(262145);"
         "assert line.endswith('\\n') and len(line)<=262144;v=json.loads(line);"
-        "sys.argv=[sys.argv[0],v['payload'],sys.argv[2]];"
-        "exec(zlib.decompress(base64.b64decode(v['program'],validate=True)))"
+        "sys.argv=([os.path.expanduser(v['package']),v['action'],'--input',v['payload'],'--prefix',sys.argv[2]]"
+        " if 'action' in v else [sys.argv[0],v['payload'],sys.argv[2]]);"
+        "runpy.run_path(sys.argv[0],run_name='__main__') if 'action' in v"
+        " else exec(zlib.decompress(base64.b64decode(v['program'],validate=True)))"
     )
     # Replace the interactive shell before sending any private payload. The
     # loader itself disables canonical input/echo and then proves readiness;
@@ -273,13 +275,34 @@ def _read_program(
     for line in lines:
         if line == ready:
             break
-    encoded = base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode()
-    encoded_program = base64.b64encode(zlib.compress(program.encode())).decode()
+    from control_plane.host_package import compact_host_input, host_package
+
+    package = host_package()
+    action = next(
+        (name for name, member in package.actions.items() if package.programs[member] == program),
+        None,
+    )
+    wire_payload = compact_host_input(payload) if action is not None else payload
+    encoded = base64.b64encode(json.dumps(wire_payload, sort_keys=True).encode()).decode()
+    encoded_program = (
+        "" if action is not None else base64.b64encode(zlib.compress(program.encode())).decode()
+    )
     if len(encoded) > 120 * 1024 or len(encoded_program) > 120 * 1024:
         raise NativeSourceUnavailable("The fixed remote read exceeds the transport argument bound.")
 
     def dispatch() -> None:
-        message = json.dumps({"program": encoded_program, "payload": encoded}) + "\n"
+        message = (
+            json.dumps(
+                {
+                    "action": action,
+                    "package": "~/.local/state/launchplane-host/" + package.version + ".pyz",
+                    "payload": encoded,
+                }
+                if action is not None
+                else {"program": encoded_program, "payload": encoded}
+            )
+            + "\n"
+        )
         if abort_send is None:
             connection.send(message)
             return
@@ -501,6 +524,18 @@ def run_managed_server_program(
     logger = logging.Logger("launchplane-private-source", level=logging.CRITICAL + 1)
     logger.disabled = True
     logger.propagate = False
+    from control_plane.host_package import host_package
+    from control_plane.dokploy.host_package import ensure_host_package
+
+    package = host_package()
+    if any(package.programs[member] == program for member in package.actions.values()):
+        ensure_host_package(
+            host=host,
+            token=token,
+            server_id=server_id,
+            package=package,
+            dispatch_guard=dispatch_guard,
+        )
     try:
         # The sync client performs one handshake. It does not reconnect or follow
         # redirects; no proxy, cookie or alternate credential is selected.

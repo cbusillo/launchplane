@@ -249,6 +249,7 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
     | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
     | {
+        "launchplane_host_version",
         "website_settings_sha256",
         "clean_snapshot_database_sha256",
         "clean_snapshot_filestore_sha256",
@@ -455,7 +456,7 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
     if key in {"connection_isolation_resource_sha256", "connection_isolation_operation_sha256"}:
         return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
-    if key == "website_settings_sha256":
+    if key in {"launchplane_host_version", "website_settings_sha256"}:
         return bool(re.fullmatch(r"[0-9a-f]{64}", value))
     if key == "website_bootstrap_company_email_skip_reason":
         return value == ODOO_COMPANY_EMAIL_SKIP_REASON

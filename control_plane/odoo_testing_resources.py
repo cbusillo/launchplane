@@ -1,7 +1,5 @@
 """Provision new local Docker volumes without adopting or changing existing data."""
 
-import base64
-import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,14 +41,9 @@ class OdooTestingResources(BaseModel):
             "mode": mode,
             "compose_project": compose_project or self.namespace,
         }
-        encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
-        return (
-            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
-            + encoded
-            + " <<'LP_TESTING_RESOURCES'\n"
-            + ODOO_TESTING_RESOURCE_PROGRAM
-            + "\nLP_TESTING_RESOURCES\n"
-        )
+        from control_plane.host_package import host_schedule
+
+        return host_schedule("resources", spec)
 
 
 class GenericWebTestingResources(OdooTestingResources):
@@ -110,14 +103,9 @@ class OdooRehearsalResources(BaseModel):
             "mode": mode,
             "compose_project": self.namespace,
         }
-        encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
-        return (
-            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
-            + encoded
-            + " <<'LP_TESTING_RESOURCES'\n"
-            + ODOO_TESTING_RESOURCE_PROGRAM
-            + "\nLP_TESTING_RESOURCES\n"
-        )
+        from control_plane.host_package import host_schedule
+
+        return host_schedule("resources", spec)
 
 
 def resource_readback_passes(evidence: dict[str, str], resources: OdooTestingResources) -> bool:

@@ -1,7 +1,3 @@
-import base64
-import gzip
-import json
-
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
@@ -32,7 +28,7 @@ def build_preview_clean_snapshot_script(
         key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_")) for key in workflow_environment
     ):
         raise ValueError("A snapshot preview cannot receive an upstream connection or identity.")
-    spec = {
+    spec: dict[str, object] = {
         "snapshot": snapshot.model_dump(mode="json"),
         "copy_witness_parameter": TESTING_COPY_COMPLETION_PARAMETER,
         "compose_project": compose_project,
@@ -54,17 +50,9 @@ def build_preview_clean_snapshot_script(
             "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", ""
         ),
     }
-    encoded = base64.b64encode(gzip.compress(json.dumps(spec).encode(), mtime=0)).decode()
-    program = base64.b64encode(
-        gzip.compress(PREVIEW_CLEAN_SNAPSHOT_PROGRAM.encode(), mtime=0)
-    ).decode()
-    return (
-        "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_PREVIEW_SNAPSHOT'\n"
-        "import base64,gzip,json\n"
-        f"spec=json.loads(gzip.decompress(base64.b64decode({encoded!r})))\n"
-        f"exec(compile(gzip.decompress(base64.b64decode({program!r})), '<preview-clean-snapshot>', 'exec'))\n"
-        "LP_PREVIEW_SNAPSHOT\n"
-    )
+    from control_plane.host_package import host_schedule
+
+    return host_schedule("preview_snapshot", spec)
 
 
 PREVIEW_CLEAN_SNAPSHOT_PROGRAM = (

@@ -571,7 +571,10 @@ class NativeSourceTransportTests(unittest.TestCase):
         connect.return_value.__enter__ = Mock(return_value=connection)
         connect.return_value.__exit__ = Mock(return_value=False)
         frames: list[dict[str, object]] = []
-        with patch.object(transport, "connect", connect):
+        with (
+            patch.object(transport, "connect", connect),
+            patch("control_plane.dokploy.host_package.ensure_host_package"),
+        ):
             transport.read_native_source(
                 host="https://provider.invalid",
                 token="private-fixture",
