@@ -1310,50 +1310,45 @@ def _monitoring_reconciliation_observations(
 ) -> tuple[tuple[PublicIngressObservationRecord, str], ...]:
     reconciliations: list[tuple[PublicIngressObservationRecord, str]] = []
     for profile in profiles:
-        for lane in profile.lanes:
+        lanes = {(lane.context, lane.instance): lane for lane in profile.lanes}
+        for incident in record_store.list_public_ingress_incident_records(
+            product=profile.product, status="open"
+        ):
+            lane = lanes.get((incident.context, incident.instance))
             if (
                 lane_keys is not None
-                and (profile.product, lane.context, lane.instance) not in lane_keys
+                and (incident.product, incident.context, incident.instance) not in lane_keys
             ):
                 continue
-            open_incidents = record_store.list_public_ingress_incident_records(
-                product=profile.product,
-                context_name=lane.context,
-                instance_name=lane.instance,
-                status="open",
-            )
-            for incident in open_incidents:
-                # Delivery has its own recovery evidence; HTTP target retirement cannot resolve it.
-                if incident.check_name.startswith(
-                    ("production-delivery-", "testing-delivery-")
-                ) or (
-                    incident.check_name == DEPLOY_FENCE_CHECK_NAME
-                    and incident.check_kind == "provider"
-                ):
-                    continue
-                target_key = _incident_target_key(incident)
-                monitored = monitored_check_identity(incident.check_name)
-                if monitored is not None:
-                    kind, name = monitored
-                    target_key = (
-                        incident.product,
-                        incident.context,
-                        incident.instance,
-                        canonical_health_check_record_token(name),
-                        kind,
-                    )
-                if target_key in eligible_target_keys:
-                    continue
-                reconciliations.append(
-                    (
-                        _monitoring_reconciliation_observation(
-                            incident=incident,
-                            monitoring_intent=lane.health_monitoring.monitoring_intent,
-                            observed_at=observed_at,
-                        ),
-                        product_profile_record_sha256(profile),
-                    )
+            if incident.check_name.startswith(("production-delivery-", "testing-delivery-")) or (
+                incident.check_name == DEPLOY_FENCE_CHECK_NAME and incident.check_kind == "provider"
+            ):
+                continue
+            target_key = _incident_target_key(incident)
+            monitored = monitored_check_identity(incident.check_name)
+            if monitored is not None:
+                kind, name = monitored
+                target_key = (
+                    incident.product,
+                    incident.context,
+                    incident.instance,
+                    canonical_health_check_record_token(name),
+                    kind,
                 )
+            if target_key in eligible_target_keys:
+                continue
+            reconciliations.append(
+                (
+                    _monitoring_reconciliation_observation(
+                        incident=incident,
+                        monitoring_intent=lane.health_monitoring.monitoring_intent
+                        if lane
+                        else "prelaunch",
+                        observed_at=observed_at,
+                    ),
+                    product_profile_record_sha256(profile),
+                )
+            )
     return tuple(reconciliations)
 
 
@@ -3680,12 +3675,20 @@ def deliver_public_ingress_notification_outbox_delivery(
         destination_payload = _dict_payload(payload.get("destination"))
         if record_store is not None:
             incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
+            event = _public_ingress_event_value(attempt_payload.get("event"))
+            matching_resolution = (
+                event == "resolved"
+                and incident.status == "resolved"
+                and attempt_payload.get("observation_id") == incident.resolved_observation_id
+            )
             retired_refusal = (
                 incident.status == "resolved"
                 and incident.resolution_reason == PRODUCTION_REQUEST_REFUSED
             )
             if (
-                incident.status == "resolved"
+                (incident.status == "resolved" and not matching_resolution)
+                or (event == "resolved" and not matching_resolution)
+                or retired_refusal
                 or incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK
             ):
                 if retired_refusal:

@@ -5763,6 +5763,14 @@ class PostgresRecordStore(HumanSessionStore):
                     json.dumps(preview_material, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest()
             )
+        active_profiles = {profile.product: profile for profile in profiles}
+        for incident in self.list_public_ingress_incident_records(status="open"):
+            active_profile = active_profiles.get(incident.product)
+            if active_profile is not None and incident.instance in {"prod", "testing"}:
+                revisions.setdefault(
+                    (incident.product, incident.context, incident.instance),
+                    product_profile_record_sha256(active_profile),
+                )
         return revisions
 
     def __del__(self) -> None:
