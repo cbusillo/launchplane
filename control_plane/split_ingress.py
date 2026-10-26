@@ -12,18 +12,18 @@ from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 
 
 @dataclass(frozen=True)
-class SplitIngressDnsPolicy:
+class SplitIngressMonitoringPolicy:
     expectations: tuple[PublicDnsExpectedTarget, ...]
     recovery_threshold: int
     conflict: str = ""
 
 
-def split_ingress_dns_policy(
+def split_ingress_monitoring_policy(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     domains: tuple[str, ...],
     host: str,
-) -> SplitIngressDnsPolicy:
+) -> SplitIngressMonitoringPolicy:
     canonical_lane = next(
         (
             item
@@ -33,32 +33,57 @@ def split_ingress_dns_policy(
         lane,
     )
     checks = tuple(
-        check for check in canonical_lane.health_monitoring.checks if check.kind == "public_http"
+        check
+        for check in canonical_lane.health_monitoring.checks
+        if check.kind == "public_http" and check.enabled
     )
     threshold = max((check.recovery_observation_threshold for check in checks), default=1)
+    supported_urls = {_url_key(canonical_lane.base_url)} | {
+        _url_key(split_ingress_health_url(profile, canonical_lane, domain)) for domain in domains
+    }
+    unsupported = tuple(
+        check.name for check in checks if check.url and _url_key(check.url) not in supported_urls
+    )
+    if unsupported:
+        return SplitIngressMonitoringPolicy(
+            (),
+            threshold,
+            f"Split monitoring cannot replace these additional public checks: {', '.join(unsupported)}.",
+        )
     expectations = tuple(target for check in checks for target in check.expected_dns_targets)
     if any(target.public_name not in domains for target in expectations):
-        return SplitIngressDnsPolicy(
+        return SplitIngressMonitoringPolicy(
             (), threshold, "A configured DNS expectation is outside the recorded route hosts."
         )
     matching = tuple(target for target in expectations if target.public_name == host)
     if len({target.addresses for target in matching}) > 1:
-        return SplitIngressDnsPolicy(
+        return SplitIngressMonitoringPolicy(
             (), threshold, f"Configured DNS expectations disagree for {host}."
         )
-    return SplitIngressDnsPolicy(matching[:1], threshold)
+    return SplitIngressMonitoringPolicy(matching[:1], threshold)
+
+
+def split_ingress_health_url(
+    profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, host: str
+) -> str:
+    health = urlsplit(lane.health_url)
+    path = health.path or profile.health_path or "/"
+    return urlunsplit(("https", host, f"/{path.lstrip('/')}", health.query, ""))
 
 
 def split_ingress_check_base_url(lane: ProductLaneProfile, health_url: str) -> str:
     base = lane.base_url.strip().rstrip("/")
-    before, after = urlsplit(base), urlsplit(health_url)
-    same = (before.scheme, before.netloc, before.path or "/", before.query) == (
-        after.scheme,
-        after.netloc,
-        after.path or "/",
-        after.query,
+    return (
+        base
+        if urlsplit(base).hostname == urlsplit(health_url).hostname
+        and _url_key(base) != _url_key(health_url)
+        else ""
     )
-    return base if before.hostname == after.hostname and not same else ""
+
+
+def _url_key(url: str) -> tuple[str, str, str, str]:
+    parsed = urlsplit(url.strip())
+    return parsed.scheme, parsed.netloc, parsed.path or "/", parsed.query
 
 
 def read_split_ingress_binding(
@@ -87,10 +112,8 @@ def split_ingress_monitoring_lane(
 ) -> ProductLaneProfile:
     if binding is None or binding.external_ingress is None:
         return lane
-    health = urlsplit(lane.health_url)
-    path = health.path or profile.health_path or "/"
     policies = {
-        domain.domain_name: split_ingress_dns_policy(
+        domain.domain_name: split_ingress_monitoring_policy(
             profile, lane, tuple(d.domain_name for d in binding.domains), domain.domain_name
         )
         for domain in binding.domains
@@ -99,7 +122,7 @@ def split_ingress_monitoring_lane(
         ProductLaneHealthCheck(
             name=split_ingress_check_name(domain.domain_name),
             kind="public_http",
-            url=urlunsplit(("https", domain.domain_name, f"/{path.lstrip('/')}", health.query, "")),
+            url=split_ingress_health_url(profile, lane, domain.domain_name),
             require_runtime_identity=True,
             expected_dns_targets=policies[domain.domain_name].expectations,
             recovery_observation_threshold=policies[domain.domain_name].recovery_threshold,

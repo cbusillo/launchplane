@@ -962,8 +962,10 @@ an ORM column/table or remains only in the evidence payload.
   health path and query are preserved. Its configured homepage is checked once,
   on its own hostname, alongside that host's health endpoint. Existing DNS
   expectations and recovery thresholds carry into the derived checks. Conflicting
-  or unmappable DNS expectations block admission and remain a visible monitoring
-  configuration failure if introduced later, before any network request.
+  or unmappable DNS expectations, and enabled public checks outside the retained
+  homepage/health URLs, block admission and remain visible monitoring configuration
+  failures if introduced later, before any network request. Disabled checks do
+  not supply DNS expectations or recovery thresholds.
   The route-record SHA fences incident
   transitions; persisted HTTP observations are evaluated against current check
   URLs, monitoring intent, deployment identity, profile and relevant source dates.

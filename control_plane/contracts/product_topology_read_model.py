@@ -55,7 +55,7 @@ from control_plane.route_binding_reconcile import read_unchanged_route_binding_e
 from control_plane.split_ingress import (
     split_ingress_check_name,
     split_ingress_monitoring_lane,
-    split_ingress_dns_policy,
+    split_ingress_monitoring_policy,
 )
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
@@ -83,6 +83,7 @@ ProductTopologyWarningCode = Literal[
     "missing_route_authority",
     "public_website_not_applicable",
     "public_website_check_missing",
+    "split_ingress_monitoring_policy_conflict",
     "route_authority_disabled",
     "stale_route_authority",
     "desired_domain_unknown",
@@ -485,13 +486,13 @@ def _split_ingress_warnings(
             binding=binding,
             now=now,
         )
-        policy = split_ingress_dns_policy(
+        policy = split_ingress_monitoring_policy(
             profile, lane, tuple(d.domain_name for d in binding.domains), domain.domain_name
         )
         if policy.conflict:
             warnings.append(
                 _warning(
-                    code="public_website_check_missing",
+                    code="split_ingress_monitoring_policy_conflict",
                     scope="observation",
                     severity="error",
                     domain_name=domain.domain_name,

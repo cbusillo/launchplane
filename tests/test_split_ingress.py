@@ -36,6 +36,8 @@ from control_plane.lane_runtime_verification import (
 )
 from control_plane.outbound_http import (
     PublicHttpResponse,
+    PublicHttpDestinationError,
+    PublicHttpDestinationErrorCode,
     PublicTlsProbeResult,
     PublicTlsCertificate,
 )
@@ -50,7 +52,7 @@ from control_plane.split_ingress import (
     split_ingress_custody_hosts,
     split_ingress_check_base_url,
     split_ingress_monitoring_lane,
-    split_ingress_dns_policy,
+    split_ingress_monitoring_policy,
 )
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorTarget,
@@ -208,7 +210,7 @@ class SplitIngressTests(unittest.TestCase):
         )
         profile = profile.model_copy(update={"lanes": (lane,)})
         self.assertTrue(
-            split_ingress_dns_policy(
+            split_ingress_monitoring_policy(
                 profile,
                 lane,
                 tuple(d.domain_name for d in binding.domains),
@@ -373,6 +375,39 @@ class SplitIngressTests(unittest.TestCase):
             )
         self.assertEqual(refused.status, "fail")
         no_network.assert_not_called()
+        dns_target = PublicDnsExpectedTarget(public_name=hosts[0], addresses=("93.184.216.34",))
+        failures: tuple[tuple[PublicHttpDestinationErrorCode, tuple[str, ...]], ...] = (
+            ("invalid_url", hosts),
+            ("private_url", ()),
+        )
+        for code, custody in failures:
+
+            def dns_get(_url: str) -> tuple[str, ...]:
+                if code == "private_url":
+                    raise PublicHttpDestinationError(code, "Resolved to a private address")
+                return dns_target.addresses
+
+            with patch(
+                "control_plane.workflows.public_ingress_monitor.request_public_http",
+                side_effect=PublicHttpDestinationError(code, "Redirect destination refused"),
+            ):
+                failed = check_public_ingress_target(
+                    target=replace(
+                        target, allowed_https_hosts=custody, expected_dns_targets=(dns_target,)
+                    ),
+                    checked_at=_NOW.isoformat(),
+                    timeout_seconds=5,
+                    http_get=fetch_public_ingress_url,
+                    tls_get=fetch_public_tls,
+                    dns_get=dns_get,
+                )
+            dns = failed.targets[0].dns
+            assert dns is not None
+            self.assertEqual(failed.failure_code, code)
+            if custody:
+                self.assertEqual(dns.observed_addresses, dns_target.addresses)
+            else:
+                self.assertEqual(dns.failure_code, code)
         homepage = "https://business.example.test"
         with patch(
             "control_plane.workflows.public_ingress_monitor.request_public_http",
@@ -672,11 +707,42 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
             now=_NOW,
         )
         self.assertTrue(
-            any(
-                w.code == "public_website_check_missing" and "disagree" in w.detail
-                for w in topology.warnings
-            )
+            any(w.code == "split_ingress_monitoring_policy_conflict" for w in topology.warnings)
         )
+
+    async def test_additional_public_checks_require_a_coverage_decision(self) -> None:
+        payload = self.seed_split()
+        profile = self.store.read_product_profile_record(payload["product"])
+        lane = profile.lanes[0]
+        for url in ("https://app.example.test/checkout", "https://outside.example.test/healthz"):
+            extra = ProductLaneHealthCheck(name="checkout", kind="public_http", url=url)
+            configured = lane.model_copy(
+                update={
+                    "health_monitoring": lane.health_monitoring.model_copy(
+                        update={"checks": (*lane.health_monitoring.checks, extra)},
+                    )
+                }
+            )
+            changed = profile.model_copy(update={"lanes": (configured,)})
+            self.store.write_product_profile_record(changed)
+            review = (await self.post("/v1/route-bindings/reconcile", payload)).json()["review"]
+            self.assertEqual(review["status"], "blocked")
+            self.assertIn(
+                "split_ingress_monitoring_policy_conflict", {f["code"] for f in review["findings"]}
+            )
+            disabled = extra.model_copy(update={"enabled": False})
+            configured = configured.model_copy(
+                update={
+                    "health_monitoring": configured.health_monitoring.model_copy(
+                        update={"checks": (*lane.health_monitoring.checks, disabled)},
+                    )
+                }
+            )
+            self.store.write_product_profile_record(
+                profile.model_copy(update={"lanes": (configured,)})
+            )
+            review = (await self.post("/v1/route-bindings/reconcile", payload)).json()["review"]
+            self.assertEqual(review["status"], "ready", review)
 
     async def test_signed_review_saves_split_and_all_readers_keep_each_host(self) -> None:
         payload = self.seed_split()

@@ -172,7 +172,7 @@ from control_plane.split_ingress import (
     split_ingress_custody_hosts,
     split_ingress_monitoring_lane,
     split_ingress_check_base_url,
-    split_ingress_dns_policy,
+    split_ingress_monitoring_policy,
 )
 from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.workflows.ship import utc_now_timestamp
@@ -705,7 +705,7 @@ def _health_check_monitor_target(
         )
         if domain_check and binding is not None:
             base_url = split_ingress_check_base_url(lane, health_url)
-            policy = split_ingress_dns_policy(
+            policy = split_ingress_monitoring_policy(
                 profile,
                 lane,
                 tuple(domain.domain_name for domain in binding.domains),
@@ -2617,10 +2617,11 @@ def check_public_ingress_target(
             url_observation = url_observation.model_copy(
                 update={"external_custody_sha256": target.external_custody_sha256}
             )
-        if target.check_kind == "public_http" and url_observation.failure_code not in {
-            "invalid_url",
-            "private_url",
-        }:
+        if (
+            target.check_kind == "public_http"
+            and target.resolution_failure_code is None
+            and (not target.allowed_https_hosts or http_get is fetch_public_ingress_url)
+        ):
             expectation = next(
                 (
                     item

@@ -13,6 +13,9 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     product_lane_monitoring_probe_effective,
 )
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
@@ -27,7 +30,7 @@ from control_plane.split_ingress import (
     split_ingress_monitoring_lane,
     split_ingress_check_name,
     split_ingress_check_base_url,
-    split_ingress_dns_policy,
+    split_ingress_monitoring_policy,
 )
 from control_plane.workflows.odoo_verification import resolve_odoo_health_url
 
@@ -313,7 +316,7 @@ def read_check_runtime_verification(
     )
     hosts = split_ingress_custody_hosts(binding, requested_url) if split_check else ()
     policy = (
-        split_ingress_dns_policy(
+        split_ingress_monitoring_policy(
             profile,
             lane,
             tuple(d.domain_name for d in binding.domains),
@@ -374,10 +377,16 @@ def read_check_runtime_verification(
             observation.product,
             observation.context,
             observation.instance,
-            observation.check_name,
+            canonical_health_check_record_token(observation.check_name),
             observation.check_kind,
         )
-        == (profile.product, lane.context, lane.instance, check.name, check.kind)
+        == (
+            profile.product,
+            lane.context,
+            lane.instance,
+            canonical_health_check_record_token(check.name),
+            check.kind,
+        )
         and (policy is None or not policy.conflict)
         and (not hosts or target is not None and target.url == requested_url)
         and (

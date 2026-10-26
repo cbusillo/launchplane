@@ -31,7 +31,7 @@ from control_plane.contracts.testing_route_refresh import (
     is_native_testing_binding,
 )
 from control_plane.contracts.text_fields import require_text
-from control_plane.split_ingress import split_ingress_dns_policy
+from control_plane.split_ingress import split_ingress_monitoring_policy
 
 NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER = "native_testing_route_requires_controller"
 
@@ -551,9 +551,8 @@ def build_route_binding_candidate(
                 current_record_sha256=current_record_sha256,
             )
 
-    if split_profile is not None and lane is not None:
         for host in domains:
-            policy = split_ingress_dns_policy(split_profile, lane, domains, host)
+            policy = split_ingress_monitoring_policy(split_profile, lane, domains, host)
             if policy.conflict:
                 return _blocked_plan(
                     findings=(
