@@ -70,6 +70,22 @@ test("an earlier accepted decision cannot look like approval of the current prev
   await page.screenshot({ path: testInfo.outputPath("owner-feedback-history.png"), fullPage: true });
 });
 
+test("an unavailable notes read after a saved decision keeps Accept disabled", async ({ page }) => {
+  await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308");
+  const original = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    return (await import(modulePath)).productReviewForFixture("products");
+  });
+  const unread = { ...original, pull_request_title: "", client_test_notes: "", client_test_notes_error: "The test notes could not be loaded. Refresh the review." };
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "example-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
+  await page.route("**/v1/product-review?*", route => route.fulfill({ json: original }));
+  await page.route("**/v1/product-review/decisions", route => route.fulfill({ json: unread }));
+  await page.goto("/ui/owner-review?repository=example%2Fcontrol-plane&pull_request=308");
+  await page.getByRole("textbox").fill("Please revise the price.");
+  await page.getByRole("button", { name: "Request changes", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeDisabled();
+});
+
 test("delivery of a historical saved decision can be retried without a preview", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=pending-without-preview&decision_id=saved");
   const decision = page.getByLabel("Recorded decision");

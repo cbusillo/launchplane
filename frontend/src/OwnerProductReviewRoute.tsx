@@ -215,14 +215,7 @@ function OwnerPreviewReviewRoute({
           historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
           review={review}
-          onDecided={(decided) => setReview((current) => ({
-            ...decided,
-            ...(decided.pull_request_title ? {} : {
-              pull_request_title: current?.pull_request_title ?? "",
-              client_test_notes: current?.client_test_notes ?? "",
-              client_test_notes_error: current?.client_test_notes_error ?? decided.client_test_notes_error,
-            }),
-          }))}
+          onDecided={setReview}
           onRefresh={() => loadReview()}
         />
         </>
@@ -375,7 +368,7 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
             pull_request: review.pull_request_number,
             decision_id: decision.record_id,
           });
-      onDecided(response);
+      onDecided({ ...response, pull_request_title: review.pull_request_title, client_test_notes: review.client_test_notes, client_test_notes_error: review.client_test_notes_error });
       if (!response.latest_decision?.feedback_url) {
         setFailure("Delivery is still pending. Your saved decision has not changed.");
       }
