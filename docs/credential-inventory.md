@@ -30,8 +30,9 @@ has the same database backup custody as existing evidence receipts.
 snapshot. Missing, failed and stale collection remain distinct. A failure keeps
 the previous snapshot with an explicit failure notice. No snapshot means unknown
 inventory. More than 26 hours since the snapshot means stale, regardless of its
-receipt time. Explicit rotation dates are evaluated again on read. Undated
-rotation remains unknown. Partial or inaccessible sources never prove absence;
+receipt time. Drift and rotation findings come from the collector's snapshot,
+using its collection date; the page does not invent another rotation policy.
+Undated rotation remains unknown. Partial or inaccessible sources never prove absence;
 complete means only the collector's named scope, not all credentials everywhere.
 
 Both routes accept the existing authenticated local administrator and Director
@@ -39,8 +40,9 @@ agent transports. Browser reads require the current stored policy's named
 administrator, not a product-scoped admin role. Ordinary product agents and
 workflow identities cannot read or publish the Director-wide inventory. Browser
 writes retain normal CSRF checks. Successful and error responses are `no-store`.
-The browser has only read/refresh controls, refreshes once a minute and preserves
-an explicit stale notice after a failed refresh.
+The browser has only read/refresh controls, refreshes once a minute and ages the
+snapshot against the service's expiry timestamp even when refresh fails. A failed
+refresh marks status unconfirmed. A 401 or 403 removes the cached inventory.
 
 ## Collection and recurring delivery
 
@@ -49,7 +51,9 @@ existing catalog's `launchplane-write-action.py` authentication helper. The publ
 metadata collector, validates its JSON and sends only that closed projection.
 It accepts collector exit codes 0, 1 and 2, so drift or partial coverage still
 arrive. A failed, timed-out or invalid collection sends a failed-attempt receipt
-without replacing the last snapshot. Temporary files hold metadata only and are
+without replacing the last snapshot. Failures carry a bounded code for a missing
+collector, timeout, collector exit, excessive size or invalid format, rather than
+raw exception text. Empty or null rotation dates normalize to unknown. Temporary files hold metadata only and are
 removed when collection ends. Raw stdout, stderr and transport exceptions are
 never printed. No credential is created, copied, moved or exported.
 
@@ -62,8 +66,12 @@ uv run launchplane-credential-inventory \
   --catalog /Users/cbusillo/Developer/codex-skills
 ```
 
-The command uses the catalog's existing authentication configuration, or an explicit
-`--config /absolute/operator-config.json`. Its output contains only collection
+The command uses the catalog's existing authentication configuration. An explicit
+`--config /absolute/operator-config.json` keeps that helper's normal environment
+isolation; use `--env-config /absolute/existing-auth.env` to name its existing
+authentication source. No file or key is copied. An unattended schedule with
+`--config` requires that explicit `--env-config` path because it cannot inherit
+the launching shell's exports. Its output contains only collection
 status and a receipt id, or a bounded delivery failure. It makes no automatic
 transport retry. Exit 0 means a collection was accepted (including drift/partial
 coverage); 1 means a failed attempt was accepted; 2 means delivery did not confirm.
@@ -82,7 +90,8 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.launchplane.c
 ```
 
 Generation refuses an existing file and does not load the job. The schedule runs
-on load and every 24 hours using existing user access. It contains paths and
+on load and every 24 hours using existing user access and `uv run --frozen`.
+It contains paths and
 timing only, never authentication values. Do not generate it from a temporary
 task worktree. An optional `--manifest` selects the reviewed metadata manifest;
 it is passed unchanged to the collector. To stop recurring collection, boot out

@@ -6,6 +6,7 @@ import argparse
 import plistlib
 from pathlib import Path
 import subprocess
+import sys
 import shutil
 from tempfile import TemporaryDirectory
 import unittest
@@ -20,7 +21,7 @@ from control_plane.credential_inventory import (
     COLLECTION_MAX_AGE,
     INVENTORY_ROUTE,
     CredentialCollection,
-    collection_digest,
+    collection_receipt_id,
     inventory_receipt,
     inventory_view,
 )
@@ -98,17 +99,18 @@ class CredentialInventoryTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             CredentialCollection.model_validate(payload)
 
-    def test_freshness_uses_collection_time_and_due_dates_advance_without_collection(self) -> None:
+    def test_freshness_uses_collection_time_and_findings_stay_with_collector(self) -> None:
         original = collection_at(self.now)
         receipt = inventory_receipt(original, now=self.now, trace_id="fixture")
         view = inventory_view(receipt, receipt, now=self.now)
         self.assertEqual(view.coverage, "partial")
         self.assertFalse(view.stale)
-        self.assertIn("rotation_due", [finding.kind for finding in view.findings])
+        self.assertEqual(view.findings, original.snapshot.findings if original.snapshot else [])
         expired = inventory_view(
             receipt, receipt, now=self.now + COLLECTION_MAX_AGE + timedelta(seconds=1)
         )
         self.assertTrue(expired.stale)
+        self.assertEqual(view.findings, expired.findings)
         empty = inventory_view(None, None, now=self.now)
         self.assertTrue(empty.stale)
         self.assertEqual(empty.coverage, "unknown")
@@ -203,7 +205,7 @@ class CredentialInventoryTests(unittest.TestCase):
     ) -> None:
         collection = collection_at(self.now)
         helper = ModuleType("operator_fixture")
-        receipt = f"credential-inventory-{collection_digest(collection)}"
+        receipt = collection_receipt_id(collection)
         with (
             patch.object(
                 helper,
@@ -225,6 +227,17 @@ class CredentialInventoryTests(unittest.TestCase):
             request.return_value = {"status": "ok", "receipt_id": "private-fixture"}
             with self.assertRaises(ValueError):
                 collector.publish_inventory(collection, helper=helper, config=None)
+            with patch.object(
+                helper, "resolve_settings", return_value={"service_url": "https://fixture.invalid"}
+            ) as settings:
+                request.return_value = {"status": "ok", "receipt_id": receipt}
+                collector.publish_inventory(
+                    collection,
+                    helper=helper,
+                    config="settings.json",
+                    env_config="existing-auth.env",
+                )
+                self.assertEqual(settings.call_args.args[0].env_config, "existing-auth.env")
         with TemporaryDirectory() as directory:
             root = Path(directory)
             args = argparse.Namespace(
@@ -232,18 +245,47 @@ class CredentialInventoryTests(unittest.TestCase):
                 catalog=root / "catalog",
                 manifest=root / "metadata.json",
                 config=str(root / "operator.json"),
+                env_config=None,
             )
             output = root / "schedule.plist"
             with patch.object(shutil, "which", return_value="/usr/local/bin/uv"):
+                with self.assertRaises(ValueError):
+                    collector.write_launch_agent(args, output)
+                args.env_config = str(root / "existing-auth.env")
                 collector.write_launch_agent(args, output)
                 with output.open("rb") as stream:
                     job = plistlib.load(stream)
-                self.assertEqual(job["StartInterval"], collector.COLLECTION_INTERVAL_SECONDS)
-                self.assertTrue(job["RunAtLoad"])
-                for path in (args.collector, args.catalog, args.manifest, Path(args.config)):
+                for path in (
+                    args.collector,
+                    args.catalog,
+                    args.manifest,
+                    Path(args.config),
+                    Path(args.env_config),
+                ):
                     self.assertIn(str(path.resolve()), job["ProgramArguments"])
                 with self.assertRaises(FileExistsError):
                     collector.write_launch_agent(args, output)
+
+    def test_empty_rotation_dates_are_unknown_and_transport_tracebacks_are_withheld(self) -> None:
+        for due in (None, ""):
+            payload = collection_at(self.now).model_dump(mode="json")
+            payload["snapshot"]["observations"][0]["records"][0]["rotation_due"] = due
+            parsed = CredentialCollection.model_validate(payload)
+            assert parsed.snapshot is not None
+            self.assertEqual(parsed.snapshot.observations[0].records[0].rotation_due, "Unknown")
+        from http.client import IncompleteRead
+
+        for error in (IncompleteRead(b"private-fixture"), SyntaxError("private-fixture")):
+            with (
+                patch.object(
+                    sys, "argv", ["publisher", "--collector", "fixture", "--catalog", "catalog"]
+                ),
+                patch.object(collector, "collect_inventory", return_value=collection_at(self.now)),
+                patch.object(collector, "operator_helper", side_effect=error),
+                patch("builtins.print") as printed,
+            ):
+                self.assertEqual(collector.main(), 2)
+                self.assertNotIn("private-fixture", str(printed.call_args_list))
 
 
 class CredentialInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -287,6 +329,10 @@ class CredentialInventoryHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(before.json()["inventory"]["collection_status"], "never")
                 first = await client.post(INVENTORY_ROUTE, json=payload, headers=headers)
                 self.assertEqual(first.status_code, 200, first.text)
+                self.assertEqual(
+                    first.json()["receipt_id"],
+                    collection_receipt_id(CredentialCollection.model_validate(payload)),
+                )
                 replay = await client.post(INVENTORY_ROUTE, json=payload, headers=headers)
                 self.assertEqual(first.json()["receipt_id"], replay.json()["receipt_id"])
                 unsafe = dict(payload, value="never-echo-this-private-fixture")

@@ -11,7 +11,7 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 from types import ModuleType
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 
 from pydantic import ValidationError
 
@@ -19,7 +19,8 @@ from control_plane.credential_inventory import (
     INVENTORY_ROUTE,
     CredentialCollection,
     CredentialSnapshot,
-    collection_digest,
+    CollectionFailure,
+    collection_receipt_id,
 )
 
 COLLECTOR_TIMEOUT_SECONDS = 300
@@ -31,6 +32,7 @@ def collect_inventory(
     *, collector: Path, catalog: Path, manifest: Path | None = None
 ) -> CredentialCollection:
     snapshot = None
+    failure_reason: CollectionFailure | None = None
     with TemporaryDirectory(prefix="credential-metadata-") as directory:
         command = [
             sys.executable,
@@ -46,34 +48,53 @@ def collect_inventory(
             completed = subprocess.run(
                 command, capture_output=True, timeout=COLLECTOR_TIMEOUT_SECONDS, check=False
             )
-            if completed.returncode in (0, 1, 2) and len(completed.stdout) <= MAX_REPORT_BYTES:
+            if completed.returncode not in (0, 1, 2):
+                failure_reason = "collector_failed"
+            elif len(completed.stdout) > MAX_REPORT_BYTES:
+                failure_reason = "report_too_large"
+            else:
                 snapshot = CredentialSnapshot.model_validate_json(completed.stdout)
-        except (OSError, subprocess.TimeoutExpired, ValidationError):
-            snapshot = None
+        except OSError:
+            failure_reason = "collector_unavailable"
+        except subprocess.TimeoutExpired:
+            failure_reason = "collector_timeout"
+        except ValidationError:
+            failure_reason = "invalid_snapshot"
     return CredentialCollection(
         attempted_at=datetime.now(timezone.utc),
         status="collected" if snapshot else "failed",
         snapshot=snapshot,
+        failure_reason=failure_reason,
     )
 
 
 def operator_helper(catalog: Path) -> ModuleType:
     scripts = catalog / "skills/launchplane/scripts"
-    sys.path.insert(0, str(scripts))
     specification = importlib.util.spec_from_file_location(
         "credential_inventory_operator", scripts / "launchplane-write-action.py"
     )
     if specification is None or specification.loader is None:
         raise ValueError("Authentication helper is unavailable.")
     module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
+    previous_path = sys.path[:]
+    try:
+        sys.path.insert(0, str(scripts))
+        specification.loader.exec_module(module)
+    finally:
+        sys.path[:] = previous_path
     return module
 
 
 def publish_inventory(
-    collection: CredentialCollection, *, helper: ModuleType, config: str | None
+    collection: CredentialCollection,
+    *,
+    helper: ModuleType,
+    config: str | None,
+    env_config: str | None = None,
 ) -> str:
-    settings = helper.resolve_settings(argparse.Namespace(config=config, env_config=None, url=None))
+    settings = helper.resolve_settings(
+        argparse.Namespace(config=config, env_config=env_config, url=None)
+    )
     result = helper.request_launchplane(
         service_url=settings["service_url"],
         path=INVENTORY_ROUTE,
@@ -81,13 +102,17 @@ def publish_inventory(
         body=collection.model_dump(mode="json"),
         timeout=30,
     )
-    receipt_id = f"credential-inventory-{collection_digest(collection)}"
+    receipt_id = collection_receipt_id(collection)
     if result.get("status") != "ok" or result.get("receipt_id") != receipt_id:
         raise ValueError("Collection receipt is unavailable.")
     return receipt_id
 
 
 def write_launch_agent(args: argparse.Namespace, output: Path) -> None:
+    if args.config and not args.env_config:
+        raise ValueError(
+            "An explicit authentication source path is required with a scheduled config."
+        )
     uv = shutil.which("uv")
     if not uv:
         raise ValueError("uv is unavailable.")
@@ -95,6 +120,7 @@ def write_launch_agent(args: argparse.Namespace, output: Path) -> None:
     arguments = [
         uv,
         "run",
+        "--frozen",
         "--project",
         str(root),
         "launchplane-credential-inventory",
@@ -107,6 +133,8 @@ def write_launch_agent(args: argparse.Namespace, output: Path) -> None:
         arguments.extend(["--manifest", str(args.manifest.resolve())])
     if args.config:
         arguments.extend(["--config", str(Path(args.config).expanduser().resolve())])
+    if args.env_config:
+        arguments.extend(["--env-config", str(Path(args.env_config).expanduser().resolve())])
     with output.open("xb") as stream:
         plistlib.dump(
             {
@@ -132,6 +160,7 @@ def main() -> int:
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--config")
+    parser.add_argument("--env-config")
     parser.add_argument("--write-launch-agent", type=Path)
     args = parser.parse_args()
     try:
@@ -143,13 +172,16 @@ def main() -> int:
             collector=args.collector, catalog=args.catalog, manifest=args.manifest
         )
         receipt_id = publish_inventory(
-            collection, helper=operator_helper(args.catalog), config=args.config
+            collection,
+            helper=operator_helper(args.catalog),
+            config=args.config,
+            env_config=args.env_config,
         )
         print(json.dumps({"status": collection.status, "receipt_id": receipt_id}))
         return 0 if collection.status == "collected" else 1
     except HTTPError as error:
         print(json.dumps({"status": "delivery_failed", "http_status": error.code}))
-    except (OSError, URLError, ValueError, KeyError, ImportError, RuntimeError):
+    except Exception:
         print(json.dumps({"status": "delivery_failed"}))
     return 2
 

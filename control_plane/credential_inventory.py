@@ -5,7 +5,15 @@ import hashlib
 import json
 from typing import Annotated, Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 
@@ -16,6 +24,13 @@ MetadataName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_./:@+~=-]{1,512}$")]
 SourceName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_./:@+~=-]{1,256}$")]
 FindingKind = Literal[
     "unknown_key_found", "unclassified_file_found", "missing", "presence_unknown", "rotation_due"
+]
+CollectionFailure = Literal[
+    "collector_unavailable",
+    "collector_timeout",
+    "collector_failed",
+    "report_too_large",
+    "invalid_snapshot",
 ]
 
 
@@ -30,6 +45,11 @@ class CredentialMetadata(MetadataModel):
     )
     purpose: Annotated[str, Field(pattern=r"^[A-Za-z0-9 .,;:/_()@+-]{1,200}$")]
     rotation_due: str
+
+    @field_validator("rotation_due", mode="before")
+    @classmethod
+    def normalize_rotation(cls, value: object) -> object:
+        return "Unknown" if value is None or value == "" else value
 
     @model_validator(mode="after")
     def validate_rotation(self) -> Self:
@@ -76,6 +96,7 @@ class CredentialCollection(MetadataModel):
     attempted_at: AwareDatetime
     status: Literal["collected", "failed"]
     snapshot: CredentialSnapshot | None
+    failure_reason: CollectionFailure | None = None
 
     @field_serializer("attempted_at")
     def serialize_attempted_at(self, value: datetime) -> str:
@@ -85,6 +106,8 @@ class CredentialCollection(MetadataModel):
     def validate_collection(self) -> Self:
         if (self.status == "collected") != (self.snapshot is not None):
             raise ValueError("Collection status and snapshot disagree.")
+        if self.status == "collected" and self.failure_reason is not None:
+            raise ValueError("A collected snapshot cannot carry a failure reason.")
         if self.snapshot and self.snapshot.generated_at > self.attempted_at:
             raise ValueError("Snapshot is newer than its collection attempt.")
         return self
@@ -95,6 +118,8 @@ class CredentialInventoryView(BaseModel):
     last_attempt_at: datetime | None
     received_at: datetime | None
     stale: bool
+    fresh_until: datetime | None
+    failure_reason: CollectionFailure | None
     coverage: Literal["complete", "partial", "unknown"]
     snapshot: CredentialSnapshot | None
     findings: list[CredentialFinding]
@@ -104,6 +129,10 @@ def collection_digest(collection: CredentialCollection) -> str:
     return hashlib.sha256(collection.model_dump_json().encode()).hexdigest()
 
 
+def collection_receipt_id(collection: CredentialCollection) -> str:
+    return f"credential-inventory-{collection_digest(collection)}"
+
+
 def inventory_receipt(
     collection: CredentialCollection, *, now: datetime, trace_id: str
 ) -> LaunchplaneIdempotencyRecord:
@@ -111,7 +140,7 @@ def inventory_receipt(
         raise ValueError("Collection timestamp is in the future.")
     fingerprint = collection_digest(collection)
     return LaunchplaneIdempotencyRecord(
-        record_id=f"credential-inventory-{fingerprint}",
+        record_id=collection_receipt_id(collection),
         scope=INVENTORY_SCOPE,
         route_path=INVENTORY_ROUTE,
         idempotency_key=fingerprint,
@@ -141,19 +170,6 @@ def inventory_view(
         else None
     )
     findings = list(snapshot.findings) if snapshot else []
-    if snapshot:
-        for observation in snapshot.observations:
-            for record in observation.records:
-                if (
-                    record.rotation_due == "Unknown"
-                    or date.fromisoformat(record.rotation_due) > now.date()
-                ):
-                    continue
-                finding = CredentialFinding(
-                    source=observation.source, name=record.name, kind="rotation_due"
-                )
-                if finding not in findings:
-                    findings.append(finding)
     statuses = {item.status for item in snapshot.observations} if snapshot else set()
     coverage: Literal["complete", "partial", "unknown"] = "unknown"
     if statuses == {"complete"}:
@@ -165,6 +181,8 @@ def inventory_view(
         last_attempt_at=attempt.attempted_at if attempt else None,
         received_at=datetime.fromisoformat(latest.recorded_at) if latest else None,
         stale=snapshot is None or now - snapshot.generated_at > COLLECTION_MAX_AGE,
+        fresh_until=snapshot.generated_at + COLLECTION_MAX_AGE if snapshot else None,
+        failure_reason=attempt.failure_reason if attempt else None,
         coverage=coverage,
         snapshot=snapshot,
         findings=findings,
