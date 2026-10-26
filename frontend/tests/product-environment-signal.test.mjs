@@ -40,7 +40,7 @@ test("failed production delivery warns only while the running release is verifie
     const lane = environment();
     lane.environment = "prod";
     const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
-    Object.assign(incident, { severity: "warning", check_kind: "provider", failure_layer: "provider", failure_code });
+    Object.assign(incident, { severity: "warning", check_kind: "provider", check_name: "production-delivery-example", failure_layer: "provider", failure_code });
     lane.health_monitoring.open_incidents = [incident];
     assert.equal(environmentOperationalTone(lane), "warning");
     assert.deepEqual(operationalAttentionReasons(lane), []);
@@ -50,6 +50,17 @@ test("failed production delivery warns only while the running release is verifie
     assert.equal(environmentOperationalTone(lane), "danger");
     assert.deepEqual(operationalWarningReasons(lane), []);
     lane.health_monitoring.open_incidents.pop();
+    lane.health_monitoring.checks[0].incident_status = "open";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    assert.ok(operationalAttentionReasons(lane).length > 1);
+    lane.health_monitoring.checks[0].incident_status = "";
+    const extraDomain = { ...lane.topology.observed.tls_domains[0], domain_name: "retained.example.test", status: "expired" };
+    lane.topology.observed.tls_domains.push(extraDomain);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    assert.ok(operationalAttentionReasons(lane).length > 1);
+    lane.topology.observed.tls_domains.pop();
     lane.health_monitoring.checks[0].status = "fail";
     assert.equal(environmentOperationalTone(lane), "danger");
     lane.health_monitoring.checks[0].status = "pass";

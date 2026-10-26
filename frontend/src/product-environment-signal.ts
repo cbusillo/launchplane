@@ -130,24 +130,20 @@ function productionDeliveryWarning(environment: ProductEnvironmentSummary, incid
 }
 
 export function operationalWarningReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
-  if (!environment || environmentRuntimeTone(environment, now) !== "verified") return [];
-  const incidents = environment.health_monitoring.open_incidents;
-  if (incidents.some(incident => !productionDeliveryWarning(environment, incident))) return [];
-  return incidents
-    .map(incident => `${readable(incident.failure_code)}; the current production release is healthy`);
+  return operationalSignal(environment, now).warningReasons;
 }
 
 export function operationalAttentionReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
-  if (!environment) return [];
+  return operationalSignal(environment, now).attentionReasons;
+}
+
+function operationalSignal(environment: ProductEnvironmentSummary | null, now: number): {
+  tone: SignalTone; attentionReasons: string[]; warningReasons: string[];
+} {
+  if (!environment) return { tone: "missing", attentionReasons: [], warningReasons: [] };
   environment = expireEnvironmentEvidence(environment, now);
   const reasons = new Set<string>();
   const incidents = environment.health_monitoring.open_incidents;
-  const verifiedDeliveryWarning = operationalWarningReasons(environment, now).length > 0;
-  for (const incident of incidents) {
-    if (verifiedDeliveryWarning && productionDeliveryWarning(environment, incident)) continue;
-    const severity = readable(incident.severity) || "Open";
-    reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
-  }
   for (const check of environment.health_monitoring.checks.filter(check => check.probe_effective)) {
     if (check.status === "fail") {
       reasons.add(check.summary?.trim() || `Health check ${check.name} failed: ${readable(check.failure_code) || "unknown failure"}`);
@@ -161,7 +157,22 @@ export function operationalAttentionReasons(environment: ProductEnvironmentSumma
     .forEach(warning => reasons.add(warning.detail));
   environment.topology.observed.tls_domains.filter(domain => negativeTlsStates.has(domain.status))
     .forEach(domain => reasons.add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
-  return [...reasons];
+  const runtimeTone = environmentRuntimeTone(environment, now);
+  const deliveryOnly = incidents.length > 0 && reasons.size === 0 && runtimeTone === "verified" &&
+    incidents.every(incident => productionDeliveryWarning(environment, incident));
+  if (!deliveryOnly) {
+    for (const incident of incidents) {
+      const severity = readable(incident.severity) || "Open";
+      reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
+    }
+  }
+  return {
+    tone: reasons.size ? "danger" : deliveryOnly ? "warning" : runtimeTone,
+    attentionReasons: [...reasons],
+    warningReasons: deliveryOnly
+      ? incidents.map(incident => `${readable(incident.failure_code)}; the current production release is healthy`)
+      : [],
+  };
 }
 
 export const deployHoldNotices: Record<NonNullable<ProductEnvironmentSummary["deploy_hold"]>, string> = {
@@ -174,10 +185,7 @@ export function deployHoldNotice(environment: ProductEnvironmentSummary | null):
 }
 
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
-  if (!environment) return "missing";
-  if (operationalAttentionReasons(environment, now).length) return "danger";
-  if (operationalWarningReasons(environment, now).length) return "warning";
-  return environmentRuntimeTone(environment, now);
+  return operationalSignal(environment, now).tone;
 }
 
 function environmentRuntimeTone(environment: ProductEnvironmentSummary, now: number): SignalTone {
