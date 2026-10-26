@@ -2517,14 +2517,73 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             )
             backups = self.store.list_verireel_prod_backup_gate_operation_records()
             self.publish.reset_mock()
-            for _ in range(3):
-                self.assertEqual(self.advance(), ())
+            with patch("control_plane.client_release.current_release_review") as read:
+                for _ in range(3):
+                    self.assertEqual(self.advance(), ())
+                read.assert_not_called()
             self.assertEqual(
                 self.store.list_release_review_decision_records(product=self.profile.product),
                 decisions,
             )
             self.assertEqual(self.store.list_verireel_prod_backup_gate_operation_records(), backups)
             self.publish.assert_not_called()
+
+    def test_standing_requalification_changed_during_review_starts_nothing(self) -> None:
+        self.switch("director_standing")
+        self.advance()
+        self.capture()
+        with patch(
+            "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+            side_effect=click.ClickException("Testing is unhealthy"),
+        ):
+            self.advance()
+        self.requalify_testing()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        deployment = self.store.read_deployment_record(inventory.deployment_record_id)
+        decisions = self.store.list_release_review_decision_records(product=self.profile.product)
+        backups = self.store.list_verireel_prod_backup_gate_operation_records()
+
+        def change_testing(**kwargs: object) -> ReleaseReviewStatus:
+            review = self.review()
+            if change == "failed":
+                self.store.write_deployment_record(
+                    deployment.model_copy(
+                        update={"deploy": deployment.deploy.model_copy(update={"status": "fail"})}
+                    )
+                )
+            else:
+                assert inventory.runtime_identity is not None
+                self.write_qualified_testing_inventory(
+                    inventory.model_copy(
+                        update={
+                            "runtime_identity": inventory.runtime_identity.model_copy(
+                                update={"source_git_ref": "d" * 40}
+                            )
+                        }
+                    )
+                )
+            return review
+
+        for change in ("failed", "different_candidate"):
+            with self.subTest(change=change):
+                self.store.write_deployment_record(deployment)
+                self.store.write_environment_inventory(inventory)
+                self.publish.reset_mock()
+                with patch(
+                    "control_plane.client_release.current_release_review",
+                    side_effect=change_testing,
+                ):
+                    self.assertEqual(self.advance(), ())
+                self.assertEqual(
+                    self.store.list_release_review_decision_records(product=self.profile.product),
+                    decisions,
+                )
+                self.assertEqual(
+                    self.store.list_verireel_prod_backup_gate_operation_records(), backups
+                )
+                self.publish.assert_not_called()
 
     def test_cancelled_standing_backup_is_not_automatically_replaced(self) -> None:
         self.switch("director_standing")

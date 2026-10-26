@@ -658,7 +658,6 @@ the failed release's operations. Outstanding provider effects and rollback
 reconciliation still block a new release. No agent receives a promotion grant
 and no product workflow calls Launchplane. Enabling this setting is a production-release activation; prepare
 and verify the Client, testing lane and backup policy before applying it.
-Changing unrelated profile metadata does not replay a failed release.
 Incomplete standing reviews back off for five minutes on each worker; changing
 the profile or lane versions triggers a fresh review. This timer never supplies
 acceptance or replaces the checks immediately before a release effect.

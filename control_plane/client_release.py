@@ -117,7 +117,10 @@ from control_plane.generic_web_promotion_http import (
 )
 from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
 from control_plane.generic_web_rollback_drill import run_generic_web_rollback_drill
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionSourceRefused,
+    qualified_generic_web_source_inventory,
+)
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
     require_generic_web_promotion_target,
@@ -1133,10 +1136,15 @@ def _stopped_standing_release_can_restart(
     if any(step.status != "fail" or step.failure is None for step in stopped):
         return False
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-    inventory = store.read_environment_inventory(context_name=lane.context, instance_name="testing")
-    deployment = store.read_deployment_record(inventory.deployment_record_id)
+    inventory = qualified_generic_web_source_inventory(store=store, profile=profile, lane=lane)
+    identity = inventory.runtime_identity
+    if identity is None or (
+        identity.artifact_id != decision.checklist.candidate.artifact_id
+        or identity.source_git_ref != decision.checklist.candidate.source_commit
+    ):
+        return False
     qualified_at = parse_launchplane_mutation_timestamp(
-        deployment.deploy.finished_at, field_name="testing_deployment_finished_at"
+        inventory.deploy.finished_at, field_name="testing_deployment_finished_at"
     )
     if qualified_at <= parse_launchplane_mutation_timestamp(
         decision.decided_at, field_name="release_decided_at"
@@ -1196,7 +1204,8 @@ def _record_standing_acceptance(
                         )
                     )
                     is not None
-                    and run.state not in {"waiting", "stopped"}
+                    and run.state != "waiting"
+                    and not _stopped_standing_release_can_restart(store, profile, previous, run)
                 )
             )
         ):
