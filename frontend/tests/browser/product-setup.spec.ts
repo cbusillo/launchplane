@@ -112,6 +112,8 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "p
       }
     }
     await expect(panel.getByRole("link", { name: "Open testing managed secrets" })).toBeVisible();
+    const declarations = panel.locator("details").filter({ has: page.locator("summary", { hasText: "Declare managed-secret fields" }) });
+    await expect(declarations.locator("select")).toBeVisible();
     if (outcome === "private") expect(applies[0].body.base_url).toBe("");
     await panel.getByRole("link", { name: "Open testing managed secrets" }).click();
     await expect(page).toHaveURL(/environments\/testing\/managed-secrets$/);
