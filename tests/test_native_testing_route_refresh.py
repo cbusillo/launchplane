@@ -348,7 +348,7 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
         current = fixture.current()
-        self.assertTrue(serving_snapshot_matches(current, expected, route=fixture.route))
+        self.assertTrue(serving_snapshot_matches(current, expected, store=fixture.store))
         self.assertTrue(
             testing_binding_matches_retained_publication(
                 fixture.store,
@@ -356,6 +356,48 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
                 expected.binding,
             )
         )
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRecord,
+            TestingActivationRefusal,
+        )
+        from control_plane.testing_application_activation import require_retained_route_authority
+
+        activation = TestingActivationRecord.model_construct(
+            product=fixture.candidate.product,
+            context=fixture.candidate.context,
+            retained_target=expected.target,
+            retained_target_id=expected.target_id,
+            retained_provider=expected.provider,
+            retained_route_binding=expected.binding,
+        )
+        require_retained_route_authority(fixture.store, activation)
+        with patch.object(
+            fixture.store, "read_route_binding_record", side_effect=FileNotFoundError
+        ):
+            with self.assertRaises(TestingActivationRefusal):
+                require_retained_route_authority(fixture.store, activation)
+        with patch(
+            "control_plane.testing_publication_storage.read_publication", side_effect=ValueError
+        ):
+            with self.assertRaises(TestingActivationRefusal):
+                require_retained_route_authority(fixture.store, activation)
+        assert current.binding is not None
+        foreign = current.binding.model_copy(
+            update={
+                "source": current.binding.source.model_copy(
+                    update={
+                        "source_versions": {
+                            **current.binding.source.source_versions,
+                            "testing_address": "foreign-publication",
+                        }
+                    }
+                ),
+            }
+        )
+        fixture.store.write_route_binding_record(foreign)
+        with self.assertRaises(TestingActivationRefusal):
+            require_retained_route_authority(fixture.store, activation)
+        fixture.store.write_route_binding_record(current.binding)
         self.assertEqual(fixture.publish(inverse=True).state, "reversed")
         self.assertEqual(fixture.current(), fixture.before)
 

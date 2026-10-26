@@ -541,6 +541,12 @@ class TestingAddressTests(unittest.TestCase):
             )
             self.assertEqual(response.json()["result"]["blocked_count"], 1, response.text)
             self.assertEqual(self.fixture.current().binding, before_drift)
+        from control_plane.contracts.testing_candidate import testing_candidate_namespace
+        from control_plane.testing_publication import plan_testing_publication
+
+        operation = "next-after-address"
+        namespace = testing_candidate_namespace(self.product, self.context, operation)
+        profile = self.store.read_product_profile_record(self.product)
         rebuilt = compile_testing_route(
             product=self.product,
             context=self.context,
@@ -548,7 +554,7 @@ class TestingAddressTests(unittest.TestCase):
             aliases=route.aliases,
             old_backend=route.new_backend,
             old_backend_addresses=(route.new_backend,),
-            new_backend="http://lp-testing-" + "b" * 32 + ":8069",
+            new_backend=f"http://{namespace}:{profile.runtime_port}",
             raw=raw,
             public_entrypoints=route.public_entrypoints,
             owned_document=owned,
@@ -556,6 +562,52 @@ class TestingAddressTests(unittest.TestCase):
         )
         self.assertEqual(rebuilt.aliases, route.aliases)
         self.assertFalse(rebuilt.address_only)
+        original = self.fixture.candidate
+        app = original.application
+        assert app is not None and app.prepared is not None
+        runtime = app.plan.runtime_identity.model_copy(
+            update={"deployment_record_id": "next-deployment"}
+        )
+        candidate_plan = app.plan.model_copy(
+            update={
+                "operation_id": operation,
+                "namespace": namespace,
+                "target_id": "next-compose",
+                "base_url": "https://" + rebuilt.host,
+                "runtime_identity": runtime,
+            }
+        )
+        prepared = app.prepared.model_copy(
+            update={
+                "plan_sha256": candidate_plan.digest,
+                "runtime_identity": runtime,
+                "private_endpoint": rebuilt.new_backend,
+                "source_witness": "empty:" + candidate_plan.digest,
+            }
+        )
+        candidate = original.model_copy(
+            update={
+                "operation_id": operation,
+                "namespace": namespace,
+                "compose_id": "next-compose",
+                "serving_target_id": original.compose_id,
+                "application": app.model_copy(
+                    update={"plan": candidate_plan, "prepared": prepared}
+                ),
+            }
+        )
+        next_plan = plan_testing_publication(
+            self.store,
+            candidate=candidate,
+            before=self.fixture.current(),
+            route=rebuilt,
+            reservation=self.reservation,
+            now=datetime.now(UTC),
+        )
+        assert next_plan.after.binding is not None
+        current_binding = self.fixture.current().binding
+        assert current_binding is not None
+        self.assertEqual(next_plan.after.binding.domains, current_binding.domains)
 
     def test_amended_route_custody_rejects_foreign_domains_and_roles(self) -> None:
         from control_plane.contracts.route_binding_record import RouteBindingDomain

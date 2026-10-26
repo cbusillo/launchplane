@@ -79,13 +79,11 @@ def serving_snapshot_matches(
     actual: TestingServingSnapshot,
     expected: TestingServingSnapshot,
     *,
-    route: TestingLaneRoute | None = None,
+    store: db.PostgresRecordStore | None = None,
 ) -> bool:
     """Serving authority and custody identify a copy; observation metadata does not."""
-    if (
-        route is not None
-        and expected.binding is not None
-        and testing_binding_matches_route(actual.binding, expected.binding, route)
+    if store is not None and testing_binding_matches_retained_publication(
+        store, actual.binding, expected.binding
     ):
         actual = actual.model_copy(update={"binding": expected.binding})
     values = []
@@ -104,17 +102,24 @@ def testing_binding_matches_retained_publication(
 ) -> bool:
     if testing_binding_authority(actual) == testing_binding_authority(expected):
         return True
-    if expected is None:
+    if (
+        actual is None
+        or expected is None
+        or testing_binding_authority(actual.model_copy(update={"domains": expected.domains}))
+        != testing_binding_authority(expected)
+    ):
         return False
     key = expected.source.source_versions.get("testing_publication", "")
-    publication = read_publication(store, key) if key else None
-    if publication is None or publication.state != "applied":
-        return False
     from control_plane.testing_address_storage import effective_testing_route
 
-    return testing_binding_matches_route(
-        actual, expected, effective_testing_route(store, publication)
-    )
+    try:
+        publication = read_publication(store, key) if key else None
+        if publication is None or publication.state != "applied":
+            return False
+        route = effective_testing_route(store, publication, binding=actual)
+        return testing_binding_matches_route(actual, expected, route)
+    except (ValueError, FileNotFoundError):
+        return False
 
 
 def _snapshot(
@@ -305,6 +310,7 @@ def prepare_publication(
         if not serving_snapshot_matches(
             _snapshot(store, session, plan.candidate.product, plan.candidate.context),
             plan.before,
+            store=store,
         ):
             raise ValueError("Serving authority changed before publication preparation.")
         record = TestingPublicationRecord(plan=plan, updated_at=plan.created_at)
@@ -444,9 +450,7 @@ def publish(
         _sources(store, session, plan, runtime_after=prior.state == "applied")
         expected = plan.before if prior.state == "planned" else effective_after(prior)
         current = _snapshot(store, session, plan.candidate.product, plan.candidate.context)
-        if not serving_snapshot_matches(
-            current, expected, route=plan.route if prior.state == "applied" else None
-        ):
+        if not serving_snapshot_matches(current, expected, store=store):
             raise ValueError("Serving authority changed since the original publication.")
         health = (
             prior.public_health
