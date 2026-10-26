@@ -12471,6 +12471,9 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = _application_testing_fixture(self)
 
+    def test_publication_refuses_stale_route_readiness_without_changing_custody(self) -> None:
+        self.fixture.test_publication_refuses_stale_route_readiness_without_changing_custody()
+
     def test_external_admission_persists_once_across_original_restart(self) -> None:
         self.fixture.test_external_admission_persists_once_across_original_restart()
 
