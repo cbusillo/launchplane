@@ -10414,6 +10414,11 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
             return MutationReservationUpdateResult(status="updated", record=bound_record)
 
+    def record_mutation_executor_exit(self, reservation: LaunchplaneIdempotencyRecord) -> None:
+        from control_plane.service_deploy_drain import record_executor_exit
+
+        record_executor_exit(self, reservation)
+
     def mark_mutation_reconcile_required(
         self,
         *,

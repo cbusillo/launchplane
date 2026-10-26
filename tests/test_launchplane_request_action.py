@@ -456,6 +456,35 @@ process.on('beforeExit', () => {{
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(replacement_may_have_dispatched(response), prior != "none")
 
+    def test_authoritative_drain_timeout_preserves_no_dispatch_after_lost_reply(self) -> None:
+        with TemporaryDirectory() as name:
+            response = Path(name) / "response.json"
+            result = self.run_action(
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/drivers/launchplane/self-deploy",
+                    "poll-result-path": "result.deploy_state",
+                    "poll-result-statuses": "draining,dispatch_in_progress",
+                    "poll-retry-on-request-error": "true",
+                    "poll-unavailable-timeout-ms": "4000",
+                    "poll-timeout-ms": "10000",
+                    "poll-interval-ms": "1",
+                    "retry-attempts": "1",
+                    "response-output-file": str(response),
+                },
+                environment={
+                    "TEST_CLOCK_STEP_MS": "1000",
+                    "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "1",
+                    "TEST_STATUS_SEQUENCE": "200,409",
+                    "TEST_ERROR_CODES": ",self_deploy_drain_timeout",
+                },
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(replacement_may_have_dispatched(response))
+            self.assertEqual(
+                json.loads(response.read_text())["error"]["code"], "self_deploy_drain_timeout"
+            )
+
     def test_gateway_lost_reply_after_drain_starts_failure_window(self) -> None:
         for status in ("502", "503", "504"):
             with self.subTest(status=status), TemporaryDirectory() as name:

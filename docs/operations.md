@@ -5150,7 +5150,9 @@ current plans and provider idleness cannot reconstruct the original proof.
 A typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
 reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
-pre-effect. The absolute ten-minute drain budget survives polls and service
+pre-effect, including when an earlier poll lost its response. The request action
+retains the authoritative timeout response so the alert keeps its blocker
+references and no unnecessary rollback starts. The absolute ten-minute drain budget survives polls and service
 restarts. For a legacy drain without a saved budget, its first updated poll anchors
 the budget to the prior stored observation. This budget is independent of the
 worker stop, provider deployment and health-verification budgets after dispatch.

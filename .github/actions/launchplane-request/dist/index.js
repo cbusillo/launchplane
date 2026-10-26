@@ -608,7 +608,7 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
     const isDraining = response.ok && responseBody?.result?.deploy_state === "draining";
     // The server replays dispatched results; a fenced draining state proves
     // this same request has not dispatched, even after an earlier lost reply.
-    if (isDraining) mayHaveDispatched = false;
+    if (isDraining || responseBody?.error?.code === "self_deploy_drain_timeout") mayHaveDispatched = false;
     requestOutcomeRecorded = true;
     let responseFileBody = responseBody;
     if (preserveDispatchProof && mayHaveDispatched && !response.ok) {

@@ -24,6 +24,7 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     rehearsal_execution_lock_name,
 )
 from control_plane.contracts.service_deploy_drain import operation_reference
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 
 
 SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS = 10 * 60
@@ -293,11 +294,12 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
         # its target execution lock through its effects. Admission
         # stays serialized until our fence commits, so a new lock owner cannot
         # start an effect between this probe and dispatch admission.
-        execution_excluded = False
+        execution_excluded = executor_exit_recorded(session, row)
         execution_lock_name = ""
         is_rehearsal = rehearsal_route(row.route_path)
         if (
-            not lease_active
+            not execution_excluded
+            and not lease_active
             and (row.scope.startswith(f"{RECONCILE_SOURCE}:") or is_rehearsal)
             and row.provider_target_key
         ):
@@ -331,6 +333,53 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
             }
         )
     return tuple(sorted(observations, key=lambda item: cast(str, item["operation_id"])))
+
+
+def record_executor_exit(store: Any, reservation: LaunchplaneIdempotencyRecord) -> None:
+    from control_plane.storage.postgres import (
+        LaunchplaneIdempotencyRow,
+        LaunchplaneServiceDeployDrainRow,
+    )
+
+    if not reservation_requires_admission(reservation.scope, reservation.route_path):
+        return
+    with store._session_factory() as session:
+        lock(store, session)
+        row = session.get(LaunchplaneIdempotencyRow, reservation.record_id)
+        if row is None or row.state != "reconcile_required":
+            return
+        current = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+        if (
+            current.attempt != reservation.attempt
+            or current.lease_owner != reservation.lease_owner
+            or current.request_fingerprint != reservation.request_fingerprint
+        ):
+            return
+        receipt_id = f"executor-exit:{current.record_id}"
+        receipt = session.get(LaunchplaneServiceDeployDrainRow, receipt_id)
+        payload = {
+            "attempt": current.attempt,
+            "lease_owner": current.lease_owner,
+            "request_fingerprint": current.request_fingerprint,
+        }
+        if receipt is None:
+            session.add(LaunchplaneServiceDeployDrainRow(record_id=receipt_id, payload=payload))
+        else:
+            receipt.payload = payload
+        session.commit()
+
+
+def executor_exit_recorded(session: Any, row: Any) -> bool:
+    from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+
+    if row.state != "reconcile_required":
+        return False
+    receipt = session.get(LaunchplaneServiceDeployDrainRow, f"executor-exit:{row.record_id}")
+    return receipt is not None and receipt.payload == {
+        "attempt": row.payload.get("attempt"),
+        "lease_owner": row.lease_owner,
+        "request_fingerprint": row.request_fingerprint,
+    }
 
 
 def _running_operations(store: Any, session: Any, now: str) -> tuple[str, ...]:
@@ -404,7 +453,13 @@ def prepare(
             and target_type == current.target_type
             and target_id == current.target_id
         )
-        if supersedes_deployment_marker and not repair_matches:
+        continuing_drain = (
+            prior is not None
+            and current is not None
+            and prior.state == current.state == "draining"
+            and current.request_fingerprint == request_fingerprint
+        )
+        if supersedes_deployment_marker and not repair_matches and not continuing_drain:
             raise ServiceDeployFenceConflict(
                 "The superseded self-deploy fence does not match.", fence=current
             )
