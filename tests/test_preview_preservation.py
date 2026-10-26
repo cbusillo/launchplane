@@ -1089,6 +1089,69 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 )
             self.assertIs(raised.exception, inspect.side_effect)
 
+    def test_expired_preservation_resumes_only_after_inspection_with_unchanged_authority(
+        self,
+    ) -> None:
+        from control_plane import odoo_preview_apply_http as preview_http
+        from control_plane.preview_preservation import PREVIEW_PRESERVATION_CAPTURE_PHASE
+        from control_plane.provider_operations import (
+            ProviderMutationRejectedError,
+            ProviderOperationLease,
+        )
+
+        assert self.issued.plan_provenance is not None
+        after_expiry = self.issued.plan_provenance.expires_at + timedelta(seconds=1)
+        for phase, changed in (
+            (None, False),
+            ("domain_delete", False),
+            (PREVIEW_PRESERVATION_CAPTURE_PHASE, False),
+            (PREVIEW_PRESERVATION_CAPTURE_PHASE, True),
+        ):
+            inspected = phase == PREVIEW_PRESERVATION_CAPTURE_PHASE
+            with self.subTest(phase=phase, changed=changed):
+                adapter = self.adapter()
+                current = self.issued.model_copy(deep=True)
+                if changed:
+                    current.dry_run_plan.compose_ref = "changed-provider-target"
+                reached_execution = RuntimeError("current authority accepted")
+                with (
+                    patch("control_plane.preview_preservation.run_preview_preservation"),
+                    patch.object(preview_http, "datetime", wraps=datetime) as clock,
+                    patch.object(
+                        preview_http, "_build_odoo_preview_apply_inputs", return_value=current
+                    ) as revalidate,
+                    patch.object(
+                        preview_http,
+                        "_odoo_preview_service_environment",
+                        side_effect=reached_execution,
+                    ) as environment,
+                ):
+                    clock.now.return_value = after_expiry
+                    if phase is not None:
+                        observation = adapter.observe(
+                            "fixture-key",
+                            phase,
+                            "fixture-reconciliation",
+                        )
+                        self.assertEqual(observation.retry_safe, inspected)
+                    if inspected and not changed:
+                        with self.assertRaises(RuntimeError) as raised:
+                            adapter.apply("fixture-key", Mock(spec=ProviderOperationLease))
+                        self.assertIs(raised.exception, reached_execution)
+                        environment.assert_called_once()
+                    else:
+                        with self.assertRaises(ProviderMutationRejectedError) as rejected:
+                            adapter.apply("fixture-key", Mock(spec=ProviderOperationLease))
+                        assert isinstance(
+                            rejected.exception.cause, preview_http.OdooPreviewPlanProvenanceError
+                        )
+                        self.assertEqual(
+                            rejected.exception.cause.code,
+                            "odoo_preview_plan_stale" if changed else "odoo_preview_plan_expired",
+                        )
+                        environment.assert_not_called()
+                    self.assertEqual(revalidate.called, inspected)
+
     def test_adoption_cannot_write_destroyed_lifecycle_without_retained_copy_verification(
         self,
     ) -> None:

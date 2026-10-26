@@ -396,7 +396,12 @@ def refresh_odoo_preview_issued_plan(
     issued_plan: OdooPreviewApplyInputsResult,
     database_url: str | None,
     observed_at: datetime | None = None,
+    continuing_preservation: bool = False,
 ) -> OdooPreviewApplyEnvelope:
+    if continuing_preservation and (
+        not request.preserve_original_reservation_id or issued_plan.operation != "destroy"
+    ):
+        raise ValueError("Only an inspected original preservation can continue its plan.")
     provenance = issued_plan.plan_provenance
     if provenance is None:
         raise OdooPreviewPlanProvenanceError(
@@ -412,7 +417,7 @@ def refresh_odoo_preview_issued_plan(
             code="odoo_preview_plan_mismatch",
             message="Odoo preview plan issuance timestamp is in the future.",
         )
-    if resolved_observed_at >= provenance.expires_at:
+    if resolved_observed_at >= provenance.expires_at and not continuing_preservation:
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_plan_expired",
             message="Odoo preview plan has expired; request fresh apply inputs.",
@@ -464,6 +469,7 @@ def execute_odoo_preview_apply_result(
     propagate_domain_lookup_error: bool = False,
     qualify_existing_preview: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    continuing_preservation: bool = False,
 ) -> dict[str, object]:
     current_request = refresh_odoo_preview_issued_plan(
         control_plane_root=control_plane_root_path,
@@ -472,6 +478,7 @@ def execute_odoo_preview_apply_result(
         request=request,
         issued_plan=issued_plan,
         database_url=database_url,
+        continuing_preservation=continuing_preservation,
     )
     if current_request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
         raise ValueError("Odoo preview apply repository does not match product profile.")

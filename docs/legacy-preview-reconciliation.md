@@ -236,6 +236,9 @@ Every subsequent destructive checkpoint and lifecycle adoption verifies the
 retained copy. Reopened applications, changed storage or changed original
 filestore block deletion. Only preservation phases with positive source and
 execution readback can resume an interrupted capture under its original key.
+That inspected continuation revalidates the current plan authority while allowing
+the original admission plan to have expired. Fresh expired plans remain refused;
+the original plan, request and key are never replaced.
 Other uncertain phases retain the normal provider-observation fence. After
 provider absence, the complete copy remains verifiable without deleted source
 containers. Actual successful destroy writes the normal destroyed lifecycle;
