@@ -50,7 +50,7 @@ def is_retained_preservation_retry(
         or reservation.route_path != ODOO_PREVIEW_APPLY_ROUTE
         or reservation.state != "running"
         or reservation.attempt <= 1
-        or reservation.provider_effect_phase not in PREVIEW_PRESERVATION_PHASES
+        or not reservation.provider_effect_phase
     ):
         return False
     current = store.read_idempotency_record_by_id(operation_record_id)
