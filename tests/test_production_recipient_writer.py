@@ -103,6 +103,31 @@ class RecipientWriterProgramTests(unittest.TestCase):
             self.run_program("pause")
         self.assertEqual(self.effects, ["stop", "start"])
 
+    def test_inventory_timestamp_does_not_change_the_retained_writer_identity(self) -> None:
+        self.identity["deployed_at"] = "2026-09-30T12:33:16Z"
+        self.row["Config"]["Env"] = [
+            "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps({**self.identity, "deployed_at": ""})
+        ]
+        self.run_program("pause")
+        self.assertFalse(self.row["State"]["Running"])
+        self.run_program("receipt_pause")
+        self.run_program("resume")
+        self.assertTrue(self.row["State"]["Running"])
+        self.assertEqual(self.effects, ["stop", "start"])
+
+    def test_timestamp_difference_never_allows_a_different_deployment_to_stop(self) -> None:
+        self.identity["deployed_at"] = "2026-09-30T12:33:16Z"
+        self.row["Config"]["Env"] = [
+            "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
+            + json.dumps(
+                {**self.identity, "deployment_record_id": "another-deployment", "deployed_at": ""}
+            )
+        ]
+        with self.assertRaises(ValueError):
+            self.run_program("pause")
+        self.assertTrue(self.row["State"]["Running"])
+        self.assertEqual(self.effects, [])
+
     def test_interrupted_start_retries_under_same_pause_and_cannot_override_a_later_pause(
         self,
     ) -> None:
