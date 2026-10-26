@@ -402,6 +402,13 @@ class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(applied.status_code, 200, applied.text)
                 self.assertTrue(applied.json()["result"]["applied"])
                 self.assertNotIn("private-value", applied.text)
+                readback = await client.post(
+                    ROUTE,
+                    json=body.model_copy(update={"mode": "readback"}).model_dump(mode="json"),
+                    headers=_browser_headers(sessions, admin())[0],
+                )
+                self.assertEqual(readback.status_code, 200, readback.text)
+                self.assertTrue(readback.json()["result"]["readback_matches"])
 
     async def test_stale_apply_reports_rolled_back_attempt_and_allows_fresh_review(self) -> None:
         sessions, _ = _human_session_manager()
