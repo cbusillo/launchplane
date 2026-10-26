@@ -1,3 +1,4 @@
+from starlette.concurrency import run_in_threadpool
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1441,7 +1442,8 @@ def build_generic_web_deploy_recovery_apply_handler(
             if execution_recovery
             else "",
         )
-        result = resume_acquired_provider_operation(
+        result = await run_in_threadpool(
+            resume_acquired_provider_operation,
             store=record_store,
             reservation=retry.record,
             response_trace_id=trace_id,
