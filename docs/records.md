@@ -1654,11 +1654,15 @@ aggregate type `public_ingress_discord_summary`, one record per policy,
 destination and fixed five-minute send window. A burst queues for its next
 boundary using its database enqueue time, so a slow probe cannot join an already
 sent batch; later observations cannot move that deadline. Overdue windows fold
-into one current window. A new critical condition still pages at once.
+into one current window before a send attempt; retries retain their original
+identity, backoff and attempt budget. A new critical condition still pages at once.
 
 Before delivery, both paths re-read current state. Cleared incidents and obsolete
 material alerts are superseded. Summaries render current conditions and compare
 them with the latest posted or provider-started snapshot, ordered by send window.
+An older window cannot post after a newer one starts. Changing the destination
+secret identity starts coverage for that destination; rotating a version under
+the same secret identity does not replay unknown effects.
 An empty, unchanged or subset snapshot sends nothing; clearing a condition alone
 does not re-post those that remain. A returning material state and an expired
 silence can appear in a later window. Silenced and acknowledged
@@ -1668,7 +1672,8 @@ destinations in a later window. The rendered snapshot is persisted atomically
 with its provider marker, with a final coverage check under the existing database
 write lock to prevent adjacent-window workers duplicating one state. Summary
 receipts live in the outbox independently of per-incident attempt records. Global
-outbox inspection includes failed deliveries and their error codes; critical
+outbox inspection gives active work and newest failures separate bounded slots,
+including their error codes; critical
 delivery failures also remain visible in the owning incident detail.
 An interrupted Discord summary retains its send
 marker and cannot replay an unknown provider effect. DNS and connection failures

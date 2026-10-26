@@ -1256,12 +1256,7 @@ def _store_monitor_observation(
         if not incident_event.delivery_eligible:
             continue
         incident = incidents_by_id[incident_event.incident_id]
-        if notify and notification_drivers is not None:
-            direct_destination_kinds: (
-                tuple[PublicIngressNotificationDestinationKind, ...] | None
-            ) = None
-            if callable(transition_writer):
-                direct_destination_kinds = ()
+        if notify and notification_drivers is not None and not callable(transition_writer):
             delivery_attempts.extend(
                 deliver_public_ingress_incident_notifications(
                     record_store=record_store,
@@ -1269,7 +1264,6 @@ def _store_monitor_observation(
                     incident=incident,
                     observation=plan.observation,
                     drivers=notification_drivers,
-                    destination_kinds=direct_destination_kinds,
                 )
             )
     return _StoredMonitorTransition(
@@ -3592,11 +3586,6 @@ class PublicIngressNotificationDriverSet:
                 delivery_status="failed",
                 action="provider_error",
                 error_message=str(error) or error.__class__.__name__,
-                outcome_unknown=destination.kind == "discord"
-                and not isinstance(error, DiscordNotificationNotSentError)
-                and not (
-                    isinstance(error, DiscordNotificationError) and 400 <= error.status_code < 500
-                ),
             )
         return PublicIngressNotificationDelivery(
             delivery_status="failed",
@@ -3709,6 +3698,10 @@ def deliver_public_ingress_notification_outbox_delivery(
                     reason=reason,
                 )
             if destination_payload.get("kind") == "discord":
+                if incident.notification_state != "active":
+                    return _superseded_incident_outbox_delivery(
+                        record=record, reason="incident_not_active"
+                    )
                 event = _public_ingress_event_value(attempt_payload.get("event"))
                 if discord_incident_needs_summary(incident, event):
                     policy = next(
@@ -4329,10 +4322,18 @@ def _deliver_discord_notification(
     }
     if drill:
         payload["allowed_mentions"] = {"parse": []}
-    discord_sender(
-        webhook_url,
-        payload,
-    )
+    try:
+        discord_sender(webhook_url, payload)
+    except Exception as error:
+        return PublicIngressNotificationDelivery(
+            delivery_status="failed",
+            action="provider_error",
+            error_message=str(error) or error.__class__.__name__,
+            outcome_unknown=not isinstance(error, DiscordNotificationNotSentError)
+            and not (
+                isinstance(error, DiscordNotificationError) and 400 <= error.status_code < 500
+            ),
+        )
     return PublicIngressNotificationDelivery(delivery_status="delivered", action="posted_discord")
 
 

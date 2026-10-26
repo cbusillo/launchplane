@@ -8349,8 +8349,7 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneOutboxDeliveryRow.payload["payload"]["destination_id"].as_string()
                 == destination_id,
                 or_(
-                    LaunchplaneOutboxDeliveryRow.payload["action"].as_string()
-                    == "posted_discord_summary",
+                    LaunchplaneOutboxDeliveryRow.action == "posted_discord_summary",
                     LaunchplaneOutboxDeliveryRow.provider_operation_key != "",
                 ),
             )
@@ -8385,6 +8384,7 @@ class PostgresRecordStore(HumanSessionStore):
         aggregate_type: str = "",
         aggregate_id: str = "",
         limit: int | None = None,
+        newest_first: bool = False,
     ) -> tuple[OutboxDeliveryRecord, ...]:
         filters: list[object] = []
         if states:
@@ -8400,8 +8400,12 @@ class PostgresRecordStore(HumanSessionStore):
             orm_model=LaunchplaneOutboxDeliveryRow,
             filters=filters,
             order_by=(
-                LaunchplaneOutboxDeliveryRow.created_at.asc(),
-                LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
+                LaunchplaneOutboxDeliveryRow.created_at.desc()
+                if newest_first
+                else LaunchplaneOutboxDeliveryRow.created_at.asc(),
+                LaunchplaneOutboxDeliveryRow.delivery_id.desc()
+                if newest_first
+                else LaunchplaneOutboxDeliveryRow.delivery_id.asc(),
             ),
             limit=limit,
         )

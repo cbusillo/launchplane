@@ -73,6 +73,7 @@ from tests.test_odoo_import_override_reconciliation import (
     runtime_record as _import_runtime_record,
 )
 from tests import test_preview_reservation_recovery as preview_reservation_tests
+from tests import test_discord_incident_summary as discord_summary_tests
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
@@ -1438,6 +1439,41 @@ class RealPostgresIntegratedProductRetirementTests(
 class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldRehearsalTests):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresDiscordSummaryTests(discord_summary_tests.DiscordIncidentSummaryTests):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+    def test_incident_enqueue_serializes_with_claim_and_provider_markers(self) -> None:
+        from psycopg.errors import LockNotAvailable
+        from sqlalchemy.exc import OperationalError
+        from control_plane import service_deploy_drain
+
+        original_lock = service_deploy_drain.lock
+
+        def bounded_lock(store: Any, session: Any) -> None:
+            session.execute(text("SET LOCAL lock_timeout = '250ms'"))
+            original_lock(store, session)
+
+        with self.store._session_factory() as held:
+            original_lock(self.store, held)
+            with (
+                patch.object(service_deploy_drain, "lock", side_effect=bounded_lock),
+                ThreadPoolExecutor(max_workers=1) as executor,
+            ):
+                future = executor.submit(self.observe, "late-probe")
+                with self.assertRaises(OperationalError) as caught:
+                    future.result(timeout=10)
+                self.assertIsInstance(caught.exception.orig, LockNotAvailable)
+            held.rollback()
+        self.assertEqual(self.store.list_public_ingress_incident_records(), ())
+        self.observe("late-probe")
+        self.drain("12:05:00")
+        self.assertEqual(len(self.sent), 1)
 
 
 @unittest.skipUnless(

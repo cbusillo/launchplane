@@ -13,7 +13,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 
 class OutboxInspectionStore(Protocol):
     def list_outbox_delivery_records(
-        self, *, states: tuple[str, ...] = (), limit: int | None = None
+        self, *, states: tuple[str, ...] = (), limit: int | None = None, newest_first: bool = False
     ) -> tuple[OutboxDeliveryRecord, ...]: ...
 
     def list_public_ingress_notification_policy_records(
@@ -78,8 +78,12 @@ def _delivery_routing(
 
 def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspection:
     records = store.list_outbox_delivery_records(
-        states=("pending", "running", "reconcile_required", "failed"), limit=limit + 1
+        states=("pending", "running", "reconcile_required"), limit=limit + 1
     )
+    failures = store.list_outbox_delivery_records(
+        states=("failed",), limit=limit + 1, newest_first=True
+    )
+    selected = (*records[:limit], *failures[:limit])
     policies = store.list_public_ingress_notification_policy_records(
         status="enabled", limit=limit + 1
     )
@@ -94,7 +98,7 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
     }
     deliveries: list[dict[str, object]] = []
     incident_statuses: dict[str, str] = {}
-    for record in records[:limit]:
+    for record in selected:
         destination = record.payload.get("destination")
         deliveries.append(
             {
@@ -116,8 +120,8 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
             }
         )
     return OutboxInspection(
-        complete=len(records) <= limit and len(policies) <= limit,
-        counts=dict(Counter(f"{record.kind}:{record.state}" for record in records[:limit])),
+        complete=len(records) <= limit and len(failures) <= limit and len(policies) <= limit,
+        counts=dict(Counter(f"{record.kind}:{record.state}" for record in selected)),
         deliveries=tuple(deliveries),
         notification_policies=tuple(
             {

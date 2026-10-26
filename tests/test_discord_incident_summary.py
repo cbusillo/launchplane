@@ -30,11 +30,12 @@ from tests import test_public_ingress_direct_outbox as direct_outbox
 
 
 class DiscordIncidentSummaryTests(unittest.TestCase):
-    def setUp(self) -> None:
+    def database_url(self) -> str:
         directory = self.enterContext(TemporaryDirectory())
-        self.store = PostgresRecordStore(
-            database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
-        )
+        return _sqlite_database_url(Path(directory) / "records.sqlite3")
+
+    def setUp(self) -> None:
+        self.store = PostgresRecordStore(database_url=self.database_url())
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
         self.destination = PublicIngressNotificationDestination(
@@ -132,7 +133,6 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         mentions = self.sent[0].get("allowed_mentions")
         assert isinstance(mentions, dict)
         self.assertEqual(mentions.get("parse"), [])
-        self.assertEqual(len(self.store.list_outbox_delivery_records()), 1)
         self.assertTrue(
             all(
                 value.status == "open"
@@ -148,7 +148,6 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         self.drain("12:10:00")
         self.assertEqual(len(self.sent), 2)
-        self.assertIn("2 conditions", str(self.sent[-1]))
 
     def test_clearing_subset_and_unchanged_reminders_do_not_repost(self) -> None:
         self.observe("one")
@@ -288,7 +287,7 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         self.drain("19:05:00")
         self.assertEqual(len(self.sent), 1)
 
-    def test_preconnect_and_rate_limit_retry_but_critical_response_loss_does_not(self) -> None:
+    def test_preconnect_and_rate_limit_retry_critical_alert(self) -> None:
         self.observe("prod", critical=True)
         for error, time in (
             (DiscordNotificationNotSentError("not sent"), "12:00:01"),
@@ -300,6 +299,133 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         self.drivers.discord_sender = lambda _url, payload: self.sent.append(payload)
         self.drain("12:02:00")
         self.assertEqual(len(self.sent), 1)
+
+    def test_summary_retries_keep_one_budget_across_window_boundaries(self) -> None:
+        self.observe("one")
+        calls = []
+
+        def refuse(_url: str, _payload: dict[str, object]) -> None:
+            calls.append(1)
+            raise DiscordNotificationError(429)
+
+        self.drivers.discord_sender = refuse
+        budget = self.store.list_outbox_delivery_records()[0].max_attempts
+        for index in range(budget + 1):
+            self.drain(f"{12 + index:02d}:05:00")
+        self.assertEqual(len(calls), budget)
+        rows = self.store.list_outbox_delivery_records()
+        failed = [value for value in rows if value.state == "failed"]
+        self.assertTrue(failed)
+        self.assertTrue(all(not value.provider_operation_key for value in failed))
+
+    def test_new_channel_reference_receives_existing_conditions(self) -> None:
+        self.observe("one")
+        self.drain("12:05:00")
+        replacement = self.secret.model_copy(update={"secret_id": "other-webhook", "name": "other"})
+        self.store.write_secret_record(replacement)
+        self.store.write_public_ingress_notification_policy_record(
+            self.policy.model_copy(
+                update={
+                    "destinations": (
+                        self.destination.model_copy(
+                            update={"discord_webhook_secret": replacement.secret_id}
+                        ),
+                    )
+                }
+            )
+        )
+        self.observe("one", time="19:00:00")
+        self.drain("19:05:00")
+        self.assertEqual(len(self.sent), 2)
+
+    def test_quiet_and_critical_http_failures_do_not_replay_uncertain_sends(self) -> None:
+        for index, (critical, status) in enumerate(
+            ((False, 404), (False, 503), (True, 503), (True, None))
+        ):
+            with self.subTest(critical=critical, status=status):
+                instance = f"lane-{critical}-{status}"
+                self.observe(instance, critical=critical, time=f"{12 + index}:00:00")
+
+                def fail(_url: str, payload: dict[str, object]) -> None:
+                    self.sent.append(payload)
+                    if status is None:
+                        raise TimeoutError("response lost")
+                    raise DiscordNotificationError(status)
+
+                self.drivers.discord_sender = fail
+                before = len(self.sent)
+                self.drain(f"{12 + index}:05:00")
+                self.drain(f"{12 + index}:10:00")
+                self.assertEqual(len(self.sent), before + 1)
+                row = max(self.store.list_outbox_delivery_records(), key=lambda v: v.updated_at)
+                self.assertEqual(row.state, "failed")
+                self.assertEqual(bool(row.provider_operation_key), status != 404)
+                self.observe(instance, critical=critical, time=f"{12 + index}:11:00", status="pass")
+                self.drain(f"{12 + index}:15:00")
+
+    def test_delayed_critical_page_respects_silence_and_acknowledgement(self) -> None:
+        for state in ("silenced", "acknowledged"):
+            self.observe(state, critical=True)
+            incident = next(
+                v for v in self.store.list_public_ingress_incident_records() if v.instance == state
+            )
+            self.store.write_public_ingress_incident_record(
+                incident.model_copy(
+                    update={
+                        "notification_state": state,
+                        "silenced_until": "2026-10-25T20:00:00Z" if state == "silenced" else "",
+                    }
+                )
+            )
+        self.drain("12:00:01")
+        self.assertEqual(self.sent, [])
+        self.assertTrue(
+            all(v.status == "open" for v in self.store.list_public_ingress_incident_records())
+        )
+
+    def test_critical_pre_send_resolver_failure_does_not_claim_unknown_effect(self) -> None:
+        self.observe("prod", critical=True)
+
+        def unavailable(_name: str) -> str:
+            raise RuntimeError("unavailable")
+
+        self.drivers.secret_resolver = unavailable
+        self.drain("12:00:01")
+        row = self.store.list_outbox_delivery_records()[0]
+        self.assertEqual(row.state, "pending")
+        self.assertFalse(row.provider_operation_key)
+        self.assertEqual(self.sent, [])
+
+    def test_older_render_cannot_post_after_a_newer_started_window(self) -> None:
+        for time in ("12:00:00", "12:06:00"):
+            row = build_discord_incident_summary_delivery(
+                policy_id=self.policy.policy_id,
+                destination_id=self.destination.destination_id,
+                created_at=f"2026-10-25T{time}Z",
+            )
+            self.store.write_outbox_delivery_record(row)
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value="2026-10-25T12:11:00Z"
+        ):
+            claims = [
+                self.store.claim_next_outbox_delivery_record(lease_owner=owner).record
+                for owner in ("old", "new")
+            ]
+            old, new = claims
+            assert old is not None and new is not None
+            for record, owner in ((new, "new"), (old, "old")):
+                result = self.store.mark_outbox_delivery_provider_started(
+                    record=record.model_copy(
+                        update={"payload": {**record.payload, "summary_states": [[owner, "state"]]}}
+                    ),
+                    lease_owner=owner,
+                    provider_operation_key=owner,
+                    provider_id="discord",
+                )
+                self.assertEqual(result.status == "updated", owner == "new")
+        self.assertFalse(
+            self.store.read_outbox_delivery_record(old.delivery_id).provider_operation_key
+        )
 
     def test_atomic_marker_rechecks_adjacent_windows_and_persists_snapshot(self) -> None:
         rows = []

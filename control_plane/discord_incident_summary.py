@@ -63,15 +63,16 @@ def summary_incidents(
 
 
 def summary_states(incidents: tuple[PublicIngressIncidentRecord, ...]) -> list[list[str]]:
-    return [
-        [value.incident_id, value.material_fingerprint_sha256, value.failure_code, value.severity]
-        for value in incidents
-    ]
+    return [[value.incident_id, value.material_fingerprint_sha256] for value in incidents]
 
 
 def summary_covers(previous: OutboxDeliveryRecord | None, current: OutboxDeliveryRecord) -> bool:
     if previous is None:
         return False
+    if previous.payload.get("webhook_reference") != current.payload.get("webhook_reference"):
+        return False
+    if int(str(previous.payload["send_window"])) >= int(str(current.payload["send_window"])):
+        return True
     states = current.payload.get("summary_states")
     covered = previous.payload.get("summary_states")
     return (
@@ -176,7 +177,9 @@ def deliver_discord_incident_summary(
         created_at=record.updated_at,
         due_now=True,
     )
-    if int(str(record.payload["send_window"])) < int(str(current.payload["send_window"])):
+    if record.attempt == 1 and int(str(record.payload["send_window"])) < int(
+        str(current.payload["send_window"])
+    ):
         from control_plane.storage.postgres import OutboxWithIdempotencyRequest
 
         record_store.enqueue_outbox_delivery_with_idempotency(
@@ -200,7 +203,13 @@ def deliver_discord_incident_summary(
     if not incidents:
         return result("delivered", action="skipped_out_of_scope")
     record = record.model_copy(
-        update={"payload": {**record.payload, "summary_states": summary_states(incidents)}}
+        update={
+            "payload": {
+                **record.payload,
+                "summary_states": summary_states(incidents),
+                "webhook_reference": destination.discord_webhook_secret,
+            }
+        }
     )
     previous = record_store.read_latest_discord_summary(
         policy_id=policy.policy_id,

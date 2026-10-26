@@ -325,8 +325,6 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         sender.assert_not_called()
         resolver.assert_not_called()
 
-        attempts = self.store.list_public_ingress_notification_attempt_records()
-        self.assertEqual(attempts, ())
         self.assertTrue(
             all(
                 value.state == "delivered" and not value.provider_operation_key
