@@ -53,10 +53,9 @@ export function PromotionRecoveryPanel({ product, fixtureMode }: { product: stri
   }
   function fail(failure: unknown, action: "Review" | "Apply" | "Readback") {
     setConfirmed(false);
-    const instruction = action === "Review" ? "No Apply was sent." : "Do not retry Apply.";
     setError(failure instanceof LaunchplaneApiError
-      ? `${action} stopped: HTTP ${failure.statusCode}, ${failure.code || "request_failed"}. Trace: ${failure.traceId || "unavailable"}. ${instruction}`
-      : `${action} is unverified. Stop and retain the original operation. ${instruction}`);
+      ? `${action} stopped: HTTP ${failure.statusCode}, ${failure.code || "request_failed"}. Trace: ${failure.traceId || "unavailable"}. Stop and retain the original operation. Do not retry Apply.`
+      : `${action} is unverified. Stop and retain the original operation. Stop and retain the original operation. Do not retry Apply.`);
   }
   function operationStorageKey(target: PromotionRecoveryTarget): string {
     return `${storageKey}:${encodeURIComponent(target.decisionRecordId)}:${target.step}:${target.attempt}`;
@@ -122,7 +121,7 @@ export function PromotionRecoveryPanel({ product, fixtureMode }: { product: stri
     finally { inFlight.current = false; setBusy(false); }
   }
   if (!admin || fixtureMode) return null;
-  return <section className="product-config-panel" aria-labelledby="promotion-recovery-title">
+  return <section className="product-config-panel promotion-recovery-panel" aria-labelledby="promotion-recovery-title">
     <header className="product-config-panel-header"><span aria-hidden="true"><ShieldCheck /></span><div>
       <p className="eyebrow">Production · existing operation</p><h2 id="promotion-recovery-title">Recover promotion</h2>
       <p>Review an interrupted accepted release for {product}. Apply reconciles its original operation using your existing administrator authority.</p>
