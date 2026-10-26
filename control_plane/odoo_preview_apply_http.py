@@ -467,7 +467,19 @@ def execute_odoo_preview_apply_result(
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     recovery_reservation: object = None,
 ) -> dict[str, object]:
-    from control_plane.preview_preservation import is_retained_preservation_retry
+    from control_plane.preview_preservation import (
+        PREVIEW_PRESERVATION_PHASES,
+        is_retained_preservation_retry,
+    )
+
+    retained_preservation_retry = is_retained_preservation_retry(
+        store=record_store,
+        profile=profile,
+        issued_plan=issued_plan,
+        request=request,
+        operation_record_id=deployment_record_id,
+        reservation=recovery_reservation,
+    )
 
     current_request = refresh_odoo_preview_issued_plan(
         control_plane_root=control_plane_root_path,
@@ -476,14 +488,7 @@ def execute_odoo_preview_apply_result(
         request=request,
         issued_plan=issued_plan,
         database_url=database_url,
-        retained_preservation_retry=is_retained_preservation_retry(
-            store=record_store,
-            profile=profile,
-            issued_plan=issued_plan,
-            request=request,
-            operation_record_id=deployment_record_id,
-            reservation=recovery_reservation,
-        ),
+        retained_preservation_retry=retained_preservation_retry,
     )
     if current_request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
         raise ValueError("Odoo preview apply repository does not match product profile.")
@@ -589,6 +594,12 @@ def execute_odoo_preview_apply_result(
             with provider_mutation_guard() if provider_mutation_guard else nullcontext():
                 yield
 
+        if (
+            retained_preservation_retry
+            and getattr(recovery_reservation, "provider_effect_phase", "")
+            not in PREVIEW_PRESERVATION_PHASES
+        ):
+            verify_preservation()
         run_preview_preservation(
             store=record_store,
             profile=profile,

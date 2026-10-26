@@ -21,7 +21,10 @@ from control_plane.contracts.idempotency_record import complete_launchplane_muta
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
+from control_plane.odoo_preview_apply_execution import (
+    OdooPreviewApplyOperation,
+    prepare_odoo_preview_apply_operation,
+)
 from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope, ODOO_PREVIEW_APPLY_ROUTE
 from control_plane.preview_preservation import (
     read_preview_preservation_authority,
@@ -1331,6 +1334,167 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                         deployment_record_id=first.record.record_id,
                         recovery_reservation=unqualified,
                     )
+
+    def interrupted_preserving_retry(self, phase: str) -> tuple[OdooPreviewApplyOperation, Mock]:
+        from control_plane import odoo_preview_apply_http as preview_http
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        self.complete_original()
+        first_attempt = True
+
+        def execute(**kwargs: Any) -> dict[str, object]:
+            nonlocal first_attempt
+            if first_attempt:
+                first_attempt = False
+                if phase:
+                    kwargs["provider_effect_checkpoint"](phase)
+                raise ProviderMutationUnknownError("original interrupted")
+            return preview_http.execute_odoo_preview_apply_result(**kwargs)
+
+        execute_spy = Mock(side_effect=execute)
+        assert self.issued.plan_provenance is not None
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="later-preservation",
+            idempotency_key=self.issued.plan_provenance.plan_id,
+            request_fingerprint="later-preservation",
+            trace_id="later-preservation",
+            execute_apply=execute_spy,
+            observe_apply=preview_http.observe_odoo_preview_apply_result,
+        )
+        self.enterContext(patch.object(operation.adapter, "capture_schedule_binding"))
+        self.enterContext(
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.example.test", "fixture-token"),
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._compose_exists_by_id",
+                return_value=True,
+            )
+        )
+        self.retry_clock = self.enterContext(patch.object(preview_http, "datetime", wraps=datetime))
+        self.enterContext(
+            patch.object(preview_http, "_build_odoo_preview_apply_inputs", return_value=self.issued)
+        )
+        self.enterContext(
+            patch.object(
+                preview_http,
+                "_odoo_preview_service_environment",
+                return_value=preview_http._OdooPreviewServiceEnvironment(values={}),
+            )
+        )
+        self.retry_preservation = self.enterContext(
+            patch("control_plane.preview_preservation.run_preview_preservation")
+        )
+        self.retry_provider = self.enterContext(
+            patch.object(preview_http, "execute_odoo_preview_dokploy_apply")
+        )
+        first = operation.run(self.store)
+        self.assertEqual(first.status, "reconcile_required")
+        assert first.record is not None
+        self.first_retry_record = first.record
+        return operation, execute_spy
+
+    def test_expired_later_destroy_retry_verifies_copy_before_preserving_again(self) -> None:
+        operation, _ = self.interrupted_preserving_retry("domain_delete")
+        assert self.issued.plan_provenance is not None
+        self.retry_clock.now.return_value = self.issued.plan_provenance.expires_at + timedelta(
+            seconds=1
+        )
+        reached_preserve = RuntimeError("preserve reached")
+        modes = []
+
+        def preservation(**kwargs: Any) -> None:
+            modes.append(kwargs["mode"])
+            if kwargs["mode"] == "preserve":
+                raise reached_preserve
+
+        self.retry_preservation.side_effect = preservation
+        with self.assertRaises(RuntimeError) as raised:
+            operation.run(self.store)
+        self.assertIs(raised.exception, reached_preserve)
+        self.assertEqual(modes, ["verify", "preserve"])
+        current = self.store.read_idempotency_record_by_id(self.first_retry_record.record_id)
+        assert current is not None
+        self.assertEqual(current.idempotency_key, self.first_retry_record.idempotency_key)
+        self.assertGreater(current.attempt, self.first_retry_record.attempt)
+        self.retry_provider.assert_not_called()
+
+    def test_missing_later_retry_copy_never_recaptures_before_or_after_expiry(self) -> None:
+        operation, _ = self.interrupted_preserving_retry("domain_delete")
+        assert self.issued.plan_provenance is not None
+
+        def missing_copy(**kwargs: Any) -> None:
+            self.assertEqual(kwargs["mode"], "verify")
+            raise ValueError("retained copy unavailable")
+
+        self.retry_preservation.side_effect = missing_copy
+        for moment in (
+            self.issued.plan_provenance.issued_at + timedelta(seconds=1),
+            self.issued.plan_provenance.expires_at + timedelta(seconds=1),
+        ):
+            with self.subTest(moment=moment):
+                self.retry_clock.now.return_value = moment
+                self.retry_preservation.reset_mock()
+                self.assertEqual(operation.run(self.store).status, "reconcile_required")
+                self.retry_preservation.assert_called_once()
+                current = self.store.read_idempotency_record_by_id(
+                    self.first_retry_record.record_id
+                )
+                assert current is not None
+                self.assertEqual(
+                    current.provider_effect_phase, self.first_retry_record.provider_effect_phase
+                )
+                self.assertEqual(current.idempotency_key, self.first_retry_record.idempotency_key)
+                self.retry_provider.assert_not_called()
+
+    def test_pre_effect_retry_needs_no_copy_and_keeps_ordinary_expiry(self) -> None:
+        from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+
+        operation, _ = self.interrupted_preserving_retry("")
+        assert self.issued.plan_provenance is not None
+        self.retry_clock.now.return_value = self.issued.plan_provenance.issued_at + timedelta(
+            seconds=1
+        )
+        reached_preserve = RuntimeError("preserve reached")
+
+        def preservation(**kwargs: Any) -> None:
+            self.assertEqual(kwargs["mode"], "preserve")
+            raise reached_preserve
+
+        self.retry_preservation.side_effect = preservation
+        with self.assertRaises(RuntimeError) as raised:
+            operation.run(self.store)
+        self.assertIs(raised.exception, reached_preserve)
+        self.retry_clock.now.return_value = self.issued.plan_provenance.expires_at + timedelta(
+            seconds=1
+        )
+        self.retry_preservation.reset_mock()
+        with self.assertRaises(OdooPreviewPlanProvenanceError):
+            operation.run(self.store)
+        self.retry_preservation.assert_not_called()
+        self.retry_provider.assert_not_called()
+        self.assertIsNone(
+            self.store.read_idempotency_record_by_id(self.first_retry_record.record_id)
+        )
+
+    def test_unknown_later_destroy_effects_do_not_reach_copy_or_execution(self) -> None:
+        operation, execute = self.interrupted_preserving_retry("compose_delete")
+        assert self.issued.plan_provenance is not None
+        self.retry_clock.now.return_value = self.issued.plan_provenance.expires_at + timedelta(
+            seconds=1
+        )
+        self.assertEqual(operation.run(self.store).status, "reconcile_required")
+        execute.assert_called_once()
+        self.retry_preservation.assert_not_called()
+        self.retry_provider.assert_not_called()
 
     def test_adoption_cannot_write_destroyed_lifecycle_without_retained_copy_verification(
         self,

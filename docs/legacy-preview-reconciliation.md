@@ -214,6 +214,12 @@ expiry. It still rebuilds and compares current plan authority and rechecks
 preservation custody before effects. A fresh expired plan or another operation
 cannot use that continuation; retain the original key.
 
+After capture, the durable runner still requires positive provider retry safety.
+An admitted original retry verifies its complete retained copy before preservation
+can run again, whether or not its admission plan has expired. Missing copies cannot
+be silently recaptured after a destructive checkpoint. Unknown effects stay held;
+an empty pre-effect checkpoint keeps ordinary retry and expiry handling.
+
 An older original without a clean snapshot can use its retained, scoped server
 schedule binding. If that binding is absent, the preserving operation captures
 and retains the same binding before effects. Missing or conflicting server
