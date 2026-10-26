@@ -7,6 +7,7 @@ import time
 from typing import TYPE_CHECKING, Protocol, cast
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
+from control_plane.discord_incident_summary import DiscordSummaryAlreadyCovered
 from control_plane.workflows.generic_web_promotion_workflow import (
     dispatch_generic_web_promotion_workflow_delivery,
 )
@@ -99,10 +100,10 @@ def run_outbox_worker_once(
             record=record,
             record_store=cast(PublicIngressNotificationOutboxStore, record_store),
             drivers=notification_drivers or PublicIngressNotificationDriverSet(),
-            mark_provider_started=lambda provider_operation_key, provider_id: (
+            mark_provider_started=lambda started_record, provider_operation_key, provider_id: (
                 _mark_provider_started(
                     record_store=record_store,
-                    record=record,
+                    record=started_record,
                     lease_owner=lease_owner,
                     provider_operation_key=provider_operation_key,
                     provider_id=provider_id,
@@ -230,5 +231,7 @@ def _mark_provider_started(
         provider_operation_key=provider_operation_key,
         provider_id=provider_id,
     )
+    if getattr(update, "status", "") == "summary_already_covered":
+        raise DiscordSummaryAlreadyCovered
     if getattr(update, "status", "") != "updated":
         raise RuntimeError("outbox_provider_marker_not_recorded")

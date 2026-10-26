@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable
-import hashlib
-import json
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from control_plane import secrets
 from control_plane.contracts.outbox_delivery import (
     OutboxDeliveryRecord,
     build_outbox_dedupe_key,
@@ -16,6 +16,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEvent,
     PublicIngressNotificationDestination,
     PublicIngressNotificationPolicyRecord,
+    RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
 )
 from control_plane.notifications import (
     DiscordNotificationError,
@@ -31,6 +32,11 @@ if TYPE_CHECKING:
     )
 
 SUMMARY_AGGREGATE_TYPE = "public_ingress_discord_summary"
+SUMMARY_WINDOW_SECONDS = 300
+
+
+class DiscordSummaryAlreadyCovered(RuntimeError):
+    pass
 
 
 def discord_incident_needs_summary(
@@ -40,101 +46,60 @@ def discord_incident_needs_summary(
 
 
 def summary_incidents(
-    record_store: PublicIngressMonitorStore,
-    policy: PublicIngressNotificationPolicyRecord,
-    replacements: tuple[PublicIngressIncidentRecord, ...] = (),
+    record_store: PublicIngressMonitorStore, policy: PublicIngressNotificationPolicyRecord
 ) -> tuple[PublicIngressIncidentRecord, ...]:
-    incidents = {
-        value.incident_id: value
-        for value in record_store.list_public_ingress_incident_records(status="open")
-    }
-    incidents.update((value.incident_id, value) for value in replacements)
     return tuple(
         sorted(
             (
                 value
-                for value in incidents.values()
-                if value.status == "open"
-                and value.notification_state == "active"
+                for value in record_store.list_public_ingress_incident_records(status="open")
+                if value.notification_state == "active"
                 and policy.matches(value)
+                and value.check_name != RETIRED_PRODUCTION_DELIVERY_LAG_CHECK
             ),
             key=lambda value: value.incident_id,
         )
     )
 
 
-def _summary_states(incidents: tuple[PublicIngressIncidentRecord, ...]) -> set[str]:
-    return {
-        hashlib.sha256(
-            json.dumps(
-                [
-                    value.incident_id,
-                    value.material_fingerprint_sha256,
-                    value.failure_code,
-                    value.severity,
-                ],
-                separators=(",", ":"),
-            ).encode()
-        ).hexdigest()
+def summary_states(incidents: tuple[PublicIngressIncidentRecord, ...]) -> list[list[str]]:
+    return [
+        [value.incident_id, value.material_fingerprint_sha256, value.failure_code, value.severity]
         for value in incidents
-    }
+    ]
 
 
-def _delivered_summary_states(
-    record_store: PublicIngressMonitorStore, policy_id: str, destination_id: str
-) -> set[str]:
-    read = getattr(record_store, "list_outbox_delivery_records", None)
-    if not callable(read):
-        return set()
-    return {
-        str(state)
-        for record in read(
-            states=("delivered",),
-            kind="public_ingress_notification",
-            aggregate_type=SUMMARY_AGGREGATE_TYPE,
-            aggregate_id=policy_id,
-        )
-        if record.action == "posted_discord_summary"
-        and record.payload.get("destination_id") == destination_id
-        for state in record.payload.get("summary_states", [])
-    }
+def summary_covers(previous: OutboxDeliveryRecord | None, current: OutboxDeliveryRecord) -> bool:
+    if previous is None:
+        return False
+    states = current.payload.get("summary_states")
+    covered = previous.payload.get("summary_states")
+    return (
+        isinstance(states, list)
+        and bool(states)
+        and isinstance(covered, list)
+        and all(state in covered for state in states)
+    )
 
 
 def build_discord_incident_summary_delivery(
     *,
-    record_store: PublicIngressMonitorStore,
     policy: PublicIngressNotificationPolicyRecord,
     destination: PublicIngressNotificationDestination,
-    incidents: tuple[PublicIngressIncidentRecord, ...],
     created_at: str,
-) -> OutboxDeliveryRecord | None:
-    states = _summary_states(incidents)
-    if not states or states <= _delivered_summary_states(
-        record_store, policy.policy_id, destination.destination_id
-    ):
-        return None
-    digest = hashlib.sha256(json.dumps(sorted(states)).encode()).hexdigest()
-    read_secret = getattr(record_store, "read_secret_record", None)
-    version = ""
-    if callable(read_secret):
-        try:
-            version = read_secret(destination.discord_webhook_secret).current_version_id
-        except FileNotFoundError:
-            pass
-    routing = hashlib.sha256(
-        json.dumps(
-            [policy.updated_at, destination.model_dump(mode="json"), version], sort_keys=True
-        ).encode()
-    ).hexdigest()
+    due_now: bool = False,
+) -> OutboxDeliveryRecord:
+    window = int(
+        datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+    ) // SUMMARY_WINDOW_SECONDS + int(not due_now)
+    ready_at = (
+        datetime.fromtimestamp(window * SUMMARY_WINDOW_SECONDS, timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     key = build_outbox_dedupe_key(
         kind="public_ingress_notification",
-        parts=(
-            SUMMARY_AGGREGATE_TYPE,
-            policy.policy_id,
-            destination.destination_id,
-            routing,
-            digest,
-        ),
+        parts=(SUMMARY_AGGREGATE_TYPE, policy.policy_id, destination.destination_id, str(window)),
     )
     return OutboxDeliveryRecord(
         delivery_id=build_outbox_delivery_id(kind="public_ingress_notification", dedupe_key=key),
@@ -144,12 +109,11 @@ def build_discord_incident_summary_delivery(
         dedupe_key=key,
         created_at=created_at,
         updated_at=created_at,
-        next_attempt_at=created_at,
+        next_attempt_at=ready_at,
         payload={
             "policy_id": policy.policy_id,
             "destination_id": destination.destination_id,
-            "summary_digest": digest,
-            "summary_states": sorted(states),
+            "send_window": window,
         },
     )
 
@@ -159,7 +123,7 @@ def deliver_discord_incident_summary(
     record: OutboxDeliveryRecord,
     record_store: PublicIngressNotificationOutboxStore,
     drivers: PublicIngressNotificationDriverSet,
-    mark_provider_started: Callable[[str, str], None],
+    mark_provider_started: Callable[[OutboxDeliveryRecord, str, str], None],
 ) -> OutboxDeliveryRecord:
     def result(
         state: str, action: str = "", error: str = "", started: bool = False
@@ -171,7 +135,9 @@ def deliver_discord_incident_summary(
                 "error_code": error,
                 "lease_owner": "",
                 "lease_expires_at": "",
-                "provider_operation_key": record.delivery_id if started else "",
+                "provider_operation_key": (record.provider_operation_key or record.delivery_id)
+                if started
+                else "",
                 "provider_id": "discord" if started else "",
             }
         )
@@ -204,37 +170,47 @@ def deliver_discord_incident_summary(
     )
     if policy is None or destination is None:
         return result("delivered", action="skipped_disabled_summary")
-    matching = summary_incidents(record_store, policy)
-    if not matching:
-        return result("delivered", action="skipped_cleared_summary")
-    webhooks = [
-        (value, drivers.resolve_secret(destination.discord_webhook_secret, value))
-        for value in matching
-    ]
-    incidents = tuple(value for value, webhook in webhooks if webhook)
-    if not incidents:
-        return result("pending", error="summary_destination_unavailable")
-    webhook = next(webhook for _, webhook in webhooks if webhook)
-    if public_discord_url_error(webhook):
-        return result("failed", error="summary_destination_invalid")
     current = build_discord_incident_summary_delivery(
-        record_store=record_store,
-        policy=policy,
-        destination=destination,
-        incidents=incidents,
-        created_at=record.updated_at,
+        policy=policy, destination=destination, created_at=record.updated_at, due_now=True
     )
-    if current is None:
-        return result("delivered", action="skipped_unchanged_summary")
-    if current.delivery_id != record.delivery_id:
+    if int(str(record.payload["send_window"])) < int(str(current.payload["send_window"])):
         from control_plane.storage.postgres import OutboxWithIdempotencyRequest
 
         record_store.enqueue_outbox_delivery_with_idempotency(
             OutboxWithIdempotencyRequest(delivery=current)
         )
         return result("delivered", action="superseded_discord_summary")
-    if any(value and value != webhook for _, value in webhooks):
-        return result("failed", error="summary_destination_scope_mismatch")
+    matching = summary_incidents(record_store, policy)
+    if not matching:
+        return result("delivered", action="skipped_cleared_summary")
+    try:
+        secret = record_store.read_secret_record(destination.discord_webhook_secret)
+    except FileNotFoundError:
+        return result("pending", error="summary_destination_unavailable")
+    incidents = tuple(
+        value
+        for value in matching
+        if secrets._scope_matches_record(
+            secret, context_name=value.context, instance_name=value.instance
+        )
+    )
+    if not incidents:
+        return result("delivered", action="skipped_out_of_scope")
+    record = record.model_copy(
+        update={"payload": {**record.payload, "summary_states": summary_states(incidents)}}
+    )
+    previous = record_store.read_latest_discord_summary(
+        policy_id=policy.policy_id,
+        destination_id=destination.destination_id,
+        exclude_delivery_id=record.delivery_id,
+    )
+    if summary_covers(previous, record):
+        return result("delivered", action="skipped_unchanged_summary")
+    webhook = drivers.resolve_secret(destination.discord_webhook_secret, incidents[0])
+    if secret.status != "configured" or not webhook:
+        return result("pending", error="summary_destination_unavailable")
+    if public_discord_url_error(webhook):
+        return result("failed", error="summary_destination_invalid")
     groups = Counter(
         (
             value.product,
@@ -252,7 +228,10 @@ def deliver_discord_incident_summary(
             lines.append("Additional conditions are listed in Product Ops.")
             break
         lines.append(line)
-    mark_provider_started(record.delivery_id, "discord")
+    try:
+        mark_provider_started(record, record.delivery_id, "discord")
+    except DiscordSummaryAlreadyCovered:
+        return result("delivered", action="skipped_unchanged_summary")
     try:
         drivers.discord_sender(
             webhook, {"content": "\n".join(lines), "allowed_mentions": {"parse": []}}

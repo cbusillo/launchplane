@@ -78,7 +78,7 @@ def _delivery_routing(
 
 def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspection:
     records = store.list_outbox_delivery_records(
-        states=("pending", "running", "reconcile_required"), limit=limit + 1
+        states=("pending", "running", "reconcile_required", "failed"), limit=limit + 1
     )
     policies = store.list_public_ingress_notification_policy_records(
         status="enabled", limit=limit + 1
@@ -106,6 +106,7 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
                 "created_at": record.created_at,
                 "attempt": record.attempt,
                 "provider_started": bool(record.provider_operation_key),
+                "error_code": record.error_code,
                 "routing": _delivery_routing(store, record, incident_statuses),
                 "queued_destination": {
                     key: value for key, value in destination.items() if key in destination_keys

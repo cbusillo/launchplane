@@ -4,26 +4,29 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 import unittest
+from unittest.mock import patch
 
 from control_plane.contracts.public_ingress_monitoring import (
-    PublicIngressIncidentRecord,
+    PublicIngressFailureCode,
     PublicIngressNotificationDestination,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
-    PublicIngressFailureCode,
 )
-from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
-from control_plane.discord_incident_summary import build_discord_incident_summary_delivery
+from control_plane.contracts.secret_record import SecretRecord
+from control_plane.discord_incident_summary import (
+    build_discord_incident_summary_delivery,
+)
 from control_plane.notifications import DiscordNotificationError, DiscordNotificationNotSentError
+from control_plane.outbox_inspection import inspect_outbox
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressNotificationDriverSet,
     _store_monitor_observation,
-    deliver_public_ingress_notification_outbox_delivery,
 )
 from tests.support.stores import _sqlite_database_url
 from tests.test_public_ingress_monitor import _notification_policy
 from tests.test_public_ingress_direct_outbox import _is_red
+from tests import test_public_ingress_direct_outbox as direct_outbox
 
 
 class DiscordIncidentSummaryTests(unittest.TestCase):
@@ -41,8 +44,17 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
             update={"product": "demo", "context": "demo", "instance": ""}
         )
         self.store.write_public_ingress_notification_policy_record(self.policy)
+        self.secret = SecretRecord(
+            secret_id="monitor-webhook",
+            scope="global",
+            integration="discord",
+            name="monitor",
+            current_version_id="test-version",
+            created_at="2026-10-25T12:00:00Z",
+            updated_at="2026-10-25T12:00:00Z",
+        )
+        self.store.write_secret_record(self.secret)
         self.sent: list[dict[str, object]] = []
-        self.markers: list[str] = []
         self.drivers = PublicIngressNotificationDriverSet(
             secret_resolver=lambda _name: "https://discord.com/api/webhooks/test/test",
             discord_sender=lambda _url, payload: self.sent.append(payload),
@@ -52,12 +64,12 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         self,
         instance: str,
         *,
+        time: str = "12:00:00",
         status: Literal["pass", "fail"] = "fail",
         critical: bool = False,
-        time: str = "12:00:00",
         code: PublicIngressFailureCode | None = None,
     ) -> None:
-        failure_code = (
+        failure = (
             (code or ("http_error" if critical else "deploy_fence_held"))
             if status == "fail"
             else None
@@ -71,229 +83,249 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
             check_name="health" if critical else "launchplane-deploy-fence",
             observed_at=f"2026-10-25T{time}Z",
             status=status,
-            failure_code=failure_code,
+            failure_code=failure,
             targets=(
                 PublicIngressTargetObservation(
                     target="health_url",
                     url="https://example.test/health",
                     status=status,
-                    failure_code=failure_code,
+                    failure_code=failure,
                     summary="Measured health",
                 ),
             ),
-            summary="Measured failure" if status == "fail" else "Measured recovery",
+            summary="Measured observation",
         )
         _store_monitor_observation(
             record_store=self.store,
             record=record,
             incident_eligible=True,
-            recovery_observation_threshold=1,
             expected_profile_sha256="",
-            expected_private_endpoint_key="",
-            expected_private_endpoint_sha256="",
-            expected_route_binding_sha256="",
-            expected_provider_hold_snapshot=None,
+            recovery_observation_threshold=1,
             notify=True,
             notification_drivers=self.drivers,
         )
 
-    def deliver(self, record: OutboxDeliveryRecord) -> OutboxDeliveryRecord:
-        return deliver_public_ingress_notification_outbox_delivery(
-            record=record,
-            record_store=self.store,
-            drivers=self.drivers,
-            mark_provider_started=lambda key, _provider: self.markers.append(key),
-        )
+    def drain(self, time: str) -> None:
+        for _ in range(100):
+            result = direct_outbox.DirectNotificationOutboxTests._work(
+                self.store, self.drivers, f"2026-10-25T{time}Z"
+            )
+            if result.status == "idle":
+                return
+        self.fail("Outbox did not settle within its fixture inventory")
 
-    def test_warning_fleet_coalesces_and_repeated_conditions_do_not_repost(self) -> None:
+    def test_worker_interleaved_with_fleet_burst_sends_one_grouped_summary(self) -> None:
         self.observe("preview-one")
-        first = self.store.list_outbox_delivery_records()[0]
-        self.observe("preview-two", time="12:01:00")
-        self.deliver(first)
-        summaries = self.store.list_outbox_delivery_records(
-            aggregate_type="public_ingress_discord_summary"
-        )
-        current = summaries[-1]
-        self.store.write_outbox_delivery_record(self.deliver(current))
+        self.drain("12:00:01")
+        self.observe("preview-two", time="12:04:00")
+        self.drain("12:04:01")
+        self.assertEqual(self.sent, [])
+        self.drain("12:05:00")
         self.assertEqual(len(self.sent), 1)
-        self.assertEqual(len(self.store.list_public_ingress_incident_records()), 2)
-        self.assertEqual(self.sent[0]["allowed_mentions"], {"parse": []})
         self.assertFalse(_is_red(self.sent[0]))
-        self.observe("preview-one", time="19:00:00")
-        self.assertEqual(len(self.store.list_outbox_delivery_records()), len(summaries))
-        self.assertEqual(
-            self.store.read_outbox_delivery_record(current.delivery_id).state, "delivered"
-        )
+        mentions = self.sent[0].get("allowed_mentions")
+        assert isinstance(mentions, dict)
+        self.assertEqual(mentions.get("parse"), [])
+        self.assertEqual(len(self.store.list_outbox_delivery_records()), 1)
         self.assertTrue(
             all(
-                incident.status == "open"
-                for incident in self.store.list_public_ingress_incident_records()
-            )
-        )
-
-    def test_cleared_warning_does_not_send(self) -> None:
-        self.observe("preview-one")
-        queued = self.store.list_outbox_delivery_records()[0]
-        self.observe("preview-one", status="pass", time="12:01:00")
-        self.deliver(queued)
-        self.assertEqual(self.sent, [])
-        self.assertEqual(self.markers, [])
-
-    def test_new_critical_failure_pages_and_unchanged_reminder_is_quiet(self) -> None:
-        self.observe("prod", critical=True)
-        first = self.store.list_outbox_delivery_records()[0]
-        self.deliver(first)
-        self.assertTrue(_is_red(self.sent[0]))
-        self.observe("prod", critical=True, time="19:00:00")
-        summaries = self.store.list_outbox_delivery_records(
-            aggregate_type="public_ingress_discord_summary"
-        )
-        self.assertEqual(len(summaries), 1)
-        self.deliver(summaries[0])
-        self.assertFalse(_is_red(self.sent[1]))
-        self.assertEqual(self.store.list_public_ingress_incident_records()[0].severity, "critical")
-
-    def test_summary_rechecks_policy_and_does_not_replay_unknown_send(self) -> None:
-        self.observe("preview-one")
-        queued = self.store.list_outbox_delivery_records()[0]
-        started = queued.model_copy(update={"provider_operation_key": queued.delivery_id})
-        result = self.deliver(started)
-        self.assertEqual(getattr(result, "error_code"), "delivery_outcome_unknown")
-        self.assertEqual(self.sent, [])
-        self.store.write_public_ingress_notification_policy_record(
-            self.policy.model_copy(update={"status": "disabled"})
-        )
-        self.deliver(queued)
-        self.assertEqual(self.sent, [])
-
-    def test_summary_rate_limit_can_retry_but_lost_response_cannot(self) -> None:
-        self.observe("preview-one")
-        queued = self.store.list_outbox_delivery_records()[0]
-        for error in (
-            DiscordNotificationNotSentError("not sent"),
-            DiscordNotificationError(429),
-            OSError("response lost"),
-        ):
-            with self.subTest(error=type(error).__name__):
-                self.drivers.discord_sender = lambda _url, _payload: (_ for _ in ()).throw(error)
-                result = self.deliver(queued)
-                if isinstance(error, (DiscordNotificationError, DiscordNotificationNotSentError)):
-                    self.assertEqual(result.state, "pending")
-                    self.assertEqual(result.provider_operation_key, "")
-                else:
-                    self.assertEqual(result.state, "failed")
-                    self.assertTrue(result.provider_operation_key)
-                    self.markers.clear()
-                    self.deliver(result)
-                    self.assertEqual(self.markers, [])
-
-    def test_superseded_critical_material_state_does_not_send_old_red(self) -> None:
-        self.observe("prod", critical=True)
-        queued = self.store.list_outbox_delivery_records()[0]
-        self.observe("prod", critical=True, time="12:01:00", code="dns_failure")
-        result = self.deliver(queued)
-        self.assertEqual(result.state, "delivered")
-        self.assertEqual(self.sent, [])
-        self.deliver(self.store.list_outbox_delivery_records()[-1])
-        self.assertIn("dns_failure", str(self.sent[0]))
-
-    def test_clearing_one_warning_does_not_repost_already_summarized_warnings(self) -> None:
-        self.observe("preview-one")
-        self.observe("preview-two", time="12:01:00")
-        queued = self.store.list_outbox_delivery_records()[-1]
-        self.store.write_outbox_delivery_record(self.deliver(queued))
-        before = {value.delivery_id for value in self.store.list_outbox_delivery_records()}
-        self.observe("preview-two", status="pass", time="12:02:00")
-        self.observe("preview-one", time="19:00:00")
-        self.assertEqual(len(self.sent), 1)
-        self.assertEqual(
-            before, {value.delivery_id for value in self.store.list_outbox_delivery_records()}
-        )
-
-    def test_summary_respects_silence_acknowledgement_and_destination_scope(self) -> None:
-        from control_plane.discord_incident_summary import _summary_states
-
-        for index, state in enumerate(("silenced", "acknowledged")):
-            self.observe(f"preview-{state}", time=f"12:0{index}:00")
-            incident = next(
-                value
+                value.status == "open"
                 for value in self.store.list_public_ingress_incident_records()
-                if value.instance == f"preview-{state}"
             )
-            self.store.write_public_ingress_incident_record(
-                incident.model_copy(
-                    update={
-                        "notification_state": state,
-                        "silenced_until": "2026-10-26T12:00:00Z" if state == "silenced" else "",
-                    }
-                )
-            )
-        self.observe("preview-allowed", time="12:03:00")
-        self.observe("preview-foreign", time="12:04:00")
-        self.drivers.incident_secret_resolver = lambda _name, value: (
-            "https://discord.com/api/webhooks/test/test"
-            if value.instance == "preview-allowed"
-            else ""
         )
-        for _ in range(2):
-            for record in self.store.list_outbox_delivery_records(states=("pending",)):
-                self.store.write_outbox_delivery_record(self.deliver(record))
+
+    def test_clearing_subset_and_unchanged_reminders_do_not_repost(self) -> None:
+        self.observe("one")
+        self.observe("two", time="12:01:00")
+        self.drain("12:05:00")
+        self.observe("two", time="12:06:00", status="pass")
+        self.observe("one", time="19:00:00")
+        self.drain("19:05:00")
         self.assertEqual(len(self.sent), 1)
-        allowed = next(
+        self.observe("one", time="19:06:00", status="pass")
+        self.drain("19:10:00")
+        self.assertEqual(len(self.sent), 1)
+
+    def test_overdue_windows_fold_into_one_current_summary(self) -> None:
+        self.observe("one")
+        self.observe("two", time="12:06:00")
+        self.observe("three", time="12:12:00")
+        self.drain("12:30:00")
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(
+            all(value.state == "delivered" for value in self.store.list_outbox_delivery_records())
+        )
+
+    def test_scope_silence_and_acknowledgement_preserve_only_eligible_conditions(self) -> None:
+        self.store.write_secret_record(
+            self.secret.model_copy(
+                update={"scope": "context_instance", "context": "demo", "instance": "allowed"}
+            )
+        )
+        for index, instance in enumerate(("allowed", "foreign", "silenced", "acknowledged")):
+            self.observe(instance, time=f"12:0{index}:00")
+            if instance in {"silenced", "acknowledged"}:
+                incident = next(
+                    value
+                    for value in self.store.list_public_ingress_incident_records()
+                    if value.instance == instance
+                )
+                self.store.write_public_ingress_incident_record(
+                    incident.model_copy(
+                        update={
+                            "notification_state": instance,
+                            "silenced_until": "2026-10-25T12:06:00Z"
+                            if instance == "silenced"
+                            else "",
+                        }
+                    )
+                )
+        self.drain("12:05:00")
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("allowed", str(self.sent[0]))
+        for instance in ("foreign", "silenced", "acknowledged"):
+            self.assertNotIn(instance, str(self.sent[0]))
+        self.observe("allowed", time="19:00:00")
+        self.drain("19:05:00")
+        self.assertEqual(len(self.sent), 1)
+
+    def test_wholly_out_of_scope_summary_skips_without_retry_or_failure(self) -> None:
+        self.store.write_secret_record(
+            self.secret.model_copy(
+                update={"scope": "context_instance", "context": "demo", "instance": "prod"}
+            )
+        )
+        self.observe("preview-one")
+        self.drain("12:05:00")
+        rows = self.store.list_outbox_delivery_records()
+        self.assertEqual(self.sent, [])
+        self.assertTrue(
+            all(
+                value.state == "delivered"
+                and not value.error_code
+                and not value.provider_operation_key
+                for value in rows
+            )
+        )
+
+    def test_silence_expiry_and_returning_material_state_can_be_summarized(self) -> None:
+        self.observe("one")
+        self.observe("two", time="12:01:00")
+        incident = next(
             value
             for value in self.store.list_public_ingress_incident_records()
-            if value.instance == "preview-allowed"
+            if value.instance == "two"
         )
-        delivered = next(
-            value
-            for value in self.store.list_outbox_delivery_records()
-            if value.action == "posted_discord_summary"
+        self.store.write_public_ingress_incident_record(
+            incident.model_copy(
+                update={"notification_state": "silenced", "silenced_until": "2026-10-25T12:06:00Z"}
+            )
         )
-        states = delivered.payload["summary_states"]
-        self.assertIsInstance(states, list)
-        assert isinstance(states, list)
-        self.assertEqual(set(states), _summary_states((allowed,)))
+        self.drain("12:05:00")
+        self.observe("two", time="19:00:00")
+        self.drain("19:05:00")
+        self.assertEqual(len(self.sent), 2)
+        self.observe("one", time="19:06:00", code="testing_delivery_failed")
+        self.drain("19:10:00")
+        self.observe("one", time="19:11:00")
+        self.drain("19:15:00")
+        self.assertEqual(len(self.sent), 4)
 
-    def test_changed_summary_has_no_restarting_settle_timer(self) -> None:
-        self.observe("preview-one")
-        queued = self.store.list_outbox_delivery_records()[0]
-        self.observe("preview-two", time="12:01:00")
-        self.deliver(queued.model_copy(update={"updated_at": "2026-10-25T12:02:00Z"}))
-        for record in self.store.list_outbox_delivery_records(states=("pending",)):
-            self.assertLessEqual(record.next_attempt_at, "2026-10-25T12:02:00Z")
-
-    def test_critical_discord_response_loss_cannot_repeat_a_red_notice(self) -> None:
+    def test_critical_failure_and_material_change_page_but_reminder_is_quiet(self) -> None:
         self.observe("prod", critical=True)
-        queued = self.store.list_outbox_delivery_records()[0]
+        self.drain("12:00:01")
+        self.observe("prod", critical=True, time="12:01:00", code="dns_failure")
+        self.drain("12:01:01")
+        self.assertEqual(sum(_is_red(value) for value in self.sent), 2)
+        self.observe("prod", critical=True, time="19:00:00", code="dns_failure")
+        self.drain("19:05:00")
+        self.assertEqual(sum(_is_red(value) for value in self.sent), 2)
+        self.assertEqual(len(self.sent), 3)
+
+    def test_unknown_summary_retains_rendered_state_and_survives_routing_edits(self) -> None:
+        self.observe("one")
 
         def lose_response(_url: str, payload: dict[str, object]) -> None:
             self.sent.append(payload)
             raise TimeoutError("response lost")
 
         self.drivers.discord_sender = lose_response
-        failed = self.deliver(queued)
-        self.assertEqual(failed.error_code, "delivery_outcome_unknown")
-        self.assertEqual(failed.state, "failed")
-        self.deliver(failed)
+        self.drain("12:05:00")
+        failed = self.store.list_outbox_delivery_records()[0]
+        self.assertTrue(failed.provider_operation_key)
+        self.assertTrue(failed.payload.get("summary_states"))
+        inspection = inspect_outbox(self.store, limit=100)
+        self.assertTrue(
+            any(
+                value["error_code"] == "delivery_outcome_unknown" for value in inspection.deliveries
+            )
+        )
+        self.store.write_public_ingress_notification_policy_record(
+            self.policy.model_copy(update={"updated_at": "2026-10-25T18:00:00Z"})
+        )
+        self.store.write_secret_record(
+            self.secret.model_copy(
+                update={"current_version_id": "rotated", "updated_at": "2026-10-25T18:00:00Z"}
+            )
+        )
+        self.observe("one", time="19:00:00")
+        self.drain("19:05:00")
         self.assertEqual(len(self.sent), 1)
 
-    def test_summary_identity_ignores_probe_times_but_changes_with_material_state(self) -> None:
-        self.observe("preview-one")
-        incident = self.store.list_public_ingress_incident_records()[0]
+    def test_preconnect_and_rate_limit_retry_but_critical_response_loss_does_not(self) -> None:
+        self.observe("prod", critical=True)
+        for error, time in (
+            (DiscordNotificationNotSentError("not sent"), "12:00:01"),
+            (DiscordNotificationError(429), "12:01:00"),
+        ):
+            self.drivers.discord_sender = lambda _url, _payload: (_ for _ in ()).throw(error)
+            self.drain(time)
+            self.assertEqual(self.store.list_outbox_delivery_records()[0].state, "pending")
+        self.drivers.discord_sender = lambda _url, payload: self.sent.append(payload)
+        self.drain("12:02:00")
+        self.assertEqual(len(self.sent), 1)
 
-        def build(value: PublicIngressIncidentRecord) -> object:
-            return build_discord_incident_summary_delivery(
-                record_store=self.store,
-                policy=self.policy,
-                destination=self.destination,
-                incidents=(value,),
-                created_at="2026-10-25T12:00:00Z",
+    def test_atomic_marker_rechecks_adjacent_windows_and_persists_snapshot(self) -> None:
+        rows = []
+        for time in ("12:00:00", "12:06:00"):
+            row = build_discord_incident_summary_delivery(
+                policy=self.policy, destination=self.destination, created_at=f"2026-10-25T{time}Z"
             )
-
-        first = build(incident)
-        self.assertEqual(
-            first, build(incident.model_copy(update={"latest_observed_at": "2026-10-25T13:00:00Z"}))
+            self.store.write_outbox_delivery_record(row)
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value="2026-10-25T12:11:00Z"
+        ):
+            for owner in ("first", "second"):
+                claim = self.store.claim_next_outbox_delivery_record(lease_owner=owner)
+                self.assertIsNotNone(claim.record)
+                assert claim.record is not None
+                rows.append(
+                    claim.record.model_copy(
+                        update={
+                            "payload": {
+                                **claim.record.payload,
+                                "summary_states": [["incident", "fingerprint"]],
+                            }
+                        }
+                    )
+                )
+            first = self.store.mark_outbox_delivery_provider_started(
+                record=rows[0],
+                lease_owner="first",
+                provider_operation_key="first-send",
+                provider_id="discord",
+            )
+            second = self.store.mark_outbox_delivery_provider_started(
+                record=rows[1],
+                lease_owner="second",
+                provider_operation_key="second-send",
+                provider_id="discord",
+            )
+        self.assertEqual(first.status, "updated")
+        self.assertNotEqual(second.status, "updated")
+        self.assertFalse(
+            self.store.read_outbox_delivery_record(rows[1].delivery_id).provider_operation_key
         )
-        self.assertNotEqual(
-            first, build(incident.model_copy(update={"material_fingerprint_sha256": "a" * 64}))
+        self.assertEqual(
+            self.store.read_outbox_delivery_record(rows[0].delivery_id).payload, rows[0].payload
         )

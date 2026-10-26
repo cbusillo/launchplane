@@ -7,11 +7,11 @@ from typing import cast
 from unittest.mock import patch
 
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
+from control_plane.contracts.secret_record import SecretRecord
 from control_plane.discord_incident_summary import SUMMARY_AGGREGATE_TYPE
 from control_plane.notifications import DiscordNotificationError, DISCORD_CRITICAL_ALERT_COLOR
 from control_plane.outbox_worker import (
     OutboxWorkerStepResult,
-    run_outbox_worker_loop,
     run_outbox_worker_once,
 )
 from control_plane.storage.postgres import PostgresRecordStore
@@ -75,7 +75,7 @@ class DirectNotificationOutboxTests(unittest.TestCase):
         self._probe(store, 503, "2026-05-30T12:04:00Z")
         new_deliveries = store.list_outbox_delivery_records(states=("pending",))
         self._drain_loop(store, drivers, "2026-05-30T12:05:00Z")
-        self.assertEqual(new_deliveries, ())
+        self.assertTrue(new_deliveries)
         self.assertEqual(len(sent), 2)
 
     def test_startup_keeps_each_incident_and_destination_separate(self) -> None:
@@ -169,6 +169,17 @@ class DirectNotificationOutboxTests(unittest.TestCase):
         store.write_public_ingress_notification_policy_record(
             _notification_policy(self._destination("discord"))
         )
+        store.write_secret_record(
+            SecretRecord(
+                secret_id="discord-webhook",
+                scope="global",
+                integration="discord",
+                name="monitor",
+                current_version_id="test-version",
+                created_at="2026-05-29T12:00:00Z",
+                updated_at="2026-05-29T12:00:00Z",
+            )
+        )
         return store
 
     @staticmethod
@@ -182,15 +193,11 @@ class DirectNotificationOutboxTests(unittest.TestCase):
     def _drain_loop(
         store: PostgresRecordStore, drivers: PublicIngressNotificationDriverSet, now: str
     ) -> None:
-        steps = iter([False] * len(store.list_outbox_delivery_records(states=("pending",))))
-        with patch.object(store, "_database_mutation_timestamp", return_value=now):
-            run_outbox_worker_loop(
-                record_store=store,
-                control_plane_root=Path("."),
-                lease_owner="worker",
-                should_stop=lambda: next(steps, True),
-                notification_drivers=drivers,
-            )
+        for _ in range(2 * len(store.list_outbox_delivery_records(states=("pending",))) + 1):
+            result = DirectNotificationOutboxTests._work(store, drivers, now)
+            if result.status == "idle":
+                return
+        raise AssertionError("Fixture outbox did not settle")
 
     def test_open_incident_survives_restart_and_transient_failure_without_duplicate_send(
         self,

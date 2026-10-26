@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast, TYPE_CHECKING
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -29,6 +29,10 @@ import ssl
 import time
 
 from pydantic import BaseModel, ConfigDict, Field
+from control_plane.contracts.secret_record import SecretRecord
+
+if TYPE_CHECKING:
+    from control_plane.storage.postgres import OutboxWithIdempotencyRequest
 
 from control_plane.contracts.sync_cycle_health import sync_cycle_health_evidence_from_payload
 
@@ -138,7 +142,6 @@ from control_plane.discord_incident_summary import (
     build_discord_incident_summary_delivery,
     deliver_discord_incident_summary,
     discord_incident_needs_summary,
-    summary_incidents,
 )
 from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsProbeResult
@@ -1170,7 +1173,7 @@ def _store_monitor_observation(
                 incident_events=plan.incident_events,
                 observation=plan.observation,
             )
-            if notify
+            if notify and callable(transition_writer)
             else ()
         )
         if not callable(transition_writer):
@@ -1510,14 +1513,11 @@ def _public_ingress_notification_outbox_deliveries(
                     incident, event
                 ):
                     summary = build_discord_incident_summary_delivery(
-                        record_store=record_store,
                         policy=policy,
                         destination=destination,
-                        incidents=summary_incidents(record_store, policy, incident_records),
                         created_at=incident_event.occurred_at,
                     )
-                    if summary is not None:
-                        deliveries.append(summary)
+                    deliveries.append(summary)
                     continue
                 attempt_id = build_public_ingress_notification_attempt_id(
                     incident_id=incident.incident_id,
@@ -3671,7 +3671,7 @@ def deliver_public_ingress_notification_outbox_delivery(
     *,
     record: OutboxDeliveryRecord,
     drivers: PublicIngressNotificationDriverSet,
-    mark_provider_started: Callable[[str, str], None],
+    mark_provider_started: Callable[[OutboxDeliveryRecord, str, str], None],
     record_store: PublicIngressNotificationOutboxStore | None = None,
 ) -> OutboxDeliveryRecord:
     delivery_record = record
@@ -3739,16 +3739,14 @@ def deliver_public_ingress_notification_outbox_delivery(
                         from control_plane.storage.postgres import OutboxWithIdempotencyRequest
 
                         summary = build_discord_incident_summary_delivery(
-                            record_store=record_store,
                             policy=policy,
                             destination=destination,
-                            incidents=summary_incidents(record_store, policy),
                             created_at=record.updated_at,
+                            due_now=True,
                         )
-                        if summary is not None:
-                            record_store.enqueue_outbox_delivery_with_idempotency(
-                                OutboxWithIdempotencyRequest(delivery=summary)
-                            )
+                        record_store.enqueue_outbox_delivery_with_idempotency(
+                            OutboxWithIdempotencyRequest(delivery=summary)
+                        )
                     return _superseded_incident_outbox_delivery(
                         record=record, reason="discord_summary"
                     )
@@ -3859,7 +3857,7 @@ def deliver_public_ingress_notification_outbox_delivery(
                     response=reconciled_response,
                 )
         else:
-            mark_provider_started(provider_operation_key, "github")
+            mark_provider_started(delivery_record, provider_operation_key, "github")
         response = drivers.github_client(
             action,
             {
@@ -3927,7 +3925,15 @@ def _superseded_incident_outbox_delivery(
 
 
 class PublicIngressNotificationOutboxStore(PublicIngressMonitorStore, Protocol):
-    def enqueue_outbox_delivery_with_idempotency(self, request: Any) -> OutboxDeliveryRecord: ...
+    def enqueue_outbox_delivery_with_idempotency(
+        self, request: OutboxWithIdempotencyRequest
+    ) -> OutboxDeliveryRecord: ...
+
+    def read_secret_record(self, secret_id: str) -> SecretRecord: ...
+
+    def read_latest_discord_summary(
+        self, *, policy_id: str, destination_id: str, exclude_delivery_id: str = ""
+    ) -> OutboxDeliveryRecord | None: ...
 
     def read_public_ingress_incident_record(
         self, incident_id: str
@@ -3943,7 +3949,7 @@ def _deliver_direct_notification_outbox(
     record: OutboxDeliveryRecord,
     drivers: PublicIngressNotificationDriverSet,
     record_store: PublicIngressNotificationOutboxStore | None,
-    mark_provider_started: Callable[[str, str], None],
+    mark_provider_started: Callable[[OutboxDeliveryRecord, str, str], None],
 ) -> OutboxDeliveryRecord:
     payload = record.payload
     attempt_payload = _dict_payload(payload.get("attempt"))
@@ -4000,7 +4006,7 @@ def _deliver_direct_notification_outbox(
             }
         )
     operation_key = str(attempt_payload["attempt_id"])
-    mark_provider_started(operation_key, destination.kind)
+    mark_provider_started(record, operation_key, destination.kind)
     delivery = drivers.send(
         destination=destination,
         event=event,

@@ -929,6 +929,7 @@ OutboxDeliveryCompletionStatus = Literal[
     "not_running",
     "owner_mismatch",
     "lease_expired",
+    "summary_already_covered",
 ]
 
 
@@ -8328,6 +8329,54 @@ class PostgresRecordStore(HumanSessionStore):
             filters=(LaunchplaneOutboxDeliveryRow.delivery_id == delivery_id,),
         )
 
+    def _latest_discord_summary(
+        self,
+        session: Session,
+        *,
+        policy_id: str,
+        destination_id: str,
+        exclude_delivery_id: str = "",
+    ) -> OutboxDeliveryRecord | None:
+        from control_plane.discord_incident_summary import SUMMARY_AGGREGATE_TYPE
+
+        row = session.scalar(
+            select(LaunchplaneOutboxDeliveryRow)
+            .where(
+                LaunchplaneOutboxDeliveryRow.kind == "public_ingress_notification",
+                LaunchplaneOutboxDeliveryRow.aggregate_type == SUMMARY_AGGREGATE_TYPE,
+                LaunchplaneOutboxDeliveryRow.aggregate_id == policy_id,
+                LaunchplaneOutboxDeliveryRow.delivery_id != exclude_delivery_id,
+                LaunchplaneOutboxDeliveryRow.payload["payload"]["destination_id"].as_string()
+                == destination_id,
+                or_(
+                    LaunchplaneOutboxDeliveryRow.payload["action"].as_string()
+                    == "posted_discord_summary",
+                    LaunchplaneOutboxDeliveryRow.provider_operation_key != "",
+                ),
+            )
+            .order_by(
+                LaunchplaneOutboxDeliveryRow.payload["payload"]["send_window"].as_integer().desc(),
+                LaunchplaneOutboxDeliveryRow.delivery_id.desc(),
+            )
+            .limit(1)
+        )
+        return (
+            self._read_payload(model_type=OutboxDeliveryRecord, payload=row.payload)
+            if row
+            else None
+        )
+
+    def read_latest_discord_summary(
+        self, *, policy_id: str, destination_id: str, exclude_delivery_id: str = ""
+    ) -> OutboxDeliveryRecord | None:
+        with self._session_factory() as session:
+            return self._latest_discord_summary(
+                session,
+                policy_id=policy_id,
+                destination_id=destination_id,
+                exclude_delivery_id=exclude_delivery_id,
+            )
+
     def list_outbox_delivery_records(
         self,
         *,
@@ -8605,6 +8654,24 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             if current_record.lease_expires_at <= observed_at:
                 return OutboxDeliveryCompletionResult(status="lease_expired", record=current_record)
+            if not require_terminal and updates.get("provider_operation_key"):
+                from control_plane.discord_incident_summary import (
+                    SUMMARY_AGGREGATE_TYPE,
+                    summary_covers,
+                )
+
+                if record.aggregate_type == SUMMARY_AGGREGATE_TYPE:
+                    previous = self._latest_discord_summary(
+                        session,
+                        policy_id=record.aggregate_id,
+                        destination_id=str(record.payload["destination_id"]),
+                        exclude_delivery_id=record.delivery_id,
+                    )
+                    if summary_covers(previous, record):
+                        session.commit()
+                        return OutboxDeliveryCompletionResult(
+                            status="summary_already_covered", record=current_record
+                        )
             next_updates = dict(updates)
             if not _string_value(next_updates.get("updated_at") or "").strip():
                 next_updates["updated_at"] = observed_at
