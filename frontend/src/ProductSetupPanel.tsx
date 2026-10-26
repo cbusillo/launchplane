@@ -57,8 +57,8 @@ export function ProductSetupPanel({ product, onApplied }: { product: string; onA
     {!profile && pendingSetup ? <p role="status" aria-label="Pending setup operation">An earlier setup apply is still unresolved. Keep its original operation key and request; recovery returns after a valid profile read.</p> : null}
     {!profile && !error ? <p role="status">Loading product setup…</p> : null}
     {profile ? <>
-      <details open={environmentOpen} onToggle={event => setEnvironmentOpen(event.currentTarget.open)}>
-        <summary>Add environment</summary>
+      <details open={environmentOpen}>
+        <summary onClick={event => { event.preventDefault(); setEnvironmentOpen(current => !current); }}>Add environment</summary>
         <p>{privateProduct ? "The separate target records must already be prepared by engineering. This product has no public website; its private health check is configured separately." : "The target records and HTTPS origin must already be prepared by engineering. The service verifies them before adding the environment."}</p>
         <SetupChange key={`${product}:environment`} product={product} kind="environment" makeRequest={() => environmentSetupRequest(product, context, instance, privateProduct ? "" : baseUrl, environmentReason, profile.public_website)} onApplied={request => { if ("instance" in request) applied(request.instance); }}>
           <label>Product context<select value={context} onChange={event => setContext(event.target.value)}>{contexts.map(value => <option key={value}>{value}</option>)}</select></label>
@@ -67,8 +67,8 @@ export function ProductSetupPanel({ product, onApplied }: { product: string; onA
           <label>Reason<input value={environmentReason} onChange={event => setEnvironmentReason(event.target.value)} required /></label>
         </SetupChange>
       </details>
-      <details open={declarationsOpen} onToggle={event => setDeclarationsOpen(event.currentTarget.open)}>
-        <summary>Declare managed-secret fields</summary>
+      <details open={declarationsOpen}>
+        <summary onClick={event => { event.preventDefault(); setDeclarationsOpen(current => !current); }}>Declare managed-secret fields</summary>
         <p>Declarations contain binding names and scope only. Enter values later on the environment's Managed secrets screen.</p>
         {!lanes.length ? <p role="status">Add a non-production environment before declaring its fields.</p> : <SetupChange key={`${product}:declarations`} product={product} kind="declarations" makeRequest={() => { if (!lane) throw new Error("Select a non-production environment."); return declarationSetupRequest(product, lane, bindings, declarationReason); }} onApplied={request => { const requirement = "managed_secret_bindings" in request ? request.managed_secret_bindings?.[0] : null; if (requirement?.instance) applied(requirement.instance); }}>
           <label>Environment<select value={selectedLane} onChange={event => setSelectedLane(event.target.value)} required><option value="">Select environment</option>{lanes.map(item => <option key={item.instance} value={item.instance}>{item.instance}</option>)}</select></label>

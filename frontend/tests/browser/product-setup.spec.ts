@@ -64,6 +64,13 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "p
     if (outcome === "private") await expect(panel.getByLabel("Prepared target HTTPS origin")).toHaveCount(0);
     else await panel.getByLabel("Prepared target HTTPS origin").fill("https://testing.example.com");
     await panel.getByLabel("Reason", { exact: true }).fill("Isolated testing");
+    if (outcome === "success") {
+      const summary = panel.getByText("Add environment", { exact: true });
+      await summary.press("Enter");
+      await expect(panel.getByLabel("Reason", { exact: true })).toBeHidden();
+      await summary.press("Space");
+      await expect(panel.getByLabel("Reason", { exact: true })).toBeVisible();
+    }
     await panel.getByRole("button", { name: "Run dry-run", exact: true }).click();
     await expect(panel.getByText("Exact service diff")).toBeVisible();
     await panel.getByLabel("Reason", { exact: true }).fill("Edited draft");
