@@ -396,13 +396,13 @@ self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
 budget. Local runs retain Playwright's default concurrency; use its `--workers`
 option for a measured diagnostic comparison.
 
-CI divides the unchanged suite into two jobs with Playwright's built-in
-`--shard` option. Each job retains four workers, zero retries, the isolation
-probe and browser diagnostics. `BROWSER_SMOKE_SHARD=1/2` (or `2/2`) selects a
-partition through `(cd frontend && pnpm test:browser)`; without that variable,
+CI partitions the unchanged suite across the [browser matrix](../../.github/workflows/ci.yml)
+with Playwright's built-in `--shard` option. Each job retains four workers, zero
+retries, the isolation probe and browser diagnostics. `BROWSER_SMOKE_SHARD` carries
+the job's one-based index and matrix total through `(cd frontend && pnpm test:browser)`; without it,
 the local command still runs the whole browser suite and checks all screenshots.
 Sharded runs write Playwright JSON reports under the artifact folder's `reports/`.
-After both jobs succeed, CI downloads their evidence into a freshly cleared
+After all shard jobs succeed, CI downloads their evidence into a freshly cleared
 directory, independently discovers the complete current suite and requires
 each discovered test to pass exactly once across the reports. Missing,
 duplicated, skipped, retried or failed tests and report errors fail the gate.
@@ -410,12 +410,11 @@ The combined evidence must also pass the existing complete screenshot check.
 Artifact names identify the shard within the current workflow run. Re-running
 failed jobs replaces that shard's evidence and retains successful siblings
 from the same immutable head; re-running only evidence verification can reuse
-both successful artifacts. Downloads remain scoped to the current workflow
+the successful shard artifacts. Downloads remain scoped to the current workflow
 run and use a freshly cleared directory, so another head's proof cannot enter.
 `ci-gate` requires both browser execution and evidence verification, including
-on forks. This reduces the browser critical path without reducing coverage;
-it adds one runner job and an evidence job, so shared runner contention and
-the other CI lanes still bound the whole-run saving.
+on forks. Sharding uses additional runner jobs and an evidence job, so shared
+runner contention and the other CI lanes still bound the whole-run saving.
 
 Browser smoke runs in every full CI run that needs fresh proof, including main pushes. The verified-tree
 shortcut above can reuse a previously successful tree; it does not selectively
@@ -536,7 +535,7 @@ cache target so runner slots share cache versions and archives; each restore
 still writes only its own checkout. The new cache-key namespace resets the old
 shared-home entries. Sibling restores cannot overwrite an install's objects. Checkout cleanup
 owns this generated directory; jobs never clear the shared home store. The same
-setup applies to validation, fork validation, both browser shards and evidence
+setup applies to validation, fork validation, browser shards and evidence
 verification. The wrapper verifies that its namespace differs from
 the host and removes only its captured container ID, including after failures.
 The workflow owns the image pin. Match the
