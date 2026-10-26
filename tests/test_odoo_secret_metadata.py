@@ -361,9 +361,21 @@ class OdooSecretMetadataTests(unittest.TestCase):
             "--repair-metadata-from-relabel-history",
             "--repair-binding-id",
         ]
-        missing = CliRunner().invoke(main, [*command, destination.binding_id])
-        self.assertNotEqual(missing.exit_code, 0)
-        self.assertIn("no override record", missing.output)
-        blank = CliRunner().invoke(main, [*command, " "])
-        self.assertNotEqual(blank.exit_code, 0)
-        self.assertIn("must not be blank", blank.output)
+        before = (
+            store.list_secret_bindings(limit=None),
+            store.list_secret_records(limit=None),
+            store.list_odoo_instance_override_records(),
+        )
+        for binding_id in (destination.binding_id, " "):
+            with self.subTest(binding_id=binding_id):
+                refused = CliRunner().invoke(main, [*command, binding_id])
+                self.assertNotEqual(refused.exit_code, 0)
+                self.assertNotEqual(refused.exit_code, 2)
+                self.assertEqual(
+                    (
+                        store.list_secret_bindings(limit=None),
+                        store.list_secret_records(limit=None),
+                        store.list_odoo_instance_override_records(),
+                    ),
+                    before,
+                )
