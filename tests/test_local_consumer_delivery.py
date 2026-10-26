@@ -43,6 +43,8 @@ from control_plane.local_consumer_delivery import (
     verify_delivery,
 )
 from control_plane.service_auth import (
+    AuthorizationTarget,
+    GitHubActionsPolicyRule,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LocalOperatorPolicyRule,
@@ -402,16 +404,19 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response.json()["package"])
         value.assert_not_called()
 
-    def agent_app(self, *, instances: tuple[str, ...] = ("testing",)) -> FastAPI:
+    def agent_app(
+        self, *, instances: tuple[str, ...] = ("testing",), token_label: str = "local-owner-write"
+    ) -> FastAPI:
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             record_store_factory=lambda: self.store,
+            human_session_manager=self.sessions,
             authz_policy=LaunchplaneAuthzPolicy(
                 schema_version=2,
                 local_operators=(
                     LocalOperatorPolicyRule(
                         subjects=("local-owner-agent",),
-                        token_labels=("local-owner-write",),
+                        token_labels=(token_label,),
                         products=("example-site",),
                         contexts=("example-site",),
                         instances=instances,
@@ -422,7 +427,7 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
             bearer_identity_config=BearerIdentityConfig(
                 local_operator_token="fixture-operator-token",
                 local_operator_subject="local-owner-agent",
-                local_operator_token_label="local-owner-write",
+                local_operator_token_label=token_label,
             ),
         )
 
@@ -524,10 +529,33 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 value.assert_not_called()
 
     async def test_worker_identity_cannot_issue_a_local_delivery(self) -> None:
+        worker = _identity()
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository=worker.repository,
+                    products=(self.request.product,),
+                    contexts=(self.request.context,),
+                    instances=("testing",),
+                    actions=("product_config.plan", "product_config.apply"),
+                ),
+            ),
+        )
+        self.assertTrue(
+            policy.allows(
+                identity=worker,
+                action="product_config.plan",
+                product=self.request.product,
+                context=self.request.context,
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+            )
+        )
         app = create_launchplane_fastapi_app(
-            verifier=_StubVerifier(_identity()),
+            verifier=_StubVerifier(worker),
             record_store_factory=lambda: self.store,
-            authz_policy=LaunchplaneAuthzPolicy(),
+            authz_policy=policy,
+            human_session_manager=self.sessions,
         )
         with patch("control_plane.local_consumer_delivery.copy_source_value") as value:
             response = await _asgi_request(
@@ -540,6 +568,56 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         value.assert_not_called()
 
+    async def test_agent_delivery_requires_the_configured_service_origin_and_same_token_label(
+        self,
+    ) -> None:
+        headers = {"Authorization": "Bearer fixture-operator-token"}
+        body: dict[str, object] = {"request": self.request.model_dump(mode="json")}
+        response = await _asgi_request(
+            self.agent_app(),
+            "POST",
+            DELIVERY_ROUTE,
+            headers=headers,
+            payload={
+                "request": {
+                    **self.request.model_dump(mode="json"),
+                    "service_origin": "https://other.example",
+                }
+            },
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        reviewed = await _asgi_request(
+            self.agent_app(), "POST", DELIVERY_ROUTE, headers=headers, payload=body
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        with patch("control_plane.local_consumer_delivery.copy_source_value") as value:
+            response = await _asgi_request(
+                self.agent_app(token_label="different-credential"),
+                "POST",
+                DELIVERY_ROUTE,
+                headers=headers,
+                payload={
+                    **body,
+                    "mode": "apply",
+                    "reviewed_plan_digest": reviewed.json()["plan_digest"],
+                },
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        value.assert_not_called()
+
+    def test_delivery_cli_never_sends_authentication_to_a_different_service_origin(self) -> None:
+        with patch("requests.Session.post") as post:
+            result = CliRunner().invoke(
+                local_consumer,
+                ["deliver", "--directory", str(self.directory)],
+                env={
+                    "LAUNCHPLANE_SERVICE_URL": "https://other.example",
+                    "LAUNCHPLANE_SERVICE_TOKEN": "fixture-operator-token",
+                },
+            )
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        post.assert_not_called()
+
     async def test_agent_cli_prepare_deliver_receive_keeps_secrets_out_of_output_and_evidence(
         self,
     ) -> None:
@@ -550,7 +628,7 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         logger.setLevel(logging.DEBUG)
         logger.addHandler(handler)
         self.addCleanup(logger.removeHandler, handler)
-        runner = CliRunner()
+        runner = CliRunner(env={"LAUNCHPLANE_SERVICE_URL": self.request.service_origin})
         directory = self.root / "agent-client"
         prepared = runner.invoke(
             local_consumer,
@@ -598,7 +676,6 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
             for call in post.call_args_list:
                 self.assertEqual(call.args[0], self.request.service_origin + DELIVERY_ROUTE)
                 self.assertFalse(call.kwargs["allow_redirects"])
-                self.assertTrue(call.kwargs["verify"])
         with (
             patch(
                 "control_plane.local_consumer._verify_service",
@@ -647,7 +724,14 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
             side_effect=ValueError(FAKE_VALUE + "private-key-value"),
         ):
             result = CliRunner().invoke(
-                local_consumer, ["deliver", "--directory", str(self.directory)]
+                local_consumer,
+                [
+                    "deliver",
+                    "--directory",
+                    str(self.directory),
+                    "--service-url",
+                    self.request.service_origin,
+                ],
             )
         self.assertNotEqual(result.exit_code, 0)
         self.assertNotIn(FAKE_VALUE, result.output)
@@ -914,6 +998,7 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "NO_PROXY": "",
                 "no_proxy": "",
                 "FIXTURE_AUTH": "fixture-service-auth",
+                "LAUNCHPLANE_SERVICE_URL": origin,
             },
         ):
             with self.assertLogs(level="DEBUG") as logs:

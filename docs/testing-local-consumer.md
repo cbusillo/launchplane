@@ -12,10 +12,11 @@ exact `context_instance` testing lane with class `testing` and no sharing reason
 can be delivered. Production, preview, context-wide, shared, worker and service
 credentials cannot use this path. The active key-safety evaluation still applies.
 
-The signed-in administrator or a terminal/local-operator agent uses existing
+The signed-in administrator or a local-operator agent uses existing
 exact-lane `product_config.plan` and `product_config.apply` authority. Agent read
 access alone cannot issue a delivery. Worker and service identities cannot issue
-one. No credential, enrollment, session, lease or authorization grant is created
+one. Terminal-agent credentials remain read/plan only. No credential, enrollment,
+session, lease or authorization grant is created
 for the local consumer.
 
 ## Prepare before secret entry
@@ -71,6 +72,7 @@ managed version id:
 ```sh
 launchplane local-consumer deliver \
   --directory /absolute/private-parent/testing-client-generation-1 \
+  --service-url https://LAUNCHPLANE_ORIGIN \
   --bearer-token-env LAUNCHPLANE_SERVICE_TOKEN
 ```
 
@@ -81,11 +83,16 @@ package for that same request and caller:
 ```sh
 launchplane local-consumer deliver \
   --directory /absolute/private-parent/testing-client-generation-1 \
+  --service-url https://LAUNCHPLANE_ORIGIN \
   --bearer-token-env LAUNCHPLANE_SERVICE_TOKEN \
   --reviewed-plan-digest REVIEWED_PLAN_DIGEST
 ```
 
-The helper uses only the prepared HTTPS service origin, verifies its certificate,
+The helper requires the independently configured `--service-url` (or
+`LAUNCHPLANE_SERVICE_URL`) to match the prepared HTTPS service origin before it
+reads authentication or sends anything. The service also requires that origin to
+match its configured public origin for every caller and refuses delivery when
+that bootstrap origin is unavailable. The helper verifies its certificate,
 and excludes redirects and environment proxies. It saves recipient ciphertext as
 `package.json` in the private directory, mode 0600, and prints only the version id
 and package path. It never collects or changes the managed value. A lost response

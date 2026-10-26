@@ -51,15 +51,8 @@ it is deleted; do not extend them.
 
 ### Testing local consumers
 
-`POST /v1/local-consumer-deliveries` plans or issues an encrypted package for
-one reviewed local recipient. It requires a signed-in human administrator with
-existing exact-testing-lane `product_config.plan`/`product_config.apply`
-authority and browser CSRF protection. It cannot issue production, preview or
-shared credentials, and returns no plaintext. The local receiver's inert
-`POST /v1/local-consumer-deliveries/verify` compares the original unguessable
-receipt and exact package against current scope/version metadata, returning
-only a status and package digest. See the
-[complete custody, transport and recovery contract](testing-local-consumer.md).
+For recipient-encrypted testing bridge delivery and inert receipt verification,
+see the [custody, transport and recovery contract](testing-local-consumer.md).
 
 ### Repository Inventory
 

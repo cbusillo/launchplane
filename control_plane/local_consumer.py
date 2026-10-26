@@ -144,12 +144,14 @@ def _ca_bundle() -> str:
 
 
 def deliver_consumer(
-    directory: Path, *, bearer_token_env: str, reviewed_plan_digest: str = ""
+    directory: Path, *, service_url: str, bearer_token_env: str, reviewed_plan_digest: str = ""
 ) -> dict[str, str]:
     directory = _directory(directory)
     request = ConsumerRequest.model_validate_json(_private_file(directory / "request.json"))
     if request.directory != str(directory):
         raise ValueError("The original directory changed.")
+    if https_origin(service_url) != request.service_origin:
+        raise ValueError("The prepared destination differs from the configured service origin.")
     token = os.environ.get(bearer_token_env, "").strip()
     if not token:
         raise ValueError("The existing agent authentication is unavailable.")

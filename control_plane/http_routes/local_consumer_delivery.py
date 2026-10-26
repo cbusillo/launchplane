@@ -27,7 +27,6 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneIdentity,
     LocalOperatorIdentity,
-    TerminalAgentIdentity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -36,6 +35,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 class LocalConsumerDependencies:
     common: ReadRouteDependencies
     read_mutation_identity: Callable[..., LaunchplaneIdentity]
+    public_origin: str | None
 
 
 def register_local_consumer_delivery_routes(
@@ -54,9 +54,9 @@ def register_local_consumer_delivery_routes(
         trace_id = common.next_trace_id()
         target = envelope.request
         if (
-            not isinstance(
-                identity, (GitHubHumanIdentity, LocalOperatorIdentity, TerminalAgentIdentity)
-            )
+            not dependencies.public_origin
+            or target.service_origin != dependencies.public_origin
+            or not isinstance(identity, (GitHubHumanIdentity, LocalOperatorIdentity))
             or (
                 isinstance(identity, GitHubHumanIdentity)
                 and (
@@ -92,10 +92,9 @@ def register_local_consumer_delivery_routes(
             if isinstance(identity, GitHubHumanIdentity):
                 actor = f"github-human:{identity.github_id}"
             elif isinstance(identity, LocalOperatorIdentity):
-                actor = f"local-operator:{identity.subject}"
+                actor = f"local-operator:{identity.subject}:{identity.token_label}"
             else:
-                assert isinstance(identity, TerminalAgentIdentity)
-                actor = f"terminal-agent:{identity.subject}"
+                raise ValueError("Unsupported testing delivery caller.")
             package = None
             if envelope.mode == "dry-run":
                 plan = prepare_delivery(record_store, target, actor=actor, trace_id=trace_id)
