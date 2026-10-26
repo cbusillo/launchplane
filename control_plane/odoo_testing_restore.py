@@ -13,6 +13,7 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from typing import Literal, TypeVar, TypedDict, NotRequired
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
+from control_plane.testing_address_settings_program import CANONICAL_ADDRESS_HOST_LIBRARY
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
 from control_plane.contracts.product_profile_record import (
@@ -960,6 +961,11 @@ def restore_main():
     containers = inspect_copy_runtime(spec, expected_instance="testing")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
+    if spec.get('canonical_settings'):
+        if not spec.get('verification_only'):
+            raise RuntimeError('Canonical settings require the qualified copy lock')
+        canonical_address_settings(spec, containers)
+        return
     if spec.get('storage_maintenance'):
         storage_maintenance(spec, containers)
         return
@@ -1648,5 +1654,6 @@ FRESH_TESTING_RESTORE_HOST_PROGRAM = (
     COPY_RUNTIME_INSPECTION_LIBRARY
     + "\n"
     + inspect.getsource(docker_daemon_authorization_denied)
+    + CANONICAL_ADDRESS_HOST_LIBRARY
     + FRESH_TESTING_RESTORE_HOST_PROGRAM
 )

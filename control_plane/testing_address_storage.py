@@ -208,6 +208,7 @@ def address_overrides(
             for key, value in forced.items()
         ),
         "updated_at": stamp,
+        "last_apply": record.last_apply.for_override_edit(),
     }
     if record.website_bootstrap is not None:
         values["website_bootstrap"] = record.website_bootstrap.model_copy(
