@@ -25,6 +25,9 @@ from control_plane.split_ingress import (
     read_split_ingress_binding,
     split_ingress_custody_hosts,
     split_ingress_monitoring_lane,
+    split_ingress_check_name,
+    split_ingress_check_base_url,
+    split_ingress_dns_policy,
 )
 from control_plane.workflows.odoo_verification import resolve_odoo_health_url
 
@@ -303,8 +306,30 @@ def read_check_runtime_verification(
     requested_url = check.url or monitor_health_url(
         profile=profile, lane=lane, base_url=lane.base_url
     )
-    hosts = (
-        split_ingress_custody_hosts(binding, requested_url) if check.kind == "public_http" else ()
+    split_check = (
+        binding is not None
+        and check.kind == "public_http"
+        and check.name == split_ingress_check_name(urlsplit(requested_url).hostname or "")
+    )
+    hosts = split_ingress_custody_hosts(binding, requested_url) if split_check else ()
+    policy = (
+        split_ingress_dns_policy(
+            profile,
+            lane,
+            tuple(d.domain_name for d in binding.domains),
+            urlsplit(requested_url).hostname or "",
+        )
+        if split_check and binding is not None
+        else None
+    )
+    requested_urls = {requested_url}
+    base_url = split_ingress_check_base_url(lane, requested_url) if split_check else ""
+    if base_url:
+        requested_urls.add(base_url)
+    custody_sha256 = (
+        binding.external_custody_sha256(urlsplit(requested_url).hostname or "")
+        if split_check and binding is not None
+        else ""
     )
     external_check = bool(
         hosts
@@ -353,16 +378,27 @@ def read_check_runtime_verification(
             observation.check_kind,
         )
         == (profile.product, lane.context, lane.instance, check.name, check.kind)
-        and (not hosts and not check.url or target is not None and target.url == requested_url)
+        and (policy is None or not policy.conflict)
+        and (not hosts or target is not None and target.url == requested_url)
         and (
             not hosts
-            or target is not None
-            and custody_redirects_match(
-                url=target.url,
-                final_url=target.final_url,
-                redirect_count=target.redirect_count,
-                visited_urls=target.visited_urls,
-                hosts=hosts,
+            or {
+                item.url
+                for item in observation.targets
+                if item.target in {"base_url", "health_url"}
+            }
+            == requested_urls
+            and all(
+                custody_redirects_match(
+                    url=item.url,
+                    final_url=item.final_url,
+                    redirect_count=item.redirect_count,
+                    visited_urls=item.visited_urls,
+                    hosts=hosts,
+                )
+                and item.external_custody_sha256 == custody_sha256
+                for item in observation.targets
+                if item.target in {"base_url", "health_url"}
             )
         )
         and observation.monitoring_intent == lane.health_monitoring.monitoring_intent

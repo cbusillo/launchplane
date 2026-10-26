@@ -959,9 +959,16 @@ an ORM column/table or remains only in the evidence payload.
   profile's public HTTP checks, avoiding duplicate incidents and disagreement
   over old check URLs. Private and provider checks retain their existing policy.
   Every hostname also gets a TLS check using its resolved ownership. The lane's
-  health path and query are preserved. The route-record SHA fences incident
+  health path and query are preserved. Its configured homepage is checked once,
+  on its own hostname, alongside that host's health endpoint. Existing DNS
+  expectations and recovery thresholds carry into the derived checks. Conflicting
+  or unmappable DNS expectations block admission and remain a visible monitoring
+  configuration failure if introduced later, before any network request.
+  The route-record SHA fences incident
   transitions; persisted HTTP observations are evaluated against current check
   URLs, monitoring intent, deployment identity, profile and relevant source dates.
+  Per-host external-custody digests in HTTP and TLS evidence also invalidate old
+  observations when a custodian or report changes within the same timestamp.
   Each HTTPS redirect must stay within the requested hostname's custody set.
   The transport checks each hop before connecting and retains the visited URLs;
   old redirected observations without that evidence cannot verify custody.
@@ -973,7 +980,10 @@ an ORM column/table or remains only in the evidence payload.
   the projected provenance when current custody, authority and evidence
   projections all agree with the stored binding. Missing, changed, conflicting
   or unavailable sources retain the stale-evidence warning. This adds no job,
-  periodic authority write or renewal action. An explicit evidence refresh that
+  periodic authority write or renewal action. TLS snapshots use the same current
+  authority proof only when their per-host authority, custody digest and exact
+  source identities/versions still agree; certificate probe freshness is checked
+  separately. Unchanged browser reviews preserve the recorded custody receipt. An explicit evidence refresh that
   adopts newer source versions requires subsequent probes for the affected
   authority dates. Custodian-reported configuration remains distinct from
   directly verified public behavior.

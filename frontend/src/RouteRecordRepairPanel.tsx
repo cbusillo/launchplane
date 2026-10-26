@@ -10,6 +10,7 @@ import {
   repairRequest, repairStorageKey, verifyRepairReceipt,
   type RepairKind, type RepairRequest, type RepairResponse, type RepairReview, type RepairScope,
   type ExternalIngress,
+  reviewedExternalIngress,
 } from "./route-record-repair";
 
 function executeRepair(request: RepairRequest, options: BrowserOperationOptions): Promise<RepairResponse> {
@@ -85,9 +86,10 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
   const [custodyConflict, setCustodyConflict] = useState(false);
   const recordedCustody = JSON.stringify(recordedExternal ?? null);
   const custodyBaseline = useRef(JSON.stringify(savedExternal ?? null));
-  const externalIngress: ExternalIngress | undefined = externalDomains.trim() ? {
+  const draftExternal: ExternalIngress | undefined = externalDomains.trim() ? {
     domains: externalDomains.split(/[\s,]+/).filter(Boolean), custodian: custodian.trim(), evidence_url: evidenceUrl.trim(),
   } : undefined;
+  const externalIngress = reviewedExternalIngress(draftExternal, recordedExternal);
   const [review, setReview] = useState<RepairReview | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [message, setMessage] = useState("");

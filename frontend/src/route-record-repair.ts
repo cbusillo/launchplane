@@ -9,6 +9,10 @@ export interface RepairScope { product: string; context: string; instance: strin
 export type RepairReview = DokployDomainRepairReview | RouteBindingRepairReview;
 export type RepairResponse = SetupDokployTargetResponse | ReconcileRouteBindingResponse;
 export type ExternalIngress = NonNullable<EnvironmentRouteBindingReadModel["external_ingress"]>;
+export function reviewedExternalIngress(draft: ExternalIngress | undefined, recorded: ExternalIngress | undefined): ExternalIngress | undefined {
+  return draft && recorded && draft.custodian === recorded.custodian && draft.evidence_url === recorded.evidence_url &&
+    JSON.stringify([...draft.domains].sort()) === JSON.stringify([...recorded.domains].sort()) ? recorded : draft;
+}
 interface CommonRequest {
   mode: "dry-run" | "apply"; product: string; context: string; instance: string;
   reason: string; confirmation: string; browser_review: BrowserRouteRepairRequest;

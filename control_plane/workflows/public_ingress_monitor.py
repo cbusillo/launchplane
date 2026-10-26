@@ -171,6 +171,8 @@ from control_plane.split_ingress import (
     split_ingress_check_name,
     split_ingress_custody_hosts,
     split_ingress_monitoring_lane,
+    split_ingress_check_base_url,
+    split_ingress_dns_policy,
 )
 from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.workflows.ship import utc_now_timestamp
@@ -313,6 +315,7 @@ class PublicIngressMonitorTarget:
     private_tls_ca_pem: str = ""
     route_binding_sha256: str = ""
     allowed_https_hosts: tuple[str, ...] = ()
+    external_custody_sha256: str = ""
     recovery_observation_threshold: int = 1
     resolution_failure_code: PublicIngressFailureCode | None = None
     resolution_failure_summary: str = ""
@@ -700,6 +703,17 @@ def _health_check_monitor_target(
         health_url = check.url.strip() or monitor_health_url(
             profile=profile, lane=lane, base_url=base_url
         )
+        if domain_check and binding is not None:
+            base_url = split_ingress_check_base_url(lane, health_url)
+            policy = split_ingress_dns_policy(
+                profile,
+                lane,
+                tuple(domain.domain_name for domain in binding.domains),
+                urlsplit(health_url).hostname or "",
+            )
+            if policy.conflict:
+                resolution_failure_code = "invalid_url"
+                resolution_failure_summary = policy.conflict
         if not (base_url or health_url):
             health_url = f"invalid-health-check://{canonical_health_check_record_token(check.name) or 'public-ingress'}"
             resolution_failure_code = "invalid_url"
@@ -741,6 +755,9 @@ def _health_check_monitor_target(
         allowed_https_hosts=split_ingress_custody_hosts(binding, health_url)
         if domain_check
         else (),
+        external_custody_sha256=binding.external_custody_sha256(urlsplit(health_url).hostname or "")
+        if domain_check and binding is not None
+        else "",
         profile_sha256=product_profile_record_sha256(profile),
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         incident_eligible=product_lane_monitoring_incident_eligible(
@@ -2596,7 +2613,14 @@ def check_public_ingress_target(
             tls_get=tls_get,
             checked_at=checked_at,
         )
-        if target.check_kind == "public_http":
+        if target.check_kind == "public_http" and target.external_custody_sha256:
+            url_observation = url_observation.model_copy(
+                update={"external_custody_sha256": target.external_custody_sha256}
+            )
+        if target.check_kind == "public_http" and url_observation.failure_code not in {
+            "invalid_url",
+            "private_url",
+        }:
             expectation = next(
                 (
                     item
@@ -2838,6 +2862,13 @@ def _check_url(
             summary=_failure_summary(public_url_error),
         )
     try:
+        if target.allowed_https_hosts and http_get is not fetch_public_ingress_url:
+            return _failed_target(
+                target_kind=target_kind,
+                url=url,
+                code="invalid_url",
+                summary="Custody checks require the default HTTPS transport; no request was sent.",
+            )
         observation = (
             fetch_public_ingress_url(
                 url, timeout_seconds, allowed_https_hosts=target.allowed_https_hosts
@@ -3479,6 +3510,7 @@ def _tls_monitor_targets(
                 tls_source_label=route_binding.source.source_label,
                 tls_source_record_ids=route_binding.source.source_record_ids,
                 tls_source_versions=dict(route_binding.source.source_versions),
+                external_custody_sha256=route_binding.external_custody_sha256(domain.domain_name),
                 tls_refreshed_at=route_binding.source.refreshed_at,
                 tls_recorded_at=route_binding.updated_at,
                 tls_freshness_status=route_binding.source.freshness_status,
@@ -3539,6 +3571,7 @@ def _tls_observation(
             source_label=target.tls_source_label,
             source_record_ids=target.tls_source_record_ids,
             source_versions=dict(target.tls_source_versions or {}),
+            external_custody_sha256=target.external_custody_sha256,
             refreshed_at=target.tls_refreshed_at,
             recorded_at=target.tls_recorded_at,
             freshness_status=target.tls_freshness_status,

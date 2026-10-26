@@ -186,6 +186,12 @@ class PublicIngressTlsRecordedEvidence(BaseModel):
     source_label: str
     source_record_ids: tuple[str, ...] = ()
     source_versions: dict[str, str] = Field(default_factory=dict)
+    external_custody_sha256: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        pattern=r"^(?:[0-9a-f]{64})?$",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     refreshed_at: str
     recorded_at: str
     freshness_status: FreshnessStatus = "recorded"
@@ -320,6 +326,12 @@ class PublicIngressTargetObservation(BaseModel):
     http_status: int | None = Field(default=None, ge=100, le=599)
     final_url: str = ""
     redirect_count: int = Field(default=0, ge=0)
+    external_custody_sha256: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        pattern=r"^(?:[0-9a-f]{64})?$",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     visited_urls: tuple[str, ...] = Field(
         default=(),
         exclude_if=lambda value: not value,

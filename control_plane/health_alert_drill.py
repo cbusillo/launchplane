@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 import hashlib
-from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 import json
 from typing import Literal
 from uuid import uuid4
@@ -16,6 +15,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
 )
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressNotificationDriverSet,

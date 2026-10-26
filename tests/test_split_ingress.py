@@ -17,17 +17,28 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneHealthCheck,
 )
 from control_plane.contracts.product_topology_read_model import build_product_environment_topology
+from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     redacted_route_binding_record,
     route_binding_record_sha256,
 )
 from control_plane.http_app import RouteBindingReconcileEnvelope, create_launchplane_fastapi_app
+from control_plane.contracts.runtime_identity import RuntimeIdentityStatus
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressObservationRecord,
+    PublicIngressTargetObservation,
+    health_monitor_freshness_seconds,
+)
 from control_plane.lane_runtime_verification import (
     read_check_runtime_verification,
     read_lane_runtime_verification,
 )
-from control_plane.outbound_http import PublicHttpResponse
+from control_plane.outbound_http import (
+    PublicHttpResponse,
+    PublicTlsProbeResult,
+    PublicTlsCertificate,
+)
 from control_plane.route_binding_reconcile import (
     RouteBindingExpectedCurrent,
     RouteBindingReconcileRequest,
@@ -37,13 +48,16 @@ from control_plane.route_binding_reconcile import (
 from control_plane.split_ingress import (
     split_ingress_check_name,
     split_ingress_custody_hosts,
+    split_ingress_check_base_url,
     split_ingress_monitoring_lane,
+    split_ingress_dns_policy,
 )
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorTarget,
     check_public_ingress_target,
     discover_public_ingress_monitor_targets,
     fetch_public_tls,
+    fetch_public_ingress_url,
 )
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.http import request
@@ -81,6 +95,43 @@ def split_binding() -> EnvironmentRouteBindingRecord:
     return EnvironmentRouteBindingRecord.model_validate(payload)
 
 
+def split_observation(
+    binding: EnvironmentRouteBindingRecord,
+    profile: LaunchplaneProductProfileRecord,
+    domain: str,
+    *,
+    status: RuntimeIdentityStatus = "match",
+) -> PublicIngressObservationRecord:
+    observed = _http_observation(
+        domain_name=domain, monitoring_intent="public", runtime_identity_status=status
+    )
+    custody = binding.external_custody_sha256(domain)
+    targets = tuple(
+        target.model_copy(update={"external_custody_sha256": custody})
+        for target in observed.targets
+    )
+    base = split_ingress_check_base_url(profile.lanes[0], observed.targets[0].url)
+    if base:
+        targets += (
+            PublicIngressTargetObservation(
+                target="base_url",
+                url=base,
+                final_url=base,
+                external_custody_sha256=custody,
+                status="pass",
+                http_status=200,
+                summary="Homepage is healthy.",
+            ),
+        )
+    return observed.model_copy(
+        update={
+            "record_id": domain,
+            "check_name": split_ingress_check_name(domain),
+            "targets": targets,
+        }
+    )
+
+
 class SplitIngressTests(unittest.TestCase):
     def test_split_public_checks_replace_legacy_and_outside_host_checks(self) -> None:
         profile = _strict_public_profile(domain_name="business.example.test")
@@ -114,6 +165,56 @@ class SplitIngressTests(unittest.TestCase):
         self.assertEqual(
             split_ingress_custody_hosts(binding, "https://outside.example.test/healthz"), ()
         )
+        expectation = PublicDnsExpectedTarget(
+            public_name=binding.domains[0].domain_name, addresses=("93.184.216.34",)
+        )
+        configured = lane.health_monitoring.checks[0].model_copy(
+            update={"expected_dns_targets": (expectation,), "recovery_observation_threshold": 2}
+        )
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"checks": (configured,)}
+                )
+            }
+        )
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        first = split_ingress_monitoring_lane(profile, lane, binding)
+        second = split_ingress_monitoring_lane(profile, first, binding)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            first.health_monitoring.checks[0].expected_dns_targets, configured.expected_dns_targets
+        )
+        self.assertTrue(
+            all(
+                check.recovery_observation_threshold == configured.recovery_observation_threshold
+                for check in first.health_monitoring.checks
+            )
+        )
+        contradictory = configured.model_copy(
+            update={
+                "name": "conflicting",
+                "expected_dns_targets": (
+                    expectation.model_copy(update={"addresses": ("1.1.1.1",)}),
+                ),
+            }
+        )
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"checks": (configured, contradictory)}
+                )
+            }
+        )
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        self.assertTrue(
+            split_ingress_dns_policy(
+                profile,
+                lane,
+                tuple(d.domain_name for d in binding.domains),
+                expectation.public_name,
+            ).conflict
+        )
 
     def test_canonical_redirect_proof_and_custody_renewal_are_scoped_per_check(self) -> None:
         binding = split_binding().model_copy(
@@ -123,13 +224,7 @@ class SplitIngressTests(unittest.TestCase):
         summary = _lane_summary()
         lane = split_ingress_monitoring_lane(profile, profile.lanes[0], binding)
         observations = tuple(
-            _http_observation(domain_name=d.domain_name, monitoring_intent="public").model_copy(
-                update={
-                    "check_name": split_ingress_check_name(d.domain_name),
-                    "record_id": d.domain_name,
-                }
-            )
-            for d in binding.domains
+            split_observation(binding, profile, domain.domain_name) for domain in binding.domains
         )
         first = observations[0].targets[0]
         canonical = observations[1].targets[0].url
@@ -143,6 +238,7 @@ class SplitIngressTests(unittest.TestCase):
                             "visited_urls": (first.url, canonical),
                         }
                     ),
+                    *observations[0].targets[1:],
                 )
             }
         )
@@ -172,6 +268,7 @@ class SplitIngressTests(unittest.TestCase):
                             "visited_urls": (first.url, observations[2].targets[0].url, first.url),
                         }
                     ),
+                    *observations[0].targets[1:],
                 )
             }
         )
@@ -187,6 +284,16 @@ class SplitIngressTests(unittest.TestCase):
         )
         self.assertNotEqual(status(observations[0].check_name, renewed), "verified")
         self.assertEqual(status(observations[2].check_name, renewed), "verified")
+        replacement = binding.model_copy(
+            update={
+                "external_ingress": binding.external_ingress.model_copy(
+                    update={"custodian": "Successor at the same timestamp"}
+                )
+            }
+        )
+        self.assertNotEqual(status(observations[1].check_name, replacement), "verified")
+        self.assertEqual(status(observations[2].check_name, replacement), "verified")
+
         queried = lane.model_copy(update={"health_url": f"{lane.health_url}?scope=runtime"})
         derived = split_ingress_monitoring_lane(profile, queried, binding)
         self.assertTrue(
@@ -242,12 +349,55 @@ class SplitIngressTests(unittest.TestCase):
                 target=target,
                 checked_at=_NOW.isoformat(),
                 timeout_seconds=5,
-                http_get=legacy_http_get,
+                http_get=fetch_public_ingress_url,
                 tls_get=fetch_public_tls,
             )
         self.assertEqual(observation.status, "pass")
         self.assertEqual(observation.targets[0].visited_urls, response.visited_urls)
         self.assertEqual(transport.call_args.kwargs["allowed_https_hosts"], hosts)
+        with patch(
+            "control_plane.workflows.public_ingress_monitor.request_public_http"
+        ) as no_network:
+            refused = check_public_ingress_target(
+                target=replace(
+                    target,
+                    expected_dns_targets=(
+                        PublicDnsExpectedTarget(public_name=hosts[0], addresses=("93.184.216.34",)),
+                    ),
+                ),
+                checked_at=_NOW.isoformat(),
+                timeout_seconds=5,
+                dns_get=lambda _host: self.fail("Refused transport must not resolve DNS"),
+                http_get=legacy_http_get,
+                tls_get=fetch_public_tls,
+            )
+        self.assertEqual(refused.status, "fail")
+        no_network.assert_not_called()
+        homepage = "https://business.example.test"
+        with patch(
+            "control_plane.workflows.public_ingress_monitor.request_public_http",
+            side_effect=lambda url, **_kwargs: (
+                replace(
+                    response, status_code=500, final_url=url, redirect_count=0, visited_urls=(url,)
+                )
+                if url == homepage
+                else response
+            ),
+        ):
+            unhealthy = check_public_ingress_target(
+                target=replace(target, base_url=homepage),
+                checked_at=_NOW.isoformat(),
+                timeout_seconds=5,
+                http_get=fetch_public_ingress_url,
+                tls_get=fetch_public_tls,
+            )
+        self.assertEqual(unhealthy.status, "fail")
+        self.assertEqual(
+            {t.url: t.status for t in unhealthy.targets}, {homepage: "fail", initial: "pass"}
+        )
+        profile = _strict_public_profile(domain_name=hosts[0])
+        root_lane = profile.lanes[0].model_copy(update={"health_url": homepage + "/"})
+        self.assertEqual(split_ingress_check_base_url(root_lane, homepage + "/"), "")
 
     def test_readers_reject_profile_changes_and_cross_custody_redirects(self) -> None:
         binding = split_binding().model_copy(
@@ -256,15 +406,7 @@ class SplitIngressTests(unittest.TestCase):
         profile = _strict_public_profile(domain_name="business.example.test")
         summary = _lane_summary()
         observations = tuple(
-            _http_observation(
-                domain_name=domain.domain_name, monitoring_intent="public"
-            ).model_copy(
-                update={
-                    "record_id": domain.domain_name,
-                    "check_name": split_ingress_check_name(domain.domain_name),
-                }
-            )
-            for domain in binding.domains
+            split_observation(binding, profile, domain.domain_name) for domain in binding.domains
         )
         original = _http_observation(
             domain_name="business.example.test", monitoring_intent="public"
@@ -358,16 +500,7 @@ class SplitIngressTests(unittest.TestCase):
         profile = _strict_public_profile(domain_name="business.example.test")
         summary = _lane_summary()
         observations = tuple(
-            _http_observation(
-                domain_name=domain.domain_name,
-                monitoring_intent="public",
-            ).model_copy(
-                update={
-                    "record_id": f"observed-{domain.domain_name}",
-                    "check_name": split_ingress_check_name(domain.domain_name),
-                }
-            )
-            for domain in binding.domains
+            split_observation(binding, profile, domain.domain_name) for domain in binding.domains
         )
         original = _http_observation(
             domain_name="business.example.test", monitoring_intent="public"
@@ -410,42 +543,9 @@ class SplitIngressTests(unittest.TestCase):
             record_store=store, profile=profile, lane=profile.lanes[0], summary=summary, now=_NOW
         )
         self.assertEqual(verification.provenance.freshness_status, "verified")
-        store.route_binding = binding.model_copy(
-            update={
-                "updated_at": _NOW.isoformat(),
-                "source": binding.source.model_copy(
-                    update={"stale_after": (_NOW - timedelta(hours=1)).isoformat()}
-                ),
-            }
-        )
-        refreshed_topology = build_product_environment_topology(
-            record_store=store,
-            profile=profile,
-            lane=profile.lanes[0],
-            lane_summary=summary,
-            now=_NOW,
-        )
-        self.assertFalse(
-            any(
-                warning.code == "stale_route_authority" and warning.severity == "error"
-                for warning in refreshed_topology.warnings
-            )
-        )
-        self.assertEqual(
-            read_lane_runtime_verification(
-                record_store=store,
-                profile=profile,
-                lane=profile.lanes[0],
-                summary=summary,
-                now=_NOW,
-            ).provenance.freshness_status,
-            "verified",
-        )
         store.route_binding = binding
-        failed = _http_observation(
-            domain_name="business.example.test",
-            monitoring_intent="public",
-            runtime_identity_status="mismatch",
+        failed = split_observation(
+            binding, profile, "business.example.test", status="mismatch"
         ).model_copy(
             update={
                 "check_name": observations[0].check_name,
@@ -453,7 +553,11 @@ class SplitIngressTests(unittest.TestCase):
             }
         )
         stale = observations[1].model_copy(
-            update={"observed_at": (_NOW - timedelta(days=2)).isoformat()}
+            update={
+                "observed_at": (
+                    _NOW - timedelta(seconds=health_monitor_freshness_seconds(binding.instance) + 1)
+                ).isoformat()
+            }
         )
         store.observations = (failed, stale, observations[2], original)
         self.assertEqual(failing_hosts(), {"business.example.test", "www.business.example.test"})
@@ -498,6 +602,81 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                 "evidence_url": "https://example.test/report",
             },
         }
+
+    async def test_conflicting_dns_policy_blocks_admission_and_existing_observations(self) -> None:
+        payload = self.seed_split()
+        route = "/v1/route-bindings/reconcile"
+        review = (await self.post(route, payload)).json()["review"]
+        binding = EnvironmentRouteBindingRecord.model_validate(
+            {
+                key: value
+                for key, value in review["proposed_record"].items()
+                if key != "record_sha256"
+            }
+        )
+        profile = self.store.read_product_profile_record(binding.product)
+        lane = profile.lanes[0]
+        checks = tuple(
+            ProductLaneHealthCheck(
+                name=f"dns-{index}",
+                kind="public_http",
+                url=lane.health_url,
+                expected_dns_targets=(
+                    PublicDnsExpectedTarget(
+                        public_name="app.example.test",
+                        addresses=(address,),
+                    ),
+                ),
+            )
+            for index, address in enumerate(("93.184.216.34", "1.1.1.1"))
+        )
+        lane = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"checks": checks},
+                )
+            }
+        )
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        self.store.write_product_profile_record(profile)
+        blocked = (await self.post(route, payload)).json()["review"]
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertIn(
+            "split_ingress_monitoring_policy_conflict",
+            {finding["code"] for finding in blocked["findings"]},
+        )
+        self.store.write_route_binding_record(binding)
+        targets = discover_public_ingress_monitor_targets(self.store, profiles=(profile,))
+        target = next(
+            t for t in targets if t.check_kind == "public_http" and t.health_url == lane.health_url
+        )
+
+        def no_network(*_args: Any, **_kwargs: Any) -> Any:
+            self.fail("Conflicting DNS policy must not connect or resolve DNS")
+
+        observed = check_public_ingress_target(
+            target=target,
+            checked_at=_NOW.isoformat(),
+            timeout_seconds=5,
+            http_get=no_network,
+            tls_get=no_network,
+            dns_get=no_network,
+        )
+        self.assertEqual(observed.status, "fail")
+        self.assertEqual(observed.failure_code, "invalid_url")
+        topology = build_product_environment_topology(
+            record_store=self.store,
+            profile=profile,
+            lane=lane,
+            lane_summary=None,
+            now=_NOW,
+        )
+        self.assertTrue(
+            any(
+                w.code == "public_website_check_missing" and "disagree" in w.detail
+                for w in topology.warnings
+            )
+        )
 
     async def test_signed_review_saves_split_and_all_readers_keep_each_host(self) -> None:
         payload = self.seed_split()
@@ -886,6 +1065,42 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                 now=evaluated,
             )
 
+        def tls_get(host: str, _timeout: int) -> PublicTlsProbeResult:
+            return PublicTlsProbeResult(
+                status="valid",
+                failure_code=None,
+                summary="Valid certificate.",
+                validated_address_count=1,
+                certificate=PublicTlsCertificate(
+                    issuer="Fixture CA",
+                    subject=f"CN={host}",
+                    not_before=(evaluated - timedelta(days=1)).isoformat(),
+                    not_after=(evaluated + timedelta(days=100)).isoformat(),
+                    days_remaining=100,
+                    public_name_match=True,
+                    public_name_match_source="san",
+                    presented_san_count=1,
+                    presented_name_evidence=(host,),
+                ),
+            )
+
+        records = []
+        for target in discover_public_ingress_monitor_targets(self.store, profiles=(profile,)):
+            if target.check_kind != "tls":
+                continue
+            record = check_public_ingress_target(
+                target=target,
+                checked_at=evaluated.isoformat(),
+                timeout_seconds=5,
+                http_get=fetch_public_ingress_url,
+                tls_get=tls_get,
+            )
+            self.store.write_public_ingress_observation_record(record)
+            records.append(record)
+        self.assertEqual(
+            {r.targets[0].tls.public_name for r in records if r.targets[0].tls is not None},
+            {d.domain_name for d in current.domains},
+        )
         observed = topology()
         self.assertEqual(observed.provider_recorded.trust_state, "recorded")
         self.assertFalse(any(w.code == "stale_route_authority" for w in observed.warnings))
@@ -897,6 +1112,73 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
             ),
             current,
         )
+        profile = profile.model_copy(
+            update={
+                "display_name": "Renamed only",
+                "updated_at": (evaluated - timedelta(seconds=1)).isoformat(),
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        self.assertFalse(any(w.code == "stale_route_authority" for w in topology().warnings))
+        original = records[0]
+        tls_target = original.targets[0]
+        assert tls_target.tls is not None
+        for versions in (
+            {},
+            {
+                **tls_target.tls.recorded.source_versions,
+                current.source.source_record_ids[0]: "older-version",
+            },
+        ):
+            altered = tls_target.tls.model_copy(
+                update={
+                    "recorded": tls_target.tls.recorded.model_copy(
+                        update={"source_versions": versions}
+                    )
+                }
+            )
+            self.store.write_public_ingress_observation_record(
+                original.model_copy(
+                    update={"targets": (tls_target.model_copy(update={"tls": altered}),)}
+                )
+            )
+            self.assertTrue(
+                any(
+                    w.code == "stale_route_authority"
+                    and w.domain_name == tls_target.tls.public_name
+                    for w in topology().warnings
+                )
+            )
+        stale_tls = tls_target.tls.model_copy(
+            update={
+                "probe": tls_target.tls.probe.model_copy(
+                    update={"stale_after": (evaluated - timedelta(seconds=1)).isoformat()}
+                )
+            }
+        )
+        self.store.write_public_ingress_observation_record(
+            original.model_copy(
+                update={"targets": (tls_target.model_copy(update={"tls": stale_tls}),)}
+            )
+        )
+        self.assertTrue(any(w.code == "stale_tls_observation" for w in topology().warnings))
+        self.store.write_public_ingress_observation_record(original)
+        assert current.external_ingress is not None
+        changed_custody = current.model_copy(
+            update={
+                "external_ingress": current.external_ingress.model_copy(
+                    update={"custodian": "Successor, same timestamp"}
+                )
+            }
+        )
+        self.store.write_route_binding_record(changed_custody)
+        self.assertEqual(
+            {w.domain_name for w in topology().warnings if w.code == "stale_route_authority"},
+            set(current.external_ingress.domains),
+        )
+        self.store.write_route_binding_record(current)
+        with patch.object(self.store, "read_provider_target_record", side_effect=FileNotFoundError):
+            self.assertTrue(any(w.code == "stale_route_authority" for w in topology().warnings))
         edge = next(
             e
             for e in self.store.list_edge_endpoint_records()

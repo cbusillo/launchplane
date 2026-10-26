@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseStoredRepairRequest, repairRequest, repairOperationScope } from "../src/route-record-repair.ts";
+import { parseStoredRepairRequest, repairRequest, repairOperationScope, reviewedExternalIngress } from "../src/route-record-repair.ts";
 
 const scope = { product: "example-site", context: "example-testing", instance: "testing" };
 for (const kind of ["domain", "binding"]) {
@@ -58,4 +58,14 @@ test("an unchanged binding verdict requires the same current and proposed record
     { proposed_record: { ...record, record_sha256: "c".repeat(64) } },
     { proposed_record: null }, { binding_operation: "create" },
   ]) assert.throws(() => checkedRepairReview(response({ ...review, ...inconsistent }), scope, "binding"));
+});
+
+
+test("unchanged and reverted custody reuse the recorded receipt", () => {
+  const recorded = { domains: ["business.example.test"], custodian: "Office operator", evidence_url: "https://example.test/report", attested_at: "2026-07-01T00:00:00Z" };
+  const { attested_at, ...draft } = recorded;
+  assert.equal(reviewedExternalIngress(draft, recorded), recorded);
+  const changed = { ...draft, custodian: "Successor" };
+  assert.equal(reviewedExternalIngress(changed, recorded), changed);
+  assert.equal(reviewedExternalIngress({ ...changed, custodian: recorded.custodian }, recorded), recorded);
 });

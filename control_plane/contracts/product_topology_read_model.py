@@ -52,7 +52,11 @@ from control_plane.lane_runtime_verification import (
 )
 from control_plane.public_dns_diagnostics import PublicDnsDiagnostic, build_public_dns_diagnostics
 from control_plane.route_binding_reconcile import read_unchanged_route_binding_evidence
-from control_plane.split_ingress import split_ingress_check_name, split_ingress_monitoring_lane
+from control_plane.split_ingress import (
+    split_ingress_check_name,
+    split_ingress_monitoring_lane,
+    split_ingress_dns_policy,
+)
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
 ProductTopologyDomainRole = Literal["primary", "alias"]
@@ -410,6 +414,7 @@ def build_product_environment_topology(
                 product=profile.product,
                 lane=lane,
                 now=evaluated_at,
+                route_binding=route_binding,
             )
         }
     )
@@ -480,6 +485,20 @@ def _split_ingress_warnings(
             binding=binding,
             now=now,
         )
+        policy = split_ingress_dns_policy(
+            profile, lane, tuple(d.domain_name for d in binding.domains), domain.domain_name
+        )
+        if policy.conflict:
+            warnings.append(
+                _warning(
+                    code="public_website_check_missing",
+                    scope="observation",
+                    severity="error",
+                    domain_name=domain.domain_name,
+                    detail=policy.conflict,
+                )
+            )
+            continue
         if result.provenance.freshness_status == "verified":
             continue
         code: ProductTopologyWarningCode = (
@@ -1557,6 +1576,7 @@ def _topology_warnings(
                     route_binding=route_binding,
                     evidence=evidence,
                     now=now,
+                    authority_provenance=provider_recorded.provenance,
                 )
             )
     if public_monitoring_effective and observed.ingress.status == "fail":
@@ -1632,11 +1652,46 @@ def _placement_warnings(
     return tuple(warnings)
 
 
+def _tls_snapshot_matches_current_authority(
+    binding: EnvironmentRouteBindingRecord,
+    tls: PublicIngressTlsObservation,
+    provenance: DataProvenance,
+) -> bool:
+    captured = tls.recorded
+    domain = next(
+        (domain for domain in binding.domains if domain.domain_name == captured.domain_name), None
+    )
+    if (
+        binding.external_ingress is None
+        or domain is None
+        or provenance.freshness_status not in {"recorded", "verified"}
+    ):
+        return False
+    ingress = binding.ingress_for_domain(domain.domain_name)
+    ownership = binding.tls_for_domain(domain.domain_name)
+    return (
+        bool(captured.source_record_ids)
+        and bool(captured.source_versions)
+        and captured.domain_role == domain.role
+        and captured.route_binding_status == binding.status
+        and captured.owner == ownership.owner
+        and captured.ingress_provider == ingress.provider
+        and captured.termination_kind == ingress.termination_kind
+        and captured.provider_evidence == ownership.provider_evidence
+        and captured.source_kind == binding.source.source_kind
+        and captured.source_label == binding.source.source_label
+        and captured.source_record_ids == binding.source.source_record_ids
+        and captured.source_versions == binding.source.source_versions
+        and captured.external_custody_sha256 == binding.external_custody_sha256(domain.domain_name)
+    )
+
+
 def _tls_warnings(
     *,
     route_binding: EnvironmentRouteBindingRecord | None,
     evidence: _ObservedTlsEvidence,
     now: datetime,
+    authority_provenance: DataProvenance,
 ) -> tuple[ProductTopologyWarning, ...]:
     projection = evidence.projection
     tls = evidence.tls
@@ -1715,13 +1770,12 @@ def _tls_warnings(
                     ),
                 )
             )
-        if (
-            _effective_freshness(
-                tls.recorded.freshness_status,
-                stale_after=tls.recorded.stale_after,
-                now=now,
-            )
-            == "stale"
+        if _effective_freshness(
+            tls.recorded.freshness_status,
+            stale_after=tls.recorded.stale_after,
+            now=now,
+        ) == "stale" and not _tls_snapshot_matches_current_authority(
+            route_binding, tls, authority_provenance
         ):
             warnings.append(
                 _warning(

@@ -1,7 +1,6 @@
 """Delivery attention is independent of the health of the artifact still running."""
 
 from __future__ import annotations
-from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -46,6 +45,7 @@ from control_plane.lane_runtime_verification import (
     read_lane_runtime_verification,
 )
 from control_plane.source_control_change import read_branch_revision
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,

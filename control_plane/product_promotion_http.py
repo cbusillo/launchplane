@@ -1,5 +1,4 @@
 from __future__ import annotations
-from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 
 import hashlib
 import json
@@ -28,6 +27,7 @@ from control_plane.drivers.generic_web_dispatch import (
     GenericWebProdPromotionEnvelope,
     GenericWebPromotionWorkflowEnvelope,
 )
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.generic_web_promotion_http import (
     GenericWebProdPromotionRecords,

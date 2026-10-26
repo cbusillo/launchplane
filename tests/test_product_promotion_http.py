@@ -694,7 +694,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
         store = _MonitoredPromotionStore()
         lane = store.profile.lanes[0]
         health_only = lane.health_monitoring.checks[0].model_copy(
-            update={"name": "public-root", "require_runtime_identity": False}
+            update={"name": "public-root", "url": lane.base_url, "require_runtime_identity": False}
         )
         lane = lane.model_copy(
             update={
