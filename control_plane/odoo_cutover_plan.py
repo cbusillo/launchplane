@@ -38,7 +38,7 @@ def rollback_pause_identity(record_id: str) -> str:
 
 
 def decision_bound_cutover_plan(
-    plan: OdooCutoverPlan, decision: ReleaseReviewDecisionRecord | None
+    plan: OdooCutoverPlan, decision: ReleaseReviewDecisionRecord | None, *, stored: bool = False
 ) -> OdooCutoverPlan:
     """Bind snapshots before recovery comparison or provider construction."""
     candidate = decision.checklist.website_settings if decision else None
@@ -58,7 +58,8 @@ def decision_bound_cutover_plan(
             **plan.model_dump(),
             "website_settings": candidate,
             "production_website_settings": production,
-        }
+        },
+        context={"stored_cutover": stored},
     )
 
 

@@ -1,4 +1,5 @@
 from contextlib import redirect_stdout
+from collections.abc import Callable
 import io
 import os
 import json
@@ -13,8 +14,13 @@ from unittest.mock import Mock, patch
 from control_plane.dokploy.cutover_restore_probe import (
     RESTORE_PROBE_PROGRAM,
     RESTORE_PREFLIGHT_PROGRAM,
+    verify_disposable_database_restore,
 )
-from control_plane.dokploy.cutover_restore_state import RESTORE_CANCEL_PROGRAM
+from control_plane.dokploy.cutover_restore_state import (
+    RESTORE_CANCEL_PROGRAM,
+    RESTORE_STATE_PROGRAM,
+)
+from control_plane.odoo_cutover_recovery import BackupVerificationRejected
 
 
 class CutoverRestoreProbeTests(unittest.TestCase):
@@ -80,7 +86,13 @@ class CutoverRestoreProbeTests(unittest.TestCase):
         self.container = "e" * 64
         self.clock = 0.0
 
-    def run_probe(self, *, failure: str = "", cancel: bool = False) -> dict[str, Any]:
+    def run_probe(
+        self,
+        *,
+        failure: str = "",
+        cancel: bool = False,
+        intercept: Callable[[list[str]], None] | None = None,
+    ) -> dict[str, Any]:
         request = {**self.request, "record": str(self.request["record"]) + failure}
         binding = {
             key: request[key]
@@ -102,6 +114,8 @@ class CutoverRestoreProbeTests(unittest.TestCase):
         def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
             nonlocal live
             self.commands.append((argv, kwargs))
+            if intercept is not None:
+                intercept(argv)
             output = b""
             status = 0
             if argv[1] == "ps" and live:
@@ -144,6 +158,8 @@ class CutoverRestoreProbeTests(unittest.TestCase):
                 output = self.container.encode()
                 if failure == "allocation":
                     status = 1
+                elif failure == "allocation-timeout":
+                    raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
             elif "pg_database_size" in argv[-1]:
                 output = b"100000"
             elif "df" in argv:
@@ -279,8 +295,10 @@ class CutoverRestoreProbeTests(unittest.TestCase):
     def test_cancellation_seals_unused_restore_and_prevents_later_allocation(self) -> None:
         self.assertEqual(self.run_probe(cancel=True), {"cancelled": True})
         self.commands.clear()
-        self.assertEqual(self.run_probe(), {"status": "failed", "terminated": True})
-        self.assertEqual(self.commands, [])
+        self.assertEqual(
+            self.run_probe(), {"status": "abandoned", "allocation_state": "not_dispatched"}
+        )
+        self.assertFalse(any(argv[1] == "run" for argv, _ in self.commands))
 
     def test_rejected_allocation_is_definite_after_native_absence_readback(self) -> None:
         self.assertEqual(
@@ -289,6 +307,106 @@ class CutoverRestoreProbeTests(unittest.TestCase):
         self.commands.clear()
         self.assertEqual(self.run_probe(failure="allocation", cancel=True), {"cancelled": True})
         self.assertEqual(self.commands, [])
+
+    def receipt(self, kind: str, *, failure: str = "") -> Path:
+        return Path(str(self.request["authority_directory"])) / (
+            str(self.request["record"]) + failure + "-restore-" + kind + ".json"
+        )
+
+    def seal(self, kind: str, *, failure: str = "", **values: Any) -> None:
+        namespace: dict[str, Any] = {}
+        with patch(
+            "sys.stdin",
+            io.StringIO(
+                json.dumps({**self.request, "record": str(self.request["record"]) + failure})
+            ),
+        ):
+            exec(RESTORE_STATE_PROGRAM, namespace)
+        namespace["seal_receipt"](kind, **values)
+
+    def test_coordinator_death_before_dispatch_cancellation_fences_late_allocation(self) -> None:
+        def stop_before_dispatch(argv: list[str]) -> None:
+            if "pg_database_size" in argv[-1]:
+                raise KeyboardInterrupt()
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_probe(intercept=stop_before_dispatch)
+        self.assertFalse(self.receipt("dispatch").exists())
+        self.assertEqual(self.run_probe(cancel=True), {"cancelled": True})
+        self.commands.clear()
+        self.assertEqual(
+            self.run_probe(), {"status": "abandoned", "allocation_state": "not_dispatched"}
+        )
+        self.assertFalse(any(argv[1] == "run" for argv, _ in self.commands))
+        self.assertFalse(self.receipt("completed").exists())
+
+    def test_unknown_allocation_can_be_abandoned_without_claiming_termination(self) -> None:
+        failure = "allocation-timeout"
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.run_probe(failure=failure)
+        self.assertEqual(self.run_probe(failure=failure, cancel=True), {"cancelled": True})
+        self.commands.clear()
+        self.assertEqual(
+            self.run_probe(failure=failure),
+            {"status": "abandoned", "allocation_state": "unknown_isolated"},
+        )
+        self.assertFalse(self.receipt("completed", failure=failure).exists())
+        self.assertFalse(any(argv[1] == "run" for argv, _ in self.commands))
+
+    def test_delayed_allocation_after_cancellation_is_removed_and_never_verified(self) -> None:
+        def cancel_during_dispatch(argv: list[str]) -> None:
+            if argv[1] == "run":
+                self.assertEqual(self.run_probe(cancel=True), {"cancelled": True})
+
+        result = self.run_probe(intercept=cancel_during_dispatch)
+        self.assertEqual(result, {"status": "abandoned", "allocation_state": "unknown_isolated"})
+        self.assertEqual(sum(argv[1] == "run" for argv, _ in self.commands), 1)
+        self.assertIn(
+            ["docker", "rm", "-f", "-v", self.container], [argv for argv, _ in self.commands]
+        )
+        self.assertFalse(any("pg_restore" in argv for argv, _ in self.commands))
+        self.assertFalse(self.receipt("completed").exists())
+
+    def test_late_success_receipt_cannot_override_abandonment_or_pass_backup_verification(
+        self,
+    ) -> None:
+        failure = "allocation-timeout"
+        with self.assertRaises(subprocess.TimeoutExpired):
+            self.run_probe(failure=failure)
+        self.run_probe(failure=failure, cancel=True)
+        success = {
+            "restored_database_uuid": self.request["database_uuid"],
+            "database_dump_sha256": self.request["database_dump_sha256"],
+            "filestore_archive_sha256": self.request["filestore_sha256"],
+        }
+        self.seal("completed", failure=failure, result=success)
+        outcome = self.run_probe(failure=failure)
+        self.assertEqual(outcome, {"status": "abandoned", "allocation_state": "unknown_isolated"})
+        with self.assertRaises(BackupVerificationRejected):
+            verify_disposable_database_restore(
+                lambda argv, stdin: json.dumps(outcome),
+                image=str(self.request["image"]),
+                runner=str(self.request["runner"]),
+                record_id=str(self.request["record"]) + failure,
+                dump=str(self.request["dump"]),
+                database_uuid=str(self.request["database_uuid"]),
+                dump_sha256=str(self.request["database_dump_sha256"]),
+                database=str(self.request["database"]),
+                filestore=str(self.request["filestore"]),
+                filestore_sha256=str(self.request["filestore_sha256"]),
+                timeout_seconds=int(str(self.request["timeout_seconds"])),
+                authority_directory=str(self.request["authority_directory"]),
+                capture_nonce=str(self.request["capture_nonce"]),
+            )
+
+    def test_legacy_intent_without_dispatch_protocol_retains_unknown_allocation(self) -> None:
+        self.seal("intent")
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel), self.assertRaises(RuntimeError):
+                self.run_probe(cancel=cancel)
+        self.assertFalse(self.receipt("cancelled").exists())
+        self.assertFalse(self.receipt("completed").exists())
+        self.assertFalse(any(argv[1] == "run" for argv, _ in self.commands))
 
 
 class NativeRestoreLifetimeTests(unittest.TestCase):

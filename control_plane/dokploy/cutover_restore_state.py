@@ -37,9 +37,15 @@ def docker_read(argv):
     result=subprocess.run(['docker',*argv],capture_output=True,timeout=min(30,spec['timeout_seconds']))
     if result.returncode: raise RuntimeError('original restore observation is unavailable')
     return result.stdout
-def restore_outcome():
+def abandonment():
+    cancelled=read_receipt('cancelled')
+    if cancelled is None: return None
+    if cancelled.get('allocation_state') not in ('not_dispatched','unknown_isolated'): raise ValueError('restore cancellation witness is malformed')
+    return {'status':'abandoned','allocation_state':cancelled['allocation_state']}
+def restore_outcome(cancel=False):
+    abandoned=abandonment()
     completed=read_receipt('completed')
-    if completed is not None:
+    if completed is not None and abandoned is None:
         result=completed.get('result')
         if result not in ({'status':'failed','terminated':True},{'restored_database_uuid':spec['database_uuid'],'database_dump_sha256':spec['database_dump_sha256'],'filestore_archive_sha256':spec['filestore_sha256']}): raise ValueError('restore completion witness is malformed')
         return result
@@ -61,24 +67,31 @@ def restore_outcome():
         if allocation['container']!=container: raise ValueError('restore allocation receipt differs')
         subprocess.run(['docker','rm','-f','-v',container],capture_output=True,timeout=min(30,spec['timeout_seconds']))
     elif allocation is None:
+        if abandoned is not None: return abandoned
         if intent is not None:
             if intent.get('cancelled') is True: return seal_receipt('completed',result={'status':'failed','terminated':True})['result']
+            if cancel and intent.get('dispatch_protocol') is True:
+                dispatch=seal_receipt('dispatch',state='cancelled')
+                if dispatch.get('state') not in ('allocating','cancelled'): raise ValueError('restore dispatch witness differs')
+                seal_receipt('cancelled',allocation_state='unknown_isolated' if dispatch['state']=='allocating' else 'not_dispatched')
+                return abandonment()
             raise RuntimeError('original restore allocation remains uncertain')
         return None
     container=allocation['container']
     if not re.fullmatch('[0-9a-f]{64}',container): raise ValueError('original restore allocation witness is malformed')
     if docker_read(['ps','-a','--no-trunc','--filter','id='+container,'--format','{{.ID}}']).strip():
         raise RuntimeError('original restore termination has not been observed')
-    return seal_receipt('completed',result={'status':'failed','terminated':True})['result']
+    return abandonment() or seal_receipt('completed',result={'status':'failed','terminated':True})['result']
 """
 
 RESTORE_CANCEL_PROGRAM = (
     RESTORE_STATE_PROGRAM
     + r"""
-outcome=restore_outcome()
+outcome=restore_outcome(cancel=True)
 if outcome is None:
-    seal_receipt('intent',cancelled=True)
-    seal_receipt('completed',result={'status':'failed','terminated':True})
+    seal_receipt('intent',cancelled=True,dispatch_protocol=True)
+    seal_receipt('dispatch',state='cancelled')
+    seal_receipt('cancelled',allocation_state='not_dispatched')
 print(json.dumps({'cancelled':True}))
 """
 )

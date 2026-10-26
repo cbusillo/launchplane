@@ -39,7 +39,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     execute_odoo_stable_target_replacement_apply,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.contracts.odoo_cutover import OdooCutoverPlan, ODOO_CUTOVER_TERMINAL_STEPS
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.workflows.odoo_cutover_deployment import (
@@ -142,26 +142,12 @@ def _require_cutover_image_rollback(deployment: DeploymentRecord | None) -> None
 def _lane_cutover_deployment(
     store: OdooProdRollbackStore, request: OdooProdRollbackRequest
 ) -> DeploymentRecord | None:
-    attempts = tuple(
-        record
-        for record in store.list_deployment_records(
-            context_name=request.context, instance_name=request.instance
-        )
-        if record.odoo_cutover is not None
-        and record.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
-    )
-    if len(attempts) > 1:
-        raise click.ClickException("Multiple unfinished cutovers require lane reconciliation.")
-    if attempts:
-        return attempts[0]
+    from control_plane.odoo_cutover_recovery import rollback_cutover_deployment
+
     try:
-        inventory = store.read_environment_inventory(
-            context_name=request.context, instance_name=request.instance
-        )
-        current = store.read_deployment_record(inventory.deployment_record_id)
-    except FileNotFoundError:
-        return None
-    return current if current.odoo_cutover is not None else None
+        return rollback_cutover_deployment(store, request)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
 
 
 def _read_previous_prod_deployment(
@@ -395,6 +381,7 @@ def execute_odoo_prod_rollback(
     request: OdooProdRollbackRequest,
     target: OdooProdRollbackTarget | None = None,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
+    cutover_dispatch_guard: Callable[[], None] | None = None,
     hold_uncertain_effects: bool = False,
     cutover_provider: OdooCutoverProvider | None = None,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
@@ -512,6 +499,7 @@ def execute_odoo_prod_rollback(
                 provider=cutover_provider,
                 artifact_id=rollback_source.artifact_id,
                 checkpoint=before_provider_effect,
+                dispatch_guard=cutover_dispatch_guard,
             )
         else:
             profile = typed_record_store.read_product_profile_record(product)

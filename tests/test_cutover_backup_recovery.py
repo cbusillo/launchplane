@@ -167,6 +167,30 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
                 )
                 BoundOdooCutoverHost.cancel_backup_restore(self.host, self.plan)
 
+    def test_missing_legacy_or_inherited_lock_never_proves_capture_death(self) -> None:
+        for inherited in (False, True):
+            with self.subTest(inherited=inherited), TemporaryDirectory() as temporary:
+                directory = Path(temporary).resolve() / "capture"
+                directory.mkdir()
+                (directory / "partial").write_bytes(b"inert unfinished capture")
+                binding = {"record_id": self.backup_id, "nonce": self.binding["nonce"]}
+                claim = directory.with_name(directory.name + ".attempt.json")
+                claim.write_text(
+                    json.dumps({**binding, **({"lock_inherited": True} if inherited else {})})
+                )
+                output = io.StringIO()
+                with (
+                    patch(
+                        "sys.stdin",
+                        io.StringIO(
+                            json.dumps({"directory": str(directory), "cancel_absent": binding})
+                        ),
+                    ),
+                    redirect_stdout(output),
+                ):
+                    exec(BACKUP_MANIFEST_PROGRAM, {})
+                self.assertEqual(json.loads(output.getvalue()), {"state": "uncertain"})
+
     def test_denial_before_capture_dispatch_keeps_the_same_intent_replayable(self) -> None:
         self.transport.side_effect = [
             RuntimeError("original guard denied before send"),
@@ -183,7 +207,7 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
         self.assertEqual(self.extract.call_count, 1)
 
     def test_failed_archive_verification_cancels_before_becoming_abortable(self) -> None:
-        from control_plane.odoo_cutover_recovery import DefiniteBackupFailure
+        from control_plane.odoo_cutover_recovery import BackupVerificationRejected
 
         failed = {
             **_passing_verification_evidence(),
@@ -199,7 +223,7 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
                 return_value=failed,
             ),
             patch.object(self.host, "cancel_backup_restore", create=True) as cancel,
-            self.assertRaises(DefiniteBackupFailure),
+            self.assertRaises(BackupVerificationRejected),
         ):
             BoundOdooCutoverHost.backup(self.host, self.plan)
         cancel.assert_called_once_with(self.plan)
@@ -229,18 +253,18 @@ class CutoverBackupRecoveryTests(unittest.TestCase):
                 self.transport.assert_not_called()
 
     def test_only_matching_terminal_capture_failure_permits_abort(self) -> None:
-        from control_plane.odoo_cutover_recovery import DefiniteBackupFailure
+        from control_plane.odoo_cutover_recovery import BackupVerificationRejected
 
         self.bindings["backup"] = self.binding
         self.manifest = {
             "state": "failed",
             "claim": {"record_id": self.backup_id, "nonce": self.binding["nonce"]},
         }
-        with self.assertRaises(DefiniteBackupFailure):
+        with self.assertRaises(BackupVerificationRejected):
             BoundOdooCutoverHost.backup(self.host, self.plan)
         self.transport.assert_not_called()
         self.manifest["claim"]["nonce"] = "foreign"
         with self.assertRaises(ValueError) as caught:
             BoundOdooCutoverHost.backup(self.host, self.plan)
-        self.assertNotIsInstance(caught.exception, DefiniteBackupFailure)
+        self.assertNotIsInstance(caught.exception, BackupVerificationRejected)
         self.transport.assert_not_called()

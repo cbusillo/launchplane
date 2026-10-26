@@ -91,10 +91,11 @@ from control_plane.odoo_cutover_plan import (
 from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.odoo_cutover_recovery import (
     startup_recovery_pause,
-    DefiniteBackupFailure,
+    BackupVerificationRejected,
     backup_recovery_eligible,
     abort_reconciliation_eligible,
     publication_recovery_pause,
+    maintenance_reconciliation_eligible,
 )
 from control_plane.prepared_public_site import prepare_public_site, verify_snapshot
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupVerificationEvidence
@@ -152,7 +153,7 @@ print(json.dumps({'release':spec['release']} if 'release' in spec else {'ready_b
 
 
 BACKUP_MANIFEST_PROGRAM = r"""
-import json,os,sys,tempfile
+import fcntl,json,os,sys,tempfile
 from pathlib import Path
 spec=json.load(sys.stdin); path=Path(spec['directory']); claim=path.with_name(path.name+'.attempt.json')
 if path.is_symlink() or claim.is_symlink() or path.resolve()!=path: raise ValueError('backup path differs')
@@ -168,16 +169,27 @@ if 'cancel_absent' in spec and not claim.exists() and (not path.exists() or path
         try: os.fsync(descriptor)
         finally: os.close(descriptor)
     finally: os.unlink(temporary)
-if claim.is_file() and json.loads(claim.read_text()).get('cancelled') is True:
-    binding=json.loads(claim.read_text())
+binding=json.loads(claim.read_text()) if claim.is_file() else None
+canonical={key:binding[key] for key in ('record_id','nonce')} if binding is not None else None
+if binding is not None and binding.get('cancelled') is True:
     if set(binding)!={'record_id','nonce','cancelled'}: raise ValueError('cancelled capture claim differs')
-    print(json.dumps({'state':'failed','claim':{key:binding[key] for key in ('record_id','nonce')}}))
+    print(json.dumps({'state':'failed','claim':canonical}))
 elif (path/'manifest.json').is_file() and claim.is_file():
-    print(json.dumps({'state':'captured','manifest':json.loads((path/'manifest.json').read_text()),'claim':json.loads(claim.read_text())}))
+    print(json.dumps({'state':'captured','manifest':json.loads((path/'manifest.json').read_text()),'claim':canonical}))
 elif path.with_name(path.name+'.failed.json').is_file():
     failure=path.with_name(path.name+'.failed.json')
     if failure.is_symlink() or not claim.is_file() or json.loads(failure.read_text())!=json.loads(claim.read_text()): raise ValueError('backup failure differs from original claim')
-    print(json.dumps({'state':'failed','claim':json.loads(claim.read_text())}))
+    print(json.dumps({'state':'failed','claim':canonical}))
+elif binding is not None and binding.get('lock_inherited') is True:
+    lock=path.with_name(path.name+'.capture.lock')
+    if not lock.is_file() or lock.is_symlink(): print(json.dumps({'state':'uncertain'}))
+    else:
+        descriptor=os.open(lock,os.O_RDWR|os.O_NOFOLLOW)
+        try:
+            try: fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError: print(json.dumps({'state':'uncertain'}))
+            else: print(json.dumps({'state':'failed','claim':canonical}))
+        finally: os.close(descriptor)
 elif claim.exists() or path.exists() and (not path.is_dir() or any(path.iterdir())): print(json.dumps({'state':'uncertain'}))
 else: print(json.dumps({'state':'absent'}))
 """
@@ -497,7 +509,9 @@ class BoundOdooCutoverHost:
                 record is not None
                 and (
                     abort_reconciliation_eligible(record)
+                    or maintenance_reconciliation_eligible(record)
                     or publication_recovery_pause(record) is not None
+                    or record.step in ODOO_CUTOVER_TERMINAL_STEPS
                 )
             )
         )
@@ -580,10 +594,24 @@ class BoundOdooCutoverHost:
             "aborting",
         }:
             self.old_readiness()
-        self.startup_capability(plan.old)
-        self.native_writer_capability.preflight(plan.old)
-        for writer in plan.writers:
-            self.native_writer_capability(plan.old, writer)
+        qualified_slot = (
+            plan.new
+            if record is not None
+            and record.step
+            in {"maintaining", "ready", "switching", "resuming", "draining", "complete"}
+            else plan.old
+        )
+        self.startup_capability(qualified_slot)
+        if (
+            qualified_slot == plan.new
+            and recovery_pause is not None
+            and self.startup_inventory_interrupted()
+        ):
+            self.verify_recovery_pause()
+        else:
+            self.native_writer_capability.preflight(qualified_slot)
+            for writer in plan.writers:
+                self.native_writer_capability(qualified_slot, writer)
         rendered = render_odoo_app_slot_compose(
             plan, data_volume=self.runtime.data_volume, private_network=self.runtime.private_network
         )
@@ -797,7 +825,9 @@ class BoundOdooCutoverHost:
         if record is None or record.public_site is None:
             return False
         pause = (
-            record.pause if backup_recovery_eligible(record) else publication_recovery_pause(record)
+            record.pause
+            if backup_recovery_eligible(record) or maintenance_reconciliation_eligible(record)
+            else publication_recovery_pause(record)
         )
         if pause is None or pause.pause_id != pause_id:
             return False
@@ -888,9 +918,14 @@ class BoundOdooCutoverHost:
         pause = startup_recovery_pause(record) if record else None
         if record is None or record.public_site is None or pause is None:
             raise ValueError("startup recovery lacks its original maintenance and public pause")
+        try:
+            observed = self.observe_prepared(pause.pause_id)
+        except (ValueError, OSError):
+            observed = ""
         if (
             self.route.observed_target() != self.lane.prepared_origin
-            or self.observe_prepared(pause.pause_id) != record.public_site.content_digest
+            or observed != record.public_site.content_digest
+            and not self.owns_prepared(pause.pause_id)
         ):
             raise ValueError("startup recovery requires its original published drained pause")
 
@@ -1105,7 +1140,7 @@ class BoundOdooCutoverHost:
             and original_attempt
             and manifest.get("claim") == {"record_id": backup_id, "nonce": binding["nonce"]}
         ):
-            raise DefiniteBackupFailure("original native capture terminated unsuccessfully")
+            raise BackupVerificationRejected("original native capture terminated unsuccessfully")
         elif manifest.get("state") != "absent":
             raise ValueError("original coherent capture is uncertain; it cannot be repeated")
         else:
@@ -1177,7 +1212,9 @@ class BoundOdooCutoverHost:
             or verification.filestore_archive_sha256 != capture.filestore_archive_sha256
         ):
             self.cancel_backup_restore(plan)
-            raise DefiniteBackupFailure("coherent tuple integrity/restore-read verification failed")
+            raise BackupVerificationRejected(
+                "coherent tuple integrity/restore-read verification failed"
+            )
         restored = verify_disposable_database_restore(
             self.transport,
             image=self.runtime.restore_image,
@@ -1193,6 +1230,7 @@ class BoundOdooCutoverHost:
             authority_directory=self.runtime.authority_directory,
             capture_nonce=binding["nonce"],
         )
+        self.guard()
         backup_record = BackupGateRecord(
             record_id=backup_id,
             context=plan.old.runtime_identity.context,

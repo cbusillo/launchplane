@@ -2,6 +2,7 @@
 
 ONLINE_ODOO_BACKUP_PROGRAM = r"""
 import base64
+import fcntl
 import hashlib
 import json
 import os
@@ -30,9 +31,10 @@ def sync_file(path):
 
 
 capture_claim_owned=False
+capture_lock=None
 
 def capture():
-    global capture_claim_owned
+    global capture_claim_owned,capture_lock
     database_name = os.environ["DATABASE_NAME"]
     backup_dir = Path(os.environ["BACKUP_DIR"])
     root = Path(os.environ["FILESTORE_ROOT"])
@@ -44,10 +46,16 @@ def capture():
         raise RuntimeError("Backup destination must be a new empty directory without symlinks")
     if os.environ.get('CUTOVER_CAPTURE_CLAIM') == '1':
         claim=backup_dir.with_name(backup_dir.name+'.attempt.json')
-        descriptor=os.open(claim,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-        with os.fdopen(descriptor,'w') as handle:
-            json.dump({'record_id':os.environ['BACKUP_RECORD_ID'],'nonce':os.environ['BACKUP_NONCE']},handle)
-            handle.flush();os.fsync(handle.fileno())
+        capture_lock=os.open(backup_dir.with_name(backup_dir.name+'.capture.lock'),os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+        fcntl.flock(capture_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        descriptor,temporary=tempfile.mkstemp(dir=claim.parent,prefix='.capture-claim-')
+        try:
+            with os.fdopen(descriptor,'w') as handle:
+                os.fchmod(handle.fileno(),0o600)
+                json.dump({'record_id':os.environ['BACKUP_RECORD_ID'],'nonce':os.environ['BACKUP_NONCE'],'lock_inherited':True},handle)
+                handle.flush();os.fsync(handle.fileno())
+            os.link(temporary,claim)
+        finally: os.unlink(temporary)
         descriptor=os.open(claim.parent,os.O_RDONLY|os.O_DIRECTORY)
         try: os.fsync(descriptor)
         finally: os.close(descriptor)
@@ -134,16 +142,19 @@ def capture():
                         ],
                         env=dump_environment, check=True, stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
+                        pass_fds=(capture_lock,) if capture_lock is not None else (),
                     )
         if dump_path.stat().st_size == 0:
             raise RuntimeError("Empty database dump")
         subprocess.run(
             ["pg_restore", "--list", str(dump_path)], check=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            pass_fds=(capture_lock,) if capture_lock is not None else (),
         )
         subprocess.run(
             ["pg_restore", "--no-owner", "--no-acl", "--file=/dev/null", str(dump_path)],
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            pass_fds=(capture_lock,) if capture_lock is not None else (),
         )
         with tarfile.open(archive_path, "w:gz", dereference=True) as archive:
             archive.add(pin_root, arcname=database_name)
@@ -207,7 +218,7 @@ except Exception:
     if capture_claim_owned:
         directory=Path(os.environ['BACKUP_DIR'])
         claim=directory.with_name(directory.name+'.attempt.json')
-        expected={'record_id':os.environ['BACKUP_RECORD_ID'],'nonce':os.environ['BACKUP_NONCE']}
+        expected={'record_id':os.environ['BACKUP_RECORD_ID'],'nonce':os.environ['BACKUP_NONCE'],'lock_inherited':True}
         if claim.is_file() and not claim.is_symlink() and json.loads(claim.read_text())==expected:
             failure=directory.with_name(directory.name+'.failed.json')
             descriptor=os.open(failure,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
@@ -217,4 +228,6 @@ except Exception:
             try: os.fsync(descriptor)
             finally: os.close(descriptor)
     raise
+finally:
+    if capture_lock is not None: os.close(capture_lock)
 """

@@ -5,6 +5,9 @@ import io
 import json
 import os
 import subprocess
+import signal
+import sys
+import time
 import tarfile
 import unittest
 from contextlib import redirect_stdout
@@ -22,6 +25,84 @@ from control_plane.dokploy.post_deploy import _build_dokploy_odoo_backup_verific
 
 
 class OnlineBackupTests(unittest.TestCase):
+    def test_native_dump_child_retains_capture_lock_after_coordinator_death(self) -> None:
+        from control_plane.dokploy.cutover_host import BACKUP_MANIFEST_PROGRAM
+
+        marker = self.root / "dump-child.json"
+        environment = {**self.environment, "CUTOVER_CAPTURE_CLAIM": "1"}
+        harness = r"""
+import json,subprocess,sys,tempfile
+spec=json.loads(sys.argv[1]);tempfile.tempdir=spec['scratch']
+from tests.test_odoo_online_backup import OnlineBackupTests
+fixture=OnlineBackupTests();fixture.setUp();fixture.environment.update(spec['environment'])
+real_run=subprocess.run
+def dump(command,**kwargs):
+    if command[0]=='pg_dump':
+        code="import json,os,sys,time;from pathlib import Path;Path(sys.argv[1]).write_text(json.dumps({'pid':os.getpid()}));time.sleep(60)"
+        return real_run([sys.executable,'-c',code,spec['marker']],**kwargs)
+    return fixture.dump(command,**kwargs)
+fixture.capture(dump)
+"""
+        coordinator = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                harness,
+                json.dumps(
+                    {"scratch": str(self.root), "environment": environment, "marker": str(marker)}
+                ),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(lambda: coordinator.kill() if coordinator.poll() is None else None)
+        deadline = time.monotonic() + 10
+        while not marker.exists() and coordinator.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(
+            marker.exists(),
+            coordinator.stderr.read()
+            if coordinator.poll() is not None and coordinator.stderr
+            else "dump child did not start",
+        )
+        child = json.loads(marker.read_text())["pid"]
+
+        def kill_child() -> None:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+        self.addCleanup(kill_child)
+
+        def observe() -> dict[str, object]:
+            result = subprocess.run(
+                [sys.executable, "-c", BACKUP_MANIFEST_PROGRAM],
+                input=json.dumps({"directory": str(self.destination)}),
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            )
+            return cast(dict[str, object], json.loads(result.stdout))
+
+        self.assertEqual(observe()["state"], "uncertain")
+        coordinator.kill()
+        coordinator.communicate(timeout=5)
+        self.assertEqual(observe()["state"], "uncertain")
+        kill_child()
+        deadline = time.monotonic() + 5
+        result = observe()
+        while result["state"] != "failed" and time.monotonic() < deadline:
+            time.sleep(0.05)
+            result = observe()
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(
+            result["claim"],
+            {"record_id": environment["BACKUP_RECORD_ID"], "nonce": environment["BACKUP_NONCE"]},
+        )
+
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -155,6 +236,7 @@ class OnlineBackupTests(unittest.TestCase):
             {
                 "record_id": self.environment["BACKUP_RECORD_ID"],
                 "nonce": self.environment["BACKUP_NONCE"],
+                "lock_inherited": True,
             },
         )
         self.assertFalse(tuple(self.destination.iterdir()))

@@ -136,31 +136,32 @@ classification, maintenance/readiness/backup observations and the full
 new parallel shared truth or schema table. File/SQLite stores are isolated
 rehearsal paths. Provider exclusivity and the existing worker lease protect
 effects; payload storage is not itself a distributed lock.
-The native worker can reacquire its existing held operation for a bounded retry
-only when the matching cutover records a timeout at publication, switching,
-resumption or drain. It uses the same lane lock, service drain admission, lease,
-accepted release and fresh authorization checks. An uncertain maintenance or
-backup operation is not automatically repeated. Recovery reuses the original
-passing logical backup rather than relabeling later data with the old image.
-The infrastructure backup guard validates continuation against the exact
-persisted cutover and admitted promotion. It evaluates capture freshness at
-that original admission, while still checking current authority, retention and
-competing consumption. A failed continuation keeps unfinished work held. New
-releases cannot bypass another unfinished cutover; recover it first. Configured
-two-slot lanes also refuse an in-place rollback after a switch-back event.
-Authorization is checked again at recovery boundaries. Denial performs no
-effects and keeps the unfinished cutover's lane hold without consuming the
-provider retry budget. Held cutover reconciliation yields to pending release
-queues, including rollback and replacement. Product reconciliation remains
-available between delayed recovery attempts. A persisted
-30-second delay after the last recovery update prevents immediate reclaims
-after denial and survives worker restarts; other eligible lanes remain claimable.
-A refused finished-release replay preserves its existing
-promotion audit record. Switch-back intent persists its start time so a crash
-before publishing the deployment event cannot replace it with retry times.
-The direct promotion
-route uses the original logical-backup identity for a stable recovery key;
-native queued releases retain their existing operation identity.
+The native worker reacquires the original held operation under its lane lock,
+service-drain admission and a renewed lease. Reconciliation is an observation
+and continuation of that admitted release, not another deployment attempt: it
+preserves the attempt number, phase and checkpoint history. One production-write
+checkpoint separates fresh admission from continuation. Dispatch guards read the
+current lease, original decision, ownership or Director authority, production
+identity and recovery pin without appending checkpoints. Testing freshness,
+release holds and release windows gate the start; they do not strand a release
+after its first production write. Changed ownership, revoked authority and
+foreign production identity still refuse effects.
+
+Recovery reuses the stored candidate, classification, website snapshots and
+original passing logical backup. Fresh requests still use current admission and
+classification. The infrastructure backup guard evaluates capture freshness at
+original admission while retaining current policy, retention and competing-use
+checks. A finished cutover whose worker lost its terminal write verifies the
+serving route and completes its original audit without another capture,
+maintenance run, writer readiness or switch. A rolled-back deployment retains
+its original cutover provenance for the same read-only completion path.
+
+Unfinished work retains the lane hold. Reconciliation yields to pending release
+queues, including rollback and replacement, and waits 30 seconds after the last
+update, including after denial. That delay survives worker restarts and lets
+other eligible lanes run. Switch-back intent retains its original start time.
+The direct promotion route uses the original logical-backup identity for a
+stable recovery key; queued releases retain their operation identity.
 
 Persist intent before publication, maintenance, switch and resumption. Failed
 preparation/readiness keeps old traffic or verified prepared traffic intact.
@@ -436,17 +437,21 @@ filestore restore on a dedicated disk volume. One batch verifies every restored
 attachment against the restored database. The command deadline comes from the
 lane's operation timeout, whose default and bounds match the backup gate.
 Exact restore readback is persisted before the tuple is returned. An atomic
-native capture claim distinguishes intent from capture: denial before dispatch
-can replay the same nonce, while started capture without its manifest stays held.
+native capture claim distinguishes intent from capture. A kernel lock belongs to
+the capture coordinator and is inherited by every native dump or verification
+child. A live child keeps recovery held even after coordinator death; an unlocked
+protocol-bearing claim proves that capture ended without a manifest. Legacy
+claims without that liveness protocol remain unknown.
 
 A passing native-maintenance receipt is checkpointed before startup recreation.
-Automatic original-operation recovery requires that receipt, the coherent
-backup, complete logical drain evidence and the still-published original public
-pause. It uses the stored startup authority for zero/multiple stopped inventory,
+Startup recreation requires that receipt, the coherent backup, complete logical
+drain evidence and the still-published original public pause. Reading an original
+maintenance result after a lost response requires the verified backup and drained
+pause, so it can recover the receipt before considering startup recreation. It uses the stored startup authority for zero/multiple stopped inventory,
 refreshes the same logical writer object, and rechecks the operation's lease and
 pause before effects. Both promotion and rollback continuation retain their
-original operation and key, wait behind pending work, and obey the existing
-attempt budget and delay. Missing, ended, foreign or unproved evidence remains
+original operation and key, wait behind pending work, and obey the reconciliation
+delay without charging another deployment attempt. Missing, ended, foreign or unproved evidence remains
 held. A failing candidate health probe can be switched back after retained-slot
 private readiness; positive foreign identity still refuses rollback.
 
@@ -482,7 +487,7 @@ hash, stream, readiness observation and database command shares the earlier
 monotonic work deadline. Capacity is checked on the actual anonymous Docker data
 volume against the source database and attachment sizes before copying. The
 original operation admits only one restore allocation, using its label and a
-deterministic name. Atomic host receipts bind intent, allocation and completion
+deterministic name. Atomic host receipts bind intent, dispatch, allocation and completion
 to the original capture nonce, immutable image and archive hashes. A reclaimed
 operation verifies an orphan's full container identity and isolated configuration,
 removes that disposable container and reads back its absence. It then aborts
@@ -491,10 +496,17 @@ container runs without network access, owns its anonymous volume and enforces
 its own maximum lifetime. Docker removes it and the volume on exit, including
 when the coordinator dies. Cleanup uses the returned container ID, never a
 reusable name. A timeout or lost reply cannot attest definite termination.
-Only the process that atomically creates restore intent may allocate. Cancelling
-an unused restore seals that same intent as cancelled, fencing delayed callers.
-A synchronously rejected allocation becomes definite only after native absence
-readback; an unknown allocation remains held even after its nominal deadline.
+Only the process that atomically creates restore intent may allocate. It must
+also win an atomic dispatch slot immediately before allocation. Cancellation can
+win that slot first and prove no dispatch occurred. If dispatch won but its reply
+was lost, cancellation records abandonment with allocation still unknown. A late
+copy is network-isolated, has no production mounts, and owns only a disposable
+anonymous volume with a native KILL lifetime. It cannot affect restoration of the
+old serving slot. Abandonment never claims termination or passing verification,
+and a late success cannot override it. Later observation can remove an exact
+owned late container. Legacy unknown allocations without the dispatch protocol
+remain held. A synchronously rejected allocation becomes definite only after
+native absence readback.
 
 A native capture writes a failure witness only after its synchronous work ends
 unsuccessfully and only if that process created the original nonce claim. A
@@ -511,31 +523,24 @@ old-slot handoff never runs readiness that would stop its writers again.
 An unpaused compatible abort verifies the
 already-serving old slot without stopping its writers or switching traffic. The final `aborted` state
 records failure with the old service restored, and is terminal for deployment,
-worker and unfinished-operation readers. Started or orphaned capture, uncertain
-allocation, a foreign pause, maintenance dispatch or lost authority keeps
-the recovery hold. Normal continuation retains the existing attempt budget,
-delay and queue ordering. A narrowly eligible original pre-maintenance operation
-continues only through an uncharged abort-only lease, including after its normal
-attempt budget is exhausted. Recovery never waits for the budget to run out.
-That path cannot capture, allocate a restore, maintain a database, replace a
-target or deploy a candidate. It retains authorization, lease checks and lane
-serialization, and a refusal cannot refund an attempt or turn the hold into
-pending work. Restoring the unchanged old service does not await a new release
-window. If `aborted` was saved before the worker lost its terminal write, the
-same path verifies the old route and finishes only the failure audit.
+worker and unfinished-operation readers. A live or unknown native capture,
+foreign tuple or pause, maintenance dispatch without recoverable evidence, or
+lost authority keeps the recovery hold. Pre-maintenance reconciliation always
+chooses the inverse: cancel or abandon the isolated verification, restore the
+old route and resume its writers. It cannot create a capture, maintenance run or
+candidate deployment. It uses the same uncharged reconciliation lease as other
+original-operation recovery, even after the fresh-attempt budget is exhausted.
+If `aborted` was saved before the terminal worker write, the same path verifies
+the old route and finishes the failure audit without creating another rollback.
 Expired-lease recovery reads the complete checkpoint history and production-write
-evidence, including worker death before the first dispatch of a reclaimed lease.
-Normal phase replay remains supported. A terminal `aborted` cutover completes
-the Client release as failed without creating another rollback operation. Its
-original admitted decision and recovery pin authorize only the inverse, so
-newer testing work or a forward-release hold cannot strand it; changed ownership,
-revoked Director authority or foreign production identity still refuse recovery.
+evidence, including death before the first dispatch of a reclaimed lease.
 
 Before aborting an absent capture, the host atomically seals its native claim as
 cancelled, preventing delayed original dispatch from capturing later. Archive
-verification failure cancels or fences the original restore before becoming a
-definite failure. A live or unknown native capture, foreign tuple or unknown
-allocation still retains the original operation for reconciliation.
+verification failure cancels or fences the original isolated restore before
+rejecting the backup. A live or unknown capture remains held; a verified-dead
+capture or abandoned inert restore can return the unchanged old service without
+claiming a passing backup.
 
 The host prunes filesystem bundles after a successful executor return while
 holding the original lane authority. It retains applied prepared publication

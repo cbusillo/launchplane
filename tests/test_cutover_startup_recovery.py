@@ -107,7 +107,7 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                 for step in (
                     ("rolling_back",)
                     if rollback
-                    else ("maintaining", "verifying", "switching", "resuming")
+                    else ("maintaining", "ready", "switching", "resuming")
                 ):
                     self.assertEqual(
                         publication_recovery_pause(progress.model_copy(update={"step": step})),
@@ -148,8 +148,27 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                     ),
                     odoo_cutover=progress,
                 )
+                missing_receipt = progress.model_copy(update={"maintenance": None})
+                self.assertIsNone(startup_recovery_pause(missing_receipt))
+                self.assertIsNone(publication_recovery_pause(missing_receipt))
+                store.write_deployment_record(
+                    deployment.model_copy(update={"odoo_cutover": missing_receipt})
+                )
+                observed = claim(
+                    lease_owner="receipt-reader",
+                    lease_expires_at="2026-10-27T00:05:00Z",
+                    claimed_at="2026-10-27T00:00:00Z",
+                )
+                if rollback:
+                    self.assertIsNone(observed)
+                else:
+                    assert observed is not None
+                    assert isinstance(held, OdooProdPromotionOperationRecord)
+                    self.assertEqual(observed.attempt, held.attempt)
+                    self.assertEqual(observed.phase, held.phase)
+                    self.assertEqual(observed.checkpoints, held.checkpoints)
+                    store.write_odoo_prod_promotion_operation_record(held)
                 for invalid in (
-                    progress.model_copy(update={"maintenance": None}),
                     progress.model_copy(update={"backup": None}),
                     progress.model_copy(
                         update={
@@ -176,7 +195,6 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                             lease_owner="worker",
                             lease_expires_at="2026-10-27T00:05:00Z",
                             claimed_at="2026-10-27T00:00:00Z",
-                            max_attempts=3,
                         )
                     )
                 store.write_deployment_record(deployment)
@@ -184,17 +202,17 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                     lease_owner="worker",
                     lease_expires_at="2026-10-27T00:05:00Z",
                     claimed_at="2026-10-27T00:00:00Z",
-                    max_attempts=3,
                 )
                 assert claimed is not None
                 self.assertEqual(claimed.operation_id, operation.operation_id)
                 self.assertEqual(claimed.idempotency_key, operation.idempotency_key)
-                self.assertEqual(claimed.attempt, 2)
+                self.assertEqual(claimed.attempt, held.attempt)
+                self.assertEqual(claimed.phase, held.phase)
+                self.assertEqual(claimed.checkpoints, held.checkpoints)
                 self.assertIsNone(
                     claim(
                         lease_owner="other",
                         lease_expires_at="2026-10-27T00:05:00Z",
                         claimed_at="2026-10-27T00:00:00Z",
-                        max_attempts=3,
                     )
                 )

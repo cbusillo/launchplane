@@ -1,4 +1,8 @@
-from control_plane.contracts.odoo_cutover import OdooCutoverRecord
+from typing import Protocol
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackRequest
+from control_plane.contracts.odoo_cutover import OdooCutoverRecord, ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.contracts.prepared_public_site import PublicPauseRecord
 from control_plane.prepared_public_site import verify_snapshot
 from control_plane.odoo_cutover_storage import DeploymentStore
@@ -6,7 +10,7 @@ from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromot
 from control_plane.odoo_cutover_plan import cutover_identity
 
 
-class DefiniteBackupFailure(ValueError):
+class BackupVerificationRejected(ValueError):
     pass
 
 
@@ -161,7 +165,77 @@ def startup_recovery_pause(record: OdooCutoverRecord) -> PublicPauseRecord | Non
     return pause
 
 
+def maintenance_reconciliation_eligible(record: OdooCutoverRecord) -> bool:
+    return (
+        record.step == "maintaining"
+        and record.backup is not None
+        and record.backup.binding == record.plan.old.binding
+        and record.backup.image == record.plan.old.image
+        and backup_recovery_eligible(
+            record.model_copy(
+                update={
+                    "step": "backing_up",
+                    "backup": None,
+                    "maintenance": None,
+                    "website_settings_attempted": False,
+                }
+            )
+        )
+    )
+
+
 def publication_recovery_pause(record: OdooCutoverRecord) -> PublicPauseRecord | None:
-    if record.step in {"maintaining", "verifying", "switching", "resuming"}:
+    if record.step in {"maintaining", "ready", "switching", "resuming"}:
         return startup_recovery_pause(record.model_copy(update={"step": "maintaining"}))
     return startup_recovery_pause(record)
+
+
+class RollbackCutoverStore(Protocol):
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]: ...
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory: ...
+
+
+def rollback_cutover_deployment(
+    store: RollbackCutoverStore, request: OdooProdRollbackRequest
+) -> DeploymentRecord | None:
+    attempts = tuple(
+        record
+        for record in store.list_deployment_records(
+            context_name=request.context, instance_name=request.instance
+        )
+        if record.odoo_cutover is not None
+        and record.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
+    )
+    if len(attempts) > 1:
+        raise ValueError("Multiple unfinished cutovers require lane reconciliation.")
+    if attempts:
+        return attempts[0]
+    try:
+        inventory = store.read_environment_inventory(
+            context_name=request.context, instance_name=request.instance
+        )
+        current = store.read_deployment_record(inventory.deployment_record_id)
+    except FileNotFoundError:
+        return None
+    if current.odoo_cutover is not None:
+        return current
+    original_id = current.runtime_source.get("cutover_deployment_record_id", "")
+    if not original_id:
+        return None
+    original = store.read_deployment_record(original_id)
+    progress = original.odoo_cutover
+    if (
+        progress is None
+        or progress.step != "rolled_back"
+        or current.artifact_identity is None
+        or current.artifact_identity.artifact_id != progress.plan.production.artifact_id
+        or current.runtime_source.get("retained_deployment_record_id")
+        != progress.plan.old.runtime_identity.deployment_record_id
+    ):
+        raise ValueError("rollback completion lost its original cutover provenance")
+    return original

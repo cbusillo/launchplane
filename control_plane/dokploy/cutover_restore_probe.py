@@ -6,7 +6,7 @@ from control_plane.dokploy.cutover_restore_state import (
     RESTORE_STATE_PROGRAM,
     RESTORE_CANCEL_PROGRAM,
 )
-from control_plane.odoo_cutover_recovery import DefiniteBackupFailure
+from control_plane.odoo_cutover_recovery import BackupVerificationRejected
 
 
 RESTORE_PREFLIGHT_PROGRAM = r"""
@@ -62,14 +62,16 @@ def pipe(source_command,destination):
 previous=restore_outcome()
 if previous is not None:
     print(json.dumps(previous));sys.exit(0)
-seal_receipt('intent')
+seal_receipt('intent',dispatch_protocol=True)
 try:
     source_size=int(run(['exec','-e','DATABASE_NAME='+spec['database'],spec['runner'],'/venv/bin/python','-c',"import os,psycopg2; c=psycopg2.connect(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_DB_PORT','5432'),dbname=os.environ['DATABASE_NAME'],user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],connect_timeout=10); q=c.cursor();q.execute('SELECT pg_database_size(current_database()) + COALESCE(sum(file_size),0) FROM ir_attachment');print(q.fetchone()[0])"]).decode().strip())
+    if seal_receipt('dispatch',state='allocating').get('state')!='allocating' or abandonment() is not None: raise RuntimeError('restore allocation was cancelled')
     allocation_started=True
     container=run(['run','-d','--rm','--pull','never','--name',spec['record']+'-restore-probe','--label','launchplane.cutover-restore='+spec['record'],'--label','launchplane.cutover-restore-request='+request_digest,'--network','none','--user','postgres','--read-only','--cap-drop','ALL','--security-opt','no-new-privileges:true','--tmpfs','/var/lib/postgresql:rw,mode=1777','--mount','type=volume,dst=/var/lib/postgresql/data','--tmpfs','/tmp:rw,mode=1777','--tmpfs','/var/run/postgresql:rw,mode=1777','-e','PGDATA=/var/lib/postgresql/data/pgdata','-e','POSTGRES_HOST_AUTH_METHOD=trust','--entrypoint','timeout',spec['image'],'--signal=KILL',str(work_seconds),'docker-entrypoint.sh','postgres']).decode().strip()
     if not re.fullmatch('[0-9a-f]{64}',container): raise ValueError('restore allocation has no exact container identity')
     allocation=seal_receipt('allocation',container=container)
     if allocation['container']!=container: raise ValueError('restore allocation changed')
+    if abandonment() is not None: raise RuntimeError('isolated restore was abandoned')
     available=int(run(['exec',container,'df','-PB1','/var/lib/postgresql/data']).decode().splitlines()[-1].split()[3])
     if source_size<=0 or available < source_size*2: raise ValueError('isolated Docker storage lacks restore staging capacity')
     while True:
@@ -109,12 +111,12 @@ finally:
             if ids: cleaned=restore_outcome()=={'status':'failed','terminated':True}
             else: cleaned=True
 if failure is not None:
-    if cleaned: print(json.dumps(seal_receipt('completed',result={'status':'failed','terminated':True})['result']))
+    if cleaned: print(json.dumps(abandonment() or seal_receipt('completed',result={'status':'failed','terminated':True})['result']))
     else: raise failure
 elif not cleaned:
     raise RuntimeError('isolated restore cleanup is uncertain')
 else:
-    print(json.dumps(seal_receipt('completed',result=result)['result'],sort_keys=True))
+    print(json.dumps(abandonment() or seal_receipt('completed',result=result)['result'],sort_keys=True))
 """
 )
 
@@ -157,7 +159,14 @@ def verify_disposable_database_restore(
             raise ValueError("original restore cancellation lacks termination evidence")
         return {}
     if value == {"status": "failed", "terminated": True}:
-        raise DefiniteBackupFailure("isolated restore failed after verified termination")
+        raise BackupVerificationRejected("isolated restore failed after verified termination")
+    if value.get("status") == "abandoned" and value.get("allocation_state") in {
+        "not_dispatched",
+        "unknown_isolated",
+    }:
+        raise BackupVerificationRejected(
+            "isolated verification was abandoned; no restore success is claimed"
+        )
     if value != {
         "restored_database_uuid": database_uuid,
         "database_dump_sha256": dump_sha256,

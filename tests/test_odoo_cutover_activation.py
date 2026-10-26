@@ -148,7 +148,7 @@ class OdooCutoverActivationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "persisted cutover"):
                 resolve_profile_cutover_plan(store, **arguments)
 
-    def test_native_reconciliation_claim_is_exclusive_bounded_and_never_replays_maintenance(
+    def test_native_reconciliation_claim_is_exclusive_uncharged_and_retains_phase_history(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary:
@@ -232,14 +232,17 @@ class OdooCutoverActivationTests(unittest.TestCase):
                     lease_owner=owner,
                     lease_expires_at="2026-10-10T21:05:00Z",
                     claimed_at="2026-10-10T21:00:00Z",
-                    max_attempts=3,
                 )
 
             self.assertIsNone(claim("worker-a"))
-            for step, error in (("maintaining", "TimeoutError"), ("switching", "ValueError")):
+            for step, error in (("maintaining", "TimeoutError"),):
                 deployment.odoo_cutover = progress.model_copy(update={"step": step, "error": error})
                 store.write_deployment_record(deployment)
                 self.assertIsNone(claim("worker-a"))
+            deployment.odoo_cutover = progress.model_copy(update={"error": "ValueError"})
+            store.write_deployment_record(deployment)
+            self.assertIsNotNone(claim("worker-a"))
+            store.write_odoo_prod_promotion_operation_record(held)
             deployment.odoo_cutover = progress
             store.write_deployment_record(deployment)
             with ThreadPoolExecutor(max_workers=2) as workers:
@@ -250,7 +253,9 @@ class OdooCutoverActivationTests(unittest.TestCase):
             self.assertIsNone(claim("worker-c"))
             assert claimed is not None
             self.assertIn(claimed.lease_owner, {"worker-a", "worker-b"})
-            self.assertEqual(claimed.attempt, 2)
+            self.assertEqual(claimed.attempt, held.attempt)
+            self.assertEqual(claimed.phase, held.phase)
+            self.assertEqual(claimed.checkpoints, held.checkpoints)
 
             # A denied resume retains its lane and provider budget. Its update
             # time is durable, so a fresh worker cannot immediately reclaim it.
@@ -266,7 +271,6 @@ class OdooCutoverActivationTests(unittest.TestCase):
                         lease_owner="restarted",
                         lease_expires_at=(at + timedelta(minutes=5)).isoformat(),
                         claimed_at=at.isoformat(),
-                        max_attempts=3,
                     )
 
                 self.assertIsNone(retry(denied_at))
@@ -275,9 +279,20 @@ class OdooCutoverActivationTests(unittest.TestCase):
                 self.assertEqual(unchanged, denied)
                 resumed = retry(denied_at + ODOO_CUTOVER_RECONCILIATION_DELAY)
                 assert resumed is not None
-                self.assertEqual(resumed.attempt, denied.attempt + 1)
-            store.write_odoo_prod_promotion_operation_record(held.model_copy(update={"attempt": 3}))
-            self.assertIsNone(claim("worker-b"))
+                self.assertEqual(resumed.attempt, denied.attempt)
+                self.assertEqual(resumed.phase, denied.phase)
+                self.assertEqual(resumed.checkpoints, denied.checkpoints)
+            from control_plane.workflows.odoo_stable_operation_worker import (
+                DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+            )
+
+            exhausted = held.model_copy(update={"attempt": DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS})
+            store.write_odoo_prod_promotion_operation_record(exhausted)
+            capped = claim("worker-b")
+            assert capped is not None
+            self.assertEqual(capped.attempt, exhausted.attempt)
+            self.assertEqual(capped.phase, exhausted.phase)
+            self.assertEqual(capped.checkpoints, exhausted.checkpoints)
 
     def test_pending_rollback_precedes_held_reconciliation(self) -> None:
         with TemporaryDirectory() as temporary:

@@ -1,4 +1,4 @@
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -56,6 +56,20 @@ class ProductionPromotionBackupTests(unittest.TestCase):
     def test_interrupted_cutover_resumes_through_real_backup_guard_without_new_capture(
         self,
     ) -> None:
+        self.run_cutover_worker("operator")
+
+    def test_begun_client_cutover_finishes_when_testing_advances_during_maintenance(self) -> None:
+        self.run_cutover_worker("testing")
+
+    def test_begun_client_cutover_finishes_when_releases_are_held_during_maintenance(self) -> None:
+        self.run_cutover_worker("held")
+
+    def test_client_cutover_restart_reuses_admission_after_testing_advances_and_release_hold(
+        self,
+    ) -> None:
+        self.run_cutover_worker("restart")
+
+    def run_cutover_worker(self, scenario: str) -> None:
         from control_plane.contracts.backup_gate_record import BackupGateRecord
         from control_plane.contracts.environment_inventory import EnvironmentInventory
         from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
@@ -70,7 +84,8 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         from tests.support.profiles import _odoo_preview_profile_payload
 
         store = self.capture()
-        provider = IsolatedCutoverProvider(self.root / "cutover")
+        client = scenario != "operator"
+        provider = IsolatedCutoverProvider(self.root / "cutover", database_changing=client)
         self.addCleanup(provider.engine.dispose)
         pair = provider.cutover
         old_identity = pair.old.runtime_identity.model_copy(
@@ -93,9 +108,13 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             writers=pair.writers,
         )
         profile = _odoo_preview_profile_payload("example-product")
-        profile["production_use"] = "prelaunch"
+        profile["production_use"] = "live" if client else "prelaunch"
+        if client:
+            profile["repository"] = "example/site"
+            profile["owner"] = {"github_id": "9001", "github_login": "site-owner"}
+            profile["release_on_acceptance"] = "promote"
         profile["preview"] = {"enabled": False}
-        profile["lanes"] = [
+        lanes = [
             {
                 "instance": "prod",
                 "context": "example-product",
@@ -104,6 +123,15 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 "odoo_cutover": config.model_dump(mode="json"),
             }
         ]
+        if client:
+            lanes.append(
+                {
+                    "instance": "testing",
+                    "context": "example-product",
+                    "base_url": "https://testing.fixture.invalid",
+                }
+            )
+        profile["lanes"] = lanes
         store.write_product_profile_record(LaunchplaneProductProfileRecord.model_validate(profile))
         for manifest in (pair.production, pair.candidate):
             store.write_artifact_manifest(manifest)
@@ -135,11 +163,52 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 updated_at=datetime.now(UTC).isoformat(),
             )
         )
+        if client:
+            from control_plane.contracts.deployment_record import DeploymentRecord
+            from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+            from control_plane.release_review import build_release_review
+            from tests.test_release_review import github_read
+
+            current_profile = store.read_product_profile_record("example-product")
+            review = build_release_review(store=store, profile=current_profile, read=github_read)
+            assert review.checklist is not None
+            accepted = ReleaseReviewDecisionRecord(
+                record_id="accepted-cutover-decision",
+                product=current_profile.product,
+                checklist=review.checklist,
+                checklist_digest=review.checklist_digest,
+                decision="accepted",
+                actor_github_id=current_profile.owner.github_id,
+                actor_github_login=current_profile.owner.github_login,
+                decided_at=datetime.now(UTC).isoformat(),
+                release_start="promote",
+                release_issue_url="https://github.com/example/site/issues/99",
+            )
+            store.write_release_review_decision_record(accepted)
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id=old_identity.deployment_record_id,
+                    context="example-product",
+                    instance="prod",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id=pair.production.artifact_id
+                    ),
+                    runtime_identity=old_identity,
+                    source_git_ref=pair.production.source_commit,
+                    deploy=DeploymentEvidence(
+                        status="pass",
+                        deploy_mode="atomic-two-slot",
+                        target_type="compose",
+                        target_name="old",
+                    ),
+                )
+            )
         request = OdooProdPromotionRunRequest(
             context="example-product",
             product="example-product",
             request_id="accepted-cutover",
             infrastructure_backup_record_id="backup-example",
+            expected_artifact_id=pair.candidate.artifact_id if client else "",
         )
         plan = resolve_profile_cutover_plan(
             store,
@@ -167,6 +236,21 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             }
         )
 
+        def current_inputs(**kwargs: object) -> Any:
+            testing = store.read_release_tuple_record(
+                context_name=request.context, channel_name="testing"
+            )
+            manifest = store.read_artifact_manifest(testing.artifact_id)
+            return inputs.model_copy(
+                update={
+                    "artifact_id": manifest.artifact_id,
+                    "source_git_ref": manifest.source_commit,
+                    "image_repository": manifest.image.repository,
+                    "image_digest": manifest.image.digest,
+                    "release_tuple_id": testing.tuple_id,
+                }
+            )
+
         def capture_logical(**kwargs: object) -> OdooProdBackupGateResult:
             store.write_backup_gate_record(
                 BackupGateRecord(
@@ -189,21 +273,29 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         with (
             patch(
                 "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
-                return_value=inputs,
-            ),
+                side_effect=current_inputs,
+            ) as resolve_inputs,
             patch(
                 "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_backup_gate",
                 side_effect=capture_logical,
             ) as capture,
+            patch(
+                "control_plane.release_review.current_release_review",
+                side_effect=lambda **kwargs: build_release_review(
+                    store=store, profile=kwargs["profile"], read=github_read
+                ),
+            )
+            if client
+            else nullcontext(),
         ):
             from control_plane.workflows.odoo_stable_operation_worker import (
                 _execute_prod_promotion_operation,
-                DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
             )
             from control_plane.durable_operation_authorization import (
                 capture_durable_operation_authorization,
             )
             from control_plane.contracts.odoo_prod_promotion_operation import (
+                OdooProdPromotionCheckpoint,
                 OdooProdPromotionOperationRecord,
                 build_odoo_prod_promotion_operation_id,
                 odoo_prod_promotion_request_fingerprint,
@@ -217,34 +309,59 @@ class ProductionPromotionBackupTests(unittest.TestCase):
 
             policy = _policy_record(_ADMINISTRATOR_POLICY)
             original = _operation()
+            authorization = capture_durable_operation_authorization(
+                identity=_github_human_identity(),
+                action=ODOO_PROMOTION_BACKUP_ACTION,
+                product=request.product,
+                context=request.context,
+                instances=("prod",),
+                policy_record=policy,
+                authorized_at=datetime.now(UTC).isoformat(),
+            )
+            checkpoints = original.checkpoints
+            scope = original.idempotency_scope
+            if client:
+                from control_plane.client_release import client_release_grant
+                from control_plane.odoo_release_recovery import pin_odoo_release_recovery_target
+
+                authorization = client_release_grant(
+                    decision=accepted,
+                    action=ODOO_PROMOTION_BACKUP_ACTION,
+                    context=request.context,
+                    authorized_at=datetime.now(UTC).isoformat(),
+                )
+                scope = "client-release"
+                checkpoints = (
+                    OdooProdPromotionCheckpoint(
+                        phase="created",
+                        recorded_at=original.created_at,
+                        evidence=pin_odoo_release_recovery_target(store, accepted, request.context),
+                    ),
+                )
             operation = type(original).model_validate(
                 original.model_copy(
                     update={
                         "product": request.product,
                         "context": request.context,
                         "request": request,
+                        "idempotency_scope": scope,
+                        "checkpoints": checkpoints,
                         "operation_id": build_odoo_prod_promotion_operation_id(
                             product=request.product,
                             context=request.context,
                             idempotency_key=original.idempotency_key,
-                            idempotency_scope=original.idempotency_scope,
+                            idempotency_scope=scope,
                         ),
                         "request_fingerprint": odoo_prod_promotion_request_fingerprint(request),
-                        "authorization": capture_durable_operation_authorization(
-                            identity=_github_human_identity(),
-                            action=ODOO_PROMOTION_BACKUP_ACTION,
-                            product=request.product,
-                            context=request.context,
-                            instances=("prod",),
-                            policy_record=policy,
-                            authorized_at=datetime.now(UTC).isoformat(),
-                        ),
+                        "authorization": authorization,
                     }
                 ).model_dump()
             )
             store.create_odoo_prod_promotion_operation_record_if_no_active_lane(operation)
 
-            def claim(*, reconcile: bool = False) -> OdooProdPromotionOperationRecord | None:
+            def claim(
+                *, reconcile: bool = False, owner: str = "cutover-worker"
+            ) -> OdooProdPromotionOperationRecord | None:
                 at = datetime.now(UTC)
                 if reconcile:
                     from control_plane.contracts.odoo_prod_promotion_operation import (
@@ -260,17 +377,22 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                         + ODOO_CUTOVER_RECONCILIATION_DELAY,
                     )
                 arguments: dict[str, Any] = dict(
-                    lease_owner="cutover-worker",
+                    lease_owner=owner,
                     lease_expires_at=(at + timedelta(minutes=5)).isoformat(),
                     claimed_at=at.isoformat(),
                 )
                 if reconcile:
                     return store.claim_odoo_cutover_reconciliation_record(
-                        **arguments, max_attempts=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS
+                        **arguments,
                     )
                 return store.claim_next_odoo_prod_promotion_operation_record(**arguments)
 
-            def work(current: OdooProdPromotionOperationRecord | None, denial: str = "") -> bool:
+            def work(
+                current: OdooProdPromotionOperationRecord | None,
+                denial: str = "",
+                *,
+                reconciling: bool = False,
+            ) -> bool:
                 assert current is not None
                 from control_plane.durable_operation_authorization import (
                     DurableOperationAuthorizationGuard,
@@ -302,11 +424,151 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                         record_store=store,
                         control_plane_root_path=self.root,
                         operation=current,
-                        lease_owner="cutover-worker",
+                        lease_owner=current.lease_owner,
                         lease_seconds=300,
                         heartbeat_seconds=5,
                         cutover_provider_factory=lambda plan: provider,
+                        reconciling=reconciling,
                     )
+
+            if client:
+                from control_plane.client_release import client_release_grant_allows
+                from control_plane.dokploy.cutover_execution import require_cutover_execution
+                from control_plane.odoo_cutover_recovery import BackupVerificationRejected
+                from control_plane.odoo_release_recovery import PRODUCTION_WRITE_KEY
+
+                guarded_snapshots: list[tuple[Any, ...]] = []
+                self.assertTrue(client_release_grant_allows(store, authorization))
+
+                def observe_dispatch() -> None:
+                    before = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+                    for _ in range(8):
+                        require_cutover_execution(plan)
+                    after = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+                    self.assertEqual(after.checkpoints, before.checkpoints)
+                    guarded_snapshots.append(after.checkpoints)
+
+                def drift() -> None:
+                    if scenario in {"testing", "restart"}:
+                        newer = plan.candidate.model_copy(update={"artifact_id": "newer-testing"})
+                        store.write_artifact_manifest(newer)
+                        testing = store.read_release_tuple_record(
+                            context_name=request.context, channel_name="testing"
+                        )
+                        store.write_release_tuple_record(
+                            testing.model_copy(update={"artifact_id": newer.artifact_id})
+                        )
+                    if scenario in {"held", "restart"}:
+                        current_profile = store.read_product_profile_record(request.product)
+                        store.write_product_profile_record(
+                            current_profile.model_copy(update={"release_on_acceptance": "held"})
+                        )
+                    self.assertFalse(client_release_grant_allows(store, authorization))
+
+                original_maintenance = provider.maintenance
+                response_lost = False
+
+                def maintenance(current: Any) -> Any:
+                    nonlocal response_lost
+                    receipt = original_maintenance(current)
+                    drift()
+                    observe_dispatch()
+                    if scenario == "restart" and not response_lost:
+                        response_lost = True
+                        raise TimeoutError("native maintenance response lost")
+                    return receipt
+
+                def reject_backup(current: Any) -> Any:
+                    observe_dispatch()
+                    raise BackupVerificationRejected("verification rejected before maintenance")
+
+                original_handoff = provider.handoff_writers
+
+                def handoff(current: Any, slot: Any) -> None:
+                    observe_dispatch()
+                    original_handoff(current, slot)
+
+                with (
+                    patch.object(provider, "maintenance", side_effect=maintenance),
+                    patch.object(provider, "handoff_writers", side_effect=handoff),
+                    patch.object(provider, "backup", side_effect=reject_backup)
+                    if scenario == "abort"
+                    else patch.object(
+                        provider, "backup", wraps=provider.backup
+                    ) as coherent_capture,
+                ):
+                    pending = store.read_odoo_prod_promotion_operation_record(
+                        operation.operation_id
+                    )
+                    self.assertEqual(pending.status, "pending")
+                    self.assertFalse(
+                        any(
+                            item.evidence.get(PRODUCTION_WRITE_KEY) == "true"
+                            for item in pending.checkpoints
+                        )
+                    )
+                    self.assertRaises(
+                        FileNotFoundError,
+                        store.read_deployment_record,
+                        plan.new.runtime_identity.deployment_record_id,
+                    )
+                    self.assertTrue(work(claim()))
+                    if scenario == "restart":
+                        held = store.read_odoo_prod_promotion_operation_record(
+                            operation.operation_id
+                        )
+                        self.assertEqual(held.status, "reconciliation_required", held.error_message)
+                        deployment = store.read_deployment_record(
+                            plan.new.runtime_identity.deployment_record_id
+                        )
+                        assert deployment.odoo_cutover is not None
+                        self.assertEqual(deployment.odoo_cutover.step, "maintaining")
+                        self.assertEqual(current_inputs().artifact_id, "newer-testing")
+                        previous_input_reads = resolve_inputs.call_count
+                        resumed = claim(reconcile=True, owner="replacement-worker")
+                        self.assertIsNotNone(
+                            resumed,
+                            "lost maintenance response must permit original-operation reconciliation",
+                        )
+                        self.assertTrue(work(resumed, reconciling=True))
+                        self.assertEqual(resolve_inputs.call_count, previous_input_reads)
+
+                completed = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+                deployment = store.read_deployment_record(
+                    plan.new.runtime_identity.deployment_record_id
+                )
+                assert deployment.odoo_cutover is not None
+                self.assertEqual(
+                    completed.status,
+                    "fail" if scenario == "abort" else "pass",
+                    completed.error_message,
+                )
+                self.assertEqual(
+                    deployment.odoo_cutover.step, "aborted" if scenario == "abort" else "complete"
+                )
+                self.assertEqual(provider.target, plan.old if scenario == "abort" else plan.new)
+                self.assertEqual(provider.maintenance_count, 0 if scenario == "abort" else 1)
+                self.assertEqual(coherent_capture.call_count, 1)
+                self.assertEqual(capture.call_count, 1)
+                self.assertTrue(guarded_snapshots)
+                self.assertEqual(
+                    sum(
+                        item.evidence.get(PRODUCTION_WRITE_KEY) == "true"
+                        for item in completed.checkpoints
+                    ),
+                    1,
+                )
+                self.assertEqual(store.list_odoo_prod_rollback_operation_records(), ())
+                with store.odoo_synchronous_lane_reservation(
+                    product=operation.product,
+                    context=operation.context,
+                    instance=operation.instance,
+                ) as owner:
+                    self.assertIsNone(owner)
+                if scenario == "abort":
+                    self.assertFalse(provider.fenced)
+                    self.assertEqual(set(provider.owners.values()), {plan.old.slot_id})
+                return
 
             provider.uncertain_switch = True
             self.assertTrue(work(claim()))
@@ -339,7 +601,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 ODOO_PROD_DEPLOY_EFFECT,
             ):
                 before = list(provider.actions)
-                self.assertTrue(work(claim(reconcile=True), denial))
+                self.assertTrue(work(claim(reconcile=True), denial, reconciling=True))
                 self.assertEqual(
                     store.read_odoo_prod_promotion_operation_record(operation.operation_id).status,
                     "reconciliation_required",
@@ -356,7 +618,7 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 "control_plane.workflows.production_promotion_backup.datetime", wraps=datetime
             ) as clock:
                 clock.now.return_value = datetime.now(UTC) + timedelta(days=2)
-                self.assertTrue(work(resumed))
+                self.assertTrue(work(resumed, reconciling=True))
             completed = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
             self.assertEqual(completed.status, "pass")
             assert completed.result is not None
@@ -369,6 +631,39 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 ).runtime_identity,
                 plan.new.runtime_identity,
             )
+            audit_before = list(provider.actions)
+            store.write_odoo_prod_promotion_operation_record(
+                completed.model_copy(
+                    update={
+                        "status": "reconciliation_required",
+                        "finished_at": "",
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "result": None,
+                        "error_code": "operation_reconciliation_required",
+                        "error_message": "completion audit reply lost",
+                        "heartbeat_at": "",
+                    }
+                )
+            )
+            with (
+                patch(
+                    "control_plane.workflows.odoo_prod_promotion_run.require_production_promotion_backup",
+                    side_effect=AssertionError("completed audit cannot require a new backup"),
+                ),
+                patch.object(provider, "readiness", side_effect=AssertionError("already serving")),
+                patch.object(provider, "switch", side_effect=AssertionError("already switched")),
+                patch.object(
+                    provider, "handoff_writers", side_effect=AssertionError("already running")
+                ),
+            ):
+                self.assertTrue(work(claim(reconcile=True), reconciling=True))
+            audited = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+            self.assertEqual(audited.status, "pass", audited.error_message)
+            self.assertEqual(audited.attempt, completed.attempt)
+            self.assertEqual(audited.checkpoints, completed.checkpoints)
+            self.assertEqual(provider.actions, audit_before)
+            self.assertEqual(capture.call_count, 1)
             rolled = execute_odoo_prod_rollback(
                 control_plane_root=self.root,
                 record_store=store,
@@ -383,6 +678,113 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                 ).artifact_id,
                 plan.production.artifact_id,
             )
+            rollback_actions = list(provider.actions)
+            with (
+                patch.object(provider, "readiness", side_effect=AssertionError("already serving")),
+                patch.object(provider, "switch", side_effect=AssertionError("already switched")),
+                patch.object(
+                    provider, "handoff_writers", side_effect=AssertionError("already running")
+                ),
+            ):
+                rollback_audit = execute_odoo_prod_rollback(
+                    control_plane_root=self.root,
+                    record_store=store,
+                    product=request.product,
+                    request=OdooProdRollbackRequest(context=request.context),
+                    cutover_provider=provider,
+                )
+            self.assertEqual(rollback_audit.rollback_status, "pass")
+            self.assertEqual(rollback_audit.deployment_record_id, rolled.deployment_record_id)
+            self.assertEqual(provider.actions, rollback_actions)
+            from tests.test_odoo_prod_promotion_operation import _rollback_operation
+            from control_plane.contracts.odoo_prod_rollback_operation import (
+                OdooProdRollbackCheckpoint,
+                build_odoo_prod_rollback_operation_id,
+                odoo_prod_rollback_request_fingerprint,
+            )
+            from control_plane.odoo_release_recovery import PRODUCTION_WRITE_KEY
+            from control_plane.workflows.odoo_stable_operation_worker import (
+                _execute_prod_rollback_operation,
+            )
+
+            rollback_request = OdooProdRollbackRequest(
+                context=request.context, promotion_record_id=completed.result.promotion_record_id
+            )
+            rollback_operation = _rollback_operation()
+            rollback_operation = type(rollback_operation).model_validate(
+                {
+                    **rollback_operation.model_dump(),
+                    "operation_id": build_odoo_prod_rollback_operation_id(
+                        product=request.product,
+                        context=request.context,
+                        idempotency_key=rollback_operation.idempotency_key,
+                        idempotency_scope=rollback_operation.idempotency_scope,
+                    ),
+                    "product": request.product,
+                    "context": request.context,
+                    "request": rollback_request,
+                    "request_fingerprint": odoo_prod_rollback_request_fingerprint(
+                        product=request.product, request=rollback_request
+                    ),
+                    "authorization": rollback_operation.authorization.model_copy(
+                        update={"product": request.product, "context": request.context}
+                    ),
+                    "target": resolve_odoo_prod_rollback_target(
+                        record_store=store, request=rollback_request
+                    ),
+                    "status": "reconciliation_required",
+                    "phase": "rollback_started",
+                    "attempt": 1,
+                    "error_code": "operation_reconciliation_required",
+                    "error_message": "original rollback completion audit lost",
+                    "checkpoints": (
+                        OdooProdRollbackCheckpoint(
+                            phase="rollback_started",
+                            recorded_at=datetime.now(UTC).isoformat(),
+                            evidence={PRODUCTION_WRITE_KEY: "true"},
+                        ),
+                    ),
+                }
+            )
+            store.create_odoo_prod_rollback_operation_record_if_no_active_lane(rollback_operation)
+            at = datetime.now(UTC)
+            reclaimed_rollback = store.claim_odoo_cutover_rollback_reconciliation_record(
+                lease_owner="rollback-audit",
+                lease_expires_at=(at + timedelta(minutes=5)).isoformat(),
+                claimed_at=at.isoformat(),
+            )
+            self.assertIsNotNone(reclaimed_rollback)
+            assert reclaimed_rollback is not None
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
+                    return_value=policy,
+                ),
+                patch.object(provider, "readiness", side_effect=AssertionError("already serving")),
+                patch.object(provider, "switch", side_effect=AssertionError("already switched")),
+                patch.object(
+                    provider, "handoff_writers", side_effect=AssertionError("already running")
+                ),
+            ):
+                self.assertTrue(
+                    _execute_prod_rollback_operation(
+                        record_store=store,
+                        control_plane_root_path=self.root,
+                        operation=reclaimed_rollback,
+                        lease_owner="rollback-audit",
+                        lease_seconds=300,
+                        heartbeat_seconds=5,
+                        cutover_provider_factory=lambda plan: provider,
+                        reconciling=True,
+                    )
+                )
+            rollback_completed = store.read_odoo_prod_rollback_operation_record(
+                rollback_operation.operation_id
+            )
+            self.assertEqual(rollback_completed.status, "pass", rollback_completed.error_message)
+            self.assertEqual(rollback_completed.checkpoints, rollback_operation.checkpoints)
+            self.assertEqual(rollback_completed.attempt, rollback_operation.attempt)
+            self.assertEqual(provider.actions, rollback_actions)
             switched = store.read_deployment_record(rolled.deployment_record_id)
             self.assertTrue(switched.deploy.started_at and switched.deploy.finished_at)
             next_plan = resolve_profile_cutover_plan(

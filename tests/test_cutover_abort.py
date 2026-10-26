@@ -4,7 +4,7 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-from control_plane.odoo_cutover_recovery import DefiniteBackupFailure
+from control_plane.odoo_cutover_recovery import BackupVerificationRejected
 from control_plane.workflows.odoo_cutover import execute_odoo_cutover
 from tests.test_odoo_cutover import IsolatedCutoverProvider, cutover_store
 
@@ -17,7 +17,7 @@ class CutoverAbortTests(unittest.TestCase):
                 provider = IsolatedCutoverProvider(root, database_changing=changing)
                 self.addCleanup(provider.engine.dispose)
                 store = cutover_store(root)
-                with patch.object(provider, "backup", side_effect=DefiniteBackupFailure()):
+                with patch.object(provider, "backup", side_effect=BackupVerificationRejected()):
                     result = execute_odoo_cutover(
                         provider.cutover, store, provider, record_id="original"
                     )
@@ -87,7 +87,7 @@ class CutoverAbortTests(unittest.TestCase):
             self.addCleanup(provider.engine.dispose)
             store = cutover_store(root)
             with (
-                patch.object(provider, "backup", side_effect=DefiniteBackupFailure()),
+                patch.object(provider, "backup", side_effect=BackupVerificationRejected()),
                 patch.object(provider, "readiness", side_effect=TimeoutError()),
                 self.assertRaises(TimeoutError),
             ):
@@ -117,7 +117,7 @@ class CutoverAbortTests(unittest.TestCase):
                 raise TimeoutError("old route applied; reply lost")
 
             with (
-                patch.object(provider, "backup", side_effect=DefiniteBackupFailure()),
+                patch.object(provider, "backup", side_effect=BackupVerificationRejected()),
                 patch.object(provider, "switch", side_effect=lost_reply),
                 self.assertRaises(TimeoutError),
             ):
@@ -141,7 +141,7 @@ class CutoverAbortTests(unittest.TestCase):
             self.addCleanup(provider.engine.dispose)
             store = cutover_store(root)
             with (
-                patch.object(provider, "backup", side_effect=DefiniteBackupFailure()),
+                patch.object(provider, "backup", side_effect=BackupVerificationRejected()),
                 patch.object(provider, "readiness") as readiness,
                 patch.object(provider, "switch") as switch,
             ):
@@ -182,11 +182,11 @@ class CutoverAbortTests(unittest.TestCase):
                 store = cutover_store(root)
 
                 def interrupt(step: str) -> None:
-                    if step == "aborting":
-                        raise TimeoutError("interrupted before old handoff")
+                    if step == "aborted":
+                        raise TimeoutError("interrupted before terminal audit")
 
                 with (
-                    patch.object(provider, "backup", side_effect=DefiniteBackupFailure()),
+                    patch.object(provider, "backup", side_effect=BackupVerificationRejected()),
                     self.assertRaises(TimeoutError),
                 ):
                     execute_odoo_cutover(
@@ -233,7 +233,7 @@ class CutoverAbortTests(unittest.TestCase):
                 ):
                     execute_odoo_cutover(provider.cutover, store, provider, record_id="original")
                 with (
-                    patch.object(provider, "backup", side_effect=DefiniteBackupFailure()),
+                    patch.object(provider, "backup", side_effect=BackupVerificationRejected()),
                     patch.object(provider, "observed_public_copy", return_value=""),
                     patch.object(provider, "owns_prepared_pause", return_value=owned),
                 ):

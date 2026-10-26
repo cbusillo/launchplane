@@ -10,7 +10,7 @@ from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 @dataclass(frozen=True)
 class CutoverExecution:
     plan_sha256: str
-    checkpoint: Callable[[str], None]
+    dispatch_guard: Callable[[], None]
 
 
 _EXECUTION: ContextVar[CutoverExecution | None] = ContextVar("cutover_execution", default=None)
@@ -18,11 +18,19 @@ _EXECUTION: ContextVar[CutoverExecution | None] = ContextVar("cutover_execution"
 
 @contextmanager
 def bind_cutover_execution(
-    plan: OdooCutoverPlan, checkpoint: Callable[[str], None]
+    plan: OdooCutoverPlan,
+    checkpoint: Callable[[str], None],
+    *,
+    dispatch_guard: Callable[[], None] | None = None,
 ) -> Iterator[None]:
     if _EXECUTION.get() is not None:
         raise ValueError("cutover execution cannot replace another admitted operation")
-    token = _EXECUTION.set(CutoverExecution(canonical_model_sha256(plan), checkpoint))
+    from control_plane.workflows.odoo_stable_target_replacement import (
+        TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
+    )
+
+    guard = dispatch_guard or (lambda: checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE))
+    token = _EXECUTION.set(CutoverExecution(canonical_model_sha256(plan), guard))
     try:
         yield
     finally:
@@ -30,11 +38,7 @@ def bind_cutover_execution(
 
 
 def require_cutover_execution(plan: OdooCutoverPlan) -> None:
-    from control_plane.workflows.odoo_stable_target_replacement import (
-        TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
-    )
-
     execution = _EXECUTION.get()
     if execution is None or execution.plan_sha256 != canonical_model_sha256(plan):
         raise ValueError("cutover host requires the original admitted release execution")
-    execution.checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+    execution.dispatch_guard()

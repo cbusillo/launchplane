@@ -1,7 +1,6 @@
 """Adapt the cutover executor to the existing promotion/deployment record path."""
 
 from collections.abc import Callable
-from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -72,6 +71,7 @@ def execute_odoo_cutover_deployment(
     instance: str,
     checkpoint: Callable[[str], None],
     abort_only: bool = False,
+    dispatch_guard: Callable[[], None] | None = None,
 ) -> OdooCutoverApplyResult:
     if context != plan.new.runtime_identity.context or instance != plan.new.binding.environment_id:
         raise ValueError("deployment envelope differs from cutover context/lane")
@@ -97,7 +97,17 @@ def execute_odoo_cutover_deployment(
     )
     store = DeploymentCutoverStore(record_store, deployment)
 
-    with bind_cutover_execution(plan, checkpoint):
+    def guard_records() -> None:
+        if dispatch_guard is not None:
+            dispatch_guard()
+        else:
+            checkpoint("cutover_record")
+
+    def record_settings() -> None:
+        guard_records()
+        record_website_application(record_store, plan, plan.website_settings, verified=False)
+
+    with bind_cutover_execution(plan, checkpoint, dispatch_guard=dispatch_guard):
         record = execute_odoo_cutover(
             plan,
             store,
@@ -105,10 +115,9 @@ def execute_odoo_cutover_deployment(
             record_id=record_id,
             checkpoint=checkpoint,
             abort_only=abort_only,
-            settings_checkpoint=lambda: record_website_application(
-                record_store, plan, plan.website_settings, verified=False
-            ),
+            settings_checkpoint=record_settings,
         )
+    guard_records()
     if record.step == "aborted":
         persisted = record_store.read_deployment_record(deployment_id)
         persisted.deploy.status = "fail"
@@ -156,20 +165,35 @@ def execute_odoo_cutover_rollback_deployment(
     provider: OdooCutoverProvider,
     artifact_id: str,
     checkpoint: Callable[[str], None] | None = None,
+    dispatch_guard: Callable[[], None] | None = None,
 ) -> OdooCutoverApplyResult:
     record = deployment.odoo_cutover
     if record is None or artifact_id != record.plan.production.artifact_id:
         raise ValueError("cutover rollback requires its exact retained production artifact")
     store = DeploymentCutoverStore(record_store, deployment)
-    with bind_cutover_execution(record.plan, checkpoint) if checkpoint else nullcontext():
+    checkpoint = checkpoint or (lambda _step: None)
+
+    def guard_records() -> None:
+        if dispatch_guard is not None:
+            dispatch_guard()
+        else:
+            checkpoint("cutover_record")
+
+    def record_settings() -> None:
+        guard_records()
+        record_website_application(
+            record_store, record.plan, record.plan.rollback_website_settings, verified=False
+        )
+
+    with bind_cutover_execution(record.plan, checkpoint, dispatch_guard=dispatch_guard):
         rolled = rollback_compatible_cutover(
             store,
             provider,
             record.record_id,
-            settings_checkpoint=lambda: record_website_application(
-                record_store, record.plan, record.plan.rollback_website_settings, verified=False
-            ),
+            settings_checkpoint=record_settings,
+            checkpoint=checkpoint,
         )
+    guard_records()
     record_website_application(
         record_store,
         record.plan,
@@ -187,7 +211,8 @@ def execute_odoo_cutover_rollback_deployment(
             "artifact_identity": ArtifactIdentityReference(artifact_id=artifact_id),
             "runtime_identity": old.runtime_identity,
             "runtime_source": {
-                "retained_deployment_record_id": old.runtime_identity.deployment_record_id
+                "retained_deployment_record_id": old.runtime_identity.deployment_record_id,
+                "cutover_deployment_record_id": deployment.record_id,
             },
             "source_git_ref": rolled.plan.production.source_commit,
             "resolved_target": ResolvedTargetEvidence(

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from control_plane.contracts.odoo_cutover import ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.provider_hold_attention import (
     PROVIDER_HOLD_PAGE_LIMIT,
     ProviderHoldAttentionPage,
@@ -17341,8 +17340,6 @@ class PostgresRecordStore(HumanSessionStore):
         lease_expires_at: str,
         claimed_at: str,
         cutover_reconciliation: bool = False,
-        cutover_abort_only: bool = False,
-        max_attempts: int = 5,
     ) -> Any:
         normalized_lease_owner = lease_owner.strip()
         if not normalized_lease_owner or not lease_expires_at.strip() or not claimed_at.strip():
@@ -17399,55 +17396,46 @@ class PostgresRecordStore(HumanSessionStore):
                         )
                         cutover = deployment.odoo_cutover
                     else:
-                        deployments = [
-                            self._read_payload(model_type=DeploymentRecord, payload=item.payload)
-                            for item in session.scalars(
-                                select(LaunchplaneDeploymentRow).where(
-                                    LaunchplaneDeploymentRow.context == record.context,
-                                    LaunchplaneDeploymentRow.instance == record.instance,
-                                )
-                            ).all()
-                        ]
-                        unfinished = [
-                            item.odoo_cutover
-                            for item in deployments
-                            if item.odoo_cutover is not None
-                            and item.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
-                        ]
-                        if len(unfinished) != 1:
+                        from control_plane.odoo_cutover_recovery import rollback_cutover_deployment
+
+                        try:
+                            rollback_deployment = rollback_cutover_deployment(self, record.request)
+                        except ValueError:
                             continue
-                        cutover = unfinished[0]
+                        cutover = (
+                            rollback_deployment.odoo_cutover
+                            if rollback_deployment is not None
+                            else None
+                        )
                         if (
-                            cutover.step != "rolling_back"
+                            cutover is None
+                            or cutover.step not in {"complete", "rolling_back", "rolled_back"}
                             or cutover.plan.production.artifact_id != record.target.artifact_id
                         ):
                             continue
                     from control_plane.odoo_cutover_recovery import (
                         startup_recovery_pause,
-                        backup_recovery_eligible,
                         abort_reconciliation_eligible,
+                        maintenance_reconciliation_eligible,
                     )
 
-                    if cutover_abort_only:
-                        if (
-                            model_type is not OdooProdPromotionOperationRecord
-                            or cutover is None
-                            or not abort_reconciliation_eligible(cutover)
-                        ):
-                            continue
-                    elif record.attempt >= max_attempts:
-                        continue
-                    elif cutover is not None and backup_recovery_eligible(cutover):
-                        continue
                     if (
                         cutover is None
                         or not (
-                            cutover.error == "TimeoutError"
-                            and cutover.step in {"pausing", "switching", "resuming", "draining"}
-                            or cutover.step in {"maintaining", "rolling_back"}
+                            cutover.step
+                            in {
+                                "pausing",
+                                "ready",
+                                "switching",
+                                "resuming",
+                                "draining",
+                                "complete",
+                                "rolled_back",
+                            }
+                            or maintenance_reconciliation_eligible(cutover)
+                            or cutover.step == "rolling_back"
                             and startup_recovery_pause(cutover) is not None
-                            or cutover_abort_only
-                            and abort_reconciliation_eligible(cutover)
+                            or abort_reconciliation_eligible(cutover)
                         )
                         or cutover.plan.new.binding.product_id != record.product
                         or cutover.plan.new.binding.environment_id != record.instance
@@ -17493,9 +17481,13 @@ class PostgresRecordStore(HumanSessionStore):
                         "lease_owner": normalized_lease_owner,
                         "lease_expires_at": lease_expires_at.strip(),
                         "heartbeat_at": claimed_at.strip(),
-                        "attempt": record.attempt + (0 if cutover_abort_only else 1),
+                        "attempt": record.attempt + (0 if cutover_reconciliation else 1),
                     }
                 )
+                if cutover_reconciliation:
+                    claimed_record = claimed_record.model_copy(
+                        update={"phase": record.phase, "checkpoints": record.checkpoints}
+                    )
                 self._sync_release_operation_row(row, claimed_record)
                 session.commit()
                 return claimed_record
@@ -17562,6 +17554,15 @@ class PostgresRecordStore(HumanSessionStore):
                 record, lease_owner=lease_owner, at=checkpointed_at
             ):
                 return None
+            from control_plane.odoo_release_recovery import (
+                PRODUCTION_WRITE_KEY,
+                odoo_release_wrote_production,
+            )
+
+            if evidence.get(PRODUCTION_WRITE_KEY) == "true" and odoo_release_wrote_production(
+                record
+            ):
+                return record
             if phase_sequence.index(phase) < phase_sequence.index(record.phase):
                 return None
             checkpointed_record = record.model_copy(
@@ -17816,12 +17817,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_owner: str,
         lease_expires_at: str,
         claimed_at: str,
-        max_attempts: int,
-        abort_only: bool = False,
     ) -> OdooProdPromotionOperationRecord | None:
-        # Use the same serialized service/lane admission and lease CAS. Only a
-        # persisted idempotent cutover timeout can resume; legacy unknown effects
-        # and missing/failed maintenance receipts keep their intervention hold.
         return cast(
             OdooProdPromotionOperationRecord | None,
             self._claim_next_release_operation(
@@ -17832,13 +17828,11 @@ class PostgresRecordStore(HumanSessionStore):
                 lease_expires_at=lease_expires_at,
                 claimed_at=claimed_at,
                 cutover_reconciliation=True,
-                cutover_abort_only=abort_only,
-                max_attempts=max_attempts,
             ),
         )
 
     def claim_odoo_cutover_rollback_reconciliation_record(
-        self, *, lease_owner: str, lease_expires_at: str, claimed_at: str, max_attempts: int
+        self, *, lease_owner: str, lease_expires_at: str, claimed_at: str
     ) -> OdooProdRollbackOperationRecord | None:
         return cast(
             OdooProdRollbackOperationRecord | None,
@@ -17850,7 +17844,6 @@ class PostgresRecordStore(HumanSessionStore):
                 lease_expires_at=lease_expires_at,
                 claimed_at=claimed_at,
                 cutover_reconciliation=True,
-                max_attempts=max_attempts,
             ),
         )
 
