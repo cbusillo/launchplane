@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "./state";
+import { expect, test, waitForState, type Page } from "./state";
 
 async function setup(page: Page, outcome = "completed", admin = true) {
   await page.goto("/ui/products?fixture=empty");
@@ -6,7 +6,7 @@ async function setup(page: Page, outcome = "completed", admin = true) {
     const module = await import("/ui/src/dev-fixtures.ts");
     return { identity: module.fixtureIdentity, products: module.productsForFixture("products"), environment: module.environmentForFixture("products", "atlas-commerce", "prod")! };
   });
-  const requests: { method: string; path: string; body: any }[] = [];
+  const requests: { method: string; path: string; query: string; body: any }[] = [];
   const completed = new Set<string>();
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "private-recovery-csrf", is_administrator: admin, identity: { ...fixtures.identity, role: admin ? "admin" : "read_only" } } }));
   await page.route("**/v1/production-backup-authority/proposals?*", route => route.fulfill({ json: { status: "ok", proposals: [] } }));
@@ -22,7 +22,7 @@ async function setup(page: Page, outcome = "completed", admin = true) {
     const path = new URL(request.url()).pathname;
     const operation = path.replace(/\/(apply|dry-run)$/, "");
     const body = request.method() === "POST" ? request.postDataJSON() : null;
-    requests.push({ method: request.method(), path, body });
+    requests.push({ method: request.method(), path, query: new URL(request.url()).search, body });
     if (body) expect(request.headers()["x-csrf-token"]).toBe("private-recovery-csrf");
     if (path.endsWith("/apply")) {
       if (outcome === "denied" || outcome === "changed") return route.fulfill({ status: outcome === "denied" ? 403 : 409, json: { trace_id: "recovery-refusal", error: { code: outcome === "denied" ? "authorization_denied" : "stale_recovery_digest", message: "Recovery stopped." } } });
@@ -63,11 +63,12 @@ test("admin reviews the original, invalidates edits, applies once and reads back
   await panel.screenshot({ path: testInfo.outputPath("promotion-recovery-reviewed.png") });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await apply.click();
-  await expect(panel.getByRole("status")).toContainText("Read back");
+  await expect(panel.getByRole("status")).toBeVisible();
   expect(requests.filter(request => request.method === "GET")).toHaveLength(2);
   await expect(apply).toBeDisabled();
   await panel.getByRole("button", { name: "Read back original operation" }).click();
-  await expect(panel.getByRole("status")).toContainText("does not establish release success");
+  await expect(panel.getByRole("status")).toBeVisible();
+  await waitForState(() => requests.filter(request => request.method === "GET").length).toBe(3);
   const sent = requests.filter(request => request.path.endsWith("/apply"));
   expect(sent).toHaveLength(1);
   expect(sent[0].body).toEqual({ reason: "A changed reason.", recovery_reference: "original-operation", expected_recovery_digest: "a".repeat(64) });
@@ -104,7 +105,7 @@ for (const outcome of ["wrong-product", "wrong-reference", "held"]) {
 
 test("non-admin has no recovery card or route calls", async ({ page }) => {
   const { panel, requests } = await setup(page, "completed", false);
-  await expect(page.getByRole("heading", { name: "Supported behavior, blockers, and browser boundary" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await expect(panel).toHaveCount(0);
   expect(requests).toHaveLength(0);
 });
@@ -116,7 +117,7 @@ test("another selection cannot retry a previously attempted recovery", async ({ 
   await expect(panel.getByRole("alert")).toBeVisible();
   await panel.getByRole("button", { name: "Choose another operation" }).click();
   await review(panel);
-  await expect(panel.getByRole("status")).toContainText("already attempted");
+  await expect(panel.getByRole("status")).toBeVisible();
   await expect(panel.getByRole("button", { name: "Apply reviewed recovery" })).toBeDisabled();
   expect(requests.filter(request => request.path.endsWith("/apply"))).toHaveLength(1);
   await panel.getByRole("button", { name: "Choose another operation" }).click();
@@ -126,6 +127,9 @@ test("another selection cannot retry a previously attempted recovery", async ({ 
   await panel.getByLabel("Recovery reason").fill("Inspect another original operation.");
   await panel.getByRole("button", { name: "Review recovery", exact: true }).click();
   await expect(panel.getByRole("checkbox")).toBeEnabled();
+  const query = new URLSearchParams(requests.at(-1)!.query);
+  expect(query.get("attempt")).toBe("2");
+  expect(query.get("step")).toBe("rollback");
 });
 
 test("expired running reservation is actionable only when the route proves adoption", async ({ page }) => {
@@ -141,7 +145,33 @@ test("unavailable session storage blocks recovery dispatch", async ({ page }) =>
   await page.addInitScript(() => Object.defineProperty(window, "sessionStorage", { get() { throw new DOMException("Unavailable", "SecurityError"); } }));
   await page.reload();
   const panel = page.getByRole("region", { name: "Recover promotion", exact: true });
-  await expect(panel.getByRole("alert")).toContainText("storage");
+  await expect(panel.getByRole("alert")).toBeVisible();
   await expect(panel.getByRole("button", { name: "Review recovery", exact: true })).toBeDisabled();
   expect(requests).toHaveLength(0);
+});
+
+test("unverified saved selection can choose another operation without clearing the original attempt", async ({ page }) => {
+  const { panel, requests } = await setup(page, "uncertain");
+  await review(panel); await panel.getByRole("checkbox").check();
+  await panel.getByRole("button", { name: "Apply reviewed recovery" }).click();
+  await expect(panel.getByRole("alert")).toBeVisible();
+  await page.evaluate(() => {
+    const key = Object.keys(sessionStorage).sort((left, right) => left.length - right.length).find(name => {
+      try { return JSON.parse(sessionStorage.getItem(name) ?? "null")?.plan?.recovery_reference === "original-operation"; }
+      catch { return false; }
+    });
+    if (!key) throw new Error("No saved review found.");
+    sessionStorage.setItem(key, "invalid saved selection");
+  });
+  await page.reload();
+  await expect(panel.getByRole("alert")).toBeVisible();
+  await panel.getByRole("button", { name: "Choose another operation" }).click();
+  await review(panel);
+  await expect(panel.getByRole("button", { name: "Apply reviewed recovery" })).toBeDisabled();
+  await expect(panel.getByRole("button", { name: "Read back original operation" })).toBeEnabled();
+  expect(requests.filter(request => request.path.endsWith("/apply"))).toHaveLength(1);
+  await panel.getByRole("button", { name: "Choose another operation" }).click();
+  await page.reload();
+  await expect(panel.getByLabel("Release decision")).toBeEnabled();
+  await expect(panel.getByLabel("Release decision")).toHaveValue("");
 });

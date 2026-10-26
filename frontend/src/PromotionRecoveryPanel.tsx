@@ -51,17 +51,21 @@ export function PromotionRecoveryPanel({ product, fixtureMode }: { product: stri
   function edit(change: () => void) {
     change(); setReview(null); setConfirmed(false); setError(""); setNotice("");
   }
-  function fail(failure: unknown) {
+  function fail(failure: unknown, action: "Review" | "Apply" | "Readback") {
     setConfirmed(false);
+    const instruction = action === "Review" ? "No Apply was sent." : "Do not retry Apply.";
     setError(failure instanceof LaunchplaneApiError
-      ? `Recovery stopped: HTTP ${failure.statusCode}, ${failure.code || "request_failed"}. Trace: ${failure.traceId || "unavailable"}. Do not retry Apply.`
-      : "Recovery is unverified. Stop and retain the original operation. Do not retry Apply.");
+      ? `${action} stopped: HTTP ${failure.statusCode}, ${failure.code || "request_failed"}. Trace: ${failure.traceId || "unavailable"}. ${instruction}`
+      : `${action} is unverified. Stop and retain the original operation. ${instruction}`);
   }
   function operationStorageKey(target: PromotionRecoveryTarget): string {
     return `${storageKey}:${encodeURIComponent(target.decisionRecordId)}:${target.step}:${target.attempt}`;
   }
   function chooseAnother() {
-    setAttempted(false); setReview(null); setConfirmed(false); setDecisionRecordId(""); setReason(""); setError(""); setNotice("");
+    try {
+      sessionStorage.removeItem(storageKey);
+      setAttempted(false); setReview(null); setConfirmed(false); setDecisionRecordId(""); setReason(""); setError(""); setNotice("");
+    } catch { setError("Recovery storage is unavailable. Keep the original operation until storage is available."); }
   }
   async function inspect() {
     if (!admin || inFlight.current || attempted) return;
@@ -83,7 +87,7 @@ export function PromotionRecoveryPanel({ product, fixtureMode }: { product: stri
       if (!verifiedPlan(plan, product, original) || plan.reservation_state !== original.reservation_state ||
           plan.reservation_attempt !== original.reservation_attempt || plan.checkpoint !== original.checkpoint) throw new Error();
       setReview({ target, reason: reviewedReason, plan });
-    } catch (failure) { fail(failure); }
+    } catch (failure) { fail(failure, "Review"); }
     finally { inFlight.current = false; setBusy(false); }
   }
   const actionable = !!review && review.plan.reservation_state !== "completed" &&
@@ -102,7 +106,7 @@ export function PromotionRecoveryPanel({ product, fixtureMode }: { product: stri
       });
       if (!verifiedPlan(result, product, review.plan) || result.status !== "accepted" || result.reservation_state !== "completed") throw new Error();
       setNotice("Apply returned completed. Read back the original operation separately.");
-    } catch (failure) { fail(failure); }
+    } catch (failure) { fail(failure, "Apply"); }
     finally { inFlight.current = false; setBusy(false); }
   }
   async function readback() {
@@ -114,7 +118,7 @@ export function PromotionRecoveryPanel({ product, fixtureMode }: { product: stri
       setNotice(result.reservation_state === "completed"
         ? "Original reservation is completed. This does not establish release success."
         : `Original reservation remains ${result.reservation_state}. Stop; the operation is not settled.`);
-    } catch (failure) { fail(failure); }
+    } catch (failure) { fail(failure, "Readback"); }
     finally { inFlight.current = false; setBusy(false); }
   }
   if (!admin || fixtureMode) return null;
@@ -124,7 +128,7 @@ export function PromotionRecoveryPanel({ product, fixtureMode }: { product: stri
       <p>Review an interrupted accepted release for {product}. Apply reconciles its original operation using your existing administrator authority.</p>
     </div></header>
     <fieldset disabled={busy || attempted}>
-      <label className="product-config-field">Release decision<input value={decisionRecordId} onChange={event => edit(() => setDecisionRecordId(event.target.value))} /></label>
+      <label className="product-config-field">Release decision<input type="text" value={decisionRecordId} onChange={event => edit(() => setDecisionRecordId(event.target.value))} /></label>
       <label className="product-config-field">Release step<select value={step} onChange={event => edit(() => setStep(event.target.value as typeof step))}><option value="promote">Promotion</option><option value="rollback">Rollback drill</option></select></label>
       <label className="product-config-field">Promotion attempt<select value={attempt} onChange={event => edit(() => setAttempt(Number(event.target.value) as 1 | 2))}><option value={1}>First</option><option value={2}>Second</option></select></label>
       <label className="product-config-field">Recovery reason<textarea value={reason} maxLength={1000} onChange={event => edit(() => setReason(event.target.value))} /></label>
@@ -144,7 +148,7 @@ export function PromotionRecoveryPanel({ product, fixtureMode }: { product: stri
     <div className="product-config-actions">
       <button className="button button-primary" type="button" disabled={busy || attempted || !actionable || !confirmed} onClick={() => void apply()}>Apply reviewed recovery</button>
       <button className="button button-secondary" type="button" disabled={busy || !review} onClick={() => void readback()}>Read back original operation</button>
-      {attempted && review && <button className="button button-secondary" type="button" disabled={busy} onClick={chooseAnother}>Choose another operation</button>}
+      {attempted && <button className="button button-secondary" type="button" disabled={busy} onClick={chooseAnother}>Choose another operation</button>}
     </div>
     {error && <p role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
