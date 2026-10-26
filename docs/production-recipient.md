@@ -456,7 +456,7 @@ revision rather than being rewritten. The release worker and reviewed recovery
 path retain both recipients when a deploy or writer outcome remains uncertain.
 Terminal rollback results expose a fixed stage-specific qualification reason
 from the promotion record through the release read, including lost-reply recovery.
-For unresolved outcomes, the reason names the unverified stage; the operation
+On the promotion record, the reason names the unverified stage; the operation
 and custody state still determine certainty. Pre-dispatch refusals retain their
 existing fixed refusal message.
 Safe cause-site logs carry the original trace without provider or exception text.

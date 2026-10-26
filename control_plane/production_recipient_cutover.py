@@ -1590,7 +1590,11 @@ class RecipientCutoverAdapter:
         with self.store.provider_evidence_guard(lease.evidence_reservation):
             self.store.write_promotion_record(
                 pending.model_copy(
-                    update={"deploy": pending.deploy.model_copy(update={"status": "fail"})}
+                    update={
+                        "deploy": pending.deploy.model_copy(update={"status": "fail"}),
+                        "failure": pending.failure
+                        or promotion_failure("recipient_cutover_unverified"),
+                    }
                 )
             )
 

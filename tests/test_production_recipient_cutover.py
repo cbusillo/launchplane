@@ -1120,6 +1120,12 @@ class RecipientCutoverTests(unittest.TestCase):
     def test_terminal_host_rollback_can_finish_its_journal_after_a_lost_write(self) -> None:
         original = self.store.write_production_recipient
         failed: list[bool] = []
+        write_promotion = self.store.write_promotion_record
+
+        def lose_diagnostic(record: Any) -> None:
+            if record.failure is not None and record.deploy.status == "pending":
+                raise ConnectionError("diagnostic write unavailable")
+            write_promotion(record)
 
         def lose_final_write(**kwargs: Any) -> None:
             if kwargs["replacement"]["phase"] == "rolled_back" and not failed:
@@ -1132,6 +1138,7 @@ class RecipientCutoverTests(unittest.TestCase):
 
         with (
             patch.object(self.store, "write_production_recipient", side_effect=lose_final_write),
+            patch.object(self.store, "write_promotion_record", side_effect=lose_diagnostic),
             patch(
                 "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
                 return_value=HealthcheckEvidence(status="fail"),
@@ -1148,6 +1155,13 @@ class RecipientCutoverTests(unittest.TestCase):
         current = custody(self.store, self.record.product, self.record.context)
         assert current is not None
         self.assertEqual(current.phase, "rolled_back")
+        from control_plane.client_release import _release_step_failure
+
+        failure = _release_step_failure(self.store, result.record, "fail")
+        assert failure is not None
+        promotion = self.store.read_promotion_record(failure.record_id)
+        assert promotion.failure is not None
+        self.assertEqual(failure.reason, promotion.failure.description)
 
     def test_inverse_preflight_peer_refusal_can_retry_under_the_same_key(self) -> None:
         from control_plane.production_recipient_inverse import RecipientInverseAdapter
