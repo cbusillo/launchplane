@@ -592,7 +592,12 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         self.namespace["one_inspection"] = self.inspect
         self.namespace["control"] = self.control
         self.namespace["observe_memory_headroom"] = lambda *_: 100
-        self.namespace["is_healthy"] = lambda name: not self.calls.append(("healthy", name))
+
+        def healthy(name: str) -> bool:
+            self.calls.append(("healthy", name))
+            return True
+
+        self.namespace["is_healthy"] = healthy
         self.enterContext(patch("os.statvfs", return_value=Mock(f_bavail=100, f_frsize=1)))
 
     def runtime(self) -> tuple[dict[str, Any], str]:
