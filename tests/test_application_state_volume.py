@@ -496,6 +496,28 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         self.assertNotIn(value, result.text)
         self.assert_production_unchanged()
 
+    async def test_application_lift_refuses_unreviewed_plan_without_clearing_staff_hold(self) -> None:
+        await self.prepare_application_hold()
+        self.serve_application()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.assertIsNotNone(target.policies.staff_testing_hold)
+        plan = await self._testing_hold()
+        self.assertEqual(plan.status_code, 202, plan.text)
+        reviewed = plan.json()["result"]["plan_sha256"]
+        stale = ("0" if reviewed[0] != "0" else "1") + reviewed[1:]
+        applied = await self._testing_hold(mode="apply", reviewed_plan_sha256=stale)
+        self.assertEqual(applied.status_code, 409, applied.text)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            target,
+        )
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
     async def test_serving_application_lifts_without_deploy_or_reconcile_and_replays(self) -> None:
         await self.prepare_application_hold()
         self.serve_application()
