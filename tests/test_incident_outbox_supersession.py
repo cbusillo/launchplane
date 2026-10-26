@@ -17,8 +17,11 @@ from tests.test_public_ingress_monitor import _notification_policy, _profile
 
 class IncidentOutboxSupersessionTests(unittest.TestCase):
     def test_interrupted_github_create_uses_marker_for_recovery_without_recreating(self) -> None:
-        for issue_exists in (False, True):
-            with self.subTest(issue_exists=issue_exists), TemporaryDirectory() as directory:
+        for issue_exists, issue_number in ((False, None), (True, None), (False, 1)):
+            with (
+                self.subTest(issue_exists=issue_exists, issue_number=issue_number),
+                TemporaryDirectory() as directory,
+            ):
                 store = PostgresRecordStore(
                     database_url=_sqlite_database_url(Path(directory) / "db")
                 )
@@ -32,6 +35,7 @@ class IncidentOutboxSupersessionTests(unittest.TestCase):
                             kind="github_issue",
                             github_repository="example/ops",
                             github_label="incident",
+                            github_issue_number=issue_number,
                         )
                     )
                 )
@@ -39,7 +43,7 @@ class IncidentOutboxSupersessionTests(unittest.TestCase):
 
                 def github(action: str, payload: dict[str, object]) -> dict[str, object]:
                     actions.append(action)
-                    if action == "create":
+                    if action == "create" or (action == "comment" and issue_number is not None):
                         raise KeyboardInterrupt()
                     if action == "find_marker" and not issue_exists:
                         return {}
@@ -65,7 +69,9 @@ class IncidentOutboxSupersessionTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     actions,
-                    ["create", "find_marker", "close"]
+                    ["comment"]
+                    if issue_number is not None
+                    else ["create", "find_marker", "close"]
                     if issue_exists
                     else ["create", "find_marker"],
                 )

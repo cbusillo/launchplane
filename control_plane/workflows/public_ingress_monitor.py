@@ -3741,7 +3741,11 @@ def deliver_public_ingress_notification_outbox_delivery(
                     _required_payload_text(attempt_payload, "policy_id"),
                     _required_payload_text(attempt_payload, "destination_id"),
                 )
-                if not matching_resolution and destination_payload.get("kind") == "github_issue":
+                if (
+                    not matching_resolution
+                    and destination_payload.get("kind") == "github_issue"
+                    and destination_payload.get("github_issue_number") is None
+                ):
                     matching_resolution = any(
                         previous.provider_operation_key
                         and _dict_payload(previous.payload.get("attempt")).get("event")
