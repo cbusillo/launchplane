@@ -380,7 +380,7 @@ class BusinessValidationAdapterTests(unittest.TestCase):
         )
 
     def test_validation_requires_switched_copy_and_cannot_rewrite_a_prior_attempt(self) -> None:
-        result = {
+        result: dict[str, Any] = {
             "state": "switched",
             "copies": [item.model_dump(mode="json") for item in self.record.copies],
             "elapsed_seconds": {},
