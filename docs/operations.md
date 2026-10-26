@@ -5272,7 +5272,16 @@ credential reclassification or external secret copy is part of this route.
 
 Supply the exact PR manifest and digest-pinned image through the normal preview
 inputs. The issued plan fingerprints the selected source settings, binding
-version and allowance. Apply that service-issued plan through the existing
+version, allowance and qualified testing runtime. The source settings come from
+the exact verified installed importer and shared payload producer, typed testing
+overrides, the actual delivered payload and persisted testing parameters. Omitted
+overrides preserve persisted parameters; installed producer defaults apply only
+when the parameter is absent. Legacy field environments and copied defaults are
+not a fallback. Uninstalled addons, missing password delivery, conflicting or
+secret-backed non-secret authority, unverified TLS and drift refuse the optional
+source. Ordinary previews without the source remain available.
+
+Apply that service-issued plan through the existing
 `POST /v1/drivers/odoo/preview-apply` route with its plan id as the idempotency
 key. Changed source authority requires a new plan. Plaintext source settings
 and passwords are never accepted as caller input or returned in the plan.
@@ -5465,12 +5474,19 @@ substitute for runtime-origin privileges.
 
 The service verifies the testing lane, immutable artifact and container and
 requires already-delivered authentication settings to match the currently selected
-safe managed binding. Database-name keys differ by producer and are not required
+safe managed binding. It shares the prerequisite reader's immutable image,
+source inventory, installed producer, canonical payload parser and addon-state
+checks. Non-secret authority comes from typed instance overrides, with no legacy
+per-field environment fallback. Omitted overrides keep persisted parameters;
+defaults apply only when the corresponding parameter is absent. Explicit
+mismatches, missing password delivery and disabled or unverified TLS stay unknown.
+Database-name keys differ by producer and are not required
 by this account-wide SHOW GRANTS read, which selects no default database; their
 agreement remains with import-override reconciliation. It sends only fixed code and non-secret identity metadata
 through its registered provider transport. Inside the container, a read-only
 PostgreSQL session reads only the fixed source parameter keys and requires
-those applied values to agree with installed settings. Source passwords never
+those applied values to agree with the effective delivered authentication
+settings, including the producer's TLS-enabled and verification facts. Source passwords never
 leave the container; isolated children consume them through stdin for the same
 fixed verified-TLS/SHOW GRANTS probe. No writer fallback, new account, password
 copy, import or production credential comparison is performed.

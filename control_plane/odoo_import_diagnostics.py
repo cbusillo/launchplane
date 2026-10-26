@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from urllib.parse import urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
@@ -34,8 +34,11 @@ from control_plane.runtime_key_safety import ALLOWED_SECRET_CLASSES_BY_ENVIRONME
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
 from control_plane.contracts.runtime_identity import (
     runtime_identity_from_health_payload,
-    RUNTIME_IDENTITY_ENV_KEY,
 )
+
+if TYPE_CHECKING:
+    from control_plane.odoo_runtime_source_prerequisites import PrerequisiteStore
+
 
 SOURCE_PREFIXES = {
     name: next(
@@ -351,7 +354,11 @@ def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsaf
 def runtime_origin_grants(
     connection: reads.OdooRuntimeConnection,
     selected: dict[str, SourceAuthority],
-    environment: dict[str, str],
+    *,
+    store: DiagnosticStore,
+    product: str,
+    control_plane_root: Path,
+    database_url: str | None,
 ) -> dict[str, GrantStatus]:
     keys = {
         name: (
@@ -385,20 +392,10 @@ def runtime_origin_grants(
             runtime_grants(
                 connection,
                 tuple(active),
-                observed_identity=environment.get(RUNTIME_IDENTITY_ENV_KEY, ""),
-                prefixes=SOURCE_PREFIXES,
-                fields=GRANT_FIELDS,
-                environment_keys={
-                    name: {
-                        field: (
-                            config_parameter_secret_env_key(prefix + ".password")
-                            if field == "password"
-                            else config_parameter_runtime_key(prefix + "." + field)
-                        )
-                        for field in (*FIELDS, "password")
-                    }
-                    for name, prefix in SOURCE_PREFIXES.items()
-                },
+                store=cast("PrerequisiteStore", store),
+                product=product,
+                control_plane_root=control_plane_root,
+                database_url=database_url,
             )
         )
         return results
@@ -564,31 +561,25 @@ def diagnose_runtime_source_grants(
                 sources.append(SourceDiagnostic(source=source_name))
                 continue
             try:
-                settings = {
-                    **source.settings,
-                    "password": _decrypt_secret_value(
-                        source.version.ciphertext, source.version.key_id
-                    ),
-                }
-                if all(
-                    parameter_agreement(
-                        key,
-                        settings[key],
-                        environment.get(
-                            config_parameter_secret_env_key(prefix + ".password")
-                            if key == "password"
-                            else config_parameter_runtime_key(prefix + "." + key),
-                            "",
-                        ),
-                    )
-                    == "match"
-                    for key in (*GRANT_FIELDS, "password")
+                password = _decrypt_secret_value(source.version.ciphertext, source.version.key_id)
+                if password and hmac.compare_digest(
+                    password.encode(),
+                    environment.get(
+                        config_parameter_secret_env_key(prefix + ".password"), ""
+                    ).encode(),
                 ):
                     selected[name] = source
-                sources.append(SourceDiagnostic(source=source_name, binding="selected"))
             except Exception:
-                sources.append(SourceDiagnostic(source=source_name))
-        grants = runtime_origin_grants(connection, selected, environment)
+                pass
+            sources.append(SourceDiagnostic(source=source_name, binding="selected"))
+        grants = runtime_origin_grants(
+            connection,
+            selected,
+            store=store,
+            product=product,
+            control_plane_root=control_plane_root,
+            database_url=database_url,
+        )
         reads.assert_selection_current(store, selection)
         if import_authority(store, product).private_snapshot != authority.private_snapshot:
             return unknown_result()

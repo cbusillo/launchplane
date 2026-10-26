@@ -373,7 +373,7 @@ class DiagnosticTests(unittest.TestCase):
         )
 
     def test_runtime_never_receives_mismatched_or_unsafe_sources(self) -> None:
-        self.environment[config_parameter_runtime_key("cm_data.db.user")] = "writer"
+        self.environment[config_parameter_secret_env_key("cm_data.db.password")] = "stale"
         self.environment[config_parameter_secret_env_key("repairshopr.sync_db.password")] = "stale"
         self.fixture.bindings[2] = self.fixture.bindings[2].model_copy(
             update={"declared_secret_class": "prod_only"}
@@ -394,7 +394,10 @@ class DiagnosticTests(unittest.TestCase):
                         diagnostic.import_authority(
                             self.fixture.store, self.fixture.profile.product
                         ).sources,
-                        self.environment,
+                        store=self.fixture.store,
+                        product=self.fixture.profile.product,
+                        control_plane_root=Path("fixture"),
+                        database_url=None,
                     ).values()
                 )
             )
