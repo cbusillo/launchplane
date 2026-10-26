@@ -3,6 +3,31 @@ import type { Request } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
+test("The Director request button submits its reason through the shared request route", { tag: "@layout" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=operator");
+  await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("operator");
+  });
+  const requests: { method: string; payload: unknown }[] = [];
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-operator", github_id: 9003, role: "admin", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.route("**/v1/release-review/requests", route => {
+    requests.push({ method: route.request().method(), payload: route.request().postDataJSON() });
+    return route.fulfill({ json: response });
+  });
+  await page.goto("/ui/owner-review?product=example-site");
+  const ask = page.getByRole("region", { name: "Ask the Client now", exact: true });
+  const reason = "The agreed repairs are ready for release.";
+  await ask.getByRole("textbox").fill(reason);
+  await ask.getByRole("button").click();
+  await expect(ask.getByRole("status")).toBeVisible();
+  expect(requests).toMatchObject([{ method: "POST", payload: { product: response.product, checklist_digest: response.review.checklist_digest, reason } }]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("decided-release-request.png"), fullPage: true });
+});
+
 test("A new invitation has its own progress and formatted linked PR checks", { tag: "@layout" }, async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();

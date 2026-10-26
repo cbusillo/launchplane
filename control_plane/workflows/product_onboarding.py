@@ -14,11 +14,7 @@ from control_plane.contracts.product_onboarding_manifest import (
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
-    ProductImageProfile,
-    ProductLaneHealthMonitoringPolicy,
     ProductLaneProfile,
-    ProductOdooPrelaunchRebuildPolicy,
-    ProductPreviewProfile,
     validate_product_profile_history_transition,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -99,11 +95,16 @@ def build_product_profile_record(
     updated_at: str,
     existing_profile: LaunchplaneProductProfileRecord | None = None,
 ) -> LaunchplaneProductProfileRecord:
-    historical_contexts = _merged_historical_contexts(
-        manifest_contexts=manifest.historical_contexts,
-        existing_profile=existing_profile,
+    payload = existing_profile.model_dump(mode="python") if existing_profile else {}
+    image = existing_profile.image.model_dump(mode="python") if existing_profile else {}
+    preview = (
+        existing_profile.preview.model_dump(mode="python")
+        if existing_profile is not None
+        and (existing_profile.preview.context, existing_profile.preview.template_instance)
+        == (manifest.preview.context, manifest.preview.template_instance)
+        else {}
     )
-    product_profile = LaunchplaneProductProfileRecord(
+    payload.update(
         product=manifest.product,
         display_name=manifest.display_name,
         repository=manifest.repository,
@@ -111,97 +112,70 @@ def build_product_profile_record(
         repository_owner_id=manifest.repository_owner_id,
         default_branch=manifest.default_branch,
         driver_id=manifest.driver_id,
-        image=ProductImageProfile(repository=manifest.image_repository),
+        image={**image, "repository": manifest.image_repository},
         runtime_port=manifest.runtime_port,
         health_path=manifest.health_path,
         lanes=tuple(
-            ProductLaneProfile(
-                instance=lane.instance,
-                context=lane.context,
-                odoo_cutover=next(
-                    (
-                        old.odoo_cutover
-                        for old in existing_profile.lanes
-                        if old.instance == lane.instance and old.context == lane.context
-                    ),
-                    None,
-                )
-                if existing_profile
-                else None,
-                generic_web_cutover=next(
-                    (
-                        old.generic_web_cutover
-                        for old in existing_profile.lanes
-                        if old.instance == lane.instance and old.context == lane.context
-                    ),
-                    None,
-                )
-                if existing_profile
-                else None,
-                base_url=lane.base_url,
-                health_url=_lane_health_url(manifest=manifest, lane=lane),
-                odoo_stable_bootstrap=lane.odoo_stable_bootstrap,
-                odoo_prelaunch_rebuild=_lane_odoo_prelaunch_rebuild(
-                    lane=lane,
-                    existing_profile=existing_profile,
-                ),
-                odoo_data_policy=lane.odoo_data_policy,
-                health_monitoring=_lane_health_monitoring(
-                    lane=lane,
-                    existing_profile=existing_profile,
-                ),
+            _onboarding_lane_profile(
+                manifest=manifest, lane=lane, existing_profile=existing_profile
             )
             for lane in manifest.lanes
         ),
-        historical_contexts=historical_contexts,
-        odoo_business_hours=existing_profile.odoo_business_hours if existing_profile else None,
-        preview=ProductPreviewProfile.model_validate(manifest.preview.model_dump(mode="json")),
+        historical_contexts=_merged_historical_contexts(
+            manifest_contexts=manifest.historical_contexts, existing_profile=existing_profile
+        ),
+        preview={**preview, **manifest.preview.model_dump(mode="python")},
         promotion_workflow=manifest.promotion_workflow,
         expected_config=manifest.product_expected_config_profile(),
         updated_at=updated_at,
         source=manifest.source_label,
     )
+    product_profile = LaunchplaneProductProfileRecord.model_validate(payload)
     validate_product_profile_history_transition(
-        existing_profile=existing_profile,
-        replacement_profile=product_profile,
+        existing_profile=existing_profile, replacement_profile=product_profile
     )
     return product_profile
 
 
-def _lane_health_monitoring(
+def _onboarding_lane_profile(
     *,
+    manifest: ProductOnboardingManifest,
     lane: ProductOnboardingLaneManifest,
     existing_profile: LaunchplaneProductProfileRecord | None,
-) -> ProductLaneHealthMonitoringPolicy:
-    if existing_profile is None:
-        return lane.health_monitoring
-    existing_lane = next(
-        (candidate for candidate in existing_profile.lanes if candidate.instance == lane.instance),
-        None,
+) -> ProductLaneProfile:
+    existing = (
+        next(
+            (
+                candidate
+                for candidate in existing_profile.lanes
+                if (candidate.instance, candidate.context) == (lane.instance, lane.context)
+            ),
+            None,
+        )
+        if existing_profile
+        else None
     )
-    return existing_lane.health_monitoring if existing_lane is not None else lane.health_monitoring
-
-
-def _lane_odoo_prelaunch_rebuild(
-    *,
-    lane: ProductOnboardingLaneManifest,
-    existing_profile: LaunchplaneProductProfileRecord | None,
-) -> ProductOdooPrelaunchRebuildPolicy:
-    if existing_profile is None:
-        return lane.odoo_prelaunch_rebuild
-    existing_lane = next(
-        (
-            candidate
-            for candidate in existing_profile.lanes
-            if candidate.context == lane.context and candidate.instance == lane.instance
-        ),
-        None,
+    payload = existing.model_dump(mode="python") if existing else {}
+    manifest_values = lane.model_dump(mode="python")
+    monitoring_owner = (
+        next(
+            (
+                candidate
+                for candidate in existing_profile.lanes
+                if candidate.instance == lane.instance
+            ),
+            None,
+        )
+        if existing_profile
+        else None
     )
-    return (
-        existing_lane.odoo_prelaunch_rebuild
-        if existing_lane is not None
-        else lane.odoo_prelaunch_rebuild
-    )
+    if monitoring_owner is not None:
+        manifest_values["health_monitoring"] = monitoring_owner.health_monitoring
+    if existing is not None:
+        manifest_values.pop("odoo_prelaunch_rebuild")
+    payload.update(manifest_values)
+    payload["health_url"] = _lane_health_url(manifest=manifest, lane=lane)
+    return ProductLaneProfile.model_validate(payload)
 
 
 def _lane_health_url(

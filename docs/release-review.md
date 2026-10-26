@@ -194,24 +194,41 @@ acceptance annotations still do not change the digest.
 
 A merge never asks the Client to release. Docs-only changes, engineering changes,
 and Client-accepted changes wait for a decided release. A differing testing
-artifact is not a release decision. The stable worker settles completed
-invitations and release records; it does not open requests, refresh them or send
-reminders based on lane changes.
+artifact is not a release decision.
 
-An admin can open a qualified request from the review page's **Ask the Client now**
-section (`POST /v1/release-review/urgent-openings`, `product_profile.write`, bound
-to the checklist digest) with a plain-language reason. The shared publisher uses
-the Launchplane Delivery App's existing release-record access, links the Client
-review page and explains whether Accept starts the gated production release or
-records approval while releases are held. The invitation keeps the reason on a
-**Why now:** line. Opening starts no release; an already open request keeps its
-original reason without a new notification. Delivery errors ask the admin to
-reload because the request may already have reached the Client. The control is
-hidden while a temporary hotfix awaits review or production already runs the
+`POST /v1/release-review/requests` records either a `director_request` or a
+`finish_line` decision and uses the same invitation sender. It takes `product`,
+`checklist_digest`, `reason`, `source` (defaults to `director_request`) and
+`decision_reference`. A finish-line request cites its recorded agreement;
+an agent also cites the recorded Director request when using that source.
+People use the existing product-scoped `product_profile.write` permission and
+session CSRF checks. Authenticated Director agents use their standing authority
+for this bounded request record, with its required decision reference; other agents and workflow identities cannot open requests.
+This operation records a request for review, never Client acceptance or permission
+to promote.
+
+The decision is stored in the product record's optional `release_request`
+field, with its actor, reason, source, reference, time, reviewed lane versions,
+checklist digest and preceding Client decision. Compare-and-write preserves
+concurrent profile edits. The general profile upsert preserves an omitted
+request and refuses changed request data; request provenance comes only from the
+bounded request route. Full request metadata is visible to admins and Director
+agents on release-review reads; the Client receives the invitation's reason.
+A retry of the same reviewed release preserves the original decision and reason. The worker sends and maintains invitations only
+from that saved decision. A changed checklist, lane version, repository, Client
+or intervening Client decision cannot renew it. Deciding the next release uses
+this same operation again; merges never record the decision themselves.
+
+The review page's **Ask the Client now** button records a `director_request`
+through this route. The invitation uses the Delivery App's existing release-record
+access and keeps the reason on its **Why now:** line. It links the Client review
+page and explains whether Accept starts the gated production release or records
+approval while releases are held. Opening starts no release. Delivery errors ask
+the admin to reload because the decision is saved and a request may already have
+reached the Client; the worker can continue delivery after a restart. The control
+is hidden while a temporary hotfix awaits review or production already runs the
 testing version. Missing access is reported; no grant or credential is created.
-The public review link uses Launchplane's own bootstrap `LAUNCHPLANE_PUBLIC_URL`.
-Durable Director and finish-line request records are the remaining Q882 source
-slice tracked by #4898.
+The public review link uses Launchplane's bootstrap `LAUNCHPLANE_PUBLIC_URL`.
 
 The publisher refuses incomplete or unavailable checklists, prelaunch/retired
 products, standing Director acceptance and candidates with a current Client
@@ -289,7 +306,7 @@ preparation first, inventory/adopt the existing requests, then deliver the
 separate trust-enforcement source. Marker text alone is not an acceptance.
 
 For an already-sent manual request or a request from a former App, a signed-in
-admin uses `POST /v1/release-review/urgent-openings` with the current
+admin uses `POST /v1/release-review/requests` with the current
 `product`, `checklist_digest`, `reason`, `adopt_issue_number`,
 `adopt_comment_id` and `dry_run: true`. After reviewing that result, the same
 request with `dry_run: false` posts only an App receipt to the selected issue.
@@ -319,7 +336,7 @@ preview decision or a bound per-PR review request in Launchplane's persisted
 preview feedback; titles, labels and the existence of a preview are not classifiers.
 Valid engineering release-test notes under the
 [shared notes contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#ready-handoffs)
-also appear in an existing mixed request or a deliberately opened urgent request.
+also appear in an existing mixed request or a decided release request.
 The Client sees the real test steps and the source change, without the engineering
 directive. Those steps alone never open an automatic request or send a new ping;
 preview-review evidence classifies additions within a deliberate publication.
@@ -376,8 +393,11 @@ in the open review is current. Lost post or replacement responses are recovered 
 cleanup is completed before delivery is cached. Missing timestamps or identities
 refuse publication. No manual live-thread cleanup is needed.
 
-No background reminders are sent until the record-driven request slice on
-#4898 lands. Existing reminder receipts remain preserved.
+A saved, still-current release request gets at most one reminder per open review
+after three days. Its durable receipt prevents duplicate reminders after restarts or lost
+responses. A direct request retry confirms the existing invitation without
+sending a due reminder. This maintains the decided request; it never starts a
+new release request because time passed.
 
 Legacy marker-only requests need the receipt-only admin adoption above before
 App-only discovery is enabled. The following read-only command can identify the
