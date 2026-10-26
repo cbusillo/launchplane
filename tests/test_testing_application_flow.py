@@ -4893,6 +4893,89 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(result.status, "completed", result)
         self.assertTrue(self.adapter.current().published)
 
+    def test_publication_refuses_stale_route_readiness_without_changing_custody(self) -> None:
+        from datetime import datetime, timedelta
+
+        self.addressed()
+        self.prepare()
+        write = self.store.write_testing_activation
+        attempted: list[str] = []
+
+        def publish(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"]:
+                before = self.adapter.current()
+                stale = deepcopy(kwargs["replacement"])
+                readiness = stale["application_readiness"]
+                observed = datetime.fromisoformat(readiness["observed_at"].replace("Z", "+00:00"))
+                readiness["observed_at"] = (observed - timedelta(hours=1)).isoformat()
+                attempted.append(readiness["observed_at"])
+                with self.assertRaises(ValueError):
+                    write(**{**kwargs, "replacement": stale})
+                self.assertEqual(self.adapter.current(), before)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=publish):
+            result = self.activate()
+        self.assertTrue(attempted)
+        self.assertEqual(result.status, "completed", result)
+        self.assertTrue(self.adapter.current().published)
+
+    def test_retained_fence_is_not_separated_when_binding_changes_between_reads(self) -> None:
+        from control_plane.testing_activation import retained_fence_is_separated
+        from control_plane.generic_web_testing_exclusion import bind_testing_recipient
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(retained_fence_is_separated(self.store, self.original))
+        identifier = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        rebound: list[str] = []
+
+        def return_to_original(*args: Any, **kwargs: Any) -> Any:
+            self.store.write_dokploy_target_record(self.retained)
+            self.store.write_dokploy_target_id_record(
+                identifier.model_copy(update={"target_id": self.old_id})
+            )
+            self.store.write_provider_target_record(
+                provider.model_copy(update={"target_id": self.old_id})
+            )
+            for alias in self.store.list_dokploy_target_id_records():
+                if alias.target_id == self.old_id and (alias.context, alias.instance) != (
+                    self.context,
+                    "testing",
+                ):
+                    self.store.delete_dokploy_target_id_record(expected_record=alias)
+            for registration in self.store.list_provider_target_records():
+                if registration.target_id == self.old_id and (
+                    registration.context,
+                    registration.instance,
+                ) != (self.context, "testing"):
+                    self.store.delete_provider_target_record(expected_record=registration)
+            bound = bind_testing_recipient(*args, **kwargs)
+            rebound.append(bound[2].target_id)
+            return bound
+
+        with patch(
+            "control_plane.testing_activation.bind_testing_recipient",
+            side_effect=return_to_original,
+        ):
+            self.assertFalse(retained_fence_is_separated(self.store, self.original))
+        self.assertEqual(rebound, [self.old_id])
+
+    def test_private_ingress_refuses_a_serving_application_moved_to_another_server(self) -> None:
+        _, ingress, _ = self.private_addressed()
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(self.adapter.current().published)
+        ingress.plan()
+        self.payloads[self.adapter.current().target_id]["serverId"] = "another-server"
+        with self.assertRaises(ValueError):
+            ingress.plan()
+
     def test_addressed_publication_correction_restores_route_and_allows_fresh_generation(
         self,
     ) -> None:

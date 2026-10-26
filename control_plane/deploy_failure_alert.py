@@ -41,15 +41,18 @@ def replacement_may_have_dispatched(response_file: Path) -> bool:
         isinstance(error, dict)
         and error.get("code")
         in {
-            "self_deploy_refused",
-            "self_deploy_drain_timeout",
-            "self_deploy_fence_conflict",
+            *self_deploy_pre_effect_error_codes(),
             "invalid_request",
             "authorization_denied",
             "authentication_required",
             "request_not_sent",
         }
     )
+
+
+def self_deploy_pre_effect_error_codes() -> frozenset[str]:
+    action = Path(__file__).resolve().parents[1] / ".github/actions/launchplane-request/dist"
+    return frozenset(json.loads((action / "self-deploy-pre-effect-errors.json").read_text()))
 
 
 def health_results(urls: list[str]) -> list[dict[str, str | int]]:

@@ -92,6 +92,14 @@ class ReleaseReviewRouteDependencies:
     ) = None
 
 
+class ReleaseReviewAccessResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    display_name: str
+    viewer_is_owner: bool
+
+
 class ReleaseReviewResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -365,6 +373,29 @@ def register_release_review_routes(
         if decision == "accepted":
             return release_start_for_acceptance(store=store, profile=profile)
         return ""
+
+    def read_release_review_access(
+        product: Annotated[str, Query(min_length=1, max_length=256)],
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> ReleaseReviewAccessResponse:
+        profile = profile_for_viewer(record_store, product, identity, common.next_trace_id())
+        return ReleaseReviewAccessResponse(
+            product=profile.product,
+            display_name=profile.display_name,
+            viewer_is_owner=isinstance(identity, GitHubHumanIdentity)
+            and viewer_is_product_owner(profile=profile, identity=identity),
+        )
+
+    app.add_api_route(
+        "/v1/release-review/access",
+        read_release_review_access,
+        methods=["GET"],
+        response_model=ReleaseReviewAccessResponse,
+        tags=["release-review"],
+        operation_id="read_release_review_access",
+        responses={status: {"model": common.error_response_model} for status in (401, 403, 503)},
+    )
 
     def read_release_review(
         product: Annotated[str, Query(min_length=1, max_length=256)],

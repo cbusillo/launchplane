@@ -276,8 +276,6 @@ def _validate_provider_capabilities(
             ("can_update_compose_env", capabilities.can_update_compose_env),
             ("can_deploy_compose", capabilities.can_deploy_compose),
             ("can_bind_domain", capabilities.can_bind_domain),
-            ("can_delete_compose", capabilities.can_delete_compose),
-            ("can_delete_domain", capabilities.can_delete_domain),
         ),
         "destroy": (
             ("can_delete_compose", capabilities.can_delete_compose),
