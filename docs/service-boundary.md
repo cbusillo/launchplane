@@ -4578,3 +4578,13 @@ review, administrator apply, private rollback custody and readback contracts of
 `POST /v1/admin/runtime-settings/removal`, and the read-only
 `POST /v1/authz-policies/workflow-rule-retirement-plan`. These paths install no
 grant and perform no provider action.
+
+### Structured refusal diagnostics
+
+Restart and native testing-rebuild refusals include an optional bounded
+`error.reason` code independent of human-readable `error.message`. A restart
+blocked by newer deployment history also returns
+`details.blocking_deployment_id`. These fields describe the existing refusal;
+they do not change its HTTP status, primary error code, authorization, dispatch
+or original-operation reconciliation requirements. Callers may project the code
+and record reference without parsing message wording. Older responses omit them.

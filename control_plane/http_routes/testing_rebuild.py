@@ -255,7 +255,11 @@ def register_testing_rebuild_routes(
                 "Testing rebuild was not admitted. Refresh the lane evidence before another request.",
             )
         raise common.http_error(
-            status_code=status, trace_id=trace_id, code=code, message=message
+            status_code=status,
+            trace_id=trace_id,
+            code=code,
+            message=message,
+            reason=error.code if isinstance(error, TestingRebuildRefused) else None,
         ) from error
 
     def inspect(
