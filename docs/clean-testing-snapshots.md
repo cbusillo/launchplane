@@ -114,8 +114,9 @@ An owned reset restarts the runner even if cleanup fails, with web still held.
 Later deploys retain an existing
 overlay and its original source, even when the newest snapshot changes.
 
-Admission charges the database, dump staging and existing reserve against real
-filesystem availability. The shared lower is already allocated and adds no
+Admission charges the full database allowance, the bounded dump's actual bytes
+and existing reserve against real filesystem availability. The testing snapshot's
+filestore staging allowance is not charged again. The shared lower adds no
 per-preview filestore charge. Upper writes consume the unchanged host quota.
 The configured memory floor also applies to a new snapshot restore on an
 existing provider target. Restore avoids recursive ownership changes that
@@ -159,6 +160,54 @@ descendants after their exec root dies.
 PostgreSQL 17 and separate preview database volumes still require a full
 database restore. Snapshot capture retains its existing clone-or-copy behavior;
 only new preview filestores use overlays. This does not provide database copy-on-write.
+
+## Idle previews
+
+Service-issued previews without upstream connections put their public route on
+a small router from the same immutable image. It receives the preview generation
+identity, with no application environment file, data mount or source credential.
+The existing network layout stays the same. A private Unix socket lets Launchplane
+read activity and coordinate sleep through its existing provider transport.
+There is no public control endpoint or outbound wake callback.
+
+After fifteen minutes without traffic and with no open connections or active
+runner execution, Launchplane freezes forwarding and stops web, the runner and
+PostgreSQL. It retains their containers, database, attachments and overlay source.
+A visitor sees a page that checks again while Launchplane starts the preview.
+A waiting non-GET request is forwarded once after wake, or receives a temporary
+failure if startup exceeds its bounded wait. The router never replays it.
+
+Sleep and wake use the existing preview executor and product locks, durable
+provider reservations and host project lock. An interrupted operation keeps its
+original intent; only a fresh observation under exclusion can resume it. A
+gateway cursor cannot authorize wake on its own: Launchplane verifies the
+completed sleep receipt against the current ready generation and target.
+Manual stops, staff testing holds, changed generations, foreign reservations
+and unavailable custody remain held. Existing previews gain the router on their
+next normal data-preserving refresh.
+
+Wakes serialize on the host, retain the configured memory floor and disk reserve,
+and wait for PostgreSQL, runner and web health plus the exact runtime identity
+before forwarding traffic. Insufficient capacity reports that no start occurred
+and leaves no held target reservation. A later attempt checks capacity again.
+Once admitted, the original wake receipt survives a gateway restart and an
+interrupted start resumes without charging its own running containers twice.
+Data-preserving refreshes also credit their own running services after matching
+the current target's identity; cold starts still meet the memory floor.
+Shared operation truth stays in Launchplane's database. Existing preview
+reservation reads expose idle operations too, and the normal original-operation
+observation and qualified refresh/destroy supersession paths recognize them.
+Changing a memory floor or storage budget does not change storage custody.
+Wake authority uses the retained completed sleep intent and its gateway receipt,
+including completion adopted by observation or qualified supersession. Idle
+retries preserve their effect checkpoint and stop after three attempts, leaving
+the original fence available for observation or expired refresh/destroy
+supersession. Exhaustion emits a warning naming the preview and original
+operation. The waiting page remains until recovery; partially started services
+stay under that original operation's custody. If a refresh aborts, a completed original wake can resume only
+its exact gateway receipt after target qualification with no live hold.
+Quiet polling does not take the preview executor lock or perform a host-wide
+storage inspection. Full qualification runs under exclusion before effects.
 
 ## Product transition and custody
 
