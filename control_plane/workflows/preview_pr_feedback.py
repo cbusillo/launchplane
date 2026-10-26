@@ -227,7 +227,11 @@ def pull_request_client_review(
     client_set: bool = True,
     director_standing: bool = False,
 ) -> bool:
-    from control_plane.client_test_notes import ClientTestNotesRequired, change_client_review
+    from control_plane.client_test_notes import (
+        ClientTestNotesRequired,
+        change_client_review,
+        open_client_questions,
+    )
     from control_plane.client_release_repositories import recorded_train_candidate
 
     reference = github_pull_request_reference(pr_url=anchor_pr_url)
@@ -266,7 +270,7 @@ def pull_request_client_review(
         base_branch=str(base.get("ref") or "") if isinstance(base, dict) else "",
     ):
         return False
-    if intent.error:
+    if intent.error and not open_client_questions(str(payload.get("body") or "")):
         raise ClientTestNotesRequired(intent.error)
     return intent.review_required
 

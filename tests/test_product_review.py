@@ -12,7 +12,8 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_review_status import OwnerReviewStatusPublisher
-from control_plane.release_review import UNREAD_PULL_REQUEST_NOTES, PullRequestNotes
+from control_plane.release_review import PullRequestNotes
+from control_plane.client_test_notes import client_test_notes
 from control_plane.service_auth import (
     BearerIdentityConfig,
     GitHubHumanIdentity,
@@ -160,7 +161,11 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(temporary_directory.cleanup)
         self.store = FilesystemRecordStore(state_dir=Path(temporary_directory.name))
         self.publisher = Mock(spec=OwnerReviewStatusPublisher)
-        self.pull_request_notes = UNREAD_PULL_REQUEST_NOTES
+        self.pull_request_notes = PullRequestNotes(
+            title="Update the repair price",
+            client_test_notes="Check the repair price.",
+            client_test_notes_error="",
+        )
         self.session_manager = HumanSessionManager(
             config=_github_oauth_config(),
             session_store=InMemoryHumanSessionStore(),
@@ -329,7 +334,9 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_owner_reviews_preview_and_decision_becomes_latest(self) -> None:
         self._write_product()
         self.pull_request_notes = PullRequestNotes(
-            title="Show the repair price", client_test_notes="Open the price list."
+            title="Show the repair price",
+            client_test_notes="Open the price list.",
+            client_test_notes_error="",
         )
         app = self._app()
         owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
@@ -355,6 +362,47 @@ class ProductReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest["reason"], "The price is wrong.")
         self.assertEqual(latest["owner_github_login"], "site-owner")
         self.assertEqual(latest["head_sha"], "abcdef1234567890abcdef1234567890abcdef12")
+
+    async def test_invalid_notes_block_acceptance_until_questions_are_answered(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+
+        self._write_product()
+        app = self._app()
+        owner = _human(login="site-owner", github_id=_OWNER_GITHUB_ID)
+        for notes in (
+            "",
+            f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?",
+            f"Nothing for the Client to test: CI only.\n### {OPEN_CLIENT_QUESTIONS}\n- Confirm the address.",
+        ):
+            with self.subTest(notes=notes):
+                self.pull_request_notes = PullRequestNotes(
+                    title="Contact page",
+                    client_test_notes=notes,
+                    client_test_notes_error=client_test_notes(notes).error,
+                )
+                read = await self._get(app, owner)
+                self.assertTrue(read.json()["client_test_notes_error"])
+                refused = await self._post(app, owner, decision="accepted")
+                self.assertEqual(refused.status_code, 409)
+                self.assertEqual(refused.json()["error"]["code"], "client_test_notes_required")
+                self.assertFalse(
+                    self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                    )
+                )
+        requested = await self._post(
+            app, owner, decision="changes_requested", reason="Please fill in the facts."
+        )
+        self.assertEqual(requested.status_code, 200)
+        self.pull_request_notes = PullRequestNotes(
+            title="Contact page",
+            client_test_notes=f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n",
+            client_test_notes_error="",
+        )
+        read = await self._get(app, owner)
+        self.assertFalse(read.json()["client_test_notes_error"])
+        accepted = await self._post(app, owner, decision="accepted")
+        self.assertEqual(accepted.status_code, 200)
 
     async def test_owner_is_recognized_by_github_id_after_a_login_rename(self) -> None:
         self._write_product()

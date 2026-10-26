@@ -1,6 +1,9 @@
 """Explicit engineering notes and real test instructions drive Client review."""
 
 import unittest
+from contextlib import nullcontext
+from pathlib import Path
+from unittest.mock import patch
 
 from github_plan_status.client_test_notes import ENGINEERING_RELEASE_TESTS
 
@@ -8,6 +11,98 @@ from control_plane.client_test_notes import change_client_review, client_test_no
 
 
 class ClientTestNotesTests(unittest.TestCase):
+    def test_review_notes_reader_validates_the_whole_body_and_review_label(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.release_review import read_pull_request_notes
+        from tests.support.profiles import product_profile_payload
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload("site"))
+        for body, labels, blocked in (
+            (
+                "## Client test notes\nNothing for the Client to test: CI only.",
+                [profile.owner.review_label],
+                True,
+            ),
+            (
+                "## Client test notes\nCheck checkout.\n## Owner test notes\nNothing for Justin to test.",
+                [],
+                True,
+            ),
+            ("## Client test notes\nCheck checkout.", [], False),
+        ):
+            with (
+                self.subTest(body=body, labels=labels),
+                patch(
+                    "control_plane.release_review.launchplane_github_token",
+                    return_value=nullcontext("fixture"),
+                ),
+                patch(
+                    "control_plane.release_review._read_release_github",
+                    return_value={
+                        "title": "Checkout",
+                        "body": body,
+                        "labels": [{"name": label} for label in labels],
+                    },
+                ),
+            ):
+                notes = read_pull_request_notes(
+                    control_plane_root=Path("unused"),
+                    profile=profile,
+                    pull_request_number=42,
+                    trace_id="fixture",
+                )
+                self.assertEqual(bool(notes.client_test_notes_error), blocked)
+                self.assertEqual(
+                    notes.client_test_notes_error,
+                    change_client_review(
+                        body=body, labels=labels, review_label=profile.owner.review_label
+                    ).error,
+                )
+
+    def test_questions_keep_the_review_notification_without_permitting_acceptance(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+        from control_plane.client_test_notes import ClientTestNotesRequired
+        from control_plane.workflows.preview_pr_feedback import pull_request_client_review
+
+        payload = {
+            "body": f"## Client test notes\nCheck the page.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?",
+            "labels": [],
+        }
+        with (
+            patch(
+                "control_plane.workflows.preview_pr_feedback.launchplane_github_token",
+                return_value=nullcontext("fixture"),
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                return_value=payload,
+            ),
+        ):
+            self.assertTrue(
+                pull_request_client_review(
+                    control_plane_root=Path("unused"),
+                    context="testing",
+                    anchor_pr_url="https://github.com/example/site/pull/42",
+                    label="owner-review",
+                )
+            )
+            self.assertTrue(
+                change_client_review(
+                    body=str(payload["body"]),
+                    labels=(),
+                    review_label="owner-review",
+                    pure_dependency_update=True,
+                ).error
+            )
+            payload["body"] = "## Client test notes\n"
+            with self.assertRaises(ClientTestNotesRequired):
+                pull_request_client_review(
+                    control_plane_root=Path("unused"),
+                    context="testing",
+                    anchor_pr_url="https://github.com/example/site/pull/42",
+                    label="owner-review",
+                )
+
     def test_release_testing_engineering_marker_keeps_each_sections_review_intent(self) -> None:
         notes = f"{ENGINEERING_RELEASE_TESTS}\nCheck the imported parts at release."
         body = "## Client test notes\n" + notes

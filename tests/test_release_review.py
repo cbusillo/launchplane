@@ -661,6 +661,7 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
             self.assertTrue(review.checklist.items[0].owner_test_notes)
 
     def test_engineering_notes_allow_client_decision_but_bad_notes_do_not(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
         from control_plane.release_review import checklist_blockers
 
         with TemporaryDirectory() as temporary:
@@ -672,6 +673,12 @@ class EngineeringNotesReleaseTests(unittest.TestCase):
                         False,
                     ),
                     ("Nothing for the Client to test: CI only.", [], False),
+                    (
+                        f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the address?",
+                        [],
+                        True,
+                    ),
+                    (f"Check the contact page.\n### {OPEN_CLIENT_QUESTIONS}\n", [], False),
                     ("Nothing for the Client to test", [], True),
                     ("Nothing for the owner to test", [{"name": "owner-review"}], True),
                     ("Nothing for the Client to test: CI only.", [{"name": "owner-review"}], True),
