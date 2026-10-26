@@ -127,6 +127,16 @@ come only from the accepted runtime payload. The runtime must provide the native
 startup shell/config functions covered by the legacy fixture; qualify the actual
 testing and retained rollback images before live activation.
 
+The canonical consumer supports legacy and typed string-parameter APIs. Copied
+websites remain excluded while their addon is scheduled for upgrade or removal;
+Odoo's base-only website model does not enable website settings. The generated
+program and immutable source fixture must advance together.
+
+Odoo 20 defaults its HTTP listener to loopback. The runtime environment record
+must supply `ODOO_HTTP_INTERFACE` for the container listener that the private
+proxy reaches. Verify readiness from that private proxy, not only from inside
+the web container. This is a runtime input, not an artifact build setting.
+
 Native Odoo consent behavior remains Essential only / Accept all. These fields
 are an application contract, not proof of Client consent acceptance, personal-
 data exclusion from events, provider event delivery or real visitors. The
