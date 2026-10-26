@@ -26,6 +26,7 @@ import { ProductRetirementPanel } from "./ProductRetirementPanel";
 import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
 import { ProductSetupPanel } from "./ProductSetupPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
+import { ProductReleaseReviewLink } from "./ProductReleaseReviewLink";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
@@ -502,6 +503,7 @@ function ProductWorkspace({
       </header>
 
       <ProductWorkspaceNav product={product} route={route} />
+      <ProductReleaseReviewLink key={`release-review:${product.product}`} product={product.product} admin={admin} fixtureMode={fixtureMode} />
       {admin && !fixtureMode ? <a className="button" href="#product-setup-title">Environment setup</a> : null}
 
       <a className="mobile-next-inspection" href={`#${inspection.targetId}`}>
