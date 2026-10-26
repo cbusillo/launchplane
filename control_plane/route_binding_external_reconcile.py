@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -12,6 +12,8 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.route_binding_record import (
+    EXTERNAL_INGRESS_ATTESTATION_WINDOW,
+    EXTERNAL_INGRESS_REFRESH_THRESHOLD,
     EnvironmentRouteBindingRecord,
     RouteBindingDomain,
     RouteBindingIngress,
@@ -19,7 +21,6 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingSource,
     RouteBindingTls,
     route_binding_record_sha256,
-    EXTERNAL_INGRESS_ATTESTATION_WINDOW,
 )
 from control_plane.contracts.text_fields import require_text
 from control_plane.route_binding_reconcile import (
@@ -27,9 +28,7 @@ from control_plane.route_binding_reconcile import (
     RouteBindingReconcileFinding,
 )
 
-
 _ATTESTATION_FRESHNESS_WINDOW = EXTERNAL_INGRESS_ATTESTATION_WINDOW
-_ATTESTATION_REFRESH_THRESHOLD = timedelta(days=15)
 
 
 class ExternalRouteBindingReconcileStore(Protocol):
@@ -655,7 +654,7 @@ def _route_binding_refresh_due(
         return True
     if stale_after > evaluated_timestamp + _ATTESTATION_FRESHNESS_WINDOW:
         return True
-    return stale_after <= evaluated_timestamp + _ATTESTATION_REFRESH_THRESHOLD
+    return stale_after <= evaluated_timestamp + EXTERNAL_INGRESS_REFRESH_THRESHOLD
 
 
 def _blocked_plan(

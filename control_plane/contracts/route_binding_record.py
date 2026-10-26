@@ -17,6 +17,7 @@ RouteBindingTerminationKind = Literal["edge", "direct", "none"]
 RouteBindingIngressProvider = str
 RouteBindingTlsOwner = Literal["launchplane", "provider", "external", "none"]
 EXTERNAL_INGRESS_ATTESTATION_WINDOW = timedelta(days=30)
+EXTERNAL_INGRESS_REFRESH_THRESHOLD = timedelta(days=15)
 
 _SECRET_KEY_TOKENS = (
     "secret",

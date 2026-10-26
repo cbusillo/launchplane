@@ -1,25 +1,32 @@
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import cast
 from urllib.parse import urlsplit
-from control_plane.split_ingress import split_ingress_check_name
 
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductLaneHealthCheck,
     ProductLaneProfile,
     product_lane_monitoring_probe_effective,
 )
 from control_plane.contracts.public_ingress_monitoring import (
-    health_monitor_freshness_seconds,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
+    health_monitor_freshness_seconds,
 )
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity, compare_runtime_identity
-from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
+from control_plane.outbound_http import custody_redirects_match
+from control_plane.split_ingress import (
+    read_split_ingress_binding,
+    split_ingress_custody_hosts,
+    split_ingress_monitoring_lane,
+)
+from control_plane.workflows.odoo_verification import resolve_odoo_health_url
 
 
 @dataclass(frozen=True)
@@ -76,7 +83,6 @@ def read_lane_runtime_verification(
 ) -> LaneRuntimeVerification:
     split_binding = read_split_ingress_binding(record_store, profile, lane)
     lane = split_ingress_monitoring_lane(profile, lane, split_binding)
-    read_observations = getattr(record_store, "list_public_ingress_observation_records", None)
     evaluated_at = now or datetime.now(timezone.utc)
     deployment_at = (
         summary.inventory.updated_at
@@ -120,11 +126,6 @@ def read_lane_runtime_verification(
     )
     if split_binding is not None and lane.health_monitoring.monitoring_intent != "public":
         return missing
-    if read_observations is None or not callable(read_observations):
-        return missing
-    read_observations = cast(
-        Callable[..., tuple[PublicIngressObservationRecord, ...]], read_observations
-    )
     checks = tuple(
         check
         for check in lane.health_monitoring.checks
@@ -137,110 +138,19 @@ def read_lane_runtime_verification(
     if not checks:
         return missing
     expected = lane_expected_runtime_identity(summary)
-    results: list[LaneRuntimeVerification] = []
-    for check in checks:
-        observation = next(
-            (
-                record
-                for record in read_observations(
-                    product=profile.product,
-                    context_name=lane.context,
-                    instance_name=lane.instance,
-                    check_name=check.name,
-                    check_kind=check.kind,
-                    limit=50,
-                )
-                if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
-            ),
-            None,
+    results = [
+        read_check_runtime_verification(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            check=check,
+            summary=summary,
+            binding=split_binding,
+            now=now,
         )
-        if observation is None:
-            results.append(missing)
-            continue
-        target = next(
-            (
-                target
-                for target in observation.targets
-                if target.target in {"health_url", "private_health_url"}
-            ),
-            None,
-        )
-        provenance = monitor_observation_provenance(observation, now=now)
-        observed_at = _timestamp(observation.observed_at)
-        authority_times = [profile.updated_at, deployment_at]
-        if split_binding is not None and split_binding.external_ingress:
-            authority_times.append(split_binding.external_ingress.attested_at)
-        if check.private_endpoint_key:
-            read_endpoint = getattr(record_store, "read_private_health_endpoint_record", None)
-            if read_endpoint is None or not callable(read_endpoint):
-                results.append(missing)
-                continue
-            read_endpoint = cast(Callable[[str], PrivateHealthEndpointRecord], read_endpoint)
-            try:
-                endpoint = read_endpoint(check.private_endpoint_key)
-            except (FileNotFoundError, KeyError):
-                results.append(missing)
-                continue
-            if endpoint.status != "active" or (
-                endpoint.product,
-                endpoint.context,
-                endpoint.instance,
-            ) != (profile.product, lane.context, lane.instance):
-                results.append(missing)
-                continue
-            authority_times.append(endpoint.updated_at)
-        current = (
-            observed_at is not None
-            and observation.monitoring_intent == lane.health_monitoring.monitoring_intent
-            and all(
-                (at := _timestamp(value)) is not None and observed_at > at
-                for value in authority_times
-                if value
-            )
-            and expected is not None
-            and compare_runtime_identity(
-                expected=expected, observed=observation.expected_runtime_identity
-            )[0]
-            == "match"
-        )
-        passed = (
-            current
-            and observation.status == "pass"
-            and (
-                split_binding is None
-                or not any(
-                    check.name == split_ingress_check_name(domain.domain_name)
-                    for domain in split_binding.domains
-                )
-                or target is not None
-                and urlsplit(target.url).hostname == urlsplit(check.url).hostname
-            )
-            and (
-                not check.require_runtime_identity
-                or (
-                    target is not None
-                    and target.status == "pass"
-                    and target.runtime_identity_status == "match"
-                    and compare_runtime_identity(
-                        expected=expected, observed=target.observed_runtime_identity
-                    )[0]
-                    == "match"
-                )
-            )
-        )
-        if provenance.freshness_status == "verified" and not passed:
-            provenance = provenance.model_copy(update={"freshness_status": "recorded"})
-        placement_target = (
-            target
-            if current
-            and target is not None
-            and (
-                target.runtime_identity_status in {"match", "mismatch", "malformed"}
-                or target.status == "fail"
-            )
-            else None
-        )
-        results.append(LaneRuntimeVerification(provenance, observation, placement_target, current))
+        for check in checks
+    ]
+    results = [result if result.observation is not None else missing for result in results]
     # Every effective check must pass; never pick an older success over a failure.
     provenance = min(
         results,
@@ -315,6 +225,194 @@ def read_lane_runtime_verification(
         runtime_evidence.runtime_target if runtime_evidence else None,
         evidence.observation_applicable if evidence else False,
     )
+
+
+def monitor_health_url(
+    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, base_url: str
+) -> str:
+    if profile.driver_id == "odoo":
+        return resolve_odoo_health_url(
+            base_url=base_url,
+            lane_health_url=lane.health_url.strip(),
+            profile_health_path=profile.health_path,
+        )
+    if lane.health_url.strip():
+        return lane.health_url.strip()
+    return (
+        f"{base_url.rstrip('/')}/{profile.health_path.strip().lstrip('/')}"
+        if base_url.strip()
+        else ""
+    )
+
+
+def read_check_runtime_verification(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    check: ProductLaneHealthCheck,
+    summary: LaunchplaneLaneSummary | None,
+    binding: EnvironmentRouteBindingRecord | None = None,
+    now: datetime | None = None,
+) -> LaneRuntimeVerification:
+    missing = LaneRuntimeVerification(
+        DataProvenance(source_kind="record", freshness_status="missing")
+    )
+    read_observations = getattr(record_store, "list_public_ingress_observation_records", None)
+    if not callable(read_observations):
+        return missing
+    deployment_at = (
+        summary.inventory.updated_at
+        if summary and summary.inventory
+        else (
+            summary.latest_deployment.deploy.finished_at
+            or summary.latest_deployment.deploy.started_at
+        )
+        if summary and summary.latest_deployment
+        else ""
+    )
+    expected = lane_expected_runtime_identity(summary) if summary is not None else None
+    observation = next(
+        (
+            record
+            for record in read_observations(
+                product=profile.product,
+                context_name=lane.context,
+                instance_name=lane.instance,
+                check_name=check.name,
+                check_kind=check.kind,
+                limit=50,
+            )
+            if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
+        ),
+        None,
+    )
+    if observation is None:
+        return missing
+    target = next(
+        (
+            target
+            for target in observation.targets
+            if target.target in {"health_url", "private_health_url"}
+        ),
+        None,
+    )
+    provenance = monitor_observation_provenance(observation, now=now)
+    observed_at = _timestamp(observation.observed_at)
+    authority_times = [profile.updated_at, deployment_at]
+    requested_url = check.url or monitor_health_url(
+        profile=profile, lane=lane, base_url=lane.base_url
+    )
+    hosts = (
+        split_ingress_custody_hosts(binding, requested_url) if check.kind == "public_http" else ()
+    )
+    external_check = bool(
+        hosts
+        and binding
+        and binding.external_ingress
+        and urlsplit(requested_url).hostname in binding.external_ingress.domains
+    )
+    if binding is not None:
+        authority_times.extend(
+            version
+            for source, version in binding.source.source_versions.items()
+            if source.startswith(("provider-target:", "dokploy-target:", "dokploy-target-id:"))
+            or not external_check
+            and source.startswith(("edge-endpoint:", "ingress-audit:"))
+        )
+    if external_check and binding is not None and binding.external_ingress is not None:
+        authority_times.append(binding.external_ingress.attested_at)
+    if check.private_endpoint_key:
+        read_endpoint = getattr(record_store, "read_private_health_endpoint_record", None)
+        if read_endpoint is None or not callable(read_endpoint):
+            return missing
+        read_endpoint = cast(Callable[[str], PrivateHealthEndpointRecord], read_endpoint)
+        try:
+            endpoint = read_endpoint(check.private_endpoint_key)
+        except (FileNotFoundError, KeyError):
+            return missing
+        if endpoint.status != "active" or (
+            endpoint.product,
+            endpoint.context,
+            endpoint.instance,
+        ) != (profile.product, lane.context, lane.instance):
+            return missing
+        authority_times.append(endpoint.updated_at)
+        requested_url = endpoint.url
+    current = (
+        observed_at is not None
+        and check.enabled
+        and product_lane_monitoring_probe_effective(
+            monitoring_intent=lane.health_monitoring.monitoring_intent, check_kind=check.kind
+        )
+        and (
+            not external_check
+            or binding is not None
+            and binding.external_ingress is not None
+            and (now or datetime.now(timezone.utc))
+            < binding.external_ingress.attestation_stale_after()
+        )
+        and (
+            observation.product,
+            observation.context,
+            observation.instance,
+            observation.check_name,
+            observation.check_kind,
+        )
+        == (profile.product, lane.context, lane.instance, check.name, check.kind)
+        and (not hosts and not check.url or target is not None and target.url == requested_url)
+        and (
+            not hosts
+            or target is not None
+            and custody_redirects_match(
+                url=target.url,
+                final_url=target.final_url,
+                redirect_count=target.redirect_count,
+                visited_urls=target.visited_urls,
+                hosts=hosts,
+            )
+        )
+        and observation.monitoring_intent == lane.health_monitoring.monitoring_intent
+        and all(
+            (at := _timestamp(value)) is not None and observed_at > at
+            for value in authority_times
+            if value
+        )
+        and expected is not None
+        and compare_runtime_identity(
+            expected=expected, observed=observation.expected_runtime_identity
+        )[0]
+        == "match"
+    )
+    passed = (
+        current
+        and observation.status == "pass"
+        and (
+            not check.require_runtime_identity
+            or (
+                target is not None
+                and target.status == "pass"
+                and target.runtime_identity_status == "match"
+                and compare_runtime_identity(
+                    expected=expected, observed=target.observed_runtime_identity
+                )[0]
+                == "match"
+            )
+        )
+    )
+    if provenance.freshness_status == "verified" and not passed:
+        provenance = provenance.model_copy(update={"freshness_status": "recorded"})
+    placement_target = (
+        target
+        if current
+        and target is not None
+        and (
+            target.runtime_identity_status in {"match", "mismatch", "malformed"}
+            or target.status == "fail"
+        )
+        else None
+    )
+    return LaneRuntimeVerification(provenance, observation, placement_target, current)
 
 
 def _timestamp(value: str) -> datetime | None:

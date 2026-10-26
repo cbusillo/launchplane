@@ -77,10 +77,14 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     } catch { return null; }
   });
   const [reason, setReason] = useState(pending?.reason ?? "");
-  const savedExternal = pending && "external_ingress" in pending ? pending.external_ingress : recordedExternal;
+  const savedExternal = pending ? ("external_ingress" in pending ? pending.external_ingress : undefined) : recordedExternal;
   const [externalDomains, setExternalDomains] = useState(savedExternal?.domains.join(", ") ?? "");
   const [custodian, setCustodian] = useState(savedExternal?.custodian ?? "");
   const [evidenceUrl, setEvidenceUrl] = useState(savedExternal?.evidence_url ?? "");
+  const [custodyDirty, setCustodyDirty] = useState(false);
+  const [custodyConflict, setCustodyConflict] = useState(false);
+  const recordedCustody = JSON.stringify(recordedExternal ?? null);
+  const custodyBaseline = useRef(JSON.stringify(savedExternal ?? null));
   const externalIngress: ExternalIngress | undefined = externalDomains.trim() ? {
     domains: externalDomains.split(/[\s,]+/).filter(Boolean), custodian: custodian.trim(), evidence_url: evidenceUrl.trim(),
   } : undefined;
@@ -111,8 +115,24 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     },
   });
   const recovering = apply.state.requiresIdempotencyContinuity;
+  const recoveryWasActive = useRef(recovering);
   const busy = readback === "pending" || [plan.state.phase, apply.state.phase].some(phase => phase === "queued" || phase === "submitting");
   const locked = !admin || busy || recovering || otherActive;
+  function loadRecordedCustody() {
+    setExternalDomains(recordedExternal?.domains.join(", ") ?? "");
+    setCustodian(recordedExternal?.custodian ?? "");
+    setEvidenceUrl(recordedExternal?.evidence_url ?? "");
+    setCustodyDirty(false); setCustodyConflict(false);
+  }
+  useEffect(() => {
+    const settledRecovery = recoveryWasActive.current && !recovering;
+    recoveryWasActive.current = recovering;
+    if (recovering || custodyBaseline.current === recordedCustody) return;
+    custodyBaseline.current = recordedCustody;
+    if (!settledRecovery) { revision.current += 1; setReview(null); setConfirmed(false); }
+    if (custodyDirty) setCustodyConflict(true);
+    else loadRecordedCustody();
+  }, [recordedCustody, recovering]);
   useEffect(() => { setActive(busy); }, [busy]);
   useEffect(() => {
     revision.current += 1;
@@ -139,7 +159,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     try { sessionStorage.removeItem(storageKey); } catch { /* Local release does not promise durable browser storage cleanup. */ }
   }
   async function inspect() {
-    if (locked || !reason.trim() || !apply.reset()) return;
+    if (locked || custodyConflict || !reason.trim() || !apply.reset()) return;
     setReview(null); setConfirmed(false); setMessage(""); setAccepted(null); setReadback("idle");
     const generation = ++revision.current;
     const response = await plan.run(repairRequest(scope, kind, reason, undefined, externalIngress));
@@ -197,14 +217,20 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
     <h3 id={`${id}-title`}>{title}</h3>
     <p>{kind === "domain" ? "Compare stored domains with the verified provider hosts before recognizing them." : "Join recorded destination, ingress and TLS ownership without inventing missing evidence."}</p>
     <label className="product-config-field">Reason<input aria-label={`${title} reason`} value={reason} disabled={locked} onChange={event => edited(event.target.value)} /></label>
-    {kind === "binding" && <details><summary>Separate externally managed domains</summary>
+    {kind === "binding" && <details><summary role="button" aria-label="Edit external custody">Separate externally managed domains</summary>
       <p>Keep the recovery route managed here. Name the business domains managed by another custodian and link their permanent configuration report. Saving attests custody and enables strict health and TLS checks for every recorded hostname.</p>
-      <label className="product-config-field">External domains<input aria-label="External domains" value={externalDomains} disabled={locked} onChange={event => { setExternalDomains(event.target.value); edited(reason); }} /></label>
-      <label className="product-config-field">Proxy custodian<input aria-label="Proxy custodian" value={custodian} disabled={locked} onChange={event => { setCustodian(event.target.value); edited(reason); }} /></label>
-      <label className="product-config-field">Configuration evidence URL<input aria-label="Configuration evidence URL" value={evidenceUrl} disabled={locked} onChange={event => { setEvidenceUrl(event.target.value); edited(reason); }} /></label>
+      <label className="product-config-field">External domains<input aria-label="External domains" value={externalDomains} disabled={locked} onChange={event => { setCustodyDirty(true); setExternalDomains(event.target.value); edited(reason); }} /></label>
+      <label className="product-config-field">Proxy custodian<input aria-label="Proxy custodian" value={custodian} disabled={locked} onChange={event => { setCustodyDirty(true); setCustodian(event.target.value); edited(reason); }} /></label>
+      <label className="product-config-field">Configuration evidence URL<input aria-label="Configuration evidence URL" value={evidenceUrl} disabled={locked} onChange={event => { setCustodyDirty(true); setEvidenceUrl(event.target.value); edited(reason); }} /></label>
     </details>}
+    {kind === "binding" && custodyConflict && <div role="status">
+      <p>The saved custody changed while you were editing. Current domains: {recordedExternal?.domains.join(", ") || "none"}. Current custodian: {recordedExternal?.custodian || "none"}.</p>
+      {recordedExternal && <p><a href={recordedExternal.evidence_url} target="_blank" rel="noreferrer">Current configuration report</a></p>}
+      <button className="button button-secondary" disabled={locked} onClick={loadRecordedCustody}>Use saved custody</button>
+      <button className="button button-secondary" disabled={locked} onClick={() => setCustodyConflict(false)}>Keep my custody edits</button>
+    </div>}
     {kind === "binding" && externalIngress && <p>Applying this decision attests the custodian's current report. Review the report before confirming; the proposed expiry is shown below.</p>}
-    <button type="button" className="button button-secondary" disabled={locked || !reason.trim()} onClick={() => void inspect()}>Review {title.toLowerCase()}</button>
+    <button type="button" className="button button-secondary" disabled={locked || custodyConflict || !reason.trim()} onClick={() => void inspect()}>Review {title.toLowerCase()}</button>
     {review && <div className="product-owner-plan route-repair-review" aria-label={`${title} review`}>
       <p><strong>{review.status === "ready" ? "Ready for your decision" : review.status === "unchanged"
         ? review.operation === "repair-domain-authority" ? "Stored domains match provider hosts" : "Stored route binding matches current evidence"
@@ -215,6 +241,7 @@ function RepairDecision({ kind, scope, admin, otherActive, setActive, refreshTok
       {review.operation === "repair-domain-authority" ? <DomainList label="Observed provider hosts" domains={review.observed_domains} /> : <>
         <p>Current binding: {review.current_record ? "present" : "absent"}. Decision: {review.binding_operation}.</p>
         {review.current_record?.external_ingress && <p>Current external custody: {review.current_record.external_ingress.domains.join(", ")} · {review.current_record.external_ingress.custodian}. <a href={review.current_record.external_ingress.evidence_url} target="_blank" rel="noreferrer">Current configuration report</a>.</p>}
+        {review.current_record?.external_ingress && review.proposed_record && !review.proposed_record.external_ingress && <p>Remove external custody. Every domain will use the managed ingress and TLS authority shown below.</p>}
         {review.proposed_record && <p>Destination: {review.proposed_record.provider_target.target_name}. Ingress: {review.proposed_record.ingress.provider} · {review.proposed_record.ingress.endpoint_key || "no endpoint"}. TLS ownership: {review.proposed_record.tls.owner}.</p>}
         {review.proposed_record?.external_ingress && <p>External ingress and TLS for {review.proposed_record.external_ingress.domains.join(", ")}: {review.proposed_record.external_ingress.custodian}. <a href={review.proposed_record.external_ingress.evidence_url} target="_blank" rel="noreferrer">Configuration evidence</a>. Other domains retain the managed ingress and TLS shown above.</p>}
         {review.proposed_record?.external_ingress_expires_at && <p>External custody expires: <time dateTime={review.proposed_record.external_ingress_expires_at}>{new Date(review.proposed_record.external_ingress_expires_at).toLocaleString()}</time>.</p>}

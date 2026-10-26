@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneMonitoringIntent,
@@ -16,11 +19,7 @@ from control_plane.contracts.product_profile_record import (
     ProductPublicWebsite,
     product_lane_monitoring_incident_eligible,
 )
-from control_plane.contracts.product_health_monitoring_migration import (
-    canonical_health_check_record_token,
-)
 from control_plane.contracts.public_ingress_monitoring import (
-    health_monitor_freshness_seconds,
     PublicIngressIncidentEventKind,
     PublicIngressIncidentNotificationState,
     PublicIngressIncidentRecord,
@@ -31,16 +30,17 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressTlsObservation,
     PublicIngressTlsStatus,
     build_public_ingress_tls_check_name,
+    health_monitor_freshness_seconds,
 )
 from control_plane.contracts.route_binding_record import (
+    EXTERNAL_INGRESS_REFRESH_THRESHOLD,
     EnvironmentRouteBindingRecord,
-    RouteBindingTerminationKind,
-    RouteBindingTlsOwner,
     RouteBindingExternalIngress,
     RouteBindingIngressReadModel,
+    RouteBindingTerminationKind,
+    RouteBindingTlsOwner,
     RouteBindingTlsReadModel,
 )
-from control_plane.split_ingress import split_ingress_monitoring_lane, split_ingress_check_name
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
     RuntimeIdentityStatus,
@@ -49,10 +49,10 @@ from control_plane.contracts.runtime_identity import (
 from control_plane.lane_runtime_verification import (
     LaneRuntimeVerification,
     lane_expected_runtime_identity,
-    monitor_observation_provenance,
+    read_check_runtime_verification,
 )
 from control_plane.public_dns_diagnostics import PublicDnsDiagnostic, build_public_dns_diagnostics
-
+from control_plane.split_ingress import split_ingress_check_name, split_ingress_monitoring_lane
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
 ProductTopologyDomainRole = Literal["primary", "alias"]
@@ -433,6 +433,8 @@ def build_product_environment_topology(
             *_split_ingress_warnings(
                 record_store=record_store,
                 binding=route_binding,
+                profile=profile,
+                lane=lane,
                 lane_summary=lane_summary,
                 now=evaluated_at,
             ),
@@ -461,64 +463,38 @@ def _split_ingress_warnings(
     *,
     record_store: object,
     binding: EnvironmentRouteBindingRecord,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
     lane_summary: LaunchplaneLaneSummary | None,
     now: datetime,
 ) -> tuple[ProductTopologyWarning, ...]:
     warnings: list[ProductTopologyWarning] = []
-    expected = lane_expected_runtime_identity(lane_summary) if lane_summary is not None else None
     for domain in binding.domains:
-        records = _optional_records(
-            record_store,
-            "list_public_ingress_observation_records",
-            product=binding.product,
-            context_name=binding.context,
-            instance_name=binding.instance,
-            check_kind="public_http",
-            check_name=split_ingress_check_name(domain.domain_name),
-            limit=50,
+        check = next(
+            check
+            for check in lane.health_monitoring.checks
+            if check.name == split_ingress_check_name(domain.domain_name)
         )
-        observation = next(
-            (
-                record
-                for record in records
-                if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
-            ),
-            None,
+        result = read_check_runtime_verification(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+            check=check,
+            summary=lane_summary,
+            binding=binding,
+            now=now,
         )
-        code: ProductTopologyWarningCode
-        if observation is None:
-            code = "public_ingress_observation_missing"
-        elif (
-            monitor_observation_provenance(observation, now=now).freshness_status != "verified"
-            or (observed_at := _parse_timestamp(observation.observed_at)) is None
-            or (
-                authority_at := _parse_timestamp(
-                    binding.external_ingress.attested_at
-                    if binding.external_ingress
-                    else binding.updated_at
-                )
-            )
-            is None
-            or observed_at <= authority_at
-        ):
-            code = "stale_public_ingress_observation"
-        elif observation.status != "pass":
-            code = "public_ingress_failure"
-        else:
-            target = _public_runtime_identity_target(observation)
-            if (
-                target is not None
-                and target.status == "pass"
-                and target.runtime_identity_status == "match"
-                and (urlsplit(target.url).hostname or "") == domain.domain_name
-                and expected is not None
-                and compare_runtime_identity(
-                    expected=expected, observed=target.observed_runtime_identity
-                )[0]
-                == "match"
-            ):
-                continue
-            code = "public_runtime_identity_unverified"
+        if result.provenance.freshness_status == "verified":
+            continue
+        code: ProductTopologyWarningCode = (
+            "public_ingress_observation_missing"
+            if result.observation is None
+            else "stale_public_ingress_observation"
+            if result.provenance.freshness_status == "stale" or not result.observation_applicable
+            else "public_ingress_failure"
+            if result.observation.status == "fail"
+            else "public_runtime_identity_unverified"
+        )
         warnings.append(
             _warning(
                 code=code,
@@ -1430,14 +1406,17 @@ def _topology_warnings(
             )
         if (
             route_binding.external_ingress
-            and route_binding.external_ingress.attestation_stale_after() <= now
+            and route_binding.external_ingress.attestation_stale_after()
+            <= now + EXTERNAL_INGRESS_REFRESH_THRESHOLD
         ):
             warnings.append(
                 _warning(
                     code="stale_route_authority",
                     scope="authority",
-                    severity="error",
-                    detail="External custody attestation expired; review the custodian's current report in Route binding.",
+                    severity="error"
+                    if route_binding.external_ingress.attestation_stale_after() <= now
+                    else "warning",
+                    detail="External custody attestation needs renewal; review the custodian's current report in Route binding.",
                 )
             )
         if route_binding.external_ingress and lane.health_monitoring.monitoring_intent != "public":

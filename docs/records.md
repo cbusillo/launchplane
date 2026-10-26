@@ -959,17 +959,28 @@ an ORM column/table or remains only in the evidence payload.
   check per hostname using the lane's health path, plus each hostname's TLS
   check using its resolved ownership. These mandatory checks do not require
   duplicated profile entries and cannot be disabled by the legacy non-strict
-  check. Observations are bound to the current route record and must postdate
-  its authority. Missing, stale, failed or wrong-runtime observations for any
+  check. The route-record SHA fences incident transitions; persisted HTTP
+  observations are evaluated against current check URLs, monitoring intent,
+  deployment identity, profile and relevant source dates. Each HTTPS redirect
+  must stay within the requested hostname's custody set. The transport checks
+  each hop before connecting and retains the visited URLs; old redirected
+  observations without that evidence cannot verify custody. Apex/www redirects
+  within the external subset are allowed. Missing, stale, failed or wrong-runtime observations for any
   hostname keep topology/readiness unverified or blocked. Managed audit
   staleness retains its existing advisory treatment; custody expiration is a
-  separate error with its deadline shown in the lane and decision. An
+  separate error with its deadline shown in the lane and decision, and a
+  renewal warning begins at the existing attestation refresh threshold. An
   evidence-only refresh does not invalidate still-current public observations
   or extend the external attestation. Custodian-reported
   configuration remains distinct from directly verified public behavior.
   A new report, custodian or domain split can be reviewed as an exact authority
   replacement in the same signed-in card. Clearing the external subset requires
-  a complete managed audit for all recorded hosts. Exact provider no-op audits
+  a complete managed audit for all recorded hosts. A custody decision cannot
+  absorb changes to destination, domain roles, managed ingress, TLS or status.
+  The existing stable route-refresh controller also discovers eligible
+  service-owned split generic-web bindings, retaining external attestation and
+  exact source/profile comparisons at commit. It never creates a binding or
+  changes custody. Exact provider no-op audits
   may use the lane's tracked target hostnames without duplicating profile check
   URLs; that hostname source is unavailable when any provider write is enabled.
 

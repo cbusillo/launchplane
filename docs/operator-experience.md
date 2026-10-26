@@ -848,6 +848,11 @@ it changes no live route. Review again to renew external custody. Automated
 managed-evidence refresh preserves its original attestation deadline.
 Saving also enables strict runtime-identity HTTP checks and TLS checks for
 every hostname. The lane stays unverified until those observations are current.
+Evidence refreshes reload untouched custody fields. If saved custody changes
+while fields are edited, choose the saved custody or keep the edits before
+reviewing again. An uncertain Apply retains its original request and key across
+refreshes and reloads. Removing external custody is shown explicitly and needs
+managed evidence for every hostname.
 
 The light/dark switch saves only an explicit choice in browser local storage,
 scoped to the browser profile and Launchplane origin. The saved choice applies

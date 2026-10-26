@@ -10,12 +10,12 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
+from control_plane.contracts.ingress_route_audit_record import (
+    TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
+    IngressRouteAuditRecord,
+)
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.ingress_route_audit_record import (
-    IngressRouteAuditRecord,
-    TESTING_PRIVATE_INGRESS_AUDIT_PREFIX,
-)
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     RouteBindingDomain,
@@ -31,7 +31,6 @@ from control_plane.contracts.testing_route_refresh import (
     is_native_testing_binding,
 )
 from control_plane.contracts.text_fields import require_text
-
 
 NATIVE_TESTING_ROUTE_REQUIRES_CONTROLLER = "native_testing_route_requires_controller"
 
@@ -288,8 +287,15 @@ def plan_route_binding_reconcile(
     if route_binding_authority_projection(current_record) != (
         route_binding_authority_projection(record)
     ):
-        if request.allow_authority_change and (
-            current_record.external_ingress or record.external_ingress
+        if (
+            request.allow_authority_change
+            and (current_record.external_ingress or record.external_ingress)
+            and route_binding_authority_projection(
+                current_record.model_copy(update={"external_ingress": None})
+            )
+            == route_binding_authority_projection(
+                record.model_copy(update={"external_ingress": None})
+            )
         ):
             return RouteBindingReconcilePlan(
                 status="ready",

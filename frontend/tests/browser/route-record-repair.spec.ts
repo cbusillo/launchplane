@@ -30,7 +30,7 @@ function bindingReview(applied: boolean, stored = false): RouteBindingRepairRevi
 }
 type Scenario = "saved" | "blocked" | "unchanged" | "denied" | "role-only" | "read-only" | "uncertain" | "stale" | "uncertain-stale" | "uncertain-conflict" | "readback-denied" | "readback-failed" |
   "storage-unavailable" | "missing-request" | "receipt-mismatch" | "receipt-digest-mismatch" | "current-drift" | "refresh" | "readback-refresh" | "edit" | "leave" |
-  "persistent-refusal" | "changed-confirmation" | "missing-binding" | "split";
+  "persistent-refusal" | "changed-confirmation" | "missing-binding" | "split" | "split-uncertain";
 
 async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
   await page.goto("/ui/products?fixture=empty");
@@ -72,7 +72,7 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
       if (scenario === "readback-failed") return route.abort();
     }
     let review = kind === "domain" ? domainReview(applying, !applying && stored) : bindingReview(applying, !applying && stored);
-    if (scenario === "split" && review.operation === "reconcile-route-binding" && review.proposed_record) {
+    if (scenario.startsWith("split") && review.operation === "reconcile-route-binding" && review.proposed_record) {
       review = { ...review, proposed_record: { ...review.proposed_record,
         external_ingress: { ...body.external_ingress, attested_at: bindingRecord().updated_at },
         external_ingress_expires_at: custodyExpiresAt } };
@@ -85,6 +85,7 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
       }
       expect(body.confirmation).toBe(review.expected_confirmation);
       expect(body.browser_review.reviewed_plan_sha256).toBe(activeDigest);
+      if (scenario === "split-uncertain" && applies.length === 1) return route.abort();
       if (["persistent-refusal", "changed-confirmation"].includes(scenario) && applies.length === 1) {
         if (scenario === "changed-confirmation") activeConfirmation = "fixture-confirmation-after-deploy";
         return route.abort();
@@ -118,7 +119,9 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
     return route.fulfill(response);
   });
   await page.goto("/ui/products/atlas-commerce/environments/testing/actions");
-  return { calls, environmentReads: () => environmentReads, releaseReview: () => releaseReview, panel: page.getByRole("region", { name: kind === "domain" ? "Domain authority" : "Route binding", exact: true }) };
+  return { calls, environmentReads: () => environmentReads, releaseReview: () => releaseReview,
+    setCustody: (custody: EnvironmentRouteBindingReadModel["external_ingress"]) => { fixtures.detail.topology.provider_recorded.external_ingress = custody; },
+    panel: page.getByRole("region", { name: kind === "domain" ? "Domain authority" : "Route binding", exact: true }) };
 }
 
 test("binding card refuses an unchanged verdict with no stored binding", async ({ page }) => {
@@ -134,22 +137,72 @@ test("binding card refuses an unchanged verdict with no stored binding", async (
 test("split ingress review preserves both custodians through save and readback @responsive", async ({ page }) => {
   const { panel, calls } = await fixture(page, "binding", "split");
   await panel.getByLabel("Route binding reason", { exact: true }).fill("Record both existing ingress paths.");
-  await panel.locator("details").filter({ has: page.getByLabel("External domains", { exact: true }) }).locator("summary").click();
+  await panel.getByRole("button", { name: "Edit external custody", exact: true }).click();
   await panel.getByLabel("External domains", { exact: true }).fill(proposedDomains[0]);
   await panel.getByLabel("Proxy custodian", { exact: true }).fill("Office proxy operator");
   await panel.getByLabel("Configuration evidence URL", { exact: true }).fill("https://example.test/proxy-report");
   await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
   await expect(panel.getByLabel("Route binding review", { exact: true })).toContainText("Office proxy operator");
-  await expect(panel.locator('a[href="https://example.test/proxy-report"]')).toBeVisible();
-  await expect(panel.locator(`time[datetime="${custodyExpiresAt}"]`)).toBeVisible();
   await panel.getByRole("checkbox").check();
   await panel.getByRole("button", { name: "Apply reviewed route binding", exact: true }).click();
-  await expect(panel.getByRole("status")).toContainText("current record readback verified");
+  await expect(panel).toHaveAttribute("data-readback", "verified");
   const bodies = calls.map(call => call.body as unknown as { external_ingress: { domains: string[]; custodian: string; evidence_url: string; attested_at?: string } });
   for (const body of bodies) expect(body.external_ingress).toMatchObject(bodies[0].external_ingress);
   expect(bodies[1].external_ingress.attested_at).toBe(bindingRecord().updated_at);
   expect(bodies.at(-1)?.external_ingress).toEqual(bodies[1].external_ingress);
 });
+
+for (const mode of ["pristine", "dirty", "uncertain"] as const) {
+  test(`split custody reconciles saved updates while ${mode} @responsive`, async ({ page }) => {
+    const state = await fixture(page, "binding", mode === "uncertain" ? "split-uncertain" : "split");
+    let panel = state.panel;
+    const original = { domains: [proposedDomains[0]], custodian: "First custodian", evidence_url: "https://example.test/first-report" };
+    async function refresh(custody: typeof original) {
+      state.setCustody(custody);
+      const before = state.environmentReads();
+      await page.getByRole("button", { name: "Refresh current evidence", exact: true }).click();
+      await waitForState(state.environmentReads).toBeGreaterThan(before);
+    }
+    await refresh(original);
+    await panel.getByRole("button", { name: "Edit external custody", exact: true }).click();
+    await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue(original.custodian);
+    await panel.getByLabel("Route binding reason", { exact: true }).fill("Review current custody.");
+    if (mode !== "pristine") await panel.getByLabel("Proxy custodian", { exact: true }).fill("My edited custodian");
+    if (mode === "uncertain") {
+      await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
+      await panel.getByRole("checkbox").check();
+      await panel.getByRole("button", { name: "Apply reviewed route binding", exact: true }).click();
+      await expect(panel).toHaveAttribute("data-recovery", "true");
+    }
+    const successor = { ...original, custodian: "Saved successor", evidence_url: "https://example.test/successor-report" };
+    await refresh(successor);
+    const review = panel.getByRole("button", { name: "Review route binding", exact: true });
+    if (mode === "pristine") {
+      await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue(successor.custodian);
+      await expect(panel.getByLabel("Configuration evidence URL", { exact: true })).toHaveValue(successor.evidence_url);
+    } else if (mode === "dirty") {
+      await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue("My edited custodian");
+      await expect(review).toBeDisabled();
+      await panel.getByRole("button", { name: "Keep my custody edits", exact: true }).click();
+      await expect(review).toBeEnabled();
+      await review.click();
+      await expect(panel.getByLabel("Route binding review", { exact: true })).toBeVisible();
+      expect((state.calls.at(-1)!.body as unknown as { external_ingress: typeof original }).external_ingress.custodian).toBe("My edited custodian");
+      await refresh({ ...successor, custodian: "Another saved successor" });
+      await panel.getByRole("button", { name: "Use saved custody", exact: true }).click();
+      await expect(panel.getByLabel("Proxy custodian", { exact: true })).toHaveValue("Another saved successor");
+    } else {
+      await expect(review).toBeDisabled();
+      await page.reload();
+      panel = page.getByRole("region", { name: "Route binding", exact: true });
+      await expect(panel).toHaveAttribute("data-recovery", "true");
+      await panel.getByRole("button", { name: "Resume original route binding", exact: true }).click();
+      await expect(panel).toHaveAttribute("data-readback", "verified");
+      const applies = state.calls.filter(call => call.body.mode === "apply");
+      expect(applies[1]).toEqual(applies[0]);
+    }
+  });
+}
 
 for (const kind of ["domain", "binding"] as const) {
   const title = kind === "domain" ? "Domain authority" : "Route binding";

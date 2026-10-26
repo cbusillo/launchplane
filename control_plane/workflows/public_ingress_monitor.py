@@ -1,24 +1,5 @@
 from __future__ import annotations
 
-from control_plane.provider_target_holds import (
-    canonical_provider_operation_reference,
-    ProviderHoldLaneSnapshot,
-    ProviderOperationAttentionReference,
-    TestingReplacementReference,
-    DEPLOY_FENCE_RECONCILE_GRACE as DEPLOY_FENCE_RECONCILE_GRACE,
-    provider_hold_is_stuck as _deploy_fence_is_stuck,
-)
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
-from typing import Any, Literal, Protocol, cast, TYPE_CHECKING
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
 import hashlib
 import json
 import logging
@@ -27,30 +8,53 @@ import smtplib
 import socket
 import ssl
 import time
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
+
 from control_plane.contracts.secret_record import SecretRecord
+from control_plane.provider_target_holds import (
+    DEPLOY_FENCE_RECONCILE_GRACE as DEPLOY_FENCE_RECONCILE_GRACE,
+)
+from control_plane.provider_target_holds import (
+    ProviderHoldLaneSnapshot,
+    ProviderOperationAttentionReference,
+    TestingReplacementReference,
+    canonical_provider_operation_reference,
+)
+from control_plane.provider_target_holds import (
+    provider_hold_is_stuck as _deploy_fence_is_stuck,
+)
 
 if TYPE_CHECKING:
     from control_plane.storage.postgres import OutboxWithIdempotencyRequest
-
-from control_plane.contracts.sync_cycle_health import sync_cycle_health_evidence_from_payload
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
 )
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
-from control_plane.testing_replacement_recovery import service_testing_operation
-from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.outbox_delivery import (
     PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY,
     OutboxDeliveryRecord,
     build_outbox_dedupe_key,
     build_outbox_delivery_id,
     retry_outbox_delivery,
+)
+from control_plane.contracts.private_health_endpoint_record import (
+    PrivateHealthEndpointRecord,
+    private_health_endpoint_record_sha256,
 )
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -64,19 +68,19 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_probe_effective,
     product_profile_record_sha256,
 )
-from control_plane.contracts.private_health_endpoint_record import (
-    PrivateHealthEndpointRecord,
-    private_health_endpoint_record_sha256,
+from control_plane.contracts.product_topology_read_model import product_lane_public_domains
+from control_plane.contracts.public_dns import (
+    PublicDnsExpectedTarget,
+    PublicDnsObservation,
+    public_dns_addresses,
 )
 from control_plane.contracts.public_ingress_monitoring import (
     HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS,
-    PRODUCTION_REQUEST_REFUSED,
-    RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     MONITOR_CADENCE_CHECK_PREFIX,
-    monitored_check_identity,
+    PRODUCTION_REQUEST_REFUSED,
     PUBLIC_TLS_EXPIRING_DAYS,
     PUBLIC_TLS_STALE_AFTER_SECONDS,
-    PublicIngressRouteBindingSourceKind,
+    RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     PublicIngressCheckKind,
     PublicIngressFailureCode,
     PublicIngressIncidentEvent,
@@ -93,11 +97,12 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
     PublicIngressObservationRecord,
     PublicIngressObservationStatus,
+    PublicIngressRouteBindingSourceKind,
     PublicIngressTargetKind,
+    PublicIngressTargetObservation,
     PublicIngressTlsObservation,
     PublicIngressTlsProbeEvidence,
     PublicIngressTlsRecordedEvidence,
-    PublicIngressTargetObservation,
     build_public_ingress_incident_event_id,
     build_public_ingress_incident_id,
     build_public_ingress_material_fingerprint,
@@ -106,67 +111,69 @@ from control_plane.contracts.public_ingress_monitoring import (
     build_public_ingress_reconciliation_observation_id,
     build_public_ingress_reminder_state_id,
     build_public_ingress_tls_check_name,
-    public_ingress_material_fingerprint_sha256,
+    monitored_check_identity,
     public_ingress_failure_layer,
     public_ingress_incident_record_sha256,
     public_ingress_incident_severity,
+    public_ingress_material_fingerprint_sha256,
 )
-from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
-from control_plane.contracts.route_binding_record import RouteBindingDomain
-from control_plane.contracts.route_binding_record import RouteBindingTerminationKind
-from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
-from control_plane.contracts.route_binding_record import route_binding_record_sha256
-from control_plane.contracts.runtime_identity import (
-    RuntimeIdentity,
-    RuntimeIdentityStatus,
-    health_payload_runtime_identity_status,
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+    RouteBindingTerminationKind,
+    RouteBindingTlsOwner,
+    route_binding_record_sha256,
 )
 from control_plane.contracts.runtime_dependency_health import (
     RuntimeDependencyExpectations,
     RuntimeDependencyHealthPolicy,
     runtime_dependency_health_evidence,
 )
-from control_plane.runtime_dependency_health import derive_runtime_dependencies
-from control_plane.drivers.registry import read_driver_descriptor
-from control_plane.lane_runtime_verification import lane_expected_runtime_identity
-from control_plane.notifications import (
-    DiscordNotificationError,
-    DiscordNotificationNotSentError,
-    DiscordNotificationSuperseded,
-    DISCORD_CRITICAL_ALERT_COLOR,
-    post_discord_webhook,
-    public_discord_url_error,
-    public_url_error,
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    RuntimeIdentityStatus,
+    health_payload_runtime_identity_status,
 )
+from control_plane.contracts.sync_cycle_health import sync_cycle_health_evidence_from_payload
 from control_plane.discord_incident_summary import (
     SUMMARY_AGGREGATE_TYPE,
     build_discord_incident_summary_delivery,
     deliver_discord_incident_summary,
     discord_incident_needs_summary,
 )
-from control_plane.outbound_http import PublicHttpDestinationError
-from control_plane.outbound_http import PublicTlsProbeResult
-from control_plane.outbound_http import resolve_public_http_destination
-from control_plane.contracts.public_dns import (
-    PublicDnsExpectedTarget,
-    PublicDnsObservation,
-    public_dns_addresses,
+from control_plane.drivers.registry import read_driver_descriptor
+from control_plane.lane_runtime_verification import (
+    lane_expected_runtime_identity,
+    monitor_health_url,
 )
-from control_plane.outbound_http import probe_public_tls
-from control_plane.contracts.product_topology_read_model import product_lane_public_domains
+from control_plane.notifications import (
+    DISCORD_CRITICAL_ALERT_COLOR,
+    DiscordNotificationError,
+    DiscordNotificationNotSentError,
+    DiscordNotificationSuperseded,
+    post_discord_webhook,
+    public_discord_url_error,
+    public_url_error,
+)
+from control_plane.outbound_http import (
+    PublicHttpDestinationError,
+    PublicHttpResponse,
+    PublicTlsProbeResult,
+    custody_redirects_match,
+    probe_public_tls,
+    request_private_http,
+    request_public_http,
+    resolve_public_http_destination,
+)
+from control_plane.runtime_dependency_health import derive_runtime_dependencies
 from control_plane.split_ingress import (
     read_split_ingress_binding,
-    split_ingress_monitoring_lane,
     split_ingress_check_name,
+    split_ingress_custody_hosts,
+    split_ingress_monitoring_lane,
 )
-from control_plane.outbound_http import request_private_http
-from control_plane.outbound_http import PublicHttpResponse
-from control_plane.outbound_http import request_public_http
-from control_plane.workflows.odoo_verification import (
-    resolve_odoo_health_url,
-)
+from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.workflows.ship import utc_now_timestamp
-
 
 MAX_REDIRECTS = 10
 USER_AGENT = "Launchplane public-ingress-monitor/1.0"
@@ -305,6 +312,7 @@ class PublicIngressMonitorTarget:
     private_endpoint_material_sha256: str = ""
     private_tls_ca_pem: str = ""
     route_binding_sha256: str = ""
+    allowed_https_hosts: tuple[str, ...] = ()
     recovery_observation_threshold: int = 1
     resolution_failure_code: PublicIngressFailureCode | None = None
     resolution_failure_summary: str = ""
@@ -337,6 +345,7 @@ class HttpObservation:
     final_url: str
     redirect_count: int
     payload: object = None
+    visited_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -688,7 +697,7 @@ def _health_check_monitor_target(
             check.name == split_ingress_check_name(domain.domain_name) for domain in binding.domains
         )
         base_url = "" if domain_check else lane.base_url.strip().rstrip("/")
-        health_url = check.url.strip() or _monitor_health_url(
+        health_url = check.url.strip() or monitor_health_url(
             profile=profile, lane=lane, base_url=base_url
         )
         if not (base_url or health_url):
@@ -729,6 +738,9 @@ def _health_check_monitor_target(
         route_binding_sha256=route_binding_record_sha256(binding)
         if domain_check and binding is not None
         else "",
+        allowed_https_hosts=split_ingress_custody_hosts(binding, health_url)
+        if domain_check
+        else (),
         profile_sha256=product_profile_record_sha256(profile),
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         incident_eligible=product_lane_monitoring_incident_eligible(
@@ -2679,12 +2691,15 @@ def check_public_ingress_target(
     )
 
 
-def fetch_public_ingress_url(url: str, timeout_seconds: int) -> HttpObservation:
+def fetch_public_ingress_url(
+    url: str, timeout_seconds: int, *, allowed_https_hosts: tuple[str, ...] = ()
+) -> HttpObservation:
     response = request_public_http(
         url,
         headers={"User-Agent": USER_AGENT},
         timeout_seconds=timeout_seconds,
         max_redirects=MAX_REDIRECTS,
+        allowed_https_hosts=allowed_https_hosts,
     )
     payload: object = None
     if response.body and "json" in response.header("content-type").lower():
@@ -2696,6 +2711,7 @@ def fetch_public_ingress_url(url: str, timeout_seconds: int) -> HttpObservation:
         status_code=response.status_code,
         final_url=response.final_url,
         redirect_count=response.redirect_count,
+        visited_urls=response.visited_urls,
         payload=payload,
     )
 
@@ -2822,7 +2838,13 @@ def _check_url(
             summary=_failure_summary(public_url_error),
         )
     try:
-        observation = http_get(url, timeout_seconds)
+        observation = (
+            fetch_public_ingress_url(
+                url, timeout_seconds, allowed_https_hosts=target.allowed_https_hosts
+            )
+            if target.allowed_https_hosts and http_get is fetch_public_ingress_url
+            else http_get(url, timeout_seconds)
+        )
     except HTTPError as error:
         return PublicIngressTargetObservation(
             target=target_kind,
@@ -2871,6 +2893,19 @@ def _check_url(
     is_health_response = target_kind in {"health_url", "private_health_url"} or (
         target_kind == "base_url" and url == target.health_url
     )
+    if target.allowed_https_hosts and not custody_redirects_match(
+        url=url,
+        final_url=observation.final_url,
+        redirect_count=observation.redirect_count,
+        visited_urls=observation.visited_urls,
+        hosts=target.allowed_https_hosts,
+    ):
+        return _failed_target(
+            target_kind=target_kind,
+            url=url,
+            code="invalid_url",
+            summary="Health redirects do not prove the recorded HTTPS custody.",
+        )
     dependency_health = (
         runtime_dependency_health_evidence(
             payload=observation.payload,
@@ -2896,6 +2931,7 @@ def _check_url(
             http_status=observation.status_code,
             final_url=observation.final_url,
             redirect_count=observation.redirect_count,
+            visited_urls=observation.visited_urls,
             summary=f"HTTP {observation.status_code}",
             dependency_health=dependency_health,
             sync=sync,
@@ -2916,6 +2952,7 @@ def _check_url(
             http_status=observation.status_code,
             final_url=observation.final_url,
             redirect_count=observation.redirect_count,
+            visited_urls=observation.visited_urls,
             runtime_identity_status="unverifiable",
             runtime_identity_detail=(
                 "No expected runtime identity is recorded for this strict public health check."
@@ -2947,6 +2984,7 @@ def _check_url(
                 http_status=observation.status_code,
                 final_url=observation.final_url,
                 redirect_count=observation.redirect_count,
+                visited_urls=observation.visited_urls,
                 runtime_identity_status=runtime_status,
                 runtime_identity_detail=runtime_detail,
                 observed_runtime_identity=observed_runtime_identity,
@@ -2972,6 +3010,7 @@ def _check_url(
         http_status=observation.status_code,
         final_url=observation.final_url,
         redirect_count=observation.redirect_count,
+        visited_urls=observation.visited_urls,
         runtime_identity_status=runtime_status,
         runtime_identity_detail=runtime_detail,
         observed_runtime_identity=observed_runtime_identity,
@@ -3537,21 +3576,6 @@ def _health_url(base_url: str, health_path: str) -> str:
     if not normalized_health_path.startswith("/"):
         normalized_health_path = f"/{normalized_health_path}"
     return f"{base_url.rstrip('/')}{normalized_health_path}"
-
-
-def _monitor_health_url(
-    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, base_url: str
-) -> str:
-    lane_health_url = lane.health_url.strip()
-    if profile.driver_id == "odoo":
-        return resolve_odoo_health_url(
-            base_url=base_url,
-            lane_health_url=lane_health_url,
-            profile_health_path=profile.health_path,
-        )
-    if lane_health_url:
-        return lane_health_url
-    return _health_url(base_url, profile.health_path).strip()
 
 
 def _normalized_url(url: str) -> str:

@@ -1,11 +1,14 @@
+import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 from typing import Any
-from httpx2 import Response
 from unittest.mock import patch
 
+from httpx2 import Response
+
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     route_binding_record_sha256,
@@ -15,33 +18,36 @@ from control_plane.route_binding_external_reconcile import (
     ExternalRouteBindingReconcileRequest,
     plan_external_route_binding_reconcile,
 )
-from control_plane.route_binding_reconcile import RouteBindingExpectedCurrent
+from control_plane.route_binding_reconcile import (
+    RouteBindingExpectedCurrent,
+    RouteBindingReconcileRequest,
+    build_route_binding_candidate,
+)
 from control_plane.route_binding_refresh_controller import (
     RouteBindingRefreshTargetInvariantError,
     RouteBindingRefreshTargetLimitExceeded,
-    discover_remaining_odoo_stable_route_bindings,
     discover_active_odoo_testing_route_bindings,
+    discover_remaining_odoo_stable_route_bindings,
     plan_remaining_odoo_stable_route_binding_refresh,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request
-from tests.support.auth import _StubVerifier, _identity
+from tests.support.auth import _identity, _StubVerifier
 from tests.test_external_route_binding_reconcile import _profile as external_profile
 from tests.test_external_route_binding_reconcile import _provider_target as external_target
-from tests.test_route_binding_refresh_controller import (
-    _Store,
-    _profile,
-    _sqlite_database_url,
-    _write_refresh_fixture,
-)
 from tests.test_route_binding_record import (
     _dokploy_target_id_record,
     _dokploy_target_record,
     _ingress_audit_record,
     _provider_target_record,
 )
-
+from tests.test_route_binding_refresh_controller import (
+    _profile,
+    _sqlite_database_url,
+    _Store,
+    _write_refresh_fixture,
+)
 
 ROUTE = "/v1/route-bindings/odoo-stable/controller/run-once"
 
@@ -226,6 +232,98 @@ class StableRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             )
             outcome = next(o for o in result.outcomes if o.product == "external-product")
             self.assertEqual(outcome.status, expected)
+
+    async def test_split_refresh_preserves_custody_and_fences_profile_changes(self) -> None:
+        profile = self.store.read_product_profile_record("example-product").model_dump(mode="json")
+        profile.update(
+            driver_id="generic-web",
+            public_website="required",
+            lanes=[
+                {
+                    "context": "example-prod",
+                    "instance": "prod",
+                    "base_url": "https://app.example.test",
+                    "health_url": "https://app.example.test/healthz",
+                    "health_monitoring": {
+                        "monitoring_intent": "public",
+                        "checks": [{"name": "public-ingress", "kind": "public_http"}],
+                    },
+                }
+            ],
+        )
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile)
+        )
+        target = self.store.read_dokploy_target_record(
+            context_name="example-prod", instance_name="prod"
+        ).model_copy(update={"domains": ("app.example.test", "operator.example.test")})
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name="example-prod", instance_name="prod"
+        )
+        self.store.write_dokploy_target_record(target)
+        self.store.write_provider_target_record(
+            ProviderTargetRecord.from_dokploy_records(
+                target_record=target, target_id_record=target_id
+            )
+        )
+        self.store.write_ingress_route_audit_record(
+            _ingress_audit_record(
+                context="example-prod", record_id="prod-alias", domains=("operator.example.test",)
+            )
+        )
+        plan = build_route_binding_candidate(
+            record_store=self.store,
+            request=RouteBindingReconcileRequest.model_validate(
+                {
+                    "product": "example-product",
+                    "context": "example-prod",
+                    "instance": "prod",
+                    "evaluated_at": "2026-07-22T00:00:00Z",
+                    "external_ingress": {
+                        "domains": ["app.example.test"],
+                        "custodian": "Office operator",
+                        "evidence_url": "https://example.test/report",
+                    },
+                }
+            ),
+        )
+        assert plan.record is not None
+        self.store.write_route_binding_record(plan.record)
+        response = await self._request("apply", now="2026-07-22T13:00:00Z", key="split-refresh")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            next(
+                o
+                for o in response.json()["result"]["outcomes"]
+                if o["product"] == "example-product"
+            )["status"],
+            "refreshed",
+        )
+        refreshed = _binding(self.store)
+        self.assertEqual(refreshed.external_ingress, plan.record.external_ingress)
+        self.assertGreater(refreshed.source.stale_after, plan.record.source.stale_after)
+        original = self.store.reconcile_route_binding_record
+
+        def change_profile(**kwargs: Any) -> Any:
+            if kwargs["replacement_record"].product == "example-product":
+                current = self.store.read_product_profile_record("example-product")
+                self.store.write_product_profile_record(
+                    current.model_copy(update={"display_name": "Changed during refresh"})
+                )
+            return original(**kwargs)
+
+        with patch.object(self.store, "reconcile_route_binding_record", side_effect=change_profile):
+            refused = await self._request(
+                "apply", now="2026-07-23T02:00:00Z", key="split-refresh-stale"
+            )
+        self.assertEqual(refused.status_code, 202, refused.text)
+        self.assertEqual(
+            next(
+                o for o in refused.json()["result"]["outcomes"] if o["product"] == "example-product"
+            )["status"],
+            "conflict",
+        )
+        self.assertEqual(_binding(self.store), refreshed)
 
     async def test_refresh_readback_and_replay_preserve_material_authority(self) -> None:
         before = _binding(self.store, external=True)
