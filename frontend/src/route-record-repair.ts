@@ -100,6 +100,12 @@ export function checkedRepairReview(response: RepairResponse, scope: RepairScope
       value.findings.every(finding => object(finding) && typeof finding.code === "string" && typeof finding.detail === "string") &&
       (value.current_record == null ? value.current_record_sha256 === "" : recordValid(value.current_record, scope) && value.current_record.record_sha256 === value.current_record_sha256) &&
       (value.proposed_record == null || recordValid(value.proposed_record, scope))) {
+    if (value.status === "unchanged" && (!value.current_record || !value.proposed_record ||
+        value.expected_current.state !== "present" || value.binding_operation !== "none" ||
+        value.expected_current.record_sha256 !== value.current_record_sha256 ||
+        value.proposed_record.record_sha256 !== value.current_record_sha256)) {
+      throw new Error("The binding verdict disagrees with its current record. Refresh the evidence before deciding.");
+    }
     return response.review as RouteBindingRepairReview;
   }
   throw new Error("The service response does not verify the requested route-record operation.");
