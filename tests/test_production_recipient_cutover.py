@@ -7,7 +7,7 @@ import json
 import subprocess
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
@@ -475,8 +475,9 @@ class RecipientCutoverTests(unittest.TestCase):
         self.fixture.assert_old_preserved()
 
     def test_unreachable_health_route_refuses_intent_and_writer_dispatch(self) -> None:
-        with patch.object(
-            self.route_connector.return_value, "side_effect", TimeoutError("private-route")
+        with patch(
+            "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+            return_value=Mock(side_effect=TimeoutError("private-route")),
         ):
             with self.assertRaises(ValueError):
                 cutover_intent(self.fixture.root, self.store, self.record, self.request)
@@ -487,10 +488,50 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertTrue(self.old_running)
 
     def test_cold_health_listener_can_refuse_connection_on_a_reachable_route(self) -> None:
-        with patch.object(self.route_connector.return_value, "side_effect", ConnectionRefusedError):
+        with patch(
+            "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+            return_value=Mock(side_effect=ConnectionRefusedError),
+        ):
             intent = cutover_intent(self.fixture.root, self.store, self.record, self.request)
         self.assertEqual(intent, self.record.activation)
         self.assertEqual(self.actions, [])
+
+    def test_route_outage_does_not_prevent_reading_armed_intent(self) -> None:
+        with patch(
+            "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+            return_value=Mock(side_effect=TimeoutError()),
+        ):
+            intent = cutover_intent(
+                self.fixture.root,
+                self.store,
+                self.record,
+                self.request.model_copy(update={"mode": "readback"}),
+            )
+        self.assertEqual(intent, self.record.activation)
+
+    def test_diagnostic_write_failure_cannot_skip_native_rollback(self) -> None:
+        write = self.store.write_promotion_record
+        failed = False
+
+        def fail_diagnostic_once(record: Any) -> None:
+            nonlocal failed
+            if record.failure is not None and not failed:
+                failed = True
+                raise ConnectionError("diagnostic write unavailable")
+            write(record)
+
+        with (
+            patch.object(self.store, "write_promotion_record", side_effect=fail_diagnostic_once),
+            patch(
+                "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
+                return_value=HealthcheckEvidence(status="fail"),
+            ),
+        ):
+            result = self.run_release()
+        self.assertTrue(failed)
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
+        self.assertEqual(result.response_payload["result"]["rollback_status"], "pass")
 
     def test_health_transport_failure_remains_readable_after_native_rollback(self) -> None:
         from control_plane.client_release import _release_step_failure
@@ -518,16 +559,25 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertEqual(_release_step_failure(self.store, replay.record, "fail"), failure)
 
     def test_unreachable_readiness_route_cannot_borrow_health_route_reachability(self) -> None:
-        request = self.request.model_copy(
-            update={"readiness_url": "http://192.168.200.21:19220/readyz"}
-        )
-        with patch.object(
-            self.route_connector.return_value,
-            "side_effect",
-            [ConnectionRefusedError(), TimeoutError()],
+        for health, readiness in (
+            ("http://192.168.200.20:19220/health", "http://192.168.200.21:19220/readyz"),
+            ("http://192.168.200.20/health", "https://192.168.200.20/readyz"),
         ):
-            with self.assertRaises(ValueError):
-                cutover_intent(self.fixture.root, self.store, self.record, request)
+            request = self.request.model_copy(
+                update={
+                    "health_urls": {key: health for key in self.request.health_urls},
+                    "readiness_url": readiness,
+                }
+            )
+            with (
+                self.subTest(health=health, readiness=readiness),
+                patch(
+                    "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+                    return_value=Mock(side_effect=[ConnectionRefusedError(), TimeoutError()]),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    cutover_intent(self.fixture.root, self.store, self.record, request)
         self.assertEqual(self.actions, [])
 
     def test_unknown_deploy_keeps_original_fence_and_never_restarts_old(self) -> None:
@@ -694,6 +744,16 @@ class RecipientCutoverTests(unittest.TestCase):
                 with self.assertRaises(GenericWebPromotionSourceRefused):
                     run_second()
             source_qualified = True
+            actions_before_route_outage = list(self.actions)
+            with patch(
+                "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+                return_value=Mock(side_effect=TimeoutError()),
+            ):
+                with self.assertRaises(ValueError):
+                    run_second()
+            self.assertEqual(self.actions, actions_before_route_outage)
+            self.assertTrue(self.old_running)
+            self.assertFalse(self.new_running)
             with patch(
                 "control_plane.production_recipient_cutover.writer_action",
                 side_effect=advance_after_pause,
@@ -858,6 +918,10 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertTrue(self.new_running)
         self.assertFalse(self.old_running)
         self.assertNotIn(("pause", False), self.actions)
+        promotion = self.store.list_promotion_records()[0]
+        self.assertEqual(promotion.deploy.status, "pass")
+        self.assertEqual(promotion.destination_health.status, "pass")
+        self.assertIsNone(promotion.failure)
 
     def test_predispatch_pause_refusal_releases_budget_and_original_key_can_retry(self) -> None:
         def refuse(*args: Any, **kwargs: Any) -> None:

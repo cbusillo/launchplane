@@ -117,7 +117,9 @@ def qualify_health_routes(request: RecipientCutoverRequest) -> None:
     destinations = {}
     for url in (*request.health_urls.values(), request.readiness_url):
         parsed = urlsplit(url)
-        destinations[(parsed.hostname, parsed.port)] = url
+        destinations[
+            (parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+        ] = url
     for url in destinations.values():
         destination = resolve_private_http_destination(url)
         try:
@@ -138,6 +140,7 @@ def cutover_intent(
     request: RecipientCutoverRequest,
     *,
     check_freshness: bool = True,
+    check_routes: bool = True,
 ) -> dict[str, Any]:
     if request.preparation_plan_sha256 != record.plan_sha256 or request.context != record.context:
         raise ValueError("Cutover belongs to a different preparation.")
@@ -168,7 +171,7 @@ def cutover_intent(
     PrivateHealthEndpointRecord.model_validate(
         {**endpoints[0].model_dump(mode="json"), "url": request.readiness_url}
     )
-    if check_freshness:
+    if check_routes and request.mode != "readback":
         qualify_health_routes(request)
     policies = [
         ProductionBackupPolicyRecord.model_validate(row)
@@ -1107,6 +1110,9 @@ class RecipientCutoverAdapter:
                     record,
                     RecipientCutoverRequest.model_validate(record.activation["request"]),
                     check_freshness=not bool(record.execution.get("old_pause_dispatched_at")),
+                    check_routes=not bool(
+                        record.execution.get(attempt_prefix + "old_pause_dispatched_at")
+                    ),
                 )
                 != record.activation
             ):
@@ -1230,6 +1236,7 @@ class RecipientCutoverAdapter:
                         }
                     )
 
+            failure_code = "destination_deploy_failed"
             if repromote:
                 writer_action(
                     self.root,
@@ -1277,7 +1284,6 @@ class RecipientCutoverAdapter:
                     binding=writer_binding,
                 )
                 old_paused = True
-                failure_code = "destination_deploy_failed"
                 execute_dokploy_artifact_deploy(
                     host=host,
                     token=token,
@@ -1395,9 +1401,6 @@ class RecipientCutoverAdapter:
                     ValueError("Recipient release gates refused bootstrap.")
                 ) from error
             begin_recovery()
-            if pending is not None:
-                pending = pending.model_copy(update={"failure": promotion_failure(failure_code)})
-                self.store.write_promotion_record(pending)
             terminal_deployment = (
                 terminal_deployment
                 or isinstance(error, api.DokployDeploymentFailed)
@@ -1411,6 +1414,14 @@ class RecipientCutoverAdapter:
                     and committed.plan_sha256 == record.plan_sha256
                 ):
                     return self.result("pass")
+                if pending is not None:
+                    pending = pending.model_copy(
+                        update={"failure": promotion_failure(failure_code)}
+                    )
+                    try:
+                        self.store.write_promotion_record(pending)
+                    except Exception as diagnostic_error:
+                        log_handled_error_cause(diagnostic_error, self.trace_id)
                 if not old_paused and not record.execution.get(
                     attempt_prefix + "old_pause_dispatched_at"
                 ):
@@ -1580,19 +1591,10 @@ class RecipientCutoverAdapter:
     def failed_result(
         self, key: str, *, provider_effect_performed: bool = True, **extra: str
     ) -> ProviderMutationOutcome:
-        promotion_id = "promotion-recipient-" + canonical_sha256(key)[:24]
-        try:
-            promotion = self.store.read_promotion_record(promotion_id)
-        except FileNotFoundError:
-            return self.result("fail", provider_effect_performed=provider_effect_performed, **extra)
-        if promotion.failure is not None:
-            extra.update(
-                error_code=promotion.failure.code, error_message=promotion.failure.description
-            )
         return self.result(
             "fail",
             provider_effect_performed=provider_effect_performed,
-            promotion_record_id=promotion_id,
+            promotion_record_id="promotion-recipient-" + canonical_sha256(key)[:24],
             **extra,
         )
 

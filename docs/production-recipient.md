@@ -384,7 +384,7 @@ and evidence files, dry-run, then reviewed apply under a stable key. The saved
 intent binds all current authority, consumer bindings and managed versions.
 Before arming and before a new execution, Launchplane checks TCP routing to every
 reviewed health and readiness host/port from its own process network. A cold
-listener's connection refusal proves only a responding route; timeouts and
+listener's connection refusal proves only a responding host or rejecting hop; timeouts and
 other connection failures refuse the intent before writer dispatch. Use a
 destination address reachable from the API and release workers. This does not
 start the application or replace the later HTTP and exact-identity checks.
