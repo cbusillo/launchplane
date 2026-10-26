@@ -625,7 +625,9 @@ def _stopped_release_outcome(
     names = {
         "backup": "verified backup",
         "promote": "deployment of the reviewed version",
-        "rollback": "rollback to the previous version",
+        "rollback": "rollback safety check"
+        if run.rollback_drill
+        else "rollback to the last accepted release",
         "recovery": "automatic recovery",
     }
     failures = [
@@ -640,7 +642,7 @@ def _stopped_release_outcome(
         live = "The version currently recorded in production could not be verified."
     else:
         version = (
-            "reviewed"
+            ("rejected" if decision.release_start == "rollback" else "reviewed")
             if production == decision.checklist.candidate
             else "previous"
             if production == decision.checklist.production

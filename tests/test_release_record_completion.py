@@ -309,7 +309,7 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
                 body = self.comments[0]["body"]
                 self.assertIn(failure.reason, body)
                 self.assertIn("rollback", body.lower())
-                self.assertIn(label, body)
+                self.assertIn(label, body.split("\n\n")[-1])
                 self.assertIn(version.source_commit[:7], body)
                 self.assertEqual(self.issue["state"], "closed")
 
@@ -329,13 +329,41 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
         with patch(
             "control_plane.release_invitation.release_version",
             side_effect=ValueError("Unavailable"),
-        ):
+        ) as read_production:
             self.advance()
+        read_production.assert_called()
         body = self.comments[0]["body"]
         self.assertIn("backup", body.lower())
-        self.assertIn("No failure reason", body)
-        self.assertIn("could not be verified", body)
+        self.assertNotIn(self.decision.checklist.candidate.source_commit[:7], body)
+        self.assertNotIn(self.decision.checklist.production.source_commit[:7], body)
         self.assertEqual(self.issue["state"], "closed")
+
+    def test_failed_rejection_rollback_identifies_rejected_version(self) -> None:
+        self.store.write_release_review_decision_record(
+            self.decision.model_copy(
+                update={
+                    "release_start": "rollback",
+                    "decision": "changes_requested",
+                    "reason": "Client rejected the hotfix",
+                }
+            )
+        )
+        self.release_run = ClientReleaseRunView(
+            decision_record_id=self.decision.record_id,
+            rollback_drill=False,
+            state="stopped",
+            steps=(
+                ClientReleaseStepView(
+                    step="rollback-1", kind="rollback", status="fail", operation_id="rollback"
+                ),
+            ),
+        )
+        with patch(
+            "control_plane.release_invitation.release_version",
+            return_value=self.decision.checklist.candidate,
+        ):
+            self.advance()
+        self.assertIn("rejected", self.comments[0]["body"].split("\n\n")[-1])
 
     def test_lost_comment_or_close_response_and_concurrent_ticks_do_not_duplicate_outcomes(
         self,
