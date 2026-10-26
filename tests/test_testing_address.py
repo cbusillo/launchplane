@@ -811,7 +811,6 @@ class TestingAddressTests(unittest.TestCase):
             idempotency_key="original-retained-key",
             request_fingerprint=canonical_json_sha256({"retained": "original"}),
             lease_owner="fixture",
-            lease_seconds=300,
             reconciliation_key="original-retained-intent",
             provider_target_key=origin.target_key(),
             provider_target_origin=origin,
