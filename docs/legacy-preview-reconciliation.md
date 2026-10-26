@@ -209,16 +209,17 @@ copy report, shared production resources or a target alias refuses admission.
 
 The original operation can outlive its issued plan's expiry. Only a
 framework-qualified retry of that exact preserving destroy, with its current
-lease, retained intent and preservation-phase checkpoint, may continue after
+lease, retained intent and nonempty effect checkpoint, may continue after
 expiry. It still rebuilds and compares current plan authority and rechecks
 preservation custody before effects. A fresh expired plan or another operation
 cannot use that continuation; retain the original key.
 
 After capture, the durable runner still requires positive provider retry safety.
-An admitted original retry verifies its complete retained copy before preservation
-can run again, whether or not its admission plan has expired. Missing copies cannot
-be silently recaptured after a destructive checkpoint. Unknown effects stay held;
-an empty pre-effect checkpoint keeps ordinary retry and expiry handling.
+An admitted original retry rechecks admission and verifies its complete retained
+copy, then continues teardown without repeating capture or rewinding its checkpoint.
+This applies before and after expiry. Missing copies cannot be silently recaptured
+after a destructive checkpoint. Unknown effects stay held; an empty pre-effect
+checkpoint keeps ordinary retry and expiry handling.
 
 An older original without a clean snapshot can use its retained, scoped server
 schedule binding. If that binding is absent, the preserving operation captures

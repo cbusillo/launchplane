@@ -1402,30 +1402,32 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         self.first_retry_record = first.record
         return operation, execute_spy
 
-    def test_expired_later_destroy_retry_verifies_copy_before_preserving_again(self) -> None:
+    def test_expired_later_destroy_retry_verifies_copy_without_rewinding_checkpoint(self) -> None:
         operation, _ = self.interrupted_preserving_retry("domain_delete")
         assert self.issued.plan_provenance is not None
         self.retry_clock.now.return_value = self.issued.plan_provenance.expires_at + timedelta(
             seconds=1
         )
-        reached_preserve = RuntimeError("preserve reached")
+        reached_destroy = RuntimeError("destroy reached")
         modes = []
 
         def preservation(**kwargs: Any) -> None:
             modes.append(kwargs["mode"])
-            if kwargs["mode"] == "preserve":
-                raise reached_preserve
 
         self.retry_preservation.side_effect = preservation
+        self.retry_provider.side_effect = reached_destroy
         with self.assertRaises(RuntimeError) as raised:
             operation.run(self.store)
-        self.assertIs(raised.exception, reached_preserve)
-        self.assertEqual(modes, ["verify", "preserve"])
+        self.assertIs(raised.exception, reached_destroy)
+        self.assertEqual(modes, ["verify"])
         current = self.store.read_idempotency_record_by_id(self.first_retry_record.record_id)
         assert current is not None
         self.assertEqual(current.idempotency_key, self.first_retry_record.idempotency_key)
         self.assertGreater(current.attempt, self.first_retry_record.attempt)
-        self.retry_provider.assert_not_called()
+        self.assertEqual(
+            current.provider_effect_phase, self.first_retry_record.provider_effect_phase
+        )
+        self.retry_provider.assert_called_once()
 
     def test_missing_later_retry_copy_never_recaptures_before_or_after_expiry(self) -> None:
         operation, _ = self.interrupted_preserving_retry("domain_delete")
