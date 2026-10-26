@@ -34,7 +34,7 @@ import type {
   WriteProductReviewDecisionData,
   RetryProductReviewFeedbackData,
   WriteReleaseReviewDecisionData,
-  OpenUrgentReleaseReviewData,
+  RequestReleaseReviewData,
   SubmitOwnerSecretInputData,
   DeliverTestingLocalConsumerData,
   ConfigureLaunchplaneGithubDeliveryData,
@@ -66,7 +66,7 @@ export const BROWSER_WRITE_ROUTES = {
   serviceGitHubTokenRetire: "/v1/service/github-delivery/token-retirement" satisfies RetireServiceGithubTokensData["url"],
   ownerSecretSubmit: "/v1/owner-secret-inputs/submit" satisfies SubmitOwnerSecretInputData["url"],
   releaseReviewDecision: "/v1/release-review/decisions" satisfies WriteReleaseReviewDecisionData["url"],
-  releaseReviewUrgentOpening: "/v1/release-review/urgent-openings" satisfies OpenUrgentReleaseReviewData["url"],
+  releaseReviewRequest: "/v1/release-review/requests" satisfies RequestReleaseReviewData["url"],
   productEnvironmentConfigApply:
     "/v1/products/{product}/environments/{environment}/config/apply" satisfies ApplyProductEnvironmentConfigData["url"],
   productImageRepositoryApply: "/v1/product-profiles/{product}/image-repository" satisfies ApplyProductImageRepositoryData["url"],

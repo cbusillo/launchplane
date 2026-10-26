@@ -103,7 +103,7 @@ import type {
   RetryProductReviewFeedbackData,
   ReleaseReviewResponse,
   ReleaseReviewDecisionEnvelope,
-  UrgentReleaseReviewEnvelope,
+  ReleaseRequestEnvelope,
   ReadProductionBackupGateOperationData,
   ReadProductionBackupGateOperationResponse,
   ReadOdooProdPromotionOperationData,
@@ -922,8 +922,8 @@ export function writeReleaseReviewDecision(payload: ReleaseReviewDecisionEnvelop
   return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewDecision, "POST", payload);
 }
 
-export function openUrgentReleaseReview(payload: UrgentReleaseReviewEnvelope): Promise<ReleaseReviewResponse> {
-  return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewUrgentOpening, "POST", payload);
+export function requestReleaseReview(payload: ReleaseRequestEnvelope): Promise<ReleaseReviewResponse> {
+  return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewRequest, "POST", payload);
 }
 
 export function writeProductReviewDecision(
