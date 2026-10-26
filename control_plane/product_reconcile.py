@@ -3016,12 +3016,42 @@ def run_product_reconcile_once(
     )
     if feedback is not None:
         plan[PR_FEEDBACK_PLAN_KEY] = feedback
+    retired_failure = False
+    if (
+        request.target_kind == "preview"
+        and feedback is not None
+        and feedback.get("status") == "failed"
+        and (
+            (
+                outcome.error
+                and plan.get("action") not in {"apply", "destroy"}
+                and plan.get("reason") != "held_preview_recovery_required"
+            )
+            or plan.get("reason") == "preview_cleanup_pr_state_unknown"
+        )
+    ):
+        try:
+            profile = record_store.read_product_profile_record(request.product)
+            previews = record_store.list_preview_records(
+                anchor_repo=_preview_anchor_repo(profile),
+                anchor_pr_number=request.pull_request_number,
+            )
+            retired_failure = request.pull_request_number in _retired_preview_numbers(
+                previews, context=profile.preview.context
+            )
+        except (FileNotFoundError, OSError, ValueError, SQLAlchemyError) as error:
+            _LOGGER.warning(
+                "Preview feedback retirement could not be read (%s).", type(error).__name__
+            )
     if request.target_kind == "preview" and _needs_absent_preview_feedback_recovery(
-        plan, include_failed=True
+        plan, include_failed=retired_failure
     ):
         # Only unresolved reads or terminal clear delivery consume this budget. Open
         # PRs waiting for builds retain their ordinary event/sweep coverage.
-        if outcome.error or plan.get("reason") == "pull_request_not_open":
+        if outcome.error or plan.get("reason") in {
+            "pull_request_not_open",
+            "preview_cleanup_pr_state_unknown",
+        }:
             closed = not outcome.error and plan.get("reason") == "pull_request_not_open"
             previously_closed = request.last_plan.get("feedback_recovery_closed_observed") is True
             attempts = _feedback_recovery_failed_attempts(request.last_plan)
@@ -3221,11 +3251,9 @@ def request_product_reconcile_sweep(
             for preview in previews
             if preview.state not in _ENDED_PREVIEW_STATES
         }
-        destroyed_preview_numbers = {
-            preview.anchor_pr_number
-            for preview in previews
-            if preview.state == "destroyed" and preview.context == profile.preview.context
-        }
+        destroyed_preview_numbers = _retired_preview_numbers(
+            previews, context=profile.preview.context
+        )
         if profile.preview.enabled:
             try:
                 requests = record_store.list_product_reconcile_requests(
@@ -3264,6 +3292,21 @@ def request_product_reconcile_sweep(
 def _feedback_recovery_failed_attempts(plan: Mapping[str, object]) -> int:
     count = plan.get("feedback_recovery_failed_attempts", 0)
     return max(0, count) if isinstance(count, int) and not isinstance(count, bool) else 0
+
+
+def _retired_preview_numbers(previews: tuple[PreviewRecord, ...], *, context: str) -> set[int]:
+    live = {
+        preview.anchor_pr_number
+        for preview in previews
+        if preview.state not in _ENDED_PREVIEW_STATES
+    }
+    return {
+        preview.anchor_pr_number
+        for preview in previews
+        if preview.state == "destroyed"
+        and preview.context == context
+        and preview.anchor_pr_number not in live
+    }
 
 
 def _needs_absent_preview_feedback_recovery(

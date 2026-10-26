@@ -7562,7 +7562,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 )
                 self.assertFalse(self.sweep_preview())
 
-    def seed_retired_preview_failure(self) -> None:
+    def seed_preview_failure(self, *, state: PreviewState = "destroyed") -> None:
         self.request("preview", 5)
         request = self.store.claim_next_product_reconcile_request("seed", 600)
         assert request is not None
@@ -7577,7 +7577,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             },
             "preview_reconcile_failed",
         )
-        self.write_preview(state="destroyed")
+        self.write_preview(state=state)
         self.github.pull_request["state"] = "closed"
 
     def test_retirement_recovers_stale_failure_without_another_pr_event(self) -> None:
@@ -7585,7 +7585,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
             build_product_site_overview,
         )
 
-        self.seed_retired_preview_failure()
+        self.seed_preview_failure()
         preview = self.store.list_preview_records()[0]
         warning_prefix = f"PR #{preview.anchor_pr_number}:"
         before = build_product_site_overview(
@@ -7605,7 +7605,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertFalse(self.sweep_preview())
 
     def test_retired_failure_recovery_keeps_unknown_reads_bounded(self) -> None:
-        self.seed_retired_preview_failure()
+        self.seed_preview_failure()
         attempts = 0
         with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
             while self.sweep_preview():
@@ -7619,19 +7619,81 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertFalse(self.sweep_preview())
 
     def test_failed_feedback_requires_a_completed_retirement(self) -> None:
-        self.seed_retired_preview_failure()
+        self.seed_preview_failure()
         self.write_preview(state="teardown_pending")
 
         self.assertFalse(self.sweep_preview())
         self.assertEqual(self.provider.applied, [])
 
     def test_failed_feedback_does_not_borrow_another_contexts_retirement(self) -> None:
-        self.seed_retired_preview_failure()
+        self.seed_preview_failure()
         preview = self.store.list_preview_records()[0]
         self.store.write_preview_record(preview.model_copy(update={"context": "other"}))
 
         self.assertFalse(self.sweep_preview())
         self.assertEqual(self.provider.applied, [])
+
+    def test_pre_retirement_failures_do_not_spend_the_later_recovery_budget(self) -> None:
+        self.seed_preview_failure(state="active")
+        self.github.pull_request["state"] = "open"
+        for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+            self.request("preview", 5)
+            with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+                failed = self.run_once()
+            self.assertEqual(failed.state, "failed")
+            self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
+            self.assertNotIn("feedback_recovery_stop_reason", failed.last_plan)
+
+        self.write_preview(state="destroyed")
+        self.github.pull_request["state"] = "closed"
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+        self.assertEqual(recovered.last_plan["reason"], "pull_request_not_open")
+        self.assertFalse(self.sweep_preview())
+
+    def test_retired_failure_with_unknown_pr_state_stays_bounded(self) -> None:
+        self.seed_preview_failure()
+        self.github.pull_request["state"] = "unknown"
+        attempts = 0
+        while self.sweep_preview():
+            unresolved = self.run_swept_preview()
+            attempts += 1
+            self.assertLessEqual(attempts, PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS)
+        self.assertGreater(attempts, 0)
+        self.assertEqual(unresolved.last_plan["reason"], "preview_cleanup_pr_state_unknown")
+        self.assertIn("last_failed_error_summary", unresolved.last_plan)
+        self.assertIn("feedback_recovery_stop_reason", unresolved.last_plan)
+        self.assertEqual(self.provider.applied, [])
+
+    def test_retirement_metadata_failure_does_not_block_the_failed_result(self) -> None:
+        self.seed_preview_failure()
+        self.request("preview", 5)
+        with (
+            patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")),
+            patch.object(
+                self.store, "list_preview_records", side_effect=OSError("metadata unavailable")
+            ),
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("last_failed_error_summary", failed.last_plan)
+        self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
+
+    def test_new_runtime_failure_does_not_spend_retirement_recovery_budget(self) -> None:
+        self.seed_preview_failure()
+        self.github.pull_request["state"] = "open"
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(
+            self.provider,
+            "execute_apply",
+            return_value={"status": "fail", "provider_effect_attempted": True},
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["action"], "apply")
+        self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
 
     def test_recovery_discovers_feedback_beyond_the_default_history_limit(self) -> None:
         for number in range(10, 120):
