@@ -1296,6 +1296,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             self.assertEqual(retained.idempotency_key, first.record.idempotency_key)
             self.assertGreater(retained.attempt, first.record.attempt)
             environment.reset_mock()
+            rebuild.reset_mock()
             rebuild.return_value = self.issued.model_copy(
                 update={
                     "dry_run_plan": self.issued.dry_run_plan.model_copy(
@@ -1304,6 +1305,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 }
             )
             self.assertEqual(operation.run(self.store).status, "reconcile_required")
+            rebuild.assert_called_once()
             environment.assert_not_called()
             with self.assertRaises(preview_http.OdooPreviewPlanProvenanceError):
                 preview_http.refresh_odoo_preview_issued_plan(
