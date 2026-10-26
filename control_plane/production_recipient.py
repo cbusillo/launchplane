@@ -46,7 +46,11 @@ from control_plane.provider_operations import (
 from control_plane.runtime_platform_credentials import looks_like_credential
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_activation import read_product_compose, verified_product_image
-from control_plane.testing_activation_compose import interpolate, qualify_compose
+from control_plane.testing_activation_compose import (
+    environment_mapping,
+    interpolate,
+    qualify_compose,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 ROUTE = "/v1/products/{product}/production-recipient"
@@ -398,26 +402,23 @@ def _qualified_render(record: ProductionRecipientRecord, values: dict[str, str])
     qualified = deepcopy(document)
     upstream_connections(record, document, values)
     for upstream in record.request.upstreams:
-        environment = qualified["services"][upstream.service].get("environment", {})
-        if isinstance(environment, list):
-            environment = dict(item.split("=", 1) for item in environment)
-            qualified["services"][upstream.service]["environment"] = environment
+        environment = environment_mapping(
+            qualified["services"][upstream.service].get("environment", {})
+        )
+        qualified["services"][upstream.service]["environment"] = environment
         for key in upstream.keys.values():
             environment.pop(key, None)
     for service in qualified["services"].values():
         service.pop("deploy")
-        environment = service.get("environment", {})
-        if isinstance(environment, list):
-            environment = dict(item.split("=", 1) for item in environment)
-            service["environment"] = environment
-        if isinstance(environment, dict):
-            from urllib.parse import urlsplit
+        environment = environment_mapping(service.get("environment", {}))
+        service["environment"] = environment
+        from urllib.parse import urlsplit
 
-            for key, value in tuple(environment.items()):
-                if key.endswith("_URL") and isinstance(value, str):
-                    parsed = urlsplit(value)
-                    if parsed.hostname in {*services, "localhost", "127.0.0.1", "::1"}:
-                        environment.pop(key)
+        for key, value in tuple(environment.items()):
+            if key.endswith("_URL") and isinstance(value, str):
+                parsed = urlsplit(value)
+                if parsed.hostname in {*services, "localhost", "127.0.0.1", "::1"}:
+                    environment.pop(key)
     qualify_compose(
         qualified,
         volumes=set(record.volumes.values()),

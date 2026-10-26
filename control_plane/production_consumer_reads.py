@@ -50,6 +50,7 @@ from control_plane.production_recipient_publication import require_owned_publica
 from control_plane.production_recipient_published_recovery import published_mounts
 from control_plane.runtime_environments import resolve_site_runtime_environment
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_activation_compose import environment_mapping
 from control_plane.secrets import _decrypt_secret_value
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.workflows.ship import utc_now_timestamp
@@ -204,11 +205,9 @@ def current_source(
     identity = current["inventory"]["runtime_identity"]
     cycle = qualify_source_cycle(observation, identity, published, now, prior)
     rendered = qualified_render(record, runtime_values(store, root, record, published=True))
-    database_environment = rendered["services"][record.request.database_service].get(
-        "environment", {}
+    database_environment = environment_mapping(
+        rendered["services"][record.request.database_service].get("environment", {})
     )
-    if not isinstance(database_environment, dict):
-        raise ValueError("The published database protocol is unsupported.")
     database = database_environment.get("MARIADB_DATABASE") or database_environment.get(
         "MYSQL_DATABASE"
     )
