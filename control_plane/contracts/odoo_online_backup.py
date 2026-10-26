@@ -1,9 +1,25 @@
 """Bounded evidence for a coherent online Odoo recovery tuple."""
 
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
+
+
+def normalized_odoo_backup_root(value: str) -> str:
+    path, allowed = PurePosixPath(value), PurePosixPath(DEFAULT_ODOO_BACKUP_ROOT)
+    if (
+        not path.is_absolute()
+        or ".." in path.parts
+        or "\x00" in value
+        or (path != allowed and allowed not in path.parents)
+    ):
+        raise ValueError("Odoo backup root must stay within the dedicated Launchplane backup root")
+    return str(path)
 
 
 class OdooProdBackupCaptureEvidence(BaseModel):

@@ -265,7 +265,14 @@ class WebsiteProviderAdapterTests(unittest.TestCase):
             )
 
         writers = ContainerSlotWriters(
-            self.plan, targets, execute, active_jobs=lambda target: int(running[target.container])
+            self.plan,
+            targets,
+            execute,
+            active_jobs=lambda target: int(running[target.container]),
+            native_ready=lambda target: None,
+            database_evidence=lambda target: json.dumps(
+                {"container": target.container, "running": running[target.container]}
+            ),
         )
         observations = writers.fence(self.site, rollback_pause_identity("release-pause"))
         self.assertTrue(observations)

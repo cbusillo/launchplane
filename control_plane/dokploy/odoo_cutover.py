@@ -47,7 +47,7 @@ class OdooSlotDriver:
     prepare_candidate: Callable[[OdooCutoverPlan], None]
     prepare_public: Callable[[OdooCutoverPlan], PreparedPublicSite]
     backup: Callable[[OdooCutoverPlan], OdooRecoveryTuple]
-    maintenance: Callable[[OdooCutoverPlan], OdooMaintenanceReceipt]
+    maintenance: Callable[[OdooCutoverPlan], OdooMaintenanceReceipt] | None
     readiness: Callable[[OdooCutoverPlan, OdooSlot], OdooSlotReadiness]
     observe_public: Callable[
         [OdooCutoverPlan, str], tuple[str, PublicSiteBinding, HealthcheckEvidence | None]
@@ -66,6 +66,9 @@ class OdooSlotDriver:
         Callable[[OdooCutoverPlan, OdooSlot, OdooWebsiteSettingsIntent], OdooWebsiteSettingsReceipt]
         | None
     ) = None
+
+    owns_prepared: Callable[[str], bool] = lambda _pause: False
+    cancel_backup_restore: Callable[[OdooCutoverPlan], None] | None = None
 
 
 class DokployOdooCutoverProvider:
@@ -86,6 +89,7 @@ class DokployOdooCutoverProvider:
             or lane.database != plan.old.binding.database
             or lane.database_uuid != plan.old.runtime_identity.database_uuid
             or lane.writers != plan.writers
+            or lane.host_runtime != plan.host_runtime
             or {(slot.slot_id, slot.compose_id, slot.private_url) for slot in lane.slots}
             != {(slot.slot_id, slot.compose_id, slot.private_url) for slot in (plan.old, plan.new)}
         ):
@@ -174,15 +178,27 @@ class DokployOdooCutoverProvider:
         digest = self.driver.observe_prepared(pause_id)
         return digest if digest == site.content_digest else ""
 
+    def owns_prepared_pause(self, pause_id: str) -> bool:
+        if pause_id not in (self.pause_id, rollback_pause_identity(self.pause_id)):
+            return False
+        return self.driver.owns_prepared(pause_id)
+
     def fence_and_drain(
         self, site: PreparedPublicSite, pause_id: str
     ) -> tuple[WriterObservation, ...]:
         return self.driver.fence_and_drain(site, pause_id)
 
+    def cancel_backup_restore(self, plan: OdooCutoverPlan) -> None:
+        if self.driver.cancel_backup_restore is None:
+            raise ValueError("original backup cancellation capability is unavailable")
+        self.driver.cancel_backup_restore(plan)
+
     def backup(self, plan: OdooCutoverPlan) -> OdooRecoveryTuple:
         return self.driver.backup(plan)
 
     def maintenance(self, plan: OdooCutoverPlan) -> OdooMaintenanceReceipt:
+        if self.driver.maintenance is None:
+            raise ValueError("cutover host has not been assembled with native maintenance")
         return self.driver.maintenance(plan)
 
     def website_settings(
@@ -214,7 +230,7 @@ class DokployOdooCutoverProvider:
         observed = self.route.observed_target()
         if observed == self.driver.lane.prepared_origin or observed not in expected:
             if observed != self.driver.lane.prepared_origin or not any(
-                self.observed_public_copy(pause_id)
+                self.observed_public_copy(pause_id) or self.owns_prepared_pause(pause_id)
                 for pause_id in (self.pause_id, rollback_pause_identity(self.pause_id))
             ):
                 raise ValueError("unknown route is not a verified prepared public copy")

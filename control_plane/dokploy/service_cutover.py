@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverPlan
-from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooSlot
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooMaintenanceReceipt, OdooSlot
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane
 from control_plane.dokploy.cutover_factory import DokployOdooCutoverProviderFactory
@@ -37,6 +37,7 @@ class OdooHostCapabilities:
     runner: Callable[[OdooSlot], str]
     startup: StartupSettings | None = None
     startup_preflight: Callable[[OdooCutoverPlan], None] | None = None
+    maintenance_checkpoint: Callable[[OdooMaintenanceReceipt], None] | None = None
 
 
 class InstalledCutoverHost(Protocol):
@@ -77,17 +78,22 @@ def bind_odoo_driver(plan: OdooCutoverPlan, capabilities: OdooHostCapabilities) 
             raise ValueError("bound website settings/startup capability is unavailable")
         capabilities.startup_preflight(current)
 
-    return replace(
-        capabilities.driver,
-        fence_and_drain=writers.fence,
-        handoff_writers=lambda current, slot: writers.handoff(slot),
-        maintenance=lambda current: run_planned_slot_maintenance(
+    def maintenance(current: OdooCutoverPlan) -> OdooMaintenanceReceipt:
+        writers.fence_candidate()
+        return run_planned_slot_maintenance(
             current,
             runner_container=capabilities.runner(current.new),
             execute=capabilities.execute,
             configure_startup=capabilities.startup,
             writers=writers,
-        ),
+            maintenance_checkpoint=capabilities.maintenance_checkpoint,
+        )
+
+    return replace(
+        capabilities.driver,
+        fence_and_drain=writers.fence,
+        handoff_writers=lambda current, slot: writers.handoff(slot),
+        maintenance=maintenance,
         website_settings_preflight=preflight,
         website_settings=lambda current, slot, intent: run_slot_website_settings(
             current,

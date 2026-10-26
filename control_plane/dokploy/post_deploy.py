@@ -30,7 +30,10 @@ import click
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
-from control_plane.contracts.odoo_online_backup import OdooProdBackupCaptureEvidence
+from control_plane.contracts.odoo_online_backup import (
+    OdooProdBackupCaptureEvidence,
+    DEFAULT_ODOO_BACKUP_ROOT as DEFAULT_ODOO_BACKUP_ROOT,
+)
 from control_plane.contracts.odoo_prod_retained_volume_backup_import import (
     ODOO_PROD_RETAINED_VOLUME_BACKUP_IMPORT_FAILURE_STAGE_BY_CODE,
     OdooProdRetainedVolumeBackupImportInspectionEvidence,
@@ -170,7 +173,6 @@ DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
 # OpenUpgrade migration; OPW's first fresh copy took 22 minutes. The execution
 # budget stays bounded and larger than an ordinary deploy timeout.
 DEFAULT_ODOO_UPSTREAM_RESTORE_EXECUTION_TIMEOUT_SECONDS = 2 * 60 * 60
-DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 ODOO_COMPANY_EMAIL_MATCH_MARKER = "website_bootstrap_company_email_matches"
 ODOO_COMPANY_EMAIL_CONTRACT_MARKER = "website_bootstrap_company_email_contract_supported"
 ODOO_COMPANY_EMAIL_SKIP_REASON = "artifact_bootstrap_predates_company_email_readback"
@@ -3292,6 +3294,7 @@ def _build_dokploy_odoo_backup_gate_script(
     backup_root: str,
     backup_record_id: str,
     expected_web_state: Literal["running", "exited"] = "running",
+    cutover_capture_claim: bool = False,
 ) -> str:
     return f"""#!/usr/bin/env bash
 set -euo pipefail
@@ -3354,6 +3357,7 @@ docker exec -i \\
     -e BACKUP_DIR="${{backup_dir}}" \\
     -e BACKUP_RECORD_ID="${{backup_record_id}}" \\
     -e BACKUP_NONCE="${{backup_nonce}}" \\
+    -e CUTOVER_CAPTURE_CLAIM={"1" if cutover_capture_claim else "0"} \\
     -e IMAGE_ID="${{image_id}}" \\
     -e RESULT_MARKER={shlex.quote(ODOO_BACKUP_GATE_RESULT_MARKER)} \\
     "${{script_runner_container_id}}" python3 - <<'PY'

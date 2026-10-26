@@ -18,6 +18,7 @@ def verify_odoo_slot_readiness(
     browser_receipt: dict[str, Any],
     execute: ContainerCommand,
     retained_assets_verified: bool,
+    writers_fenced: bool,
 ) -> OdooSlotReadiness:
     """Preparation warms resources; the final HTTP probe only observes.
 
@@ -33,6 +34,7 @@ def verify_odoo_slot_readiness(
         or contract.get("database_uuid") != slot.runtime_identity.database_uuid
         or contract.get("runtime_identity") != identity
         or not retained_assets_verified
+        or not writers_fenced
     ):
         raise ValueError("native readiness contract/asset retention differs from exact slot")
     if (

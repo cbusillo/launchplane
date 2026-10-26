@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import json
+import hashlib
 from collections.abc import Callable
 
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooSlot
@@ -56,6 +57,9 @@ class ContainerSlotWriters:
         targets: tuple[SlotWriterContainer, ...],
         execute: ContainerCommand,
         active_jobs: Callable[[SlotWriterContainer], int],
+        *,
+        native_ready: Callable[[SlotWriterContainer], None] | None = None,
+        database_evidence: Callable[[SlotWriterContainer], str] | None = None,
     ) -> None:
         physical_writer_targets(plan, targets)
         self.plan, self.targets, self.execute, self.active_jobs = (
@@ -64,6 +68,17 @@ class ContainerSlotWriters:
             execute,
             active_jobs,
         )
+        self.native_ready = native_ready
+        self.database_evidence = database_evidence
+
+    def fence_candidate(self) -> None:
+        targets = tuple(
+            target for target in self.targets if target.slot_id == self.plan.new.slot_id
+        )
+        for target in physical_writer_targets(self.plan, self.targets):
+            if target.slot_id == self.plan.new.slot_id:
+                self._stop(target)
+        self.require_drained(targets)
 
     def _running(self, target: SlotWriterContainer) -> bool:
         observed = json.loads(self.execute(("docker", "inspect", target.container), None))
@@ -86,10 +101,18 @@ class ContainerSlotWriters:
     def fence(self, site: PreparedPublicSite, pause_id: str) -> tuple[WriterObservation, ...]:
         if site.plan.binding != self.plan.old.binding or site.plan.writers != self.plan.writers:
             raise ValueError("writer pause differs from the admitted release")
+        if self.database_evidence is None:
+            raise ValueError("writer fence requires native database observation evidence")
         # The privately prepared candidate must also be unable to schedule work.
         for target in physical_writer_targets(self.plan, self.targets):
             self._stop(target)
         self.require_drained(self.targets)
+        evidence = {}
+        for target in self.targets:
+            observed = self.database_evidence(target)
+            if not observed:
+                raise ValueError("logical writer drain has no native observation evidence")
+            evidence[target.slot_id, target.writer.writer_id] = observed
         return tuple(
             WriterObservation(
                 binding=site.plan.binding,
@@ -97,7 +120,18 @@ class ContainerSlotWriters:
                 writer=writer,
                 fenced=True,
                 active_jobs=0,
-                evidence_id=pause_id + ":" + writer.writer_id,
+                evidence_id=hashlib.sha256(
+                    json.dumps(
+                        [
+                            pause_id,
+                            writer.writer_id,
+                            *[
+                                evidence[slot.slot_id, writer.writer_id]
+                                for slot in (self.plan.old, self.plan.new)
+                            ],
+                        ]
+                    ).encode()
+                ).hexdigest(),
             )
             for writer in self.plan.writers
         )
@@ -105,6 +139,8 @@ class ContainerSlotWriters:
     def handoff(self, slot: OdooSlot) -> tuple[tuple[str, int], ...]:
         if slot not in (self.plan.old, self.plan.new):
             raise ValueError("writer resume target differs from the release")
+        if self.native_ready is None:
+            raise ValueError("writer handoff requires native process liveness evidence")
         physical = physical_writer_targets(self.plan, self.targets)
         for target in physical:
             if target.slot_id != slot.slot_id:
@@ -125,5 +161,6 @@ class ContainerSlotWriters:
             ]
             if len(running) != 1 or running[0].slot_id != slot.slot_id:
                 raise ValueError("writer resume has no unique observed target owner")
+            self.native_ready(running[0])
             owners.append((writer.writer_id, len(running)))
         return tuple(owners)
