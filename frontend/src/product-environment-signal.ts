@@ -1,4 +1,4 @@
-import type { DataProvenance, ProductEnvironmentDetail, ProductEnvironmentSummary, ProductSiteOverview } from "./generated/openapi.ts";
+import type { DataProvenance, ProductEnvironmentDetail, ProductEnvironmentSummary, ProductIncidentSummary, ProductSiteOverview } from "./generated/openapi.ts";
 
 function expireProvenance(provenance: DataProvenance, now: number): DataProvenance {
   return ["verified", "recorded"].includes(provenance.freshness_status) && Date.parse(provenance.stale_after) < now
@@ -124,17 +124,26 @@ function readable(value: string | null | undefined): string {
   return (value ?? "").replaceAll("_", " ").trim();
 }
 
-// Every cause that makes a lane red, worded from its own evidence. The tone is
-// danger exactly when this is non-empty, so a red lane can always say why.
+function productionDeliveryWarning(environment: ProductEnvironmentSummary, incident: ProductIncidentSummary): boolean {
+  return environment.environment === "prod" && incident.failure_layer === "provider" &&
+    incident.severity === "warning";
+}
+
+export function operationalWarningReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
+  return operationalSignal(environment, now).warningReasons;
+}
+
 export function operationalAttentionReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
-  if (!environment) return [];
+  return operationalSignal(environment, now).attentionReasons;
+}
+
+function operationalSignal(environment: ProductEnvironmentSummary | null, now: number): {
+  tone: SignalTone; attentionReasons: string[]; warningReasons: string[];
+} {
+  if (!environment) return { tone: "missing", attentionReasons: [], warningReasons: [] };
   environment = expireEnvironmentEvidence(environment, now);
   const reasons = new Set<string>();
   const incidents = environment.health_monitoring.open_incidents;
-  for (const incident of incidents) {
-    const severity = readable(incident.severity) || "Open";
-    reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
-  }
   for (const check of environment.health_monitoring.checks.filter(check => check.probe_effective)) {
     if (check.status === "fail") {
       reasons.add(check.summary?.trim() || `Health check ${check.name} failed: ${readable(check.failure_code) || "unknown failure"}`);
@@ -148,7 +157,22 @@ export function operationalAttentionReasons(environment: ProductEnvironmentSumma
     .forEach(warning => reasons.add(warning.detail));
   environment.topology.observed.tls_domains.filter(domain => negativeTlsStates.has(domain.status))
     .forEach(domain => reasons.add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
-  return [...reasons];
+  const runtimeTone = environmentRuntimeTone(environment, now);
+  const deliveryOnly = incidents.length > 0 && reasons.size === 0 && runtimeTone === "verified" &&
+    incidents.every(incident => productionDeliveryWarning(environment, incident));
+  if (!deliveryOnly) {
+    for (const incident of incidents) {
+      const severity = readable(incident.severity) || "Open";
+      reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
+    }
+  }
+  return {
+    tone: reasons.size ? "danger" : deliveryOnly ? "warning" : runtimeTone,
+    attentionReasons: [...reasons],
+    warningReasons: deliveryOnly
+      ? incidents.map(incident => `${readable(incident.failure_code)}; the current production release is healthy`)
+      : [],
+  };
 }
 
 export const deployHoldNotices: Record<NonNullable<ProductEnvironmentSummary["deploy_hold"]>, string> = {
@@ -161,8 +185,10 @@ export function deployHoldNotice(environment: ProductEnvironmentSummary | null):
 }
 
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
-  if (!environment) return "missing";
-  if (operationalAttentionReasons(environment, now).length) return "danger";
+  return operationalSignal(environment, now).tone;
+}
+
+function environmentRuntimeTone(environment: ProductEnvironmentSummary, now: number): SignalTone {
   environment = expireEnvironmentEvidence(environment, now);
   const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
   const warnings = healthWarnings(environment);

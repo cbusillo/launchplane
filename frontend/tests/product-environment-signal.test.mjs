@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, publicObservationGap } from "../src/product-environment-signal.ts";
+import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, operationalWarningReasons, publicObservationGap } from "../src/product-environment-signal.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 Object.defineProperty(globalThis, "window", { configurable: true, value: { location: { search: "" } } });
@@ -34,6 +34,48 @@ function environment() {
 
 test("a fresh identity and health verification makes a monitored lane green", () =>
   assert.equal(environmentOperationalTone(environment()), "verified"));
+
+test("failed production delivery warns only while the running release is verified", () => {
+  for (const failure_code of ["production_delivery_failed", "deploy_fence_held"]) {
+    const lane = environment();
+    lane.environment = "prod";
+    const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+    Object.assign(incident, { severity: "warning", check_kind: "provider", check_name: "production-delivery-example", failure_layer: "provider", failure_code });
+    lane.health_monitoring.open_incidents = [incident];
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.deepEqual(operationalAttentionReasons(lane), []);
+    assert.equal(lane.health_monitoring.open_incidents[0], incident);
+    const critical = { ...incident, severity: "critical", failure_code: "monitor_run_missed" };
+    lane.health_monitoring.open_incidents.push(critical);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    lane.health_monitoring.open_incidents.pop();
+    lane.health_monitoring.checks[0].incident_status = "open";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    assert.ok(operationalAttentionReasons(lane).length > 1);
+    lane.health_monitoring.checks[0].incident_status = "";
+    const extraDomain = { ...lane.topology.observed.tls_domains[0], domain_name: "retained.example.test", status: "expired" };
+    lane.topology.observed.tls_domains.push(extraDomain);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    assert.ok(operationalAttentionReasons(lane).length > 1);
+    lane.topology.observed.tls_domains.pop();
+    lane.health_monitoring.checks[0].status = "fail";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.checks[0].status = "pass";
+    for (const status of ["mismatch", "malformed", "missing", "unchecked", "unverifiable"]) {
+      lane.topology.observed.placement.runtime_identity_status = status;
+      assert.equal(environmentOperationalTone(lane), "danger");
+    }
+    lane.topology.observed.placement.runtime_identity_status = "match";
+    assert.equal(environmentOperationalTone(lane, Date.parse(lane.provenance.stale_after) + 1), "danger");
+    incident.severity = "critical";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.open_incidents = [];
+    assert.equal(environmentOperationalTone(lane), "verified");
+  }
+});
 
 test("a canonical generated occurrence blocks green independently of declared checks", () => {
   const lane = environment();

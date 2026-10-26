@@ -1,7 +1,7 @@
 import { setClockTime, expect, test } from "./state";
 import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
-const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "stale", "unknown", "absent"] as const;
+const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "delivery-warning", "stale", "unknown", "absent"] as const;
 
 for (const theme of ["dark", "light"] as const) {
 
@@ -37,6 +37,12 @@ for (const state of cases) {
       check.trust_state = "verified";
       check.incident_status = "";
       check.provenance.stale_after = lane.provenance.stale_after;
+      if (state === "delivery-warning") {
+        const incident = structuredClone(product.environments.find((lane: { environment: string }) => lane.environment === "prod").health_monitoring.open_incidents[0]);
+        lane.environment = "prod";
+        Object.assign(incident, { severity: "warning", check_kind: "provider", failure_layer: "provider", check_name: "production-delivery-example", failure_code: "production_delivery_failed", summary: "A production delivery failed." });
+        lane.health_monitoring.open_incidents = [incident];
+      }
       if (state === "failed") check.status = "fail";
       if (state === "incident") check.incident_status = "open";
       if (state === "stale") lane.provenance.stale_after = new Date(now - 1000).toISOString();
@@ -75,7 +81,8 @@ for (const state of cases) {
           products.push(extra);
         }
       }
-      return { product, products, identity: module.fixtureIdentity, now, testingDescription: sidebarStatus(product.environments[0] ?? null, "Testing").description };
+      const laneLabel = state === "delivery-warning" ? "Production" : "Testing";
+      return { product, products, identity: module.fixtureIdentity, now, laneLabel, laneName: lane.environment, testingDescription: sidebarStatus(product.environments[0] ?? null, laneLabel).description };
     }, state);
     await setClockTime(page, fixtures.now);
     if (theme === "light") await page.getByRole("button", { name: "Switch to light theme" }).click();
@@ -93,15 +100,19 @@ for (const state of cases) {
     await page.getByRole("list", { name: "Launchplane products" })
       .getByRole("link", { name: new RegExp(fixtures.product.display_name) }).click();
     await expect(page.getByRole("heading", { level: 1, name: fixtures.product.display_name })).toBeVisible();
-    const dot = railLink.locator('[data-lane="testing"]');
-    const signal = page.locator(".signal-tile").filter({ hasText: /^Testing/i });
+    const dot = railLink.locator(`[data-lane="${fixtures.laneName}"]`);
+    const signal = page.locator(".signal-tile").filter({ hasText: new RegExp(`^${fixtures.laneLabel}`, "i") });
     const healthy = state === "healthy" || state === "missing-route" || state === "expired-route";
-    const tone = healthy ? "verified" : state === "failed" || state === "incident" ? "danger" : state === "stale" ? "warning" : "missing";
+    const tone = healthy ? "verified" : state === "failed" || state === "incident" ? "danger" : state === "stale" || state === "delivery-warning" ? "warning" : "missing";
     await expect(signal).toHaveAttribute("data-tone", tone);
     await expect(dot).toHaveAttribute("data-tone", state === "stale" ? "stale" : tone);
     await expect(dot).toHaveAttribute("title", fixtures.testingDescription);
     await expect(railLink.locator(".product-trust-dots")).toHaveAttribute("aria-label", new RegExp(fixtures.testingDescription.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     await expect(dot.locator("svg")).toBeAttached();
+    if (state === "delivery-warning") {
+      await expect(page.locator(".evidence-warning")).toHaveCount(0);
+      await expect(page.getByRole("link", { name: "Inspect incident", exact: true })).toHaveAttribute("href", new RegExp(`/prod#incident-history$`));
+    }
     // State symbols must remain perceptible against the actual rail in both themes.
     const contrast = await dot.evaluate(element => {
       const rgb = (value: string) => value.match(/[\d.]+/g)!.slice(0, 3).map(Number);
@@ -118,7 +129,7 @@ for (const state of cases) {
       return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
     });
     expect(contrast).toBeGreaterThanOrEqual(3);
-    if (state === "healthy" || state === "absent" || state === "failed") {
+    if (state === "healthy" || state === "absent" || state === "failed" || state === "delivery-warning") {
       await page.screenshot({ path: smokeArtifact(`sidebar-${state}-${theme}-${testInfo.project.name}.png`), fullPage: false });
     }
     if (state === "healthy") {
