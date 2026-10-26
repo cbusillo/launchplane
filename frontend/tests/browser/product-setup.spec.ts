@@ -187,6 +187,17 @@ for (const outcome of ["success", "declaration-uncertain", "declaration-uncertai
   });
 }
 
+test("setup summaries close disclosures revealed by the browser", async ({ page }) => {
+  const { panel } = await setupScenario(page, "success", true);
+  for (const name of ["Add environment", "Declare managed-secret fields"]) {
+    const details = panel.locator("details").filter({ has: page.locator("summary", { hasText: name }) });
+    await details.evaluate(element => { (element as HTMLDetailsElement).open = true; });
+    await expect(details).toHaveAttribute("open", "");
+    await details.locator("summary").first().click();
+    await expect(details).not.toHaveAttribute("open", "");
+  }
+});
+
 test("read-only users receive no environment setup controls", async ({ page }) => {
   await page.goto("/ui/products/atlas-commerce?fixture=products");
   const data = await page.evaluate(async () => {
