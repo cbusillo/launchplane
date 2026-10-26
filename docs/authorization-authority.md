@@ -104,7 +104,10 @@ taking leases, creating operative lifecycle plans, revealing credentials and
 copying secret values retain write or explicit source permissions. The two
 secret-copy source checks explicitly disable read-role inheritance. Existing
 terminal transport restrictions remain; `local_operator` supplies the full
-planning surface, including mixed plan/apply routes.
+planning surface, including mixed plan/apply routes. Mutation routes normally
+refuse terminal-agent transport before policy evaluation, even under a broad
+rule. A route must explicitly admit that transport; dry-run admission is
+route-specific.
 
 The action catalog, [`service_auth.py`](../control_plane/service_auth.py) and
 native routes describe installed runtime admission. Native routes also recognize
@@ -289,9 +292,8 @@ production and Client scopes; an instance rule does not acquire new rights.
 The separate Director-agent path validates an exact testing or uniquely owned preview
 lane. Director testing/preview applies need current safety even with a broad
 context grant; a grant cannot establish that a lane is unused or data is disposable.
-Director-only staging with `deploy=false` may perform an independently reviewed
-separation without starting
-existing shared-storage containers. Staging eligibility never authorizes deploy.
+On the Director-agent path, `deploy=false` may stage an independently reviewed
+separation without starting existing shared-storage containers. Staging eligibility never authorizes deploy.
 Preview-inclusive product retirement checks the Director-agent marker, never-live
 product status and testing-only ownership; Client and other machine callers keep
 their existing rules.
