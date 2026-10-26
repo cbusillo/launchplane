@@ -1106,24 +1106,34 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         after_expiry = self.issued.plan_provenance.expires_at + timedelta(seconds=1)
         for phase, changed, safe_retry in (
             (None, False, False),
+            ("", False, True),
             ("domain_delete", False, False),
             ("domain_delete", False, True),
             (PREVIEW_PRESERVATION_CAPTURE_PHASE, False, False),
             (PREVIEW_PRESERVATION_CAPTURE_PHASE, True, False),
         ):
-            inspected = phase == PREVIEW_PRESERVATION_CAPTURE_PHASE or safe_retry
+            inspected = phase == PREVIEW_PRESERVATION_CAPTURE_PHASE or bool(phase) and safe_retry
             with self.subTest(phase=phase, changed=changed, safe_retry=safe_retry):
                 adapter = self.adapter()
                 if safe_retry:
-                    adapter._observe_apply = Mock(return_value=("absent", None, True))
+                    adapter._observe_apply = preview_http.observe_odoo_preview_apply_result
                 current = self.issued.model_copy(deep=True)
                 if changed:
                     current.dry_run_plan.compose_ref = "changed-provider-target"
                 reached_execution = RuntimeError("current authority accepted")
                 with (
                     patch(
-                        "control_plane.preview_preservation.run_preview_preservation"
+                        "control_plane.preview_preservation.run_preview_preservation",
+                        side_effect=AssertionError("No capture has begun") if phase == "" else None,
                     ) as preservation,
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.example.test", "fixture-token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_preview_runtime._compose_exists_by_id",
+                        return_value=True,
+                    ),
                     patch.object(preview_http, "datetime", wraps=datetime) as clock,
                     patch.object(
                         preview_http, "_build_odoo_preview_apply_inputs", return_value=current
@@ -1141,12 +1151,14 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                             phase,
                             "fixture-reconciliation",
                         )
-                        self.assertEqual(observation.retry_safe, inspected)
+                        self.assertEqual(observation.retry_safe, inspected or safe_retry)
                         if inspected:
                             self.assertEqual(
                                 preservation.call_args.kwargs["mode"],
                                 "verify" if safe_retry else "inspect",
                             )
+                        else:
+                            preservation.assert_not_called()
                     if inspected and not changed:
                         with self.assertRaises(RuntimeError) as raised:
                             adapter.apply("fixture-key", Mock(spec=ProviderOperationLease))

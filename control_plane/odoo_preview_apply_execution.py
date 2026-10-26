@@ -249,7 +249,9 @@ class OdooPreviewProviderMutationAdapter:
                 provider_effect_phase in PREVIEW_PRESERVATION_PHASES
                 and observation_outcome != "present"
             )
-            verified_retry = observation_outcome == "absent" and retry_safe
+            verified_retry = (
+                bool(provider_effect_phase) and observation_outcome == "absent" and retry_safe
+            )
             if self._apply_request.preserve_original_reservation_id and (
                 capture_retry or verified_retry
             ):

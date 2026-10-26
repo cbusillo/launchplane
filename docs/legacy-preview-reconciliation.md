@@ -241,6 +241,8 @@ the original admission plan to have expired. Fresh expired plans remain refused;
 the original plan, request and key are never replaced.
 After capture, a provider-proven retry-safe destroy phase can continue after
 expiry only when the complete retained copy verifies again.
+An interruption before the first effect checkpoint uses ordinary retry and
+expiry handling without requiring a retained copy that has not been captured.
 Other uncertain phases retain the normal provider-observation fence. After
 provider absence, the complete copy remains verifiable without deleted source
 containers. Actual successful destroy writes the normal destroyed lifecycle;
