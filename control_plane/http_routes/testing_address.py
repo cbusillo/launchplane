@@ -27,6 +27,7 @@ from control_plane.testing_address import (
 from control_plane.testing_address_qualification import (
     plan_testing_address,
     TestingAddressRecipientUnverified,
+    TestingAddressRecipientBusy,
 )
 from control_plane.testing_address_storage import (
     read_address_plan,
@@ -187,6 +188,8 @@ def register_testing_address_routes(
                 in_progress_message="Testing address amendment is running under its original key.",
                 reconcile_message="Testing address outcome needs observation with the original plan and key.",
             )
+        except TestingAddressRecipientBusy as error:
+            refuse(409, "testing_address_recipient_busy", str(error), cause=error)
         except TestingAddressRecipientUnverified as error:
             refuse(409, "testing_address_recipient_unverified", str(error), cause=error)
         except NativeSourceAuthorizationDenied as error:

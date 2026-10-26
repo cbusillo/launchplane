@@ -41,6 +41,8 @@ def address_preimage_present(adapter: TestingAddressAdapter) -> bool:
 
 
 def cancelled_address_result(adapter: TestingAddressAdapter) -> dict[str, object]:
+    from control_plane.testing_address_preparation import pending_address_preparations
+
     return {
         "plan_sha256": adapter.plan.digest,
         "product": adapter.plan.product,
@@ -49,6 +51,7 @@ def cancelled_address_result(adapter: TestingAddressAdapter) -> dict[str, object
         "applied": False,
         "cancelled": True,
         "preimage_restored": True,
+        "retained_preparation_fences_preserved": pending_address_preparations(adapter),
     }
 
 
@@ -148,11 +151,7 @@ def cancel_testing_address(
         raise NativeSourceUnavailable("The address operation has no original forward custody.")
 
     performed = not address_preimage_present(adapter)
-    inverse = adapter.store.read_idempotency_record(
-        scope=ADDRESS_SCOPE, route_path=INVERSE_ROUTE, idempotency_key=adapter.plan.digest
-    )
-    if performed or inverse is not None:
-        restore_address_preimage(adapter, lease, guard)
+    restore_address_preimage(adapter, lease, guard)
     guard()
     result = read_cancelled_address(adapter)
     return ProviderMutationOutcome(

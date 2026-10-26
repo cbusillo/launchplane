@@ -1,12 +1,15 @@
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 import time
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_address import TestingAddressPlan, address_binding
-from control_plane.dokploy import api, source
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+from control_plane.dokploy import api, post_deploy, source
 from control_plane.dokploy.testing_route import (
     amend_testing_route_address,
     observe_testing_route,
@@ -40,9 +43,51 @@ class TestingAddressRecipientUnverified(ValueError):
         )
 
 
+class TestingAddressRecipientBusy(ValueError):
+    def __init__(self) -> None:
+        super().__init__(
+            "An original operation holds the retained recipient deploy fence. "
+            "Preserve that operation, its original key and the retained target fence."
+        )
+
+
+def require_available_address_recipients(
+    store: PostgresRecordStore, *, product: str, context: str, retained_ids: frozenset[str]
+) -> None:
+    for target in sorted(retained_ids):
+        origin = ProviderTargetOrigin(
+            product=product,
+            context=context,
+            instance="testing",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=target,
+        )
+        if store.list_held_provider_target_reservations(provider_target_key=origin.target_key()):
+            raise TestingAddressRecipientBusy()
+
+
 def qualify_address_domains(
     *, host: str, token: str, hostname: str, retained_ids: frozenset[str], server_id: str
 ) -> tuple[str, tuple[str, ...]]:
+    inventory = inspect_address_domains(
+        host=host, token=token, hostname=hostname, retained_ids=retained_ids, server_id=server_id
+    )
+    if any(inventory.automation.values()):
+        raise TestingAddressRecipientUnverified(True, 0)
+    return inventory.digest, inventory.projects
+
+
+@dataclass(frozen=True)
+class AddressDomainInventory:
+    digest: str
+    projects: tuple[str, ...]
+    automation: dict[str, bool]
+
+
+def inspect_address_domains(
+    *, host: str, token: str, hostname: str, retained_ids: frozenset[str], server_id: str
+) -> AddressDomainInventory:
     try:
         return _qualify_address_domains(
             host=host,
@@ -66,12 +111,13 @@ def qualify_address_domains(
 
 def _qualify_address_domains(
     *, host: str, token: str, hostname: str, retained_ids: frozenset[str], server_id: str
-) -> tuple[str, tuple[str, ...]]:
+) -> AddressDomainInventory:
     offset, digest = 0, ""
     started = time.monotonic()
     rows: list[dict[str, object]] = []
     projects: set[str] = set()
     seen: set[str] = set()
+    automation: dict[str, bool] = {}
     while True:
         page = read_dokploy_inventory(
             host=host, token=token, offset=offset, limit=1, inventory_digest=digest
@@ -135,10 +181,10 @@ def _qualify_address_domains(
                             target_id=target.target_id,
                             schedule_type="compose",
                         )
-                        if actual.get("autoDeploy") is not False or schedules:
-                            raise TestingAddressRecipientUnverified(
-                                actual.get("autoDeploy"), len(schedules)
-                            )
+                        enabled = actual.get("autoDeploy")
+                        if type(enabled) is not bool or schedules:
+                            raise TestingAddressRecipientUnverified(enabled, len(schedules))
+                        automation[target.target_id] = enabled
                         seen.add(target.target_id)
                         projects.add(str(actual["appName"]))
                         rows.append(
@@ -157,8 +203,10 @@ def _qualify_address_domains(
     )
     if check.inventory_digest != digest or seen != retained_ids:
         raise ValueError("The hostname recipient inventory is incomplete or changed.")
-    return canonical_json_sha256(sorted(rows, key=lambda item: str(item["id"]))), tuple(
-        sorted(projects)
+    return AddressDomainInventory(
+        canonical_json_sha256(sorted(rows, key=lambda item: cast(str, item["id"]))),
+        tuple(sorted(projects)),
+        automation,
     )
 
 
@@ -199,6 +247,49 @@ def address_transport(
             "expected_sha256": plan.recipient_sha256,
         },
     )
+
+
+def require_unbound_address_recipients(
+    store: PostgresRecordStore, retained_ids: frozenset[str]
+) -> None:
+    if any(
+        item.target_id in retained_ids for item in store.list_dokploy_target_id_records()
+    ) or any(
+        item.provider_id == "dokploy" and item.target_id in retained_ids
+        for item in store.list_physical_provider_target_records()
+    ):
+        raise ValueError("A retained hostname recipient is bound to an active lane.")
+
+
+def require_idle_address_recipients(
+    *, host: str, token: str, context: str, retained_ids: frozenset[str]
+) -> None:
+    for target_id in sorted(retained_ids):
+        try:
+            deployments = api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=target_id,
+                require_complete=True,
+            )
+            idle = all(
+                api.deployment_is_terminal(item) for item in deployments
+            ) and post_deploy.compose_data_workflow_is_quiescent(
+                host=host,
+                token=token,
+                target_definition=source.DokployTargetDefinition(
+                    context=context, instance="testing", target_id=target_id
+                ),
+            )
+        except api.DokployRequestFailed as error:
+            if error.status_code in {401, 403}:
+                raise NativeSourceAuthorizationDenied(
+                    "The existing provider identity denied retained recipient workflow observation."
+                ) from error
+            raise
+        if not idle:
+            raise ValueError("A retained hostname recipient has an unresolved provider workflow.")
 
 
 @contextmanager
@@ -260,6 +351,15 @@ def plan_testing_address(
         for key in {retirement_operation_id, reservation_operation_id}
     }
     with exclude_address_executors(store, tuple(operations)):
+        require_available_address_recipients(
+            store,
+            product=product,
+            context=context,
+            retained_ids=frozenset(str(item.target_id) for item in reservations),
+        )
+        require_unbound_address_recipients(
+            store, frozenset(str(item.target_id) for item in reservations)
+        )
         host, token = source.read_dokploy_config(
             control_plane_root=root, database_url=store.database_url
         )
@@ -286,12 +386,19 @@ def plan_testing_address(
                 "The published testing target changed its domainless managed placement."
             )
         server_id = require_registered_remote_server(current["serverId"])
-        inventory, projects = qualify_address_domains(
+        domains = inspect_address_domains(
             host=host,
             token=token,
             hostname=hostname,
             retained_ids=frozenset(str(item.target_id) for item in reservations),
             server_id=server_id,
+        )
+        inventory, projects = domains.digest, domains.projects
+        require_idle_address_recipients(
+            host=host,
+            token=token,
+            context=context,
+            retained_ids=frozenset(domains.automation),
         )
         route = amend_testing_route_address(publication.plan.route, hostname)
         identity = before.inventory.runtime_identity if before.inventory else None
@@ -346,6 +453,7 @@ def plan_testing_address(
             server_id=server_id,
             provider_project=str(current["appName"]),
             retained_projects=projects,
+            retained_automation=domains.automation,
             recipient_sha256=frame["address_recipients_sha256"],
             domain_inventory_sha256=inventory,
             operation_sha256=operations,

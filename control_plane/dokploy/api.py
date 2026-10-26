@@ -1299,6 +1299,12 @@ _DEPLOYMENT_FAILURE_STATUSES = frozenset(
 )
 
 
+def deployment_is_terminal(deployment: JsonObject) -> bool:
+    return (
+        deployment_status(deployment) in _DEPLOYMENT_SUCCESS_STATUSES | _DEPLOYMENT_FAILURE_STATUSES
+    )
+
+
 def resolve_dokploy_user_id(*, host: str, token: str) -> str:
     payload = dokploy_request(host=host, token=token, path="/api/user.session")
     payload_as_object = as_json_object(payload)
