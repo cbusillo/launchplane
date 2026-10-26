@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Any, Literal
 import unittest
 from unittest.mock import patch
 
+from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressFailureCode,
     PublicIngressNotificationDestination,
@@ -16,6 +17,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.discord_incident_summary import (
     build_discord_incident_summary_delivery,
+    summary_states,
 )
 from control_plane.notifications import DiscordNotificationError, DiscordNotificationNotSentError
 from control_plane.outbox_inspection import inspect_outbox
@@ -272,7 +274,7 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         self.drain("12:05:00")
         failed = self.store.list_outbox_delivery_records()[0]
         self.assertTrue(failed.provider_operation_key)
-        self.assertTrue(failed.payload.get("summary_states"))
+        self.assertTrue(failed.payload.get("incident_states"))
         inspection = inspect_outbox(self.store, limit=100)
         self.assertTrue(
             any(
@@ -403,7 +405,70 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         self.assertFalse(row.provider_operation_key)
         self.assertEqual(self.sent, [])
 
+    def test_changes_between_render_and_admission_never_send_stale_conditions(self) -> None:
+        marker = self.store.mark_outbox_delivery_provider_started
+        for index, change in enumerate(("resolved", "silenced", "material")):
+            for critical in (False, True):
+                with self.subTest(change=change, critical=critical):
+                    instance = f"race-{index}-{critical}"
+                    hour = 12 + 2 * index + int(critical)
+                    self.observe(instance, critical=critical, time=f"{hour}:00:00")
+                    before = len(self.sent)
+                    changed = False
+
+                    def admit(**kwargs: Any) -> object:
+                        nonlocal changed
+                        record = kwargs["record"]
+                        assert isinstance(record, OutboxDeliveryRecord)
+                        if not changed:
+                            incident = next(
+                                v
+                                for v in self.store.list_public_ingress_incident_records()
+                                if v.instance == instance
+                            )
+                            updates: dict[str, object] = {
+                                "notification_state": "silenced",
+                                "silenced_until": "2026-10-25T23:00:00Z",
+                            }
+                            if change == "resolved":
+                                updates = {
+                                    "status": "resolved",
+                                    "resolved_at": f"2026-10-25T{hour}:04:00Z",
+                                    "resolved_observation_id": incident.latest_observation_id,
+                                }
+                            elif change == "material":
+                                self.observe(
+                                    instance,
+                                    critical=critical,
+                                    time=f"{hour}:04:00",
+                                    code="dns_failure" if critical else "testing_delivery_failed",
+                                )
+                                changed = True
+                                return marker(**kwargs)
+                            self.store.write_public_ingress_incident_record(
+                                incident.model_copy(update=updates)
+                            )
+                            changed = True
+                        return marker(**kwargs)
+
+                    with patch.object(
+                        self.store, "mark_outbox_delivery_provider_started", side_effect=admit
+                    ):
+                        self.drain(f"{hour}:05:00")
+                    if change != "material":
+                        self.assertEqual(len(self.sent), before)
+                    else:
+                        self.assertLessEqual(len(self.sent), before + int(critical))
+                    self.drain(f"{hour}:10:00")
+                    if change == "material":
+                        self.assertEqual(len(self.sent), before + 1)
+                        self.observe(
+                            instance, critical=critical, time=f"{hour}:11:00", status="pass"
+                        )
+                        self.drain(f"{hour}:15:00")
+
     def test_older_render_cannot_post_after_a_newer_started_window(self) -> None:
+        self.observe("one")
         for time in ("12:00:00", "12:06:00"):
             row = build_discord_incident_summary_delivery(
                 policy_id=self.policy.policy_id,
@@ -426,7 +491,9 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
                         update={
                             "payload": {
                                 **record.payload,
-                                "summary_states": [[owner, "state"]],
+                                "incident_states": summary_states(
+                                    self.store.list_public_ingress_incident_records()
+                                ),
                                 "webhook_reference": owner,
                             }
                         }
@@ -441,6 +508,7 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         )
 
     def test_atomic_marker_rechecks_adjacent_windows_and_persists_snapshot(self) -> None:
+        self.observe("one")
         rows = []
         for time in ("12:00:00", "12:06:00"):
             row = build_discord_incident_summary_delivery(
@@ -461,7 +529,9 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
                         update={
                             "payload": {
                                 **claim.record.payload,
-                                "summary_states": [["incident", "fingerprint"]],
+                                "incident_states": summary_states(
+                                    self.store.list_public_ingress_incident_records()
+                                ),
                             }
                         }
                     )

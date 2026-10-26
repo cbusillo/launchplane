@@ -7,7 +7,7 @@ import time
 from typing import TYPE_CHECKING, Protocol, cast
 
 from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
-from control_plane.discord_incident_summary import DiscordSummaryAlreadyCovered
+from control_plane.notifications import DiscordNotificationSuperseded
 from control_plane.workflows.generic_web_promotion_workflow import (
     dispatch_generic_web_promotion_workflow_delivery,
 )
@@ -231,7 +231,9 @@ def _mark_provider_started(
         provider_operation_key=provider_operation_key,
         provider_id=provider_id,
     )
+    if getattr(update, "status", "") == "notification_state_changed":
+        raise DiscordNotificationSuperseded(refresh_required=True)
     if getattr(update, "status", "") == "summary_already_covered":
-        raise DiscordSummaryAlreadyCovered
+        raise DiscordNotificationSuperseded
     if getattr(update, "status", "") != "updated":
         raise RuntimeError("outbox_provider_marker_not_recorded")

@@ -930,6 +930,7 @@ OutboxDeliveryCompletionStatus = Literal[
     "owner_mismatch",
     "lease_expired",
     "summary_already_covered",
+    "notification_state_changed",
 ]
 
 
@@ -8676,6 +8677,40 @@ class PostgresRecordStore(HumanSessionStore):
                         return OutboxDeliveryCompletionResult(
                             status="summary_already_covered", record=current_record
                         )
+            if (
+                not require_terminal
+                and updates.get("provider_operation_key")
+                and updates.get("provider_id") == "discord"
+                and record.kind == "public_ingress_notification"
+            ):
+                states = record.payload.get("incident_states")
+                if not isinstance(states, list) or not states:
+                    raise ValueError("Discord admission requires rendered incident states.")
+                incident_statement = (
+                    select(LaunchplanePublicIngressIncidentRow)
+                    .where(
+                        LaunchplanePublicIngressIncidentRow.incident_id.in_(
+                            [value[0] for value in states]
+                        )
+                    )
+                    .order_by(LaunchplanePublicIngressIncidentRow.incident_id)
+                )
+                if not self.database_url.startswith("sqlite"):
+                    incident_statement = incident_statement.with_for_update()
+                current = [
+                    PublicIngressIncidentRecord.model_validate(value.payload)
+                    for value in session.scalars(incident_statement)
+                ]
+                active_states = [
+                    [value.incident_id, value.material_fingerprint_sha256]
+                    for value in current
+                    if value.status == "open" and value.notification_state == "active"
+                ]
+                if any(value not in active_states for value in states):
+                    session.commit()
+                    return OutboxDeliveryCompletionResult(
+                        status="notification_state_changed", record=current_record
+                    )
             next_updates = dict(updates)
             if not _string_value(next_updates.get("updated_at") or "").strip():
                 next_updates["updated_at"] = observed_at

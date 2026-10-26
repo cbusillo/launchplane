@@ -1669,8 +1669,8 @@ silence can appear in a later window. Silenced and acknowledged
 conditions are excluded. Lane-scoped destinations summarize only the conditions
 their managed secret covers. Routing revisions can retry previously unavailable
 destinations in a later window. The rendered snapshot is persisted atomically
-with its provider marker, with a final coverage check under the existing database
-write lock to prevent adjacent-window workers duplicating one state. Summary
+with its provider marker. Final coverage and current open/active incident-state
+checks run under the existing database write lock and incident row locks to prevent adjacent-window workers duplicating one state. Summary
 receipts live in the outbox independently of per-incident attempt records. Global
 outbox inspection gives active work and newest failures separate bounded slots,
 including their error codes; critical

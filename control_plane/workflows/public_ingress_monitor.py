@@ -132,6 +132,7 @@ from control_plane.lane_runtime_verification import lane_expected_runtime_identi
 from control_plane.notifications import (
     DiscordNotificationError,
     DiscordNotificationNotSentError,
+    DiscordNotificationSuperseded,
     DISCORD_CRITICAL_ALERT_COLOR,
     post_discord_webhook,
     public_discord_url_error,
@@ -3870,6 +3871,10 @@ def deliver_public_ingress_notification_outbox_delivery(
             marker=marker,
             response=response,
         )
+    except DiscordNotificationSuperseded:
+        return _superseded_incident_outbox_delivery(
+            record=delivery_record, reason="state_changed_before_send"
+        )
     except (ValueError, KeyError) as error:
         return delivery_record.model_copy(
             update={
@@ -3999,6 +4004,12 @@ def _deliver_direct_notification_outbox(
             }
         )
     operation_key = str(attempt_payload["attempt_id"])
+    if destination.kind == "discord":
+        payload = {
+            **payload,
+            "incident_states": [[incident.incident_id, incident.material_fingerprint_sha256]],
+        }
+        record = record.model_copy(update={"payload": payload})
     mark_provider_started(record, operation_key, destination.kind)
     delivery = drivers.send(
         destination=destination,

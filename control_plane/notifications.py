@@ -40,6 +40,12 @@ class DiscordNotificationError(RuntimeError):
         super().__init__(f"Discord webhook returned HTTP {status_code}")
 
 
+class DiscordNotificationSuperseded(RuntimeError):
+    def __init__(self, *, refresh_required: bool = False) -> None:
+        self.refresh_required = refresh_required
+        super().__init__("Discord notification no longer matches current state.")
+
+
 class DiscordNotificationNotSentError(RuntimeError):
     pass
 

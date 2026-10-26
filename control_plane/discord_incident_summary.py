@@ -21,6 +21,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.notifications import (
     DiscordNotificationError,
     DiscordNotificationNotSentError,
+    DiscordNotificationSuperseded,
     public_discord_url_error,
 )
 
@@ -33,10 +34,6 @@ if TYPE_CHECKING:
 
 SUMMARY_AGGREGATE_TYPE = "public_ingress_discord_summary"
 SUMMARY_WINDOW_SECONDS = 300
-
-
-class DiscordSummaryAlreadyCovered(RuntimeError):
-    pass
 
 
 def discord_incident_needs_summary(
@@ -73,8 +70,8 @@ def summary_covers(previous: OutboxDeliveryRecord | None, current: OutboxDeliver
         return True
     if previous.payload.get("webhook_reference") != current.payload.get("webhook_reference"):
         return False
-    states = current.payload.get("summary_states")
-    covered = previous.payload.get("summary_states")
+    states = current.payload.get("incident_states")
+    covered = previous.payload.get("incident_states")
     return (
         isinstance(states, list)
         and bool(states)
@@ -206,7 +203,7 @@ def deliver_discord_incident_summary(
         update={
             "payload": {
                 **record.payload,
-                "summary_states": summary_states(incidents),
+                "incident_states": summary_states(incidents),
                 "webhook_reference": destination.discord_webhook_secret,
             }
         }
@@ -242,7 +239,9 @@ def deliver_discord_incident_summary(
         lines.append(line)
     try:
         mark_provider_started(record, record.delivery_id, "discord")
-    except DiscordSummaryAlreadyCovered:
+    except DiscordNotificationSuperseded as error:
+        if error.refresh_required:
+            return result("pending", error="summary_snapshot_changed")
         return result("delivered", action="skipped_unchanged_summary")
     try:
         drivers.discord_sender(
