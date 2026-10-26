@@ -1513,6 +1513,103 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                         (operation.operation_id,),
                     )
 
+    def test_primary_host_package_bootstrap_retains_recovery_evidence(self) -> None:
+        from control_plane.dokploy.host_package import ensure_schedule_host_package
+        from control_plane.dokploy import post_deploy
+        from control_plane.host_package import host_schedule
+        from control_plane.host_package_installer import HOST_PACKAGE_INSTALLED_MARKER
+
+        for store, root in self.stores():
+            with self.subTest(backend=type(store).__name__):
+                operation = self.running(store)
+                schedules: dict[str, api.JsonObject] = {}
+                histories: dict[str, list[api.JsonObject]] = {}
+                mutations = []
+
+                def provider(**kwargs: Any) -> api.JsonValue:
+                    path = kwargs["path"]
+                    query = kwargs.get("query") or {}
+                    payload = kwargs.get("payload") or {}
+                    if kwargs.get("method", "GET") != "GET":
+                        mutations.append(path)
+                    if path == "/api/schedule.list":
+                        return cast(api.JsonValue, list(schedules.values()))
+                    if path == "/api/schedule.create":
+                        identifier = f"bootstrap-{len(schedules)}"
+                        schedules[identifier] = {**payload, "scheduleId": identifier}
+                        return schedules[identifier]
+                    if path == "/api/schedule.runManually":
+                        identifier = payload["scheduleId"]
+                        deployment = {"deploymentId": "run-" + identifier, "status": "done"}
+                        histories.setdefault(identifier, []).append(deployment)
+                        return deployment
+                    if path == "/api/schedule.delete":
+                        schedules.pop(payload["scheduleId"])
+                        return {}
+                    if path == "/api/compose.one":
+                        return {"composeId": "compose-123"}
+                    if path == "/api/schedule.one":
+                        return schedules.get(query["scheduleId"])
+                    if path == "/api/deployment.allByType":
+                        return cast(
+                            api.JsonValue,
+                            histories.get(query["id"], []) if query["type"] == "schedule" else [],
+                        )
+                    raise AssertionError(f"Unexpected provider call: {path}")
+
+                def run(**kwargs: Any) -> str:
+                    result = api.dokploy_request(
+                        host=kwargs["host"],
+                        token=kwargs["token"],
+                        path="/api/schedule.runManually",
+                        method="POST",
+                        payload={"scheduleId": kwargs["schedule_id"]},
+                    )
+                    assert isinstance(result, dict)
+                    return "deployment=" + str(result["deploymentId"])
+
+                with (
+                    patch.object(api, "_dokploy_request", side_effect=provider),
+                    patch.object(api, "run_dokploy_schedule", side_effect=run),
+                    patch.object(
+                        post_deploy,
+                        "_read_odoo_post_deploy_log_markers",
+                        return_value={HOST_PACKAGE_INSTALLED_MARKER: "true"},
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_recovery.source.read_dokploy_config",
+                        return_value=("https://provider.test", "fixture-token"),
+                    ),
+                ):
+                    with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                        ensure_schedule_host_package(
+                            host="https://provider.test",
+                            token="fixture-token",
+                            target_id="fixture-user",
+                            schedule_type="dokploy-server",
+                            app_name="fixture-testing",
+                            payload={"script": host_schedule("resources", {}), "serverId": None},
+                        )
+                    fenced = self.fence(store)
+                    assert fenced.recovery_journal is not None
+                    referenced = {effect.schedule_id for effect in fenced.recovery_journal.effects}
+                    self.assertTrue(referenced)
+                    self.assertEqual(referenced, set(schedules))
+                    self.assertTrue(
+                        all(effect.acknowledged for effect in fenced.recovery_journal.effects)
+                    )
+                    before_inspection = list(mutations)
+                    self.assertIsNotNone(inspect_testing_replacement(fenced, root))
+                    schedules.pop(next(iter(referenced)))
+                    self.assertIsNone(inspect_testing_replacement(fenced, root))
+                    self.assertEqual(mutations, before_inspection)
+                    self.assertEqual(
+                        store.read_odoo_stable_target_replacement_operation_record(
+                            operation.operation_id
+                        ),
+                        fenced,
+                    )
+
     def test_classifier_requires_exact_terminal_deploy_and_bound_provider(self) -> None:
         for store, root in self.stores():
             operation = self.running(store)

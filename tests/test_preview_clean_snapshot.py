@@ -838,6 +838,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             }
 
         with (
+            patch("control_plane.dokploy.host_package.ensure_schedule_host_package"),
             patch.object(
                 api,
                 "fetch_dokploy_target_payload",

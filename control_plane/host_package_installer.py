@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import base64
 import fcntl
 import hashlib
@@ -13,8 +15,11 @@ import tempfile
 HOST_PACKAGE_INSTALLED_MARKER = "launchplane_host_installed"
 
 
-def private_directory(path: Path) -> None:
-    path.mkdir(mode=0o700, exist_ok=True)
+def private_directory(path: Path, *, create: bool) -> bool:
+    if not path.exists() and not path.is_symlink():
+        if not create:
+            return False
+        path.mkdir(mode=0o700)
     metadata = path.lstat()
     if (
         not stat.S_ISDIR(metadata.st_mode)
@@ -22,6 +27,7 @@ def private_directory(path: Path) -> None:
         or metadata.st_mode & 0o022
     ):
         raise ValueError("Host package directory is not private")
+    return True
 
 
 def regular_bytes(path: Path, bound: int) -> bytes:
@@ -40,13 +46,17 @@ def install(spec: dict[str, object]) -> dict[str, object]:
     version = spec["version"]
     if not isinstance(version, str) or not re.fullmatch(r"[a-f0-9]{64}", version):
         raise ValueError("Invalid host package version")
+    mode = spec["mode"]
+    if mode not in {"inspect", "chunk", "commit"}:
+        raise ValueError("Invalid host package installation mode")
     home = Path.home().resolve(strict=True)
     for directory in (
         home / ".local",
         home / ".local/state",
         home / ".local/state/launchplane-host",
     ):
-        private_directory(directory)
+        if not private_directory(directory, create=mode != "inspect"):
+            return {"type": "complete", "installed": False, "version": version}
     root = home / ".local/state/launchplane-host"
     destination = root / (version + ".pyz")
     if destination.exists() or destination.is_symlink():
@@ -54,10 +64,8 @@ def install(spec: dict[str, object]) -> dict[str, object]:
             return {"type": "complete", "installed": True, "version": version}
     if spec["mode"] == "inspect":
         return {"type": "complete", "installed": False, "version": version}
-    if spec["mode"] == "require":
-        raise ValueError("Required host package version is unavailable")
     staging = root / version
-    private_directory(staging)
+    private_directory(staging, create=True)
     descriptor = os.open(
         staging / "lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
     )

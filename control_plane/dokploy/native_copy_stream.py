@@ -289,7 +289,10 @@ def _read_program(
         compact_host_input,
         host_package,
         HOST_PACKAGE_CHUNK_BYTES,
+        native_package,
     )
+
+    from control_plane.host_package_runtime import program_names
 
     package = host_package()
     action = next(
@@ -297,6 +300,8 @@ def _read_program(
         None,
     )
     wire_payload = compact_host_input(payload) if action is not None else payload
+    if action is not None:
+        package = native_package(action, tuple(sorted(program_names(wire_payload) | {action})))
     encoded = base64.b64encode(json.dumps(wire_payload, sort_keys=True).encode()).decode()
     encoded_program = (
         "" if action is not None else base64.b64encode(zlib.compress(program.encode())).decode()

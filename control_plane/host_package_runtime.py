@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import base64
 import hashlib
@@ -9,6 +11,7 @@ import sys
 import zipfile
 
 HOST_PACKAGE_VERSION_MARKER = "launchplane_host_version"
+HOST_PROGRAM_VERSION_MARKER = "launchplane_host_program_version"
 
 
 def program_names(value: object) -> set[str]:
@@ -67,26 +70,21 @@ def main(package_content: bytes | None = None) -> None:
             name: archive.read("programs/" + name + ".py").decode()
             for name in program_names(raw) | {actions[arguments.action]}
         }
-        if (
-            arguments.program_version
-            and program_version(arguments.action, raw, programs) != arguments.program_version
-        ):
+        action_version = program_version(arguments.action, raw, programs)
+        if arguments.program_version and action_version != arguments.program_version:
             raise ValueError("Packaged host action version differs")
         spec = expand(raw, archive)
         program = archive.read("programs/" + actions[arguments.action] + ".py").decode()
+        filename = json.loads(archive.read("filenames.json"))[arguments.action]
     sys.argv = [arguments.action, base64.b64encode(json.dumps(spec).encode()).decode()]
     if arguments.prefix:
         sys.argv.append(arguments.prefix)
-    exec(
-        compile(
-            program,
-            "<rehearsal>"
-            if arguments.action == "rehearsal"
-            else "<launchplane-host:" + arguments.action + ">",
-            "exec",
-        ),
-        {"spec": spec},
-    )
+    print(HOST_PROGRAM_VERSION_MARKER + "=" + action_version, flush=True)
+    try:
+        exec(compile(program, filename, "exec"), {"spec": spec})
+    finally:
+        print(HOST_PACKAGE_VERSION_MARKER + "=" + version, flush=True)
+        print(HOST_PROGRAM_VERSION_MARKER + "=" + action_version, flush=True)
 
 
 if __name__ == "__main__":

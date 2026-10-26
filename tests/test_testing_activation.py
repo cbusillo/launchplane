@@ -2253,6 +2253,12 @@ class ActivationPortProgramTests(unittest.TestCase):
         from control_plane.odoo_testing_resources import GenericWebTestingResources
         from control_plane.testing_activation import inspect_new_resources
 
+        from control_plane.host_package import host_invocation
+        from control_plane.host_package_runtime import (
+            HOST_PACKAGE_VERSION_MARKER,
+            HOST_PROGRAM_VERSION_MARKER,
+        )
+
         resources = GenericWebTestingResources(
             product="fixture-product",
             context="fixture-context",
@@ -2291,6 +2297,17 @@ class ActivationPortProgramTests(unittest.TestCase):
         for name, program_status, port_output, storage_output, inline, accepted in cases:
             log_lines = [*storage_output, *port_output.splitlines()]
 
+            def upsert(**arguments: Any) -> dict[str, str]:
+                invocation = host_invocation(arguments["schedule_payload"]["script"])
+                assert invocation is not None
+                log_lines.extend(
+                    [
+                        HOST_PACKAGE_VERSION_MARKER + "=" + invocation.package_version,
+                        HOST_PROGRAM_VERSION_MARKER + "=" + invocation.program_version,
+                    ]
+                )
+                return {"scheduleId": "fixture-schedule"}
+
             def run_schedule(**_kwargs: Any) -> str:
                 if program_status:
                     raise dokploy_api.DokployScheduleExecutionFailed(
@@ -2303,6 +2320,7 @@ class ActivationPortProgramTests(unittest.TestCase):
 
             with (
                 self.subTest(name=name),
+                patch("control_plane.dokploy.host_package.ensure_schedule_host_package"),
                 patch(
                     "control_plane.testing_activation.source.read_dokploy_config",
                     return_value=("https://provider.example.invalid", "fixture-token"),
@@ -2322,7 +2340,7 @@ class ActivationPortProgramTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.dokploy.api.upsert_dokploy_schedule",
-                    return_value={"scheduleId": "fixture-schedule"},
+                    side_effect=upsert,
                 ),
                 patch(
                     "control_plane.dokploy.api.run_dokploy_schedule",
@@ -2337,7 +2355,7 @@ class ActivationPortProgramTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
-                    return_value=tuple(log_lines),
+                    side_effect=lambda **_: tuple(log_lines),
                 ),
                 patch(
                     "control_plane.dokploy.api.dokploy_request",

@@ -21,7 +21,11 @@ from control_plane.host_package import (
 )
 from control_plane import host_package as packages
 from control_plane.dokploy import post_deploy
-from control_plane.host_package_runtime import HOST_PACKAGE_VERSION_MARKER
+from control_plane.host_package_runtime import (
+    HOST_PACKAGE_VERSION_MARKER,
+    HOST_PROGRAM_VERSION_MARKER,
+)
+from control_plane.host_package import host_invocation
 from control_plane.host_package_installer import install
 from control_plane.host_package_runtime import expand
 from control_plane.dokploy import api
@@ -34,6 +38,14 @@ class HostPackageTests(unittest.TestCase):
         self.root = Path(temporary).resolve()
         self.enterContext(patch.object(Path, "home", return_value=self.root))
         self.package = host_package()
+        executable = self.root / "bin"
+        executable.mkdir()
+        (executable / "python3").symlink_to(sys.executable)
+        self.bootstrap_environment = {
+            **os.environ,
+            "HOME": str(self.root),
+            "PATH": str(executable) + os.pathsep + os.environ["PATH"],
+        }
 
     def upload(self, content: bytes | None = None) -> Path:
         payload = self.package.content if content is None else content
@@ -128,11 +140,13 @@ class HostPackageTests(unittest.TestCase):
     def test_schedule_bootstrap_fits_provider_and_installs_exact_package(self) -> None:
         scripts: dict[str, str] = {}
         outputs: dict[str, dict[str, str]] = {}
+        names: list[str] = []
 
         def upsert(**arguments: object) -> dict[str, str]:
             payload = arguments["schedule_payload"]
             assert isinstance(payload, dict)
             api.validate_dokploy_schedule_script(payload)
+            names.append(str(arguments["schedule_name"]))
             key = str(len(scripts))
             scripts[key] = str(payload["script"])
             return {"scheduleId": key}
@@ -141,7 +155,7 @@ class HostPackageTests(unittest.TestCase):
             script = scripts[str(arguments["schedule_id"])]
             result = subprocess.run(
                 ["bash", "-c", script],
-                env={**os.environ, "HOME": str(self.root)},
+                env=self.bootstrap_environment,
                 capture_output=True,
                 check=True,
             )
@@ -179,6 +193,7 @@ class HostPackageTests(unittest.TestCase):
                 payload={"script": host_schedule("resources", {}), "serverId": None},
             )
             self.assertEqual(len(scripts), initial + 1)
+            self.assertTrue(set(names[:initial]).isdisjoint(names[initial:]))
         archive = self.root / ".local/state/launchplane-host" / (self.package.version + ".pyz")
         self.assertEqual(archive.read_bytes(), self.package.content)
 
@@ -243,13 +258,17 @@ class HostPackageTests(unittest.TestCase):
             with patch.object(driver, "host_package", return_value=future):
                 ensure()
             self.assertEqual(requests[-1]["version"], self.package.version)
-            self.assertEqual(requests[-1]["mode"], "require")
+            self.assertEqual(len(requests), before + 2)
+            archive = self.root / ".local/state/launchplane-host" / (self.package.version + ".pyz")
+            self.assertEqual(archive.read_bytes(), self.package.content)
 
     def test_installation_precedes_operation_guard_and_checkpoint(self) -> None:
         from contextlib import contextmanager
         from control_plane.dokploy import host_package as driver, source
 
         events: list[str] = []
+        invocation = host_invocation(host_schedule("resources", {}))
+        assert invocation is not None
 
         @contextmanager
         def guard() -> Iterator[None]:
@@ -272,7 +291,10 @@ class HostPackageTests(unittest.TestCase):
             patch.object(
                 post_deploy,
                 "_read_odoo_post_deploy_log_markers",
-                return_value={HOST_PACKAGE_VERSION_MARKER: self.package.version},
+                return_value={
+                    HOST_PACKAGE_VERSION_MARKER: self.package.version,
+                    HOST_PROGRAM_VERSION_MARKER: invocation.program_version,
+                },
             ),
         ):
             post_deploy.run_manual_data_schedule(
@@ -298,7 +320,7 @@ class HostPackageTests(unittest.TestCase):
 
         result = subprocess.run(
             ["bash", "-c", bootstrap_script({"version": "invalid", "mode": "require"})],
-            env={**os.environ, "HOME": str(self.root)},
+            env=self.bootstrap_environment,
             capture_output=True,
             check=False,
         )
@@ -309,3 +331,69 @@ class HostPackageTests(unittest.TestCase):
         )
         self.assertTrue(failure.program_sites)
         self.assertNotIn(str(self.root), result.stdout.decode())
+
+    def test_packaged_activation_runs_storage_and_port_checks(self) -> None:
+        import io
+        from contextlib import redirect_stdout
+        from unittest.mock import Mock
+        from control_plane import testing_activation
+        from control_plane.dokploy import source
+        from tests.support.host_package import execute_host_schedule
+        from tests.test_odoo_testing_resources import TestingResourceProgramTests
+
+        fixture = TestingResourceProgramTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.prepare()
+
+        def run(**arguments: object) -> dict[str, str]:
+            payload = arguments["schedule_payload"]
+            assert isinstance(payload, dict)
+            output = io.StringIO()
+            failed = False
+            with (
+                patch.object(Path, "home", return_value=fixture.root),
+                patch.object(subprocess, "run", side_effect=fixture.docker),
+                redirect_stdout(output),
+            ):
+                try:
+                    execute_host_schedule(str(payload["script"]))
+                except SystemExit:
+                    failed = True
+            evidence = post_deploy.extract_odoo_post_deploy_readback_markers(
+                {"logs": output.getvalue()}
+            )
+            if failed:
+                raise post_deploy.OdooPostDeployReadbackFailure("fixture", evidence=evidence)
+            return evidence
+
+        with (
+            patch.object(
+                source, "read_dokploy_config", return_value=("https://provider.invalid", "fixture")
+            ),
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"appName": fixture.resources.namespace, "serverId": "fixture-server"},
+            ),
+            patch.object(post_deploy, "run_manual_data_schedule", side_effect=run),
+        ):
+            testing_activation.inspect_new_resources(
+                self.root, fixture.resources, set(), lambda _: None
+            )
+            listener = Mock()
+            listener.bind.side_effect = OSError("occupied")
+            with (
+                patch("socket.socket", return_value=listener),
+                self.assertRaises(post_deploy.OdooPostDeployReadbackFailure),
+            ):
+                testing_activation.inspect_new_resources(
+                    self.root, fixture.resources, {12345}, lambda _: None
+                )
+            listener.bind.assert_called_once()
+
+    def test_malformed_package_tail_is_refused_but_native_reserve_is_valid(self) -> None:
+        script = host_schedule("resources", {})
+        self.assertIsNotNone(host_invocation(script + " " * 128))
+        with self.assertRaises(ValueError):
+            api.validate_dokploy_schedule_script({"script": script + "\necho unexpected\n"})

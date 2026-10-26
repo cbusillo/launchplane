@@ -1,6 +1,5 @@
 """Activate only new testing resources; retain the old recipient and unknown effects."""
 
-import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 import hmac
@@ -801,14 +800,10 @@ def inspect_new_resources(
         compose_name=resources.context,
         target_payload=payload,
     )
-    encoded = base64.b64encode(json.dumps(sorted(ports)).encode()).decode()
-    program = (
-        resources.script("readback")
-        + "\npython3 - "
-        + encoded
-        + " <<'LP_PORTS'\n"
-        + PORT_INSPECTION_PROGRAM
-        + "\nLP_PORTS\n"
+    from control_plane.host_package import host_schedule
+
+    program = host_schedule(
+        "activation", {"resources": resources.host_spec("readback"), "ports": sorted(ports)}
     )
     evidence = post_deploy.run_manual_data_schedule(
         host=host,

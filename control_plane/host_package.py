@@ -44,8 +44,16 @@ def host_package() -> HostPackage:
     from control_plane.preview_clean_snapshot import PREVIEW_CLEAN_SNAPSHOT_PROGRAM
     from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
     from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
+    from control_plane.testing_activation import PORT_INSPECTION_PROGRAM
 
     programs = {
+        "activation": (
+            "import base64,json,sys\nactivation=json.loads(base64.b64decode(sys.argv[1]))\n"
+            "sys.argv=[sys.argv[0],base64.b64encode(json.dumps(activation['resources']).encode()).decode()]\n"
+            + ODOO_TESTING_RESOURCE_PROGRAM
+            + "\nsys.argv=[sys.argv[0],base64.b64encode(json.dumps(activation['ports']).encode()).decode()]\n"
+            + PORT_INSPECTION_PROGRAM
+        ),
         "restore": FRESH_TESTING_RESTORE_HOST_PROGRAM,
         "rehearsal": rehearsal_host_program(),
         "resources": ODOO_TESTING_RESOURCE_PROGRAM,
@@ -65,6 +73,7 @@ def host_package() -> HostPackage:
     actions = {
         name: name
         for name in (
+            "activation",
             "restore",
             "rehearsal",
             "resources",
@@ -74,12 +83,40 @@ def host_package() -> HostPackage:
             "preview_snapshot",
         )
     }
+    return build_package(programs, actions, include_installer=True)
+
+
+@cache
+def native_package(action: str, names: tuple[str, ...]) -> HostPackage:
+    full = host_package()
+    return build_package(
+        {name: full.programs[name] for name in names},
+        {action: full.actions[action]},
+        include_installer=False,
+    )
+
+
+def build_package(
+    programs: dict[str, str], actions: dict[str, str], *, include_installer: bool
+) -> HostPackage:
+    from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
+
     members = {
         "__main__.py": Path(__file__).with_name("host_package_runtime.py").read_bytes(),
-        "installer.py": Path(__file__).with_name("host_package_installer.py").read_bytes(),
+        "filenames.json": json.dumps(
+            {
+                name: REHEARSAL_HOST_FILENAME
+                if name == "rehearsal"
+                else "<launchplane-host:" + name + ">"
+                for name in actions
+            },
+            sort_keys=True,
+        ).encode(),
         "actions.json": json.dumps(actions, sort_keys=True).encode(),
         **{"programs/" + name + ".py": program.encode() for name, program in programs.items()},
     }
+    if include_installer:
+        members["installer.py"] = Path(__file__).with_name("host_package_installer.py").read_bytes()
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name, content in sorted(members.items()):
@@ -106,7 +143,7 @@ def compact_host_input(value: object) -> object:
     return value
 
 
-def host_command(action: str, spec: dict[str, object], *, prefix: str = "") -> str:
+def host_command(action: str, spec: dict[str, object]) -> str:
     package = host_package()
     if action not in package.actions:
         raise ValueError("Unknown packaged host action")
@@ -119,8 +156,6 @@ def host_command(action: str, spec: dict[str, object], *, prefix: str = "") -> s
         "--input",
         "-",
     ]
-    if prefix:
-        arguments.extend(["--prefix", prefix])
     return "python3 " + path + " " + shlex.join(arguments)
 
 
@@ -148,6 +183,14 @@ class HostInvocation:
 
 
 def host_invocation(script: object) -> HostInvocation | None:
+    normalized = script.rstrip() + "\n" if isinstance(script, str) else script
+    result = parse_host_invocation(normalized)
+    if result is None and isinstance(script, str) and HOST_PACKAGE_PATH_PREFIX in script:
+        raise ValueError("Malformed packaged host invocation")
+    return result
+
+
+def parse_host_invocation(script: object) -> HostInvocation | None:
     if not isinstance(script, str) or not script.startswith(HOST_SCHEDULE_HEADER):
         return None
     command, separator, tail = script[len(HOST_SCHEDULE_HEADER) :].partition(
@@ -184,7 +227,10 @@ def host_schedules_match(observed: object, expected: str) -> bool:
     current = host_invocation(expected)
     if current is None:
         return False
-    previous = host_invocation(observed)
+    try:
+        previous = host_invocation(observed)
+    except ValueError:
+        return False
     if previous is not None:
         return (previous.action, previous.program_version, previous.spec) == (
             current.action,

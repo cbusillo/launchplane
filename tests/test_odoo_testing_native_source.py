@@ -658,6 +658,27 @@ class NativeSourceTransportTests(unittest.TestCase):
             )
         self.assertFalse(connection.sent)
 
+    def test_chunk_transport_contains_only_its_action_program(self) -> None:
+        import zipfile
+
+        connection = Connection()
+        transport._read_program(
+            connection,
+            program=transport.NATIVE_TESTING_CHUNK_WRITE_PROGRAM,
+            payload={},
+            timeout_seconds=5,
+            receive=lambda _: None,
+        )
+        lines = next(message for message in connection.sent if message.startswith("{")).splitlines()
+        content = b"".join(base64.b64decode(line) for line in lines[1:])
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            programs = [
+                archive.read(name).decode()
+                for name in archive.namelist()
+                if name.startswith("programs/")
+            ]
+        self.assertEqual(programs, [transport.NATIVE_TESTING_CHUNK_WRITE_PROGRAM])
+
     def test_truncation_never_supplies_completion(self) -> None:
         connection = Connection({"type": "data", "part": "database", "data": "Zml4dHVyZQ=="})
         with self.assertRaises(TimeoutError):
