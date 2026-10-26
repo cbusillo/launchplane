@@ -437,12 +437,17 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
 
     def test_reconciled_refusal_keeps_an_interrupted_notification_outcome_unknown(self) -> None:
         self.reject(reason="promotion_required")
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
         queued = self.store.list_outbox_delivery_records()[0].model_copy(
             update={"provider_operation_key": "interrupted-send", "provider_id": "discord"}
         )
         self.now += timedelta(seconds=2)
         self.healthy_production()
         self.monitor()
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id).resolution_reason,
+            PRODUCTION_REQUEST_REFUSED,
+        )
         sender = Mock()
         started = Mock()
         result = deliver_public_ingress_notification_outbox_delivery(

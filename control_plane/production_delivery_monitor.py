@@ -148,7 +148,7 @@ def _resolve_guard_refusal(
             != "verified"
         ):
             raise ValueError(
-                "Production health must pass freshly after the last refusal or retirement."
+                "Production health must pass freshly after the last refusal."
             )
     _require_verified_production_runtime(store, profile, lane, now)
     if not _is_refusal_only_incident(store, incident):
