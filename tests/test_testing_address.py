@@ -160,6 +160,11 @@ class TestingAddressTests(unittest.TestCase):
 
     def test_canonical_amendment_preserves_copy_and_original_receipts(self) -> None:
         legacy_payload = self.plan.model_dump(mode="json")
+        legacy_payload.pop("canonical_settings", None)
+        self.assertEqual(
+            TestingAddressPlan.model_validate(legacy_payload).digest,
+            canonical_json_sha256(legacy_payload),
+        )
         legacy_payload.pop("retained_automation", None)
         self.assertEqual(TestingAddressPlan.model_validate(legacy_payload).digest, self.plan.digest)
         for automation in ({"foreign-target": True}, {"retained-target": "true"}):

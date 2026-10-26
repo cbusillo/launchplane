@@ -437,7 +437,7 @@ def plan_testing_address(
             or route.new_backend not in frame["old_endpoints"]
         ):
             raise ValueError("The original testing route or new canonical hostname is unverified.")
-        return TestingAddressPlan(
+        plan = TestingAddressPlan(
             product=product,
             context=context,
             retirement_operation_id=retirement_operation_id,
@@ -460,3 +460,15 @@ def plan_testing_address(
             retirement_sha256=canonical_json_sha256(store._payload_dict(retained)),
             created_at=datetime.now(UTC),
         )
+        from control_plane.testing_address_settings import plan_canonical_settings
+        from control_plane.connection_isolation_qualification import (
+            require_connection_isolation_lane,
+        )
+
+        require_connection_isolation_lane(
+            store, product=product, context=context, instance="testing"
+        )
+        settings = plan_canonical_settings(
+            host=host, token=token, plan=plan, publication=publication, provider=current
+        )
+        return plan.model_copy(update={"canonical_settings": settings})

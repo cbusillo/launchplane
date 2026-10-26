@@ -1407,9 +1407,41 @@ Native refresh and later rebuild admission resolve this additive address receipt
 A later rebuild keeps the original hostname as an alias. Ordinary deploy and
 release checks continue to validate the original copy custody, and completed
 restore rendering uses the amended canonical address without rewriting its
-generation witness. After amendment readback, reapply the testing canonical Odoo
-settings through the existing supported service operation. The address amendment
-does not itself deploy, restore, start or delete an application.
+generation witness.
+
+New address plans also bind canonical settings application. They preserve the
+current provider payload and change only its canonical URL and freeze parameter,
+including the existing website bootstrap URL. The plan binds the remaining
+provider environment, the sole native website and its database values. Planning
+uses the native copy's storage/network inspection and a read-only database probe.
+Known staff, needed-copy, use and sharing protections remain refusals. Original
+retired executors stay excluded; their records and UNKNOWN fences never change.
+The synchronous testing lane reservation also excludes current maintenance,
+isolation and deployments. Only the plan's archived retirement operation is
+excluded from that active-owner check, under its retained executor lock and
+unchanged custody proof.
+
+After the canonical metadata commit, the same address operation runs three
+durable phases: update that target's payload, recreate its current immutable
+artifact, and release its payload-bound web gate after integration readback.
+The existing native copy lock covers the gate writer. It never invokes module
+updates, data restoration, user normalization or API-key provisioning. Before
+recreating, the existing private readiness probe verifies current local
+credentials without a login or credential write. No secret or other provider
+environment value is added. The original request and key own every phase;
+an uncertain deploy trigger is observed by its original title and never blindly
+repeated. A committed address cannot be cancelled to bypass an unfinished
+settings phase.
+
+`canonical_settings_verified` requires an independent read of the current
+website domain, `web.base.url` and its freeze value, the matching web gate and
+both public HTTPS runtime identities. A released gate alone does not prove
+that startup applied the settings. Editing override intent resets its old
+apply evidence; the canonical result does not certify unrelated pending intent.
+Historical saved plans omit this settings step and retain their original digest
+and behavior. They never acquire an unreviewed write. The operation does not
+replace the current copy, restore data, start a retained recipient or delete an
+application.
 
 ## Native testing worker integration
 

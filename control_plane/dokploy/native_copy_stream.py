@@ -540,6 +540,9 @@ def _read_remote(
         raise NativeSourceUnavailable("The provider source stream is incomplete.") from None
 
 
+run_managed_server_program = _read_remote
+
+
 NATIVE_ODOO_SOURCE_READ_PROGRAM = (
     FILESTORE_TAR_WARNING_LIBRARY
     + r"""

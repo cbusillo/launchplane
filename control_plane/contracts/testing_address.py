@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from pydantic import Field, StrictBool, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.testing_address_settings import TestingAddressSettingsPlan
 from control_plane.contracts.prepared_public_site import FrozenRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -42,6 +43,9 @@ class TestingAddressPlan(FrozenRecord):
     operation_sha256: dict[str, str]
     retirement_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     created_at: datetime
+    canonical_settings: TestingAddressSettingsPlan | None = Field(
+        default=None, exclude_if=lambda value: value is None, repr=False
+    )
 
     @property
     def digest(self) -> str:
