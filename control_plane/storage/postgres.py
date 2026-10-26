@@ -9511,11 +9511,38 @@ class PostgresRecordStore(HumanSessionStore):
     def list_held_odoo_preview_reservations(
         self, *, product: str, limit: int = 101
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        return self._list_odoo_preview_reservations(product=product, limit=min(max(limit, 1), 1001))
+
+    def list_odoo_preview_cleanup_originals(
+        self, *, product: str, number: int
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        return self._list_odoo_preview_reservations(
+            product=product, number=number, include_failed=True
+        )
+
+    def _list_odoo_preview_reservations(
+        self,
+        *,
+        product: str,
+        limit: int | None = None,
+        number: int | None = None,
+        include_failed: bool = False,
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
         from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
         from control_plane.product_reconcile import reconcile_reservation_scope
 
         original = aliased(LaunchplaneIdempotencyRow)
+        original_filters = (
+            (
+                original.payload["response_payload"]["original_intent"]["issued_plan"][
+                    "plan_request"
+                ]["pr_number"].as_integer()
+                == number,
+            )
+            if number is not None
+            else ()
+        )
         retained_product = (
             select(original.record_id)
             .where(
@@ -9525,8 +9552,31 @@ class PostgresRecordStore(HumanSessionStore):
                 original.request_fingerprint == LaunchplaneIdempotencyRow.request_fingerprint,
                 original.payload["response_payload"]["original_intent"]["product"].as_string()
                 == product,
+                *original_filters,
             )
             .exists()
+        )
+        held_states = LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required"))
+        states = (
+            or_(
+                held_states,
+                and_(
+                    LaunchplaneIdempotencyRow.state == "completed",
+                    LaunchplaneIdempotencyRow.payload["response_payload"]["result"]["status"]
+                    .as_string()
+                    .in_(("fail", "blocked")),
+                ),
+            )
+            if include_failed
+            else held_states
+        )
+        product_scope = (
+            retained_product
+            if number is not None
+            else or_(
+                LaunchplaneIdempotencyRow.scope == reconcile_reservation_scope(product),
+                retained_product,
+            )
         )
         return self._list_models(
             model_type=LaunchplaneIdempotencyRecord,
@@ -9535,14 +9585,11 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneIdempotencyRow.route_path.in_(
                     (ODOO_PREVIEW_APPLY_ROUTE, PREVIEW_IDLE_ROUTE)
                 ),
-                LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
-                or_(
-                    LaunchplaneIdempotencyRow.scope == reconcile_reservation_scope(product),
-                    retained_product,
-                ),
+                states,
+                product_scope,
             ),
             order_by=(LaunchplaneIdempotencyRow.record_id,),
-            limit=min(max(limit, 1), 1001),
+            limit=limit,
         )
 
     def lookup_existing_mutation_reservation(
