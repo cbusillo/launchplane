@@ -439,6 +439,25 @@ class OdooPreviewApplyOperation:
     disposable_cleanup: bool = False
     route_path: str = ODOO_PREVIEW_APPLY_ROUTE
 
+    def require_refresh_lifecycle(self) -> None:
+        plan = self.adapter._issued_plan
+        if plan.operation != "refresh" or plan.dry_run_plan.compose_ref.startswith("${created."):
+            return
+        preview = find_preview_record(
+            record_store=cast(LaunchplaneMutationStore, self.adapter._record_store),
+            context_name=self.adapter._profile.preview.context,
+            anchor_repo=self.adapter._profile.repository.partition("/")[2],
+            anchor_pr_number=plan.plan_request.pr_number,
+        )
+        if preview is None:
+            raise OdooPreviewPlanProvenanceError(
+                code="odoo_preview_lifecycle_unavailable",
+                message=(
+                    "The existing preview has no lifecycle authority. Preserve its original "
+                    "operation and data before rebuilding it."
+                ),
+            )
+
     def run(
         self, store: DurableProviderOperationStore, *, allow_mutation: bool = True
     ) -> DurableProviderOperationResult:
@@ -558,6 +577,16 @@ class OdooPreviewApplyOperation:
                     raise ValueError("Logical preview executor exclusion was lost.")
 
             self.adapter.execution_check = check_both
+            if (
+                allow_mutation
+                and postgres.read_idempotency_record(
+                    scope=self.reservation_scope,
+                    route_path=self.route_path,
+                    idempotency_key=self.idempotency_key,
+                )
+                is None
+            ):
+                self.require_refresh_lifecycle()
             return run_durable_provider_operation(
                 store=store,
                 scope=self.reservation_scope,
