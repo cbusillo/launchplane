@@ -2,11 +2,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, OutboxWithIdempotencyRequest
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.workflows.public_ingress_monitor import (
     INCIDENT_RESOLVED_SUPERSESSION_ACTION,
     PublicIngressNotificationDriverSet,
+    _reconcile_duplicate_incident,
+    _public_ingress_notification_outbox_deliveries,
 )
 from tests.support.stores import _sqlite_database_url
 from tests import test_public_ingress_direct_outbox as direct_outbox
@@ -14,6 +16,46 @@ from tests.test_public_ingress_monitor import _notification_policy, _profile
 
 
 class IncidentOutboxSupersessionTests(unittest.TestCase):
+    def test_duplicate_cleanup_does_not_send_endpoint_recovery(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            destination = direct_outbox.DirectNotificationOutboxTests._destination("email")
+            store.write_public_ingress_notification_policy_record(_notification_policy(destination))
+            sent: list[object] = []
+            drivers = PublicIngressNotificationDriverSet(
+                email_sender=lambda _destination, message: sent.append(message),
+                secret_resolver=lambda _name: "mock-credential",
+            )
+            direct_outbox.DirectNotificationOutboxTests._probe(store, 503, "2026-05-29T12:00:00Z")
+            direct_outbox.DirectNotificationOutboxTests._work(
+                store, drivers, "2026-05-29T12:00:01Z"
+            )
+            self.assertEqual(len(sent), 1)
+            incident = store.list_public_ingress_incident_records()[0]
+            resolved, event = _reconcile_duplicate_incident(
+                incident=incident, reconciled_at="2026-05-29T12:01:00Z"
+            )
+            store.write_public_ingress_incident_record(resolved)
+            observation = store.read_public_ingress_observation_record(
+                resolved.resolved_observation_id
+            )
+            for delivery in _public_ingress_notification_outbox_deliveries(
+                record_store=store,
+                incident_records=(resolved,),
+                incident_events=(event,),
+                observation=observation,
+            ):
+                store.enqueue_outbox_delivery_with_idempotency(
+                    OutboxWithIdempotencyRequest(delivery=delivery)
+                )
+            direct_outbox.DirectNotificationOutboxTests._work(
+                store, drivers, "2026-05-29T12:02:00Z"
+            )
+            self.assertEqual(len(sent), 1)
+
     def test_resolved_incident_backlog_is_superseded_without_sending(self) -> None:
         for kind in ("email", "discord", "github_issue"):
             with self.subTest(kind=kind), TemporaryDirectory() as directory:

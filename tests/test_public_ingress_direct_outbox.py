@@ -267,6 +267,15 @@ class DirectNotificationOutboxTests(unittest.TestCase):
                 self.assertEqual(len(attempts), 1)
                 self.assertEqual(attempts[0].delivery_status, "delivered")
                 self.assertEqual(store.list_public_ingress_incident_records()[0].status, "open")
+                self._probe(store, 200, "2026-05-29T12:04:00Z")
+                self.assertEqual(
+                    self._work(store, drivers, "2026-05-29T12:04:01Z").status, "delivered"
+                )
+                self.assertEqual(len(sent), 2)
+                resolved = store.list_public_ingress_notification_attempt_records(event="resolved")
+                self.assertEqual(len(resolved), 1)
+                self.assertEqual(resolved[0].delivery_status, "delivered")
+                self.assertEqual(self._work(store, drivers, "2026-05-29T12:05:01Z").status, "idle")
                 store.close()
 
     def test_interrupted_send_is_explicitly_uncertain_and_not_resent(self) -> None:

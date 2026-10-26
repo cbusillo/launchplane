@@ -77,6 +77,7 @@ class MonitorIncidentLifecycleTests(unittest.TestCase):
             )
             self.assertEqual(reconciled.records[-1].purpose, "reconciliation")
             self.assertEqual(reconciled.records[-1].status, "skipped")
+            self.assertEqual(reconciled.records[-1].monitoring_intent, original.monitoring_intent)
 
     def test_store_backed_worker_closes_recovered_issue_and_suppresses_old_failure(self) -> None:
         with TemporaryDirectory() as directory:
@@ -92,7 +93,7 @@ class MonitorIncidentLifecycleTests(unittest.TestCase):
                         github_repository="example/site",
                         github_label="incident",
                     )
-                )
+                ).model_copy(update={"reminder_interval_seconds": 900})
             )
             actions: list[str] = []
 
@@ -121,6 +122,10 @@ class MonitorIncidentLifecycleTests(unittest.TestCase):
             worker()
             self.assertEqual(actions, ["create"])
             monitor("2026-07-27T16:20:00Z", 503)
+            queued = store.list_outbox_delivery_records(
+                states=("pending",), kind="public_ingress_notification"
+            )
+            self.assertTrue(any(row.payload["attempt"]["event"] == "reminder" for row in queued))
             monitor("2026-07-27T16:21:00Z", 200)
             store.close()
             store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))

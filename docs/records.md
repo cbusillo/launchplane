@@ -1351,17 +1351,14 @@ discovery, the stale probe is retained as evidence but cannot open, update, or
 resolve an incident; the next monitor cycle reconciles against current
 authority.
 
-Open incidents on removed stable lanes remain in the scheduler's lane selection
-while their product is active. The monitor compares their lane identity against
-the current profile and reconciles obsolete checks as `monitoring_intent_changed`,
-with skipped evidence and the same transactional profile guard. Delivery and
-deploy-fence incidents retain their own recovery rules.
+Removing a stable lane also reconciles its obsolete health incidents through
+that guarded path, preserving the last observed intent and probe. Delivery and
+deploy-fence incidents still require their own proved recovery.
 
-The notification worker suppresses queued failure notices after resolution, but
-delivers the resolved event bound to that incident's resolved observation. Retired
-production refusals remain suppressed. GitHub close delivery retains its marker
-lookup and interrupted-close reconciliation; direct sends retain their existing
-uncertain-outcome protection.
+Recovery notifications follow a delivered failure notice to the same policy and
+destination, bound to the resolved observation/event. Duplicate cleanup and
+retired refusals stay silent. Queued obsolete failures remain superseded, and
+uncertain sends retain their recovery protection.
 
 ### Lane health and identity history
 

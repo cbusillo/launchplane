@@ -1315,6 +1315,8 @@ def _monitoring_reconciliation_observations(
             product=profile.product, status="open"
         ):
             lane = lanes.get((incident.context, incident.instance))
+            if lane is None and incident.instance not in {"prod", "testing"}:
+                continue
             if (
                 lane_keys is not None
                 and (incident.product, incident.context, incident.instance) not in lane_keys
@@ -1337,14 +1339,29 @@ def _monitoring_reconciliation_observations(
                 )
             if target_key in eligible_target_keys:
                 continue
+            previous = (
+                record_store.list_public_ingress_observation_records(
+                    product=incident.product,
+                    context_name=incident.context,
+                    instance_name=incident.instance,
+                    check_name=incident.check_name,
+                    check_kind=incident.check_kind,
+                    limit=1,
+                )
+                if lane is None
+                else ()
+            )
+            if lane is None and not previous:
+                continue
             reconciliations.append(
                 (
                     _monitoring_reconciliation_observation(
                         incident=incident,
                         monitoring_intent=lane.health_monitoring.monitoring_intent
                         if lane
-                        else "prelaunch",
+                        else previous[0].monitoring_intent,
                         observed_at=observed_at,
+                        lane_removed=lane is None,
                     ),
                     product_profile_record_sha256(profile),
                 )
@@ -1357,12 +1374,15 @@ def _monitoring_reconciliation_observation(
     incident: PublicIngressIncidentRecord,
     monitoring_intent: ProductLaneMonitoringIntent,
     observed_at: str,
+    lane_removed: bool = False,
 ) -> PublicIngressObservationRecord:
     summary = (
         f"Monitoring configuration changed for {incident.product}/{incident.instance}; "
         f"{incident.check_kind} check {incident.check_name!r} is no longer incident-eligible "
         f"under {monitoring_intent} intent."
     )
+    if lane_removed:
+        summary = f"Lane removed from the current profile for {incident.product}/{incident.instance}; prior {incident.check_kind} check {incident.check_name!r} is no longer incident-eligible."
     return PublicIngressObservationRecord(
         record_id=build_public_ingress_reconciliation_observation_id(
             product=incident.product,
@@ -3652,6 +3672,18 @@ def public_ingress_notification_drivers(
     )
 
 
+def is_matching_incident_resolution(
+    incident: PublicIngressIncidentRecord, attempt: dict[str, object]
+) -> bool:
+    return (
+        attempt.get("event") == "resolved"
+        and incident.status == "resolved"
+        and incident.resolution_reason in {"recovered", "monitoring_intent_changed"}
+        and attempt.get("observation_id") == incident.resolved_observation_id
+        and attempt.get("incident_event_id") == incident.latest_material_event_id
+    )
+
+
 def deliver_public_ingress_notification_outbox_delivery(
     *,
     record: OutboxDeliveryRecord,
@@ -3676,11 +3708,18 @@ def deliver_public_ingress_notification_outbox_delivery(
         if record_store is not None:
             incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
             event = _public_ingress_event_value(attempt_payload.get("event"))
-            matching_resolution = (
-                event == "resolved"
-                and incident.status == "resolved"
-                and attempt_payload.get("observation_id") == incident.resolved_observation_id
-            )
+            matching_resolution = is_matching_incident_resolution(incident, attempt_payload)
+            if matching_resolution:
+                matching_resolution = any(
+                    attempt.delivery_status == "delivered"
+                    and attempt.event != "resolved"
+                    and attempt.policy_id == attempt_payload.get("policy_id")
+                    and attempt.destination_id == attempt_payload.get("destination_id")
+                    for attempt in record_store.list_public_ingress_notification_attempt_records(
+                        incident_id=incident.incident_id,
+                        destination_kind=destination_payload.get("kind", ""),
+                    )
+                )
             retired_refusal = (
                 incident.status == "resolved"
                 and incident.resolution_reason == PRODUCTION_REQUEST_REFUSED

@@ -8697,12 +8697,24 @@ class PostgresRecordStore(HumanSessionStore):
                     PublicIngressIncidentRecord.model_validate(value.payload)
                     for value in session.scalars(incident_statement)
                 ]
+                from control_plane.workflows.public_ingress_monitor import (
+                    is_matching_incident_resolution,
+                )
+
+                attempt = record.payload.get("attempt")
                 active_states = [
                     [value.incident_id, value.material_fingerprint_sha256]
                     for value in current
-                    if value.status == "open" and value.notification_state == "active"
+                    if value.notification_state == "active"
+                    and (
+                        value.status == "open"
+                        or (
+                            record.aggregate_type == "public_ingress_incident"
+                            and isinstance(attempt, dict)
+                            and is_matching_incident_resolution(value, attempt)
+                        )
+                    )
                 ]
-                attempt = record.payload.get("attempt")
                 event_id = attempt.get("incident_event_id") if isinstance(attempt, dict) else None
                 stale_event = record.aggregate_type == "public_ingress_incident" and any(
                     value.latest_material_event in {"opened", "updated"}
