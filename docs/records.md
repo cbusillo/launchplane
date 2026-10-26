@@ -1355,11 +1355,6 @@ Removing a stable lane also reconciles its obsolete health incidents through
 that guarded path, preserving the last observed intent and probe. Delivery and
 deploy-fence incidents still require their own proved recovery.
 
-Recovery notifications follow a delivered failure notice to the same policy and
-destination, bound to the resolved observation/event. Duplicate cleanup and
-retired refusals stay silent. Queued obsolete failures remain superseded, and
-uncertain sends retain their recovery protection.
-
 ### Lane health and identity history
 
 `GET /v1/products/{product}/environments/{environment}/health-history` reads
@@ -1590,8 +1585,13 @@ A material change clears acknowledgement and remains immediately deliverable.
 Silenced incidents preserve observations and events but suppress update and
 reminder delivery only until their required `silenced_until`; expiry reactivates
 delivery and the next unchanged failure may emit the current overdue reminder.
-Resolution remains recorded; durable deliveries for resolved incidents are
-superseded without contacting external sinks. A recovery
+Recovery waits for unsettled failure deliveries to the same incident, policy
+and destination without consuming its retry budget. It follows a delivered
+failure and is bound to the exact resolved observation/event, including for
+acknowledged or silenced incidents. Duplicate cleanup, retired refusals and
+undelivered backlogs stay silent. An uncertain direct send is never replayed
+and supplies no delivered-failure proof; an interrupted GitHub create permits
+marker lookup and closure only of the issue actually found. A recovery
 observation resolves only after the health check's configured consecutive-pass
 threshold and writes one `resolved` event with `resolution_reason = recovered`.
 If monitoring authority makes a check ineligible, a typed reconciliation
@@ -1666,8 +1666,8 @@ sent batch; later observations cannot move that deadline. Overdue windows fold
 into one current window before a send attempt; retries retain their original
 identity, backoff and attempt budget. A new critical condition still pages at once.
 
-Before delivery, both paths re-read current state. Cleared incidents and obsolete
-material alerts are superseded. Discord uses the event-bound material state and
+Before delivery, both paths re-read current state. Obsolete failure and material
+alerts are superseded. Discord uses the event-bound material state and
 final admission check instead of the old startup-backlog message rewrite. Email
 retains its existing backlog compaction. Summaries render current conditions and compare
 them with the latest posted or provider-started snapshot, ordered by send window.

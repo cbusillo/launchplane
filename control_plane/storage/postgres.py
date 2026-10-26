@@ -8507,9 +8507,35 @@ class PostgresRecordStore(HumanSessionStore):
                 observed_at=observed_at,
                 lease_seconds=lease_seconds,
             )
+            predecessor = aliased(LaunchplaneOutboxDeliveryRow)
+            notification_payload = LaunchplaneOutboxDeliveryRow.payload["payload"]
+            predecessor_payload = predecessor.payload["payload"]
+            unsettled_failure = (
+                select(predecessor.delivery_id)
+                .where(
+                    predecessor.kind == "public_ingress_notification",
+                    predecessor.aggregate_type == "public_ingress_incident",
+                    predecessor.aggregate_id == LaunchplaneOutboxDeliveryRow.aggregate_id,
+                    predecessor.state.in_(("pending", "running", "reconcile_required")),
+                    predecessor_payload["attempt"]["event"].as_string() != "resolved",
+                    predecessor_payload["attempt"]["policy_id"].as_string()
+                    == notification_payload["attempt"]["policy_id"].as_string(),
+                    predecessor_payload["destination"]["destination_id"].as_string()
+                    == notification_payload["destination"]["destination_id"].as_string(),
+                    predecessor_payload["destination"]["kind"].as_string()
+                    == notification_payload["destination"]["kind"].as_string(),
+                )
+                .exists()
+            )
+            recovery_notification = and_(
+                LaunchplaneOutboxDeliveryRow.kind == "public_ingress_notification",
+                LaunchplaneOutboxDeliveryRow.aggregate_type == "public_ingress_incident",
+                notification_payload["attempt"]["event"].as_string() == "resolved",
+            )
             statement = (
                 select(LaunchplaneOutboxDeliveryRow)
                 .where(
+                    or_(~recovery_notification, ~unsettled_failure),
                     LaunchplaneOutboxDeliveryRow.state.in_(
                         ("pending", "running", "reconcile_required")
                     ),
@@ -8705,14 +8731,11 @@ class PostgresRecordStore(HumanSessionStore):
                 active_states = [
                     [value.incident_id, value.material_fingerprint_sha256]
                     for value in current
-                    if value.notification_state == "active"
-                    and (
-                        value.status == "open"
-                        or (
-                            record.aggregate_type == "public_ingress_incident"
-                            and isinstance(attempt, dict)
-                            and is_matching_incident_resolution(value, attempt)
-                        )
+                    if (value.notification_state == "active" and value.status == "open")
+                    or (
+                        record.aggregate_type == "public_ingress_incident"
+                        and isinstance(attempt, dict)
+                        and is_matching_incident_resolution(value, attempt)
                     )
                 ]
                 event_id = attempt.get("incident_event_id") if isinstance(attempt, dict) else None

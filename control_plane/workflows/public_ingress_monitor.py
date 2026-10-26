@@ -1462,13 +1462,20 @@ def deliver_public_ingress_incident_notifications(
                     incident_id=incident.incident_id,
                     destination_kind=destination.kind,
                 )
-                delivery = drivers.send(
-                    destination=destination,
-                    event=event,
-                    incident=incident,
-                    observation=observation,
-                    previous_attempts=previous_attempts,
-                )
+                if event == "resolved" and not failure_notification_delivered(
+                    previous_attempts, policy.policy_id, destination.destination_id
+                ):
+                    delivery = PublicIngressNotificationDelivery(
+                        delivery_status="skipped", action=INCIDENT_RESOLVED_SUPERSESSION_ACTION
+                    )
+                else:
+                    delivery = drivers.send(
+                        destination=destination,
+                        event=event,
+                        incident=incident,
+                        observation=observation,
+                        previous_attempts=previous_attempts,
+                    )
             attempt = PublicIngressNotificationAttemptRecord(
                 attempt_id=attempt_id,
                 incident_id=incident.incident_id,
@@ -2306,6 +2313,8 @@ def _reconcile_duplicate_incident(
             previous_material_fingerprint_sha256=incident.material_fingerprint_sha256,
             severity=incident.severity,
             summary=summary,
+            delivery_eligible=False,
+            suppression_reason="migration_reconciliation",
         ),
     )
 
@@ -3672,6 +3681,20 @@ def public_ingress_notification_drivers(
     )
 
 
+def failure_notification_delivered(
+    attempts: tuple[PublicIngressNotificationAttemptRecord, ...],
+    policy_id: str,
+    destination_id: str,
+) -> bool:
+    return any(
+        attempt.delivery_status == "delivered"
+        and attempt.event != "resolved"
+        and attempt.policy_id == policy_id
+        and attempt.destination_id == destination_id
+        for attempt in attempts
+    )
+
+
 def is_matching_incident_resolution(
     incident: PublicIngressIncidentRecord, attempt: dict[str, object]
 ) -> bool:
@@ -3710,16 +3733,31 @@ def deliver_public_ingress_notification_outbox_delivery(
             event = _public_ingress_event_value(attempt_payload.get("event"))
             matching_resolution = is_matching_incident_resolution(incident, attempt_payload)
             if matching_resolution:
-                matching_resolution = any(
-                    attempt.delivery_status == "delivered"
-                    and attempt.event != "resolved"
-                    and attempt.policy_id == attempt_payload.get("policy_id")
-                    and attempt.destination_id == attempt_payload.get("destination_id")
-                    for attempt in record_store.list_public_ingress_notification_attempt_records(
+                matching_resolution = failure_notification_delivered(
+                    record_store.list_public_ingress_notification_attempt_records(
                         incident_id=incident.incident_id,
                         destination_kind=_required_payload_text(destination_payload, "kind"),
-                    )
+                    ),
+                    _required_payload_text(attempt_payload, "policy_id"),
+                    _required_payload_text(attempt_payload, "destination_id"),
                 )
+                if not matching_resolution and destination_payload.get("kind") == "github_issue":
+                    matching_resolution = any(
+                        previous.provider_operation_key
+                        and _dict_payload(previous.payload.get("attempt")).get("event")
+                        != "resolved"
+                        and _dict_payload(previous.payload.get("attempt")).get("policy_id")
+                        == attempt_payload.get("policy_id")
+                        and _dict_payload(previous.payload.get("destination")).get("destination_id")
+                        == destination_payload.get("destination_id")
+                        and _dict_payload(previous.payload.get("destination")).get("kind")
+                        == "github_issue"
+                        for previous in record_store.list_outbox_delivery_records(
+                            kind="public_ingress_notification",
+                            aggregate_type="public_ingress_incident",
+                            aggregate_id=incident.incident_id,
+                        )
+                    )
             retired_refusal = (
                 incident.status == "resolved"
                 and incident.resolution_reason == PRODUCTION_REQUEST_REFUSED
@@ -3741,7 +3779,7 @@ def deliver_public_ingress_notification_outbox_delivery(
                     reason=reason,
                 )
             if destination_payload.get("kind") == "discord":
-                if incident.notification_state != "active":
+                if incident.notification_state != "active" and not matching_resolution:
                     return _superseded_incident_outbox_delivery(
                         record=record, reason="incident_not_active"
                     )
@@ -3952,6 +3990,17 @@ def _superseded_incident_outbox_delivery(
 
 
 class PublicIngressNotificationOutboxStore(PublicIngressMonitorStore, Protocol):
+    def list_outbox_delivery_records(
+        self,
+        *,
+        states: tuple[str, ...] = (),
+        kind: str = "",
+        aggregate_type: str = "",
+        aggregate_id: str = "",
+        limit: int | None = None,
+        newest_first: bool = False,
+    ) -> tuple[OutboxDeliveryRecord, ...]: ...
+
     def enqueue_outbox_delivery_with_idempotency(
         self, request: OutboxWithIdempotencyRequest
     ) -> OutboxDeliveryRecord: ...

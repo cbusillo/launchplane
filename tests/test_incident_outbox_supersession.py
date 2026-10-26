@@ -16,6 +16,60 @@ from tests.test_public_ingress_monitor import _notification_policy, _profile
 
 
 class IncidentOutboxSupersessionTests(unittest.TestCase):
+    def test_interrupted_github_create_uses_marker_for_recovery_without_recreating(self) -> None:
+        for issue_exists in (False, True):
+            with self.subTest(issue_exists=issue_exists), TemporaryDirectory() as directory:
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "db")
+                )
+                self.addCleanup(store.close)
+                store.ensure_schema()
+                store.write_product_profile_record(_profile())
+                store.write_public_ingress_notification_policy_record(
+                    _notification_policy(
+                        PublicIngressNotificationDestination(
+                            destination_id="ops",
+                            kind="github_issue",
+                            github_repository="example/ops",
+                            github_label="incident",
+                        )
+                    )
+                )
+                actions: list[str] = []
+
+                def github(action: str, payload: dict[str, object]) -> dict[str, object]:
+                    actions.append(action)
+                    if action == "create":
+                        raise KeyboardInterrupt()
+                    if action == "find_marker" and not issue_exists:
+                        return {}
+                    return {"url": "https://github.com/example/ops/issues/1", "id": "issue-1"}
+
+                drivers = PublicIngressNotificationDriverSet(github_client=github)
+                direct_outbox.DirectNotificationOutboxTests._probe(
+                    store, 503, "2026-05-29T12:00:00Z"
+                )
+                with self.assertRaises(KeyboardInterrupt):
+                    direct_outbox.DirectNotificationOutboxTests._work(
+                        store, drivers, "2026-05-29T12:00:01Z"
+                    )
+                direct_outbox.DirectNotificationOutboxTests._probe(
+                    store, 200, "2026-05-29T12:01:00Z"
+                )
+                unknown = direct_outbox.DirectNotificationOutboxTests._work(
+                    store, drivers, "2026-05-29T12:06:01Z"
+                )
+                self.assertEqual(unknown.error_code, "delivery_outcome_unknown")
+                direct_outbox.DirectNotificationOutboxTests._work(
+                    store, drivers, "2026-05-29T12:07:01Z"
+                )
+                self.assertEqual(
+                    actions,
+                    ["create", "find_marker", "close"]
+                    if issue_exists
+                    else ["create", "find_marker"],
+                )
+
     def test_duplicate_cleanup_does_not_send_endpoint_recovery(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))

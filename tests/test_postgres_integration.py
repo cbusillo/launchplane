@@ -8264,6 +8264,65 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertEqual(first_claim.record.delivery_id, first.delivery_id)
         self.assertEqual(first_claim.record.lease_owner, "worker-a")
 
+    def test_recovery_claim_waits_for_locked_failure_but_not_other_destinations(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            self.assertEqual(
+                store.claim_next_outbox_delivery_record(lease_owner="startup").status, "empty"
+            )
+
+            def notification(suffix: str, event: str, destination: str) -> OutboxDeliveryRecord:
+                return _outbox_delivery(suffix=suffix).model_copy(
+                    update={
+                        "kind": "public_ingress_notification",
+                        "aggregate_type": "public_ingress_incident",
+                        "aggregate_id": "incident-test",
+                        "payload": {
+                            "attempt": {"event": event, "policy_id": "policy-test"},
+                            "destination": {"destination_id": destination, "kind": "email"},
+                        },
+                    }
+                )
+
+            failure = notification("first", "opened", "ops")
+            recovery = notification("second", "resolved", "ops")
+            unrelated = notification("third", "resolved", "other")
+            store.write_outbox_delivery_record(failure)
+            store.write_outbox_delivery_record(recovery)
+            store.write_outbox_delivery_record(unrelated)
+            blocker = create_engine(store.database_url)
+            self.addCleanup(blocker.dispose)
+            with blocker.connect() as connection:
+                transaction = connection.begin()
+                try:
+                    connection.execute(
+                        text(
+                            "select delivery_id from launchplane_outbox_deliveries where delivery_id = :delivery_id for update"
+                        ),
+                        {"delivery_id": failure.delivery_id},
+                    )
+                    claimed = store.claim_next_outbox_delivery_record(lease_owner="worker-b")
+                    self.assertIsNotNone(claimed.record)
+                    assert claimed.record is not None
+                    self.assertEqual(claimed.record.delivery_id, unrelated.delivery_id)
+                    waiting = store.read_outbox_delivery_record(recovery.delivery_id)
+                    self.assertEqual(waiting.attempt, 0)
+                finally:
+                    transaction.rollback()
+            opened = store.claim_next_outbox_delivery_record(lease_owner="worker-a")
+            assert opened.record is not None
+            self.assertEqual(opened.record.delivery_id, failure.delivery_id)
+            self.assertEqual(
+                store.claim_next_outbox_delivery_record(lease_owner="worker-b").status, "empty"
+            )
+            completed = store.complete_outbox_delivery_record(
+                record=opened.record.model_copy(update={"state": "delivered", "action": "sent"}),
+                lease_owner="worker-a",
+            )
+            self.assertEqual(completed.status, "updated")
+            resolved = store.claim_next_outbox_delivery_record(lease_owner="worker-b")
+            assert resolved.record is not None
+            self.assertEqual(resolved.record.delivery_id, recovery.delivery_id)
+
     def test_outbox_enqueue_with_idempotency_is_atomic_on_validation_failure(self) -> None:
         with _store_for_fresh_head_database() as store:
             delivery = _outbox_delivery(suffix="atomic-validation")
