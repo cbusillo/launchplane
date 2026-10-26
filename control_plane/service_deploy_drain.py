@@ -344,6 +344,14 @@ def record_executor_exit(store: Any, reservation: LaunchplaneIdempotencyRecord) 
     if not reservation_requires_admission(reservation.scope, reservation.route_path):
         return
     with store._session_factory() as session:
+        state = session.scalar(
+            select(LaunchplaneIdempotencyRow.state).where(
+                LaunchplaneIdempotencyRow.record_id == reservation.record_id
+            )
+        )
+        if state != "reconcile_required":
+            return
+    with store._session_factory() as session:
         lock(store, session)
         row = session.get(LaunchplaneIdempotencyRow, reservation.record_id)
         if row is None or row.state != "reconcile_required":

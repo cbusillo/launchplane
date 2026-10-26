@@ -347,7 +347,14 @@ def _record_executor_exit(
         yield
     finally:
         if isinstance(store, ProviderExecutorExitStore):
-            store.record_mutation_executor_exit(reservation)
+            try:
+                store.record_mutation_executor_exit(reservation)
+            except Exception as error:
+                logging.getLogger(__name__).warning(
+                    "Provider executor exit was not recorded operation=%s cause_type=%s",
+                    reservation.record_id,
+                    type(error).__name__,
+                )
 
 
 class _ReservationHeartbeat:

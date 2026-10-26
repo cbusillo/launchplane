@@ -824,6 +824,9 @@ a retry cannot inherit it. The unknown product outcome and exclusive target
 reservation remain unchanged. This proof survives service restart without
 replaying or settling the product operation. Historical holds and interrupted
 executors without a receipt keep the existing drain behavior.
+Receipt persistence failure logs a bounded diagnostic and preserves the runner's
+original result or exception; missing proof remains a blocker. Completed or
+released reservations do not take the drain lock for a receipt.
 Exact-request replay, expiry reconciliation, provider
 observation, admitted heartbeats and terminal writes remain usable during the
 drain; fresh/retried effects are refused. Matching image/marker startup admits
