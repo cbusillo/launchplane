@@ -23,7 +23,10 @@ from control_plane.dokploy.preview_inventory import complete_preview_compose_inv
 from control_plane.drivers.registry import product_profile_uses_odoo_driver
 from control_plane.disposable_lanes import require_disposable_lane
 from control_plane.preview_gateway import PREVIEW_GATEWAY_SERVICE, PREVIEW_IDLE_SECONDS
-from control_plane.preview_idle_runtime import PREVIEW_IDLE_RUNTIME_PROGRAM
+from control_plane.preview_idle_runtime import (
+    PREVIEW_IDLE_RUNTIME_PROGRAM,
+    PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_preview import (
     effective_preview_app_name_prefix,
@@ -88,7 +91,7 @@ class PreviewIdleClient:
             program=PREVIEW_IDLE_RUNTIME_PROGRAM,
             payload={**self.target["spec"], "action": action, "control": control or {}},
             receive=frames.append,
-            timeout_seconds=240,
+            timeout_seconds=PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS + 120 if action == "awake" else 240,
             dispatch_guard=dispatch,
         )
         self.check()

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -34,7 +35,10 @@ from control_plane.preview_idle import (
     PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS,
     idle_action,
 )
-from control_plane.preview_idle_runtime import PREVIEW_IDLE_RUNTIME_PROGRAM
+from control_plane.preview_idle_runtime import (
+    PREVIEW_IDLE_RUNTIME_PROGRAM,
+    PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import _odoo_preview_profile_payload
 from control_plane.workflows.odoo_verification import DEFAULT_ODOO_RUNTIME_HEALTH_PATH
@@ -593,11 +597,10 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         self.namespace["control"] = self.control
         self.namespace["observe_memory_headroom"] = lambda *_: 100
 
-        def healthy(name: str) -> bool:
-            self.calls.append(("healthy", name))
-            return True
-
-        self.namespace["is_healthy"] = healthy
+        self.wait_healthy = self.namespace["wait_healthy"]
+        self.namespace["wait_healthy"] = lambda name, _deadline: self.calls.append(
+            ("healthy", name)
+        )
         self.enterContext(patch("os.statvfs", return_value=Mock(f_bavail=100, f_frsize=1)))
 
     def runtime(self) -> tuple[dict[str, Any], str]:
@@ -686,21 +689,46 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(self.calls[-1], ("control", "awake"))
 
-    def test_pending_health_yields_without_opening_gateway_or_blocking_other_previews(self) -> None:
+    def test_unhealthy_stopped_or_restarting_service_refuses_completed_wake(self) -> None:
         self.wake()
-        self.namespace["is_healthy"] = Mock(return_value=False)
-        result = self.namespace["execute"]()
-        self.assertFalse(result["accepted"])
-        self.assertEqual(
-            [call for call in self.calls if call[0] == "start"], [("start", "database")]
+        self.namespace["wait_healthy"] = self.wait_healthy
+        for state in (
+            {"Running": False, "Health": {"Status": "starting"}},
+            {"Running": True, "Health": {"Status": "unhealthy"}},
+            {"Running": True, "Restarting": True, "Health": {"Status": "starting"}},
+            {"Running": True},
+        ):
+            with self.subTest(state=state):
+                self.namespace["one_inspection"] = Mock(return_value={"State": state})
+                with self.assertRaisesRegex(RuntimeError, "stopped or unhealthy"):
+                    self.namespace["execute"]()
+                self.assertNotIn(("control", "awake"), self.calls)
+
+    def test_wake_services_share_one_bounded_health_deadline(self) -> None:
+        self.wake()
+        self.namespace["wait_healthy"] = self.wait_healthy
+        now = [0.0]
+        self.namespace["time"] = SimpleNamespace(
+            monotonic=lambda: now[0],
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
         )
-        self.assertFalse(any(call == ("control", "awake") for call in self.calls))
-        self.namespace["is_healthy"] = Mock(side_effect=[True, False])
-        self.calls.clear()
-        result = self.namespace["execute"]()
-        self.assertFalse(result["accepted"])
-        self.assertIn(("start", "script-runner", "web"), self.calls)
-        self.assertFalse(any(call == ("control", "awake") for call in self.calls))
+
+        def inspect(identifier: str) -> dict[str, Any]:
+            ready_at = PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS * (
+                0.6 if identifier == "database" else 1.2
+            )
+            return {
+                "State": {
+                    "Running": True,
+                    "Health": {"Status": "healthy" if now[0] >= ready_at else "starting"},
+                }
+            }
+
+        self.namespace["one_inspection"] = inspect
+        with self.assertRaisesRegex(RuntimeError, "health is unavailable"):
+            self.namespace["execute"]()
+        self.assertLess(now[0], PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS * 1.1)
+        self.assertNotIn(("control", "awake"), self.calls)
 
     def test_foreign_sleep_receipt_never_starts_containers(self) -> None:
         self.wake()
@@ -709,15 +737,52 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
             self.namespace["execute"]()
         self.assertFalse(self.calls)
 
-    def test_admitted_partial_wake_does_not_charge_its_memory_twice(self) -> None:
+    def test_recorded_partial_wake_rechecks_current_capacity_before_starting_more_services(
+        self,
+    ) -> None:
         self.wake()
         self.value["gateway"]["wake_record_id"] = "wake-fixture"
         self.states["database"] = {"running": True, "healthy": True}
-        self.namespace["observe_memory_headroom"] = Mock(
-            side_effect=AssertionError("Do not re-admit this original wake")
-        )
+        self.namespace["observe_memory_headroom"] = lambda *_: 99
+        self.assertFalse(self.namespace["execute"]()["capacity"])
+        self.assertFalse(any(call[0] == "start" for call in self.calls))
+        self.namespace["observe_memory_headroom"] = lambda *_: 100
+        self.namespace["spec"]["disk_reserve"] = 101
+        self.assertFalse(self.namespace["execute"]()["capacity"])
+        self.assertFalse(any(call[0] == "start" for call in self.calls))
+        self.namespace["spec"]["disk_reserve"] = 100
         self.namespace["execute"]()
         self.assertEqual(self.calls[-1], ("control", "awake"))
+
+    def test_another_host_wake_cannot_dispatch_until_startup_lock_is_released(self) -> None:
+        self.namespace["spec"].update(action="awake", compose_project="second-preview-project")
+        execute = Mock(return_value={"accepted": True})
+        self.namespace["execute"] = execute
+        entry = ast.parse(PREVIEW_IDLE_RUNTIME_PROGRAM)
+        entry.body = entry.body[-2:]
+        encoded = base64.b64encode(json.dumps(self.namespace["spec"]).encode()).decode()
+        with TemporaryDirectory() as directory:
+            locks = (
+                Path(directory) / self.namespace["CLEAN_SNAPSHOT_STATE_DIRECTORY"] / "preview-locks"
+            )
+            locks.mkdir(parents=True)
+            with (
+                patch("pathlib.Path.home", return_value=Path(directory).resolve()),
+                patch("sys.argv", ["fixture", encoded, "frame:"]),
+                (locks / "idle-start.lock").open("w") as first_wake,
+            ):
+                self.namespace["fcntl"].flock(first_wake.fileno(), self.namespace["fcntl"].LOCK_EX)
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    exec(compile(entry, "<contending-wake>", "exec"), self.namespace)
+                self.assertEqual(
+                    json.loads(output.getvalue().removeprefix("frame:"))["type"], "failed"
+                )
+                execute.assert_not_called()
+                self.namespace["fcntl"].flock(first_wake.fileno(), self.namespace["fcntl"].LOCK_UN)
+                with redirect_stdout(io.StringIO()):
+                    exec(compile(entry, "<admitted-wake>", "exec"), self.namespace)
+                execute.assert_called_once()
 
     def test_native_entrypoint_runs_with_its_own_imports_and_project_lock(self) -> None:
         self.namespace["spec"]["compose_project"] = "fixture-project"
