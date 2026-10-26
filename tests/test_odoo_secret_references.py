@@ -677,14 +677,15 @@ class SecretReferenceScriptTests(unittest.TestCase):
     def test_apply_requires_complete_agreeing_reviewed_keys(self) -> None:
         reviewed_keys = ("first.password", "second.password", "third.password")
         cases = (
-            (reviewed_keys, "already_agrees", True, True),
-            (tuple(reversed(reviewed_keys)), "already_agrees", True, True),
-            ((), "already_agrees", True, False),
-            (reviewed_keys[:-1], "already_agrees", True, False),
-            ((*reviewed_keys, "extra.password"), "already_agrees", True, False),
-            ((*reviewed_keys[:-1], "extra.password"), "already_agrees", True, False),
-            (reviewed_keys, "reconcile_reference", True, False),
-            (reviewed_keys, "already_agrees", False, False),
+            (reviewed_keys, reviewed_keys, "already_agrees", True, True),
+            (tuple(reversed(reviewed_keys)), reviewed_keys, "already_agrees", True, True),
+            ((), reviewed_keys, "already_agrees", True, False),
+            (reviewed_keys[:-1], reviewed_keys, "already_agrees", True, False),
+            ((*reviewed_keys, "extra.password"), reviewed_keys, "already_agrees", True, False),
+            ((*reviewed_keys[:-1], "extra.password"), reviewed_keys, "already_agrees", True, False),
+            (reviewed_keys, reviewed_keys, "reconcile_reference", True, False),
+            (reviewed_keys, reviewed_keys, "already_agrees", False, False),
+            (reviewed_keys[:-1], reviewed_keys[:-1], "already_agrees", True, False),
         )
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/reconcile-odoo-secret-references.py")
@@ -712,11 +713,20 @@ class SecretReferenceScriptTests(unittest.TestCase):
                 },
             }
 
-        for keys, action, matches, verified in cases:
+        for keys, review_entries, action, matches, verified in cases:
             with self.subTest(keys=keys, action=action, matches=matches):
-                review = response(reviewed_keys, "reconcile_reference", read_back_matches=matches)
-                write = Mock(return_value=review)
-                read = Mock(side_effect=(review, response(keys, action)))
+                review = response(review_entries, "reconcile_reference")
+                write = Mock(
+                    return_value=response(
+                        reviewed_keys, "reconcile_reference", read_back_matches=matches
+                    )
+                )
+                read = Mock(
+                    side_effect=(
+                        response(reviewed_keys, "reconcile_reference"),
+                        response(keys, action),
+                    )
+                )
                 transport = {
                     "resolve_settings": lambda _: {
                         "service_url": "https://fixture.invalid",
