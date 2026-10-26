@@ -381,8 +381,16 @@ every active backup policy's replacement source target, the existing managed
 application API writer binding, and a completed service-owned destination backup
 operation. Use `--cutover` with the terminal consumer, separate private request
 and evidence files, dry-run, then reviewed apply under a stable key. The saved
-intent binds all current authority, consumer bindings and managed versions. Before
-execution, a fresh reviewed intent can replace an expired destination capture;
+intent binds all current authority, consumer bindings and managed versions.
+Before arming and before a new execution, Launchplane checks TCP routing to every
+reviewed health and readiness host/port from its own process network. A cold
+listener's connection refusal proves only a responding host or rejecting hop; timeouts and
+other connection failures refuse the intent before writer dispatch. Use a
+destination address reachable from the API and release workers. This does not
+start the application or replace the later HTTP and exact-identity checks.
+The worker checks every health URL and readiness URL independently; a passing
+health response cannot stand in for readiness.
+Before execution, a fresh reviewed intent can replace an expired destination capture;
 every earlier intent stays in custody history. Once execution begins its admitted
 intent stays fixed, and recovery does not expire the already-admitted destination
 capture while resolving that admitted release, including its drill's resume of
@@ -446,6 +454,12 @@ survive. Any changed owned row refuses the whole inverse; no shared guest is
 restored and no data volume is deleted. Backup history receives a new inverse
 revision rather than being rewritten. The release worker and reviewed recovery
 path retain both recipients when a deploy or writer outcome remains uncertain.
+Terminal rollback results expose a fixed stage-specific qualification reason
+from the promotion record through the release read, including lost-reply recovery.
+On the promotion record, the reason names the unverified stage; the operation
+and custody state still determine certainty. Pre-dispatch refusals retain their
+existing fixed refusal message.
+Safe cause-site logs carry the original trace without provider or exception text.
 The worker inverse checks release authority before dispatching its replacement
 writer pause. After that pause is dispatched, the running operation finishes its
 bound restore or abort cleanup under its lease and owned-row checks; a later

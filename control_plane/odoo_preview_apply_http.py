@@ -469,7 +469,19 @@ def execute_odoo_preview_apply_result(
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     recovery_reservation: object = None,
 ) -> dict[str, object]:
-    from control_plane.preview_preservation import is_retained_preservation_retry
+    from control_plane.preview_preservation import (
+        PREVIEW_PRESERVATION_PHASES,
+        is_retained_preservation_retry,
+    )
+
+    retained_preservation_retry = is_retained_preservation_retry(
+        store=record_store,
+        profile=profile,
+        issued_plan=issued_plan,
+        request=request,
+        operation_record_id=deployment_record_id,
+        reservation=recovery_reservation,
+    )
 
     current_request = refresh_odoo_preview_issued_plan(
         control_plane_root=control_plane_root_path,
@@ -478,14 +490,7 @@ def execute_odoo_preview_apply_result(
         request=request,
         issued_plan=issued_plan,
         database_url=database_url,
-        retained_preservation_retry=is_retained_preservation_retry(
-            store=record_store,
-            profile=profile,
-            issued_plan=issued_plan,
-            request=request,
-            operation_record_id=deployment_record_id,
-            reservation=recovery_reservation,
-        ),
+        retained_preservation_retry=retained_preservation_retry,
     )
     if current_request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
         raise ValueError("Odoo preview apply repository does not match product profile.")
@@ -562,7 +567,10 @@ def execute_odoo_preview_apply_result(
         raise ValueError("A new snapshot preview requires its issued clean source.")
     effective_mutation_guard = provider_mutation_guard
     if current_request.preserve_original_reservation_id:
-        from control_plane.preview_preservation import run_preview_preservation
+        from control_plane.preview_preservation import (
+            require_preview_preservation_admission,
+            run_preview_preservation,
+        )
         from control_plane.storage.postgres import PostgresRecordStore
 
         if (
@@ -591,19 +599,33 @@ def execute_odoo_preview_apply_result(
             with provider_mutation_guard() if provider_mutation_guard else nullcontext():
                 yield
 
-        run_preview_preservation(
-            store=record_store,
-            profile=profile,
-            issued_plan=issued_plan,
-            original_reservation_id=current_request.preserve_original_reservation_id,
-            operation_record_id=deployment_record_id,
-            control_plane_root=control_plane_root_path,
-            mode="preserve",
-            timeout_seconds=current_request.apply.timeout_seconds,
-            check=provider_lease_check,
-            effect_checkpoint=provider_effect_checkpoint,
-            mutation_guard=provider_mutation_guard,
-        )
+        if (
+            retained_preservation_retry
+            and getattr(recovery_reservation, "provider_effect_phase", "")
+            not in PREVIEW_PRESERVATION_PHASES
+        ):
+            require_preview_preservation_admission(
+                store=record_store,
+                profile=profile,
+                issued_plan=issued_plan,
+                original_reservation_id=current_request.preserve_original_reservation_id,
+                operation_record_id=deployment_record_id,
+            )
+            verify_preservation()
+        else:
+            run_preview_preservation(
+                store=record_store,
+                profile=profile,
+                issued_plan=issued_plan,
+                original_reservation_id=current_request.preserve_original_reservation_id,
+                operation_record_id=deployment_record_id,
+                control_plane_root=control_plane_root_path,
+                mode="preserve",
+                timeout_seconds=current_request.apply.timeout_seconds,
+                check=provider_lease_check,
+                effect_checkpoint=provider_effect_checkpoint,
+                mutation_guard=provider_mutation_guard,
+            )
         effective_mutation_guard = preserved_mutation_guard
     driver_result = execute_odoo_preview_dokploy_apply(
         record_store=record_store,
