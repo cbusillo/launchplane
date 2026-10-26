@@ -334,6 +334,7 @@ class PrerequisiteFixture(unittest.TestCase):
             reference = (
                 self.fixture.identity.image_reference
                 if self.drift != "image"
+                and not (self.drift == "image_after" and self.inspections > 1)
                 else "foreign@sha256:" + "f" * 64
             )
             return subprocess.CompletedProcess(
@@ -412,6 +413,55 @@ class PrerequisiteTests(PrerequisiteFixture):
         self.assertEqual(self.pg.rollback.call_count, len(self.connects))
         self.assertEqual(self.pg.close.call_count, len(self.connects))
         self.assertEqual(self.container_calls, 1)
+
+    def test_failed_prerequisites_report_only_the_failed_stage(self) -> None:
+        scenarios = (
+            ("configuration", lambda: self.config.write_text("invalid")),
+            (
+                "code_roots",
+                lambda: self.config.write_text(
+                    self.config.read_text().replace(str(self.tenant / "addons"), "/missing", 1)
+                ),
+            ),
+            (
+                "payload_provenance",
+                lambda: (
+                    self.tenant
+                    / "addons/shared"
+                    / reader.PAYLOAD_ADDON
+                    / "services/override_payload.py"
+                ).write_text(PRIVATE),
+            ),
+            (
+                "payload_decode",
+                lambda: self.env.update({ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: PRIVATE}),
+            ),
+            ("applied_parameters", lambda: setattr(self.cursor.fetchone, "return_value", ("off",))),
+            ("addon_state", lambda: self.installed.update({reader.PAYLOAD_ADDON: "uninstalled"})),
+        )
+        for stage, fail in scenarios:
+            with self.subTest(stage=stage):
+                with contextlib.ExitStack() as cleanup:
+                    files = {
+                        path: path.read_bytes()
+                        for path in (
+                            self.config,
+                            self.tenant
+                            / "addons/shared"
+                            / reader.PAYLOAD_ADDON
+                            / "services/override_payload.py",
+                        )
+                    }
+                    cleanup.callback(lambda: [path.write_bytes(raw) for path, raw in files.items()])
+                    cleanup.callback(self.env.update, self.env.copy())
+                    cleanup.callback(self.installed.update, self.installed.copy())
+                    cleanup.callback(setattr, self.cursor.fetchone, "return_value", ("on",))
+                    fail()
+                    result = self.read()
+                    self.assertEqual(result.runtime, "unknown")
+                    self.assertEqual(result.failure_stage, stage)
+                    self.assertNotIn(PRIVATE, result.model_dump_json())
+        self.assertIsNone(self.read().failure_stage)
 
     def test_runtime_source_layout_does_not_require_importable_odoo(self) -> None:
         with patch("importlib.util.find_spec", return_value=None):
@@ -545,12 +595,42 @@ class PrerequisiteTests(PrerequisiteFixture):
         path.write_text("# modified caller")
         result = self.read()
         self.assertEqual(result.sources[0].producer, "unknown")
+        self.assertEqual(result.sources[0].failure_stage, "source_provenance")
         self.assertEqual(result.sources[1].producer, "verified")
         path.unlink()
         target = self.root / "foreign.py"
         target.write_bytes(original)
         path.symlink_to(target)
         self.assertEqual(self.read().sources[0].producer, "unknown")
+
+    def test_all_unverified_producers_keep_their_failure_stages_without_querying_odoo(self) -> None:
+        for name in reader.SOURCE_ADDONS:
+            self.producer(name).write_text("changed")
+        for missing in reader.SOURCE_ADDONS:
+            with self.subTest(missing=missing):
+                expected = {name: "source_provenance" for name in reader.SOURCE_ADDONS}
+                inventory = reader.producer_files(
+                    self.manifest, self.fixture.connection, self.fixture.profile.repository
+                )
+                inventory[missing] = {}
+                expected[missing] = "producer_inventory"
+                with patch.object(reader, "producer_files", return_value=inventory):
+                    result = self.read()
+                self.assertEqual(result.runtime, "unknown")
+                self.assertIsNone(result.failure_stage)
+                for source in result.sources:
+                    self.assertEqual(source.failure_stage, expected[source.source])
+                    self.assertEqual(source.producer, "unknown")
+                self.assertFalse(self.connects)
+
+    def test_invalid_container_result_is_validation_failure_without_returning_values(self) -> None:
+        authority = reader._authority(self.fixture.store, self.fixture.profile.product)
+        authority.metadata["cm_data"]["unexpected"] = PRIVATE
+        with patch.object(reader, "_authority", return_value=authority):
+            result = self.read()
+        self.assertEqual(result.runtime, "unknown")
+        self.assertEqual(result.failure_stage, "result_validation")
+        self.assertNotIn(PRIVATE, result.model_dump_json())
 
     def test_server_independently_rejects_nonclosed_or_duplicate_provider_frames(self) -> None:
         authority = reader._authority(self.fixture.store, self.fixture.profile.product)
@@ -563,6 +643,13 @@ class PrerequisiteTests(PrerequisiteFixture):
         }
         for frames in (
             [{"type": "complete", "result": {**minimal, "raw": PRIVATE}}],
+            [{"type": "complete", "result": {**minimal, "failure_stage": PRIVATE}}],
+            [
+                {
+                    "type": "complete",
+                    "result": {**minimal, "runtime": "verified", "failure_stage": "drift"},
+                }
+            ],
             [{"type": "complete", "result": minimal}, {"type": "complete", "result": minimal}],
             [{"type": "complete", "result": {**minimal, "applied": True}}],
             [{"type": "complete", "result": {**minimal, "values_redacted": False}}],
@@ -583,6 +670,15 @@ class PrerequisiteTests(PrerequisiteFixture):
                         authority=authority,
                         observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
                     )
+
+    def test_service_distinguishes_transport_and_invalid_evidence(self) -> None:
+        for failure, expected in ((OSError(PRIVATE), "transport"), (None, "result_validation")):
+            with self.subTest(stage=expected):
+                with patch.object(self, "remote", side_effect=failure):
+                    result = self.read()
+                self.assertEqual(result.failure_stage, expected)
+                self.assertEqual(result.runtime, "unknown")
+                self.assertNotIn(PRIVATE, result.model_dump_json())
 
     def test_producer_default_changes_are_consumed_and_not_copied(self) -> None:
         prefix = SOURCE_PREFIXES["cm_data"]
@@ -720,7 +816,9 @@ def resolve_connection_settings(values):
         for malformed in ("not-base64", base64.b64encode(b"[]").decode()):
             with self.subTest(malformed=malformed):
                 self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = malformed
-                self.assertEqual(self.read().runtime, "unknown")
+                result = self.read()
+                self.assertEqual(result.runtime, "unknown")
+                self.assertEqual(result.failure_stage, "payload_decode")
         self.env[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = encoded
         self.assertEqual(self.read().runtime, "verified")
 
@@ -795,7 +893,9 @@ def resolve_connection_settings(values):
                 )
             }
         )
-        self.assertEqual(self.read().runtime, "unknown")
+        result = self.read()
+        self.assertEqual(result.runtime, "unknown")
+        self.assertEqual(result.failure_stage, "producer_inventory")
 
     def test_shared_parser_shadow_symlink_and_missing_inventory_fail_closed(self) -> None:
         parser = (
@@ -831,6 +931,7 @@ def resolve_connection_settings(values):
         original_producer = self.producer("cm_data").read_bytes()
         for drift in (
             "image",
+            "image_after",
             "container",
             "parameter",
             "file",
@@ -846,6 +947,13 @@ def resolve_connection_settings(values):
                     self.assertEqual(result.sources[0].producer, "unknown")
                 else:
                     self.assertEqual(result.runtime, "unknown")
+                    expected_stage = {
+                        "image": "host_inspection",
+                        "frame": "result_validation",
+                        "oversized": "host_execution",
+                        "timeout": "host_execution",
+                    }.get(drift, "drift")
+                    self.assertEqual(result.failure_stage, expected_stage)
                 self.assertNotIn(PRIVATE, result.model_dump_json())
                 self.drift = ""
                 self.inspections = 0
