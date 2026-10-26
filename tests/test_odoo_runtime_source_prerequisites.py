@@ -603,6 +603,16 @@ class PrerequisiteTests(PrerequisiteFixture):
         path.symlink_to(target)
         self.assertEqual(self.read().sources[0].producer, "unknown")
 
+    def test_all_unverified_producers_keep_their_failure_stages_without_querying_odoo(self) -> None:
+        for name in reader.SOURCE_ADDONS:
+            self.producer(name).write_text("changed")
+        result = self.read()
+        self.assertEqual(result.runtime, "unknown")
+        for source in result.sources:
+            self.assertEqual(source.failure_stage, "source_provenance")
+            self.assertEqual(source.producer, "unknown")
+        self.assertFalse(self.connects)
+
     def test_server_independently_rejects_nonclosed_or_duplicate_provider_frames(self) -> None:
         authority = reader._authority(self.fixture.store, self.fixture.profile.product)
         files = reader.producer_files(

@@ -389,6 +389,9 @@ def run():
             modules[name]=load_producer(name,raw)
         except Exception:
             failures[name]=stage
+    if not modules:
+        return {**unknown,'failure_stage':stage,
+                'sources':[{'source':name,'failure_stage':failures[name]} for name in names]}
     keys=list(dict.fromkeys(key for module in modules.values() for key in module.PARAMETER_KEYS))
     stage='applied_parameters'
     before,installed=parameters(keys,options) if keys else ({},{})
