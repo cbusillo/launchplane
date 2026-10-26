@@ -17443,7 +17443,9 @@ class PostgresRecordStore(HumanSessionStore):
                         deployment = self._read_payload(
                             model_type=DeploymentRecord, payload=deployment_row.payload
                         )
-                        cutover = deployment.odoo_cutover
+                        from control_plane.odoo_cutover_recovery import deployment_operation_cutover
+
+                        cutover = deployment_operation_cutover(deployment, record)
                     else:
                         from control_plane.odoo_cutover_recovery import rollback_operation_cutover
 
@@ -17472,8 +17474,6 @@ class PostgresRecordStore(HumanSessionStore):
                         or cutover.step == "rolled_back"
                         and model_type is OdooProdPromotionOperationRecord
                         or not cutover_reconciliation_eligible(cutover)
-                        or cutover.plan.new.binding.product_id != record.product
-                        or cutover.plan.new.binding.environment_id != record.instance
                     ):
                         continue
                     charge_attempt = cutover_reconciliation_uses_budget(cutover)

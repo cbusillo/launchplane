@@ -188,6 +188,15 @@ class OdooCutoverActivationTests(unittest.TestCase):
                                     "release_id": operation.request.request_id
                                     if slot == plan.new
                                     else "previous",
+                                    "deployment_record_id": "deployment-cutover-"
+                                    + cutover_identity(
+                                        operation.product,
+                                        operation.context,
+                                        operation.instance,
+                                        operation.request.request_id,
+                                    )
+                                    if slot == plan.new
+                                    else slot.runtime_identity.deployment_record_id,
                                 }
                             ),
                         }

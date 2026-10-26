@@ -177,7 +177,10 @@ reconciliation interface.
 Unfinished work retains the lane hold. Reconciliation yields to pending release
 queues, including rollback and replacement, and waits 30 seconds after the last
 update, including after denial. That delay survives worker restarts and lets
-other eligible lanes run. Preparation and compatible settings-free inverse
+other eligible lanes run. Promotion claim admission and execution share the same
+original-record, lane, release and deployment identity predicate. A mismatched
+stored cutover stays held without taking a valid lane's recovery turn.
+Preparation and compatible settings-free inverse
 interruptions use that same original-operation continuation. A Client rejection
 retains the canonical last accepted release at its rejecting decision as the
 inverse target, including when multiple temporary hotfixes were stacked. A later
@@ -492,7 +495,11 @@ live lane. Parent #3268 still waits for its exact accepted real-release event.
 ### Source recovery and retention
 
 Canonical maintenance seals a failed outcome in its existing exclusive attempt
-marker only after the child exits unsuccessfully and its log is durable. The
+marker only after the child exits unsuccessfully and its log is durable. Before
+dispatch, the native plan and exclusive attempt file are synced along with their
+directory and ancestor entries. A persistence interruption refuses the child; a
+retained started attempt cannot dispatch another one. A full log or outcome
+volume leaves the original attempt UNKNOWN even after space becomes available. The
 outcome binds the immutable plan digest. Reading that outcome ends automatic
 reclaiming without starting another child. An interrupted command, partial log,
 legacy started marker or missing boundary witness remains UNKNOWN.
