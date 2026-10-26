@@ -20,7 +20,7 @@ class ClientTestNotesTests(unittest.TestCase):
         for body, labels, blocked in (
             (
                 "## Client test notes\nNothing for the Client to test: CI only.",
-                ["owner-review"],
+                [profile.owner.review_label],
                 True,
             ),
             (
