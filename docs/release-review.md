@@ -927,6 +927,25 @@ accepted checklist, backup, reservation, target and durable promotion outcome.
 Both reads require the existing product-scoped `product_environment.read`
 capability and write no records or provider state.
 
+The product's production **Actions** tab offers **Recover promotion** to a
+signed-in administrator for generic-web products. Enter the original release
+decision, promotion attempt, step and reason, then select **Review recovery**.
+The card reads the stored original before the dry-run and shows its opaque
+operation reference, state, checkpoint, proposed action and reviewed digest.
+Input changes invalidate the review. Confirm the exact review, then select
+**Apply reviewed recovery** once. The existing route checks current authority
+and compares the reviewed digest again; any refusal or uncertain response stops
+Apply. The browser records the attempt before dispatch, retaining the original
+review for separate **Read back original operation**, including after reload.
+An unavailable browser session store blocks dispatch. **Choose another
+operation** permits other recoveries while the original remains unavailable
+for another Apply in that browser session. Returning to that decision, step
+and attempt restores its readback. No automatic retry or readback is sent.
+Completed readback establishes reservation settlement, not release success.
+Session and CSRF values are used only by the existing request transport and
+never rendered or saved with the review. This card does not operate the
+separate production-recipient recovery route or its writer-fence procedure.
+
 Separately reviewed `/apply` requires the same reason, `recovery_reference`,
 `expected_recovery_digest`, and current production-scoped
 `generic_web_prod_promotion.execute` authority. Browser writes use the existing
