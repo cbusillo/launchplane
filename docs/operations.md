@@ -2123,11 +2123,13 @@ effective production checks are fresh and passing strictly after the most recent
 refusal, and the current runtime matches the expected release identity. A refusal
 at or after a passing check keeps the incident open until a later healthy check.
 Repeated monitor observations that merely retain an unresolved incident are not
-new requests. 
+new requests.
+
 Real delivery failures, mixed or uncertain histories, missing/stale/failed checks,
 unverified identity and concurrent incident changes stay open. Scheduled rechecks
 use the delivery monitor's lane lock. New refusal requests retain their normal
-nonblocking evidence write. Changed product authority also blocks persistence. Rechecks select only incidents whose full retained history contains refusals.
+nonblocking evidence write. Changed product authority also blocks persistence.
+Rechecks select only incidents whose full retained history contains refusals.
 Their history stays unchanged without a repeated failure appended on each pass.
 Mixed histories keep the normal failure observations and reminders. The latest
 refusal-event lookup runs only when a refusal-only candidate exists.

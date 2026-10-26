@@ -147,9 +147,7 @@ def _resolve_guard_refusal(
             or monitor_observation_provenance(observations[0], now=now).freshness_status
             != "verified"
         ):
-            raise ValueError(
-                "Production health must pass freshly after the last refusal."
-            )
+            raise ValueError("Production health must pass freshly after the last refusal.")
     _require_verified_production_runtime(store, profile, lane, now)
     if not _is_refusal_only_incident(store, incident):
         raise ValueError("Incident history includes a failure or uncertain outcome beyond refusal.")
