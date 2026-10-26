@@ -281,17 +281,19 @@ def run_preview_preservation(
             with mutation_guard() if mutation_guard else nullcontext():
                 check()
                 effect_checkpoint(PREVIEW_PRESERVATION_INSPECT_PHASE)
-                binding = require_existing_preview_resources(
-                    host=host,
-                    token=token,
-                    compose_id=authority.compose_id,
-                    compose_name=authority.compose_name,
-                    context=profile.product,
-                    instance=authority.preview_slug,
-                    environment=preview_resource_environment(authority.compose_name),
-                    checkpoint=check,
-                    operation="destroy",
-                )
+            binding = require_existing_preview_resources(
+                host=host,
+                token=token,
+                compose_id=authority.compose_id,
+                compose_name=authority.compose_name,
+                context=profile.product,
+                instance=authority.preview_slug,
+                environment=preview_resource_environment(authority.compose_name),
+                checkpoint=check,
+                operation="destroy",
+            )
+            with mutation_guard() if mutation_guard else nullcontext():
+                check()
                 if binding != current_source["provider_binding_sha256"]:
                     raise ValueError("Original preview changed during preservation qualification.")
 
@@ -330,14 +332,6 @@ def run_preview_preservation(
         dispatch_guard=dispatch,
     )
     check()
-    if len(frames) == 1 and frames[0].get("type") == "failed":
-        message = frames[0].get("error_message")
-        if (
-            isinstance(message, str)
-            and message.startswith("Preview preservation ")
-            and len(message) <= 256
-        ):
-            raise click.ClickException(message)
     if (
         len(frames) != 1
         or frames[0].get("type") != "complete"

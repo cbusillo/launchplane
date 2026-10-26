@@ -138,7 +138,10 @@ class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     apply: OdooPreviewDokployApplyRequest
     preserve_original_reservation_id: str = Field(
-        default="", max_length=128, pattern=r"^(?:mutation-reservation-[a-f0-9]{64})?$"
+        default="",
+        max_length=128,
+        pattern=r"^(?:mutation-reservation-[a-f0-9]{64})?$",
+        exclude_if=lambda value: not value,
     )
 
     @model_validator(mode="after")
@@ -570,8 +573,8 @@ def execute_odoo_preview_apply_result(
 
         @contextmanager
         def preserved_mutation_guard() -> Iterator[None]:
+            verify_preservation()
             with provider_mutation_guard() if provider_mutation_guard else nullcontext():
-                verify_preservation()
                 yield
 
         run_preview_preservation(

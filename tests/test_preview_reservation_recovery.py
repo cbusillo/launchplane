@@ -307,6 +307,27 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 observer.assert_called_once()
                 write.assert_not_called()
 
+    def test_original_without_optional_preservation_field_still_observes_and_adopts(self) -> None:
+        with self.store._session_factory() as session:
+            row = session.scalar(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.scope == self.reservation.scope,
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == self.reservation.record_id,
+                )
+            )
+            assert row is not None
+            payload = json.loads(json.dumps(row.payload))
+            payload["response_payload"]["original_intent"]["apply_request"].pop(
+                "preserve_original_reservation_id", None
+            )
+            row.payload = payload
+            session.commit()
+        observer = Mock(return_value=("present", {"status": "fail"}, False))
+        result = self.recover(observe=observer)
+        self.assertEqual(result["settlement"], "adopted")
+        observer.assert_called_once()
+
     def remove_original_intent(self) -> None:
         with self.store._session_factory() as session:
             receipt = session.scalar(

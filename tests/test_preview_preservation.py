@@ -2,6 +2,8 @@ import hashlib
 import io
 import json
 from datetime import datetime, timezone
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 import subprocess
 import sys
@@ -168,6 +170,50 @@ class PreviewPreservationProgramTests(unittest.TestCase):
             self.preserve()
         self.assertEqual((temporary / "unknown").read_bytes(), b"only copy")
         self.assertTrue((self.filestore / "ab/attachment").exists())
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+
+    def test_owned_receipt_temp_file_does_not_block_capture_recovery(self) -> None:
+        self.restored.side_effect = RuntimeError("interrupted")
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        temporary = self.path.with_name(".pending-" + self.path.name)
+        (temporary / ".pending-receipt").write_bytes(b"partial receipt")
+        self.restored.side_effect = None
+        self.namespace["verification_resources"] = Mock()
+        self.assertTrue(self.preserve()["database_restore_verified"])
+
+    def test_interrupted_owner_publication_and_cleanup_leave_recoverable_custody(self) -> None:
+        writer = self.namespace["write_snapshot_receipt"]
+
+        def interrupt_receipt(path: Path, payload: object) -> None:
+            del payload
+            (path.parent / ".pending-owner").write_bytes(b"partial metadata")
+            raise RuntimeError("receipt interrupted")
+
+        self.namespace["write_snapshot_receipt"] = interrupt_receipt
+        with self.assertRaisesRegex(RuntimeError, "receipt interrupted"):
+            self.preserve()
+        temporary = self.path.with_name(".pending-" + self.path.name)
+        self.assertFalse(temporary.exists())
+        self.namespace["write_snapshot_receipt"] = writer
+        self.restored.side_effect = RuntimeError("restore interrupted")
+        with self.assertRaisesRegex(RuntimeError, "restore interrupted"):
+            self.preserve()
+        self.namespace["verification_resources"] = Mock()
+        unlink = Path.unlink
+
+        def interrupt_cleanup(path: Path, *args: Any, **kwargs: Any) -> None:
+            if path == temporary / "pending.json":
+                raise RuntimeError("cleanup interrupted")
+            unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", new=interrupt_cleanup):
+            with self.assertRaisesRegex(RuntimeError, "cleanup interrupted"):
+                self.preserve()
+        self.assertEqual([path.name for path in temporary.iterdir()], ["pending.json"])
+        self.restored.side_effect = None
+        self.assertTrue(self.preserve()["database_restore_verified"])
+        self.assertEqual((self.filestore / "ab/attachment").read_bytes(), b"attachment bytes")
 
     def test_additional_data_and_low_capacity_fail_before_stopping_original(self) -> None:
         for additional in ("sessions", "addons/private-key"):
@@ -348,7 +394,30 @@ class PreviewPreservationVerifierCustodyTests(unittest.TestCase):
             self.assertNotIn("-p", run)
             self.assertNotIn("--volume", run)
             self.assertEqual(run[-1], self.image)
+            self.assertIn("POSTGRES_USER=postgres", run)
             self.assertEqual(cleanup.call_count, 2)
+
+    def test_verifier_readiness_uses_final_server_instead_of_init_socket(self) -> None:
+        self.namespace["deadline"] = time.monotonic() + 60
+
+        def readiness(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            del kwargs
+            self.assertIn("-h", arguments)
+            self.assertEqual(arguments[arguments.index("-h") + 1], "127.0.0.1")
+            return subprocess.CompletedProcess(arguments, 0)
+
+        with patch.object(subprocess, "run", side_effect=readiness):
+            self.namespace["wait_database"]("owned-verifier")
+
+    def test_transient_exec_must_finish_and_persistent_exec_remains_held(self) -> None:
+        active = {"Id": "fixture-database", "ExecIDs": ["active-exec"]}
+        idle = {**active, "ExecIDs": None}
+        with patch.object(time, "sleep"):
+            self.namespace["one_container"] = Mock(return_value=idle)
+            self.assertEqual(self.namespace["require_idle_container"](active), idle)
+            self.namespace["one_container"] = Mock(return_value=active)
+            with self.assertRaisesRegex(RuntimeError, "execution custody is active"):
+                self.namespace["require_idle_container"](active)
 
 
 class PreviewPreservationAuthorityTests(unittest.TestCase):
@@ -506,6 +575,7 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             )
             self.assertEqual(resumed.outcome, "absent")
             self.assertTrue(resumed.retry_safe)
+            self.assertTrue(resumed.preserve_effect_checkpoint)
             self.assertEqual(inspect.call_args.kwargs["mode"], "inspect")
             inspect.side_effect = ValueError("source execution unknown")
             with self.assertRaisesRegex(ValueError, "source execution unknown"):
@@ -529,3 +599,78 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "copy changed"):
                 adapter._finalize_successful_result({"status": "pass"})
             lifecycle.assert_not_called()
+
+    def test_remote_inspection_waits_outside_shared_metadata_guard(self) -> None:
+        from control_plane.preview_preservation import run_preview_preservation
+
+        self.complete_original()
+        source = {"provider_binding_sha256": "fixture-provider-binding"}
+        guarded = False
+
+        @contextmanager
+        def guard() -> Iterator[None]:
+            nonlocal guarded
+            guarded = True
+            try:
+                yield
+            finally:
+                guarded = False
+
+        def inspect(**kwargs: Any) -> str:
+            del kwargs
+            self.assertFalse(guarded)
+            return source["provider_binding_sha256"]
+
+        def remote(**kwargs: Any) -> None:
+            self.assertFalse(guarded)
+            kwargs["dispatch_guard"](lambda: self.assertTrue(guarded))
+            self.assertFalse(guarded)
+            kwargs["receive"](
+                {
+                    "type": "complete",
+                    "preservation_id": self.authority().preservation_id,
+                    "source": source,
+                    "volume_binding": {"fixture": True},
+                }
+            )
+
+        with (
+            patch(
+                "control_plane.preview_preservation.read_preview_preservation_source",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.dokploy.source.read_dokploy_config",
+                return_value=("https://fixture.invalid", "fixture"),
+            ),
+            patch(
+                "control_plane.clean_testing_snapshot.snapshot_storage_budget",
+                return_value=OdooTestingDrillStorageBudget(
+                    database_bytes=1024,
+                    filestore_bytes=1024,
+                    staging_bytes=1024,
+                    reserve_bytes=1024,
+                ),
+            ),
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources",
+                side_effect=inspect,
+            ),
+            patch(
+                "control_plane.dokploy.memory_capacity.preview_host_memory_floor", return_value=1024
+            ),
+            patch("control_plane.dokploy.native_copy_stream._read_remote", side_effect=remote),
+        ):
+            run_preview_preservation(
+                store=self.store,
+                profile=self.profile,
+                issued_plan=self.issued,
+                original_reservation_id=self.original.record_id,
+                operation_record_id="fixture-new-operation",
+                control_plane_root=self.root,
+                mode="preserve",
+                timeout_seconds=60,
+                check=lambda: None,
+                effect_checkpoint=Mock(),
+                mutation_guard=guard,
+            )

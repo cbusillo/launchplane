@@ -259,7 +259,9 @@ class OdooPreviewProviderMutationAdapter:
                     timeout_seconds=self._apply_request.apply.timeout_seconds,
                     check=self.execution_check,
                 )
-                return ProviderObservation(outcome="absent", retry_safe=True)
+                return ProviderObservation(
+                    outcome="absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
             return ProviderObservation(
                 outcome=cast(ProviderObservationOutcome, observation_outcome),
                 retry_safe=retry_safe,

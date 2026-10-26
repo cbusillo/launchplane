@@ -12,7 +12,6 @@ PREVIEW_PRESERVATION_PROGRAM = (
 import base64
 import fcntl
 from pathlib import Path
-import shutil
 import stat
 import sys
 import tarfile
@@ -33,6 +32,16 @@ def one_container(identifier: str) -> dict:
     if len(rows) != 1:
         raise RuntimeError('Preview preservation container is ambiguous')
     return rows[0]
+
+
+def require_idle_container(container: dict) -> dict:
+    for attempt in range(3):
+        if container.get('ExecIDs', 'unknown') in (None, []):
+            return container
+        if attempt < 2:
+            time.sleep(0.1)
+            container = one_container(container['Id'])
+    raise RuntimeError('Preview preservation execution custody is active')
 
 
 def tree_manifest(root: Path) -> dict:
@@ -109,7 +118,7 @@ def preview_containers(source: dict) -> dict:
     identifiers = docker('ps', '-aq', '--filter',
         'label=com.docker.compose.project=' + source['compose_project']).decode().split()
     for identifier in identifiers:
-        container = one_container(identifier)
+        container = require_idle_container(one_container(identifier))
         service = container['Config'].get('Labels', {}).get('com.docker.compose.service')
         if service in selected:
             raise RuntimeError('Preview preservation service is ambiguous')
@@ -178,7 +187,7 @@ def require_unserved_web(container: dict) -> None:
 
 def wait_database(identifier: str) -> None:
     while time.monotonic() < deadline:
-        ready = subprocess.run(['docker', 'exec', identifier, 'pg_isready', '-U', 'postgres'],
+        ready = subprocess.run(['docker', 'exec', identifier, 'pg_isready', '-h', '127.0.0.1', '-U', 'postgres'],
             capture_output=True, timeout=10, pass_fds=inherited_lock_descriptors)
         if ready.returncode == 0:
             return
@@ -227,7 +236,8 @@ def pending_preservation(temporary: Path, source: dict, binding: dict, image: st
         or json.loads(pending.read_text()) != {'authority': spec['authority'], 'source': source,
             'volume_binding': binding, 'verification_image': image}):
         raise RuntimeError('Preview preservation pending source changed')
-    if any(entry.name not in {'pending.json', 'database.dump', 'filestore.tar.gz', 'receipt.json'}
+    if any((entry.name not in {'pending.json', 'database.dump', 'filestore.tar.gz', 'receipt.json'}
+        and not entry.name.startswith('.pending-'))
         or entry.is_symlink() or not entry.is_file() for entry in temporary.iterdir()):
         raise RuntimeError('Preview preservation pending directory has foreign data')
     return True
@@ -243,7 +253,7 @@ def restore_verification(path: Path, image: str) -> int:
             '--network', 'none', '--memory', '512m', '--memory-swap', '512m', '--cpus', '1',
             '--security-opt', 'no-new-privileges:true',
             '--mount', 'type=volume,src=' + name + ',dst=/var/lib/postgresql/data',
-            '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', image).decode().strip()
+            '-e', 'POSTGRES_HOST_AUTH_METHOD=trust', '-e', 'POSTGRES_USER=postgres', image).decode().strip()
         wait_database(identifier)
         docker('exec', identifier, 'createdb', '-U', 'postgres', 'preservation_check')
         with path.open('rb') as stream:
@@ -257,6 +267,30 @@ def restore_verification(path: Path, image: str) -> int:
             b"SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p');\n"))
     finally:
         verification_resources(name, image)
+
+
+def sync_preservation_parent(path: Path) -> None:
+    descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def clear_owned_pending_preservation(temporary: Path) -> None:
+    for entry in temporary.iterdir():
+        if entry.name != 'pending.json':
+            entry.unlink()
+    (temporary / 'pending.json').unlink()
+    temporary.rmdir()
+
+
+def initialize_pending_preservation(temporary: Path, owner: dict) -> None:
+    initial = Path(tempfile.mkdtemp(prefix='.initial-' + temporary.name + '-', dir=temporary.parent))
+    write_snapshot_receipt(initial / 'pending.json', owner)
+    sync_snapshot_directory(initial)
+    os.rename(initial, temporary)
+    sync_preservation_parent(temporary)
 
 
 def preserve(path: Path, source: dict) -> dict:
@@ -285,32 +319,31 @@ def preserve(path: Path, source: dict) -> dict:
         raise RuntimeError('Preview preservation lacks reviewed memory headroom')
     if total > budget['filestore_bytes'] or space.f_bavail * space.f_frsize < budget['reserve_bytes'] + 2 * budget['database_bytes'] + total:
         raise RuntimeError('Preview preservation lacks reviewed storage headroom')
-    require_unserved_web(containers['web'])
-    for service in ('web', 'script-runner'):
-        docker('stop', '-t', '30', containers[service]['Id'])
-    other_connections = database_query(database['Id'], source['database_name'],
-        b'SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid();\n')
-    if other_connections != '0':
-        raise RuntimeError('Preview preservation database is in use')
     expected_databases = sorted([source['database_name'], 'postgres'])
     actual_databases = json.loads(database_query(database['Id'], 'postgres',
         b'SELECT json_agg(datname ORDER BY datname) FROM pg_database WHERE NOT datistemplate;\n'))
     if actual_databases != expected_databases:
         raise RuntimeError('Preview preservation has additional database custody')
-    source_tables = int(database_query(database['Id'], source['database_name'],
-        b"SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p');\n"))
     temporary = path.with_name('.pending-' + path.name)
     if pending_preservation(temporary, source, binding, database['Image']):
         verification_resources('lp-preview-preserve-' + spec['preservation_id'][:32], database['Image'])
-        shutil.rmtree(temporary)
+        clear_owned_pending_preservation(temporary)
     elif temporary.exists():
         temporary.rmdir()
     verifier = 'lp-preview-preserve-' + spec['preservation_id'][:32]
     if (docker('ps', '-aq', '--filter', 'name=^/' + verifier + '$').decode().split()
         or verifier in docker('volume', 'ls', '--format', '{{.Name}}').decode().splitlines()):
         raise RuntimeError('Preview preservation verifier lacks its pending custody')
-    temporary.mkdir(mode=0o700)
-    write_snapshot_receipt(temporary / 'pending.json', {'authority': spec['authority'], 'source': source,
+    require_unserved_web(containers['web'])
+    for service in ('web', 'script-runner'):
+        docker('stop', '-t', '30', containers[service]['Id'])
+    other_connections = database_query(database['Id'], source['database_name'],
+        b"SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND backend_type='client backend';\n")
+    if other_connections != '0':
+        raise RuntimeError('Preview preservation database is in use')
+    source_tables = int(database_query(database['Id'], source['database_name'],
+        b"SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p');\n"))
+    initialize_pending_preservation(temporary, {'authority': spec['authority'], 'source': source,
         'volume_binding': binding, 'verification_image': database['Image']})
     status, _, _ = capture_snapshot_file(['docker', 'exec', database['Id'], 'sh', '-c',
         'pg_dump -Fc --lock-wait-timeout=10s -U "$POSTGRES_USER" --dbname "$1"', '_', source['database_name']],
@@ -336,11 +369,7 @@ def preserve(path: Path, source: dict) -> dict:
     write_snapshot_receipt(temporary / 'receipt.json', receipt)
     sync_snapshot_directory(temporary)
     os.rename(temporary, path)
-    parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(parent)
-    finally:
-        os.close(parent)
+    sync_preservation_parent(path)
     return verify_preservation(path)
 
 
@@ -407,8 +436,7 @@ try:
     print(sys.argv[2] + json.dumps({'type': 'complete', 'preservation_id': spec['preservation_id'],
         'source': receipt['source'], 'volume_binding': receipt['volume_binding'],
         'retry_safe': spec['mode'] == 'inspect'}), flush=True)
-except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError, tarfile.TarError) as error:
-    print(sys.argv[2] + json.dumps({'type': 'failed',
-        'error_message': str(error) if type(error) is RuntimeError else 'Preview preservation inspection failed'}), flush=True)
+except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError, tarfile.TarError):
+    print(sys.argv[2] + json.dumps({'type': 'failed'}), flush=True)
 """
 )
