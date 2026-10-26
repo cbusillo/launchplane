@@ -2,7 +2,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Iterator, Any
+from typing import Iterator, Any, cast
 import unittest
 from unittest.mock import Mock, patch
 
@@ -78,6 +78,15 @@ class ProductionPromotionBackupTests(unittest.TestCase):
         self,
     ) -> None:
         self.run_cutover_worker("settings-restart")
+
+    def test_deterministic_native_preparation_failure_has_a_configured_attempt_bound(self) -> None:
+        self.run_cutover_worker("prepare-failure")
+
+    def test_definite_native_maintenance_failure_does_not_dispatch_another_upgrade(self) -> None:
+        self.run_cutover_worker("maintenance-failure")
+
+    def test_native_entry_refusal_before_record_creation_releases_the_lane(self) -> None:
+        self.run_cutover_worker("entry-refusal")
 
     def run_cutover_worker(self, scenario: str) -> None:
         from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -480,6 +489,124 @@ class ProductionPromotionBackupTests(unittest.TestCase):
                         cutover_provider_factory=lambda plan: provider,
                         reconciling=reconciling,
                     )
+
+            if scenario in {"prepare-failure", "maintenance-failure"}:
+                from control_plane.contracts.odoo_prod_promotion_operation import (
+                    ODOO_CUTOVER_RECONCILIATION_DELAY,
+                )
+                from control_plane.workflows.odoo_stable_operation_worker import (
+                    DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+                    run_odoo_stable_operation_worker_once,
+                )
+
+                method = "prepare_candidate" if scenario == "prepare-failure" else "maintenance"
+                with (
+                    patch.object(
+                        provider, method, side_effect=ValueError("deterministic native refusal")
+                    ) as effects,
+                    patch(
+                        "control_plane.workflows.odoo_stable_operation_worker.read_active_authz_policy_record",
+                        return_value=policy,
+                    ),
+                ):
+                    for _ in range(DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS + 2):
+                        current = store.read_odoo_prod_promotion_operation_record(
+                            operation.operation_id
+                        )
+                        at = max(
+                            datetime.now(UTC),
+                            datetime.fromisoformat(current.updated_at.replace("Z", "+00:00"))
+                            + ODOO_CUTOVER_RECONCILIATION_DELAY,
+                        )
+                        with patch(
+                            "control_plane.workflows.odoo_stable_operation_worker._utc_now_timestamp",
+                            return_value=at.isoformat(),
+                        ):
+                            result = run_odoo_stable_operation_worker_once(
+                                record_store=store,
+                                control_plane_root_path=self.root,
+                                lease_owner="bounded-native-worker",
+                                max_attempts=DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+                                cutover_provider_factory=lambda current_plan: provider,
+                            )
+                        if result.status == "worked":
+                            self.assertTrue(result.terminal_write_committed)
+                    expected = (
+                        DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS
+                        if method == "prepare_candidate"
+                        else 1
+                    )
+                    self.assertEqual(effects.call_count, expected)
+                held = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+                self.assertEqual(held.status, "reconciliation_required")
+                self.assertEqual(held.attempt, expected)
+                deployment = store.read_deployment_record(
+                    plan.new.runtime_identity.deployment_record_id
+                )
+                assert deployment.odoo_cutover is not None
+                self.assertEqual(
+                    deployment.odoo_cutover.step,
+                    "preparing" if method == "prepare_candidate" else "maintaining",
+                )
+                self.assertEqual(capture.call_count, 1)
+                self.assertEqual(store.list_odoo_prod_rollback_operation_records(), ())
+                return
+
+            if scenario == "entry-refusal":
+                from types import SimpleNamespace
+                from control_plane.dokploy.cutover_host import BoundOdooCutoverHost
+                from control_plane.dokploy.cutover_execution import require_cutover_execution
+                from control_plane.odoo_cutover_recovery import operation_cutover
+                from control_plane.odoo_release_recovery import odoo_release_wrote_production
+
+                def entry_guard() -> None:
+                    profile = store.read_product_profile_record(request.product)
+                    store.write_product_profile_record(
+                        profile.model_copy(update={"release_on_acceptance": "held"})
+                    )
+                    require_cutover_execution(plan)
+
+                host = cast(
+                    Any,
+                    SimpleNamespace(
+                        plan=plan, admitted=False, guard=entry_guard, record=lambda: None
+                    ),
+                )
+                host.enter_execution = lambda current_plan: getattr(
+                    BoundOdooCutoverHost, "enter_execution"
+                )(host, current_plan)
+                before = list(provider.actions)
+                with (
+                    patch.object(
+                        provider,
+                        "exclusive",
+                        side_effect=lambda current_plan: BoundOdooCutoverHost.exclusive_state(
+                            host, current_plan
+                        ),
+                    ),
+                    patch.object(provider, "maintenance") as entry_maintenance,
+                ):
+                    self.assertTrue(work(claim()))
+                finished = store.read_odoo_prod_promotion_operation_record(operation.operation_id)
+                self.assertEqual(finished.status, "fail", finished.error_message)
+                self.assertTrue(odoo_release_wrote_production(finished))
+                self.assertIsNone(operation_cutover(store, finished))
+                from control_plane.odoo_cutover_plan import cutover_record_id
+
+                self.assertEqual(
+                    store.read_promotion_record(
+                        "promotion-cutover-" + cutover_record_id(plan)
+                    ).deploy.status,
+                    "fail",
+                )
+                self.assertEqual(provider.actions, before)
+                entry_maintenance.assert_not_called()
+                self.assertEqual(store.list_odoo_prod_rollback_operation_records(), ())
+                with store.odoo_synchronous_lane_reservation(
+                    product=request.product, context=request.context, instance="prod"
+                ) as owner:
+                    self.assertIsNone(owner)
+                return
 
             if client:
                 from control_plane.client_release import client_release_grant_allows

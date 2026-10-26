@@ -4,7 +4,13 @@ from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromot
 from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackOperationRecord
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from contextlib import redirect_stdout
+from types import SimpleNamespace
+import io
+import sys
+import subprocess
 import unittest
+from unittest.mock import MagicMock, Mock, patch
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooCutoverRecord
@@ -20,6 +26,72 @@ from tests.test_odoo_prod_promotion_operation import _operation, _rollback_opera
 
 
 class CutoverStartupRecoveryTests(unittest.TestCase):
+    def test_failed_canonical_maintenance_attempt_cannot_start_a_second_registry_child(
+        self,
+    ) -> None:
+        from control_plane.dokploy.slot_maintenance import run_planned_slot_maintenance
+
+        with TemporaryDirectory() as temporary:
+            provider = IsolatedCutoverProvider(Path(temporary) / "site", database_changing=True)
+            self.addCleanup(provider.engine.dispose)
+            plan = provider.cutover
+            cursor = MagicMock()
+            cursor.__enter__.return_value = cursor
+            boundary = [
+                ("database.uuid", plan.new.runtime_identity.database_uuid),
+                ("odoo_devkit.credential_boundary_commit", "original"),
+            ]
+            cursor.fetchall.side_effect = [boundary, [("base", "installed")], boundary]
+            connection = MagicMock()
+            connection.__enter__.return_value = connection
+            connection.cursor.return_value = cursor
+            child = Mock(
+                return_value=subprocess.CompletedProcess([], 1, stdout=b"failed", stderr=b"")
+            )
+            resolver = Mock(return_value={"install_modules": [], "update_modules": []})
+
+            def execute(argv: tuple[str, ...], stdin: str | None) -> str:
+                if argv[1] == "inspect":
+                    return plan.new.image
+                assert stdin is not None
+                program = argv[argv.index("-c") + 1]
+                output = io.StringIO()
+                with (
+                    patch("sys.stdin", io.StringIO(stdin)),
+                    patch("sys.argv", ["python", argv[-1]]),
+                    patch("sys.path", list(sys.path)),
+                    patch.dict(
+                        "sys.modules",
+                        {
+                            "psycopg2": SimpleNamespace(connect=lambda **kwargs: connection),
+                            "odoo_release_plan": SimpleNamespace(resolve_plan=resolver),
+                        },
+                    ),
+                    patch.dict(
+                        "os.environ",
+                        {
+                            "ODOO_DB_HOST": "isolated",
+                            "ODOO_DB_USER": "fixture",
+                            "ODOO_DB_PASSWORD": "inert",
+                        },
+                    ),
+                    patch("subprocess.run", child),
+                    redirect_stdout(output),
+                ):
+                    exec(program, {})
+                return output.getvalue()
+
+            with patch(
+                "control_plane.dokploy.slot_maintenance.slot_run_directory",
+                return_value=str(Path(temporary) / "state"),
+            ):
+                for _ in range(2):
+                    with self.assertRaises(RuntimeError):
+                        run_planned_slot_maintenance(
+                            plan, runner_container="fixture", execute=execute
+                        )
+            child.assert_called_once()
+
     def test_only_original_held_operation_can_reclaim_proven_interrupted_startup(self) -> None:
         for rollback in (False, True):
             with self.subTest(rollback=rollback), TemporaryDirectory() as temporary:
@@ -225,6 +297,51 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                     self.assertEqual(plain_claim.checkpoints, held.checkpoints)
                     assert isinstance(held, OdooProdRollbackOperationRecord)
                     store.write_odoo_prod_rollback_operation_record(held)
+                if not rollback:
+                    from control_plane.workflows.odoo_stable_operation_worker import (
+                        DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
+                    )
+
+                    assert isinstance(held, OdooProdPromotionOperationRecord)
+                    exhausted = held.model_copy(
+                        update={"attempt": DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS}
+                    )
+                    store.write_odoo_prod_promotion_operation_record(exhausted)
+                    store.write_deployment_record(deployment)
+                    self.assertIsNone(
+                        claim(
+                            lease_owner="exhausted-startup",
+                            lease_expires_at="2026-10-27T00:05:00Z",
+                            claimed_at="2026-10-27T00:00:00Z",
+                        )
+                    )
+                    store.write_deployment_record(
+                        deployment.model_copy(update={"odoo_cutover": missing_receipt})
+                    )
+                    observation = claim(
+                        lease_owner="original-outcome-reader",
+                        lease_expires_at="2026-10-27T00:05:00Z",
+                        claimed_at="2026-10-27T00:00:00Z",
+                    )
+                    assert observation is not None
+                    self.assertEqual(observation.attempt, exhausted.attempt)
+                    store.write_odoo_prod_promotion_operation_record(held)
+                    store.write_deployment_record(
+                        deployment.model_copy(
+                            update={
+                                "odoo_cutover": missing_receipt.model_copy(
+                                    update={"error": "ValueError"}
+                                )
+                            }
+                        )
+                    )
+                    self.assertIsNone(
+                        claim(
+                            lease_owner="definite-maintenance-failure",
+                            lease_expires_at="2026-10-27T00:05:00Z",
+                            claimed_at="2026-10-27T00:00:00Z",
+                        )
+                    )
                 store.write_deployment_record(deployment)
                 claimed = claim(
                     lease_owner="worker",
@@ -234,7 +351,7 @@ class CutoverStartupRecoveryTests(unittest.TestCase):
                 assert claimed is not None
                 self.assertEqual(claimed.operation_id, operation.operation_id)
                 self.assertEqual(claimed.idempotency_key, operation.idempotency_key)
-                self.assertEqual(claimed.attempt, held.attempt)
+                self.assertEqual(claimed.attempt, held.attempt + (0 if rollback else 1))
                 self.assertEqual(claimed.phase, held.phase)
                 self.assertEqual(claimed.checkpoints, held.checkpoints)
                 self.assertIsNone(

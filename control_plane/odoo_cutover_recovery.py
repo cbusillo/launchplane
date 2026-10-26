@@ -13,6 +13,10 @@ from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromot
 from control_plane.odoo_cutover_plan import cutover_identity
 
 
+class CutoverEntryRefusedError(RuntimeError):
+    code = "odoo_cutover_entry_refused"
+
+
 class BackupVerificationRejected(ValueError):
     pass
 
@@ -270,3 +274,44 @@ def rollback_operation_cutover(
         == (operation.product, operation.context, operation.instance, operation.target.artifact_id)
         else None
     )
+
+
+def cutover_reconciliation_eligible(record: OdooCutoverRecord) -> bool:
+    if abort_reconciliation_eligible(record) or record.step in {
+        "preparing",
+        "prepared",
+        "pausing",
+        "ready",
+        "switching",
+        "resuming",
+        "draining",
+        "complete",
+        "rolled_back",
+    }:
+        return True
+    if maintenance_reconciliation_eligible(record):
+        return record.maintenance is not None or record.error in {
+            "",
+            RuntimeError.__name__,
+            TimeoutError.__name__,
+        }
+    return record.step == "rolling_back" and (
+        startup_recovery_pause(record) is not None
+        or record.plan.compatibility.classification == "compatible"
+        and not record.website_settings_attempted
+        and record.rollback_pause is None
+        and record.maintenance is not None
+        and record.backup is not None
+    )
+
+
+def cutover_reconciliation_uses_budget(record: OdooCutoverRecord) -> bool:
+    return record.step in {
+        "preparing",
+        "prepared",
+        "pausing",
+        "ready",
+        "switching",
+        "resuming",
+        "draining",
+    } or (record.step == "maintaining" and record.maintenance is not None)

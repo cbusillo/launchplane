@@ -450,7 +450,7 @@ def complete_odoo_cutover_promotion_audit(
         provider=provider,
         context=promotion.context,
         instance=promotion.to_instance,
-        checkpoint=lambda _step: dispatch_guard(),
+        checkpoint=lambda _step: None,
         dispatch_guard=dispatch_guard,
     )
     dispatch_guard()

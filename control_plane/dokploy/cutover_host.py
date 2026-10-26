@@ -1,3 +1,4 @@
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 import base64
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -90,6 +91,7 @@ from control_plane.odoo_cutover_plan import (
 )
 from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.odoo_cutover_recovery import (
+    CutoverEntryRefusedError,
     startup_recovery_pause,
     BackupVerificationRejected,
     backup_recovery_eligible,
@@ -628,58 +630,66 @@ class BoundOdooCutoverHost:
         with api.guard_dokploy_mutations(self.guard), self.exclusive_state(plan):
             yield
 
-    @contextmanager
-    def exclusive_state(self, plan: OdooCutoverPlan) -> Iterator[None]:
+    def enter_execution(self, plan: OdooCutoverPlan) -> None:
         if plan != self.plan:
             raise ValueError("host execution crossed its original plan")
         self.guard()
         self.state.admit_execution(recovery=self.record() is not None)
         self.admitted = True
-        try:
-            retained = self.state.authority("retained-assets")
-            if retained is None:
-                if self.record() is not None:
-                    raise ValueError("held cutover lacks its original retained asset evidence")
-                retained = {}
-                for path in self.runtime.retained_assets:
-                    response = self.probes.private_resource(plan.old.private_url, path)
-                    if response["status"] != 200:
-                        raise ValueError("serving slot cannot supply its retained asset")
-                    retained[path] = hashlib.sha256(base64.b64decode(response["body"])).hexdigest()
-                if self.state.authority("retained-assets", retained) != retained:
-                    raise ValueError("retained asset evidence has no durable readback")
+        retained = self.state.authority("retained-assets")
+        if retained is None:
+            if self.record() is not None:
+                raise ValueError("held cutover lacks its original retained asset evidence")
+            retained = {}
+            for path in self.runtime.retained_assets:
+                response = self.probes.private_resource(plan.old.private_url, path)
+                if response["status"] != 200:
+                    raise ValueError("serving slot cannot supply its retained asset")
+                retained[path] = hashlib.sha256(base64.b64decode(response["body"])).hexdigest()
+            if self.state.authority("retained-assets", retained) != retained:
+                raise ValueError("retained asset evidence has no durable readback")
+        record = self.record()
+        if (
+            record is not None
+            and startup_recovery_pause(record) is not None
+            and self.startup_inventory_interrupted()
+        ):
+            self.verify_recovery_guard(plan)
+            slot = plan.old if record.step == "rolling_back" else plan.new
+            intent = (
+                plan.rollback_website_settings
+                if record.step == "rolling_back"
+                else plan.website_settings
+            )
+            if intent is None:
+                raise ValueError("original startup recovery lacks its admitted website intent")
+            self.startup.recover(
+                plan,
+                slot,
+                intent,
+                verify_guard=self.verify_recovery_guard,
+                active_jobs=self.observer.active_jobs,
+            )
+        for target in physical_writer_targets(plan, self.writers.targets):
+            slot = self.slot(target.slot_id)
             record = self.record()
-            if (
-                record is not None
-                and startup_recovery_pause(record) is not None
-                and self.startup_inventory_interrupted()
-            ):
+            if slot == plan.new and (record is None or record.step == "preparing"):
+                continue
+            containers = self.containers(slot, writer_service(target.writer))
+            if len(containers) != 1:
                 self.verify_recovery_guard(plan)
-                slot = plan.old if record.step == "rolling_back" else plan.new
-                intent = (
-                    plan.rollback_website_settings
-                    if record.step == "rolling_back"
-                    else plan.website_settings
-                )
-                if intent is None:
-                    raise ValueError("original startup recovery lacks its admitted website intent")
-                self.startup.recover(
-                    plan,
-                    slot,
-                    intent,
-                    verify_guard=self.verify_recovery_guard,
-                    active_jobs=self.observer.active_jobs,
-                )
-            for target in physical_writer_targets(plan, self.writers.targets):
-                slot = self.slot(target.slot_id)
-                record = self.record()
-                if slot == plan.new and (record is None or record.step == "preparing"):
-                    continue
-                containers = self.containers(slot, writer_service(target.writer))
-                if len(containers) != 1:
-                    self.verify_recovery_guard(plan)
-                    continue
-                self.target(slot, target.writer)
+                continue
+            self.target(slot, target.writer)
+
+    @contextmanager
+    def exclusive_state(self, plan: OdooCutoverPlan) -> Iterator[None]:
+        try:
+            try:
+                self.enter_execution(plan)
+            except DurableOperationAuthorizationDeniedError as error:
+                if self.record() is None:
+                    raise CutoverEntryRefusedError(str(error)) from error
+                raise
             yield
             try:
                 self.prune_prepared()

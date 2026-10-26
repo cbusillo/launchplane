@@ -353,6 +353,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyResult,
 )
 from control_plane.contracts.odoo_prod_promotion_operation import (
+    DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     ODOO_PROD_PROMOTION_OPERATION_PHASE_SEQUENCE,
     OdooProdPromotionCheckpoint,
     OdooProdPromotionOperationPhase,
@@ -17340,6 +17341,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_expires_at: str,
         claimed_at: str,
         cutover_reconciliation: bool = False,
+        max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     ) -> Any:
         normalized_lease_owner = lease_owner.strip()
         if not normalized_lease_owner or not lease_expires_at.strip() or not claimed_at.strip():
@@ -17365,6 +17367,7 @@ class PostgresRecordStore(HumanSessionStore):
                 return None
             for row in cast(list[Any], session.scalars(statement).all()):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
+                charge_attempt = True
                 if cutover_reconciliation:
                     from control_plane.odoo_cutover_plan import cutover_identity
                     from control_plane.contracts.odoo_prod_promotion_operation import (
@@ -17406,44 +17409,21 @@ class PostgresRecordStore(HumanSessionStore):
                         }:
                             continue
                     from control_plane.odoo_cutover_recovery import (
-                        startup_recovery_pause,
-                        abort_reconciliation_eligible,
-                        maintenance_reconciliation_eligible,
+                        cutover_reconciliation_eligible,
+                        cutover_reconciliation_uses_budget,
                     )
 
                     if (
                         cutover is None
-                        or not (
-                            cutover.step
-                            in {
-                                "preparing",
-                                "prepared",
-                                "pausing",
-                                "ready",
-                                "switching",
-                                "resuming",
-                                "draining",
-                                "complete",
-                            }
-                            or maintenance_reconciliation_eligible(cutover)
-                            or model_type is OdooProdRollbackOperationRecord
-                            and (
-                                cutover.step == "rolled_back"
-                                or cutover.step == "rolling_back"
-                                and (
-                                    startup_recovery_pause(cutover) is not None
-                                    or cutover.plan.compatibility.classification == "compatible"
-                                    and not cutover.website_settings_attempted
-                                    and cutover.rollback_pause is None
-                                    and cutover.maintenance is not None
-                                    and cutover.backup is not None
-                                )
-                            )
-                            or abort_reconciliation_eligible(cutover)
-                        )
+                        or cutover.step == "rolled_back"
+                        and model_type is OdooProdPromotionOperationRecord
+                        or not cutover_reconciliation_eligible(cutover)
                         or cutover.plan.new.binding.product_id != record.product
                         or cutover.plan.new.binding.environment_id != record.instance
                     ):
+                        continue
+                    charge_attempt = cutover_reconciliation_uses_budget(cutover)
+                    if charge_attempt and record.attempt >= max_attempts:
                         continue
                 if not source_read_retry_ready(record, claimed_at):
                     continue
@@ -17485,7 +17465,7 @@ class PostgresRecordStore(HumanSessionStore):
                         "lease_owner": normalized_lease_owner,
                         "lease_expires_at": lease_expires_at.strip(),
                         "heartbeat_at": claimed_at.strip(),
-                        "attempt": record.attempt + (0 if cutover_reconciliation else 1),
+                        "attempt": record.attempt + int(charge_attempt),
                     }
                 )
                 if cutover_reconciliation:
@@ -17821,6 +17801,7 @@ class PostgresRecordStore(HumanSessionStore):
         lease_owner: str,
         lease_expires_at: str,
         claimed_at: str,
+        max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     ) -> OdooProdPromotionOperationRecord | None:
         return cast(
             OdooProdPromotionOperationRecord | None,
@@ -17832,11 +17813,17 @@ class PostgresRecordStore(HumanSessionStore):
                 lease_expires_at=lease_expires_at,
                 claimed_at=claimed_at,
                 cutover_reconciliation=True,
+                max_attempts=max_attempts,
             ),
         )
 
     def claim_odoo_cutover_rollback_reconciliation_record(
-        self, *, lease_owner: str, lease_expires_at: str, claimed_at: str
+        self,
+        *,
+        lease_owner: str,
+        lease_expires_at: str,
+        claimed_at: str,
+        max_attempts: int = DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     ) -> OdooProdRollbackOperationRecord | None:
         return cast(
             OdooProdRollbackOperationRecord | None,
@@ -17848,6 +17835,7 @@ class PostgresRecordStore(HumanSessionStore):
                 lease_expires_at=lease_expires_at,
                 claimed_at=claimed_at,
                 cutover_reconciliation=True,
+                max_attempts=max_attempts,
             ),
         )
 
@@ -17896,7 +17884,11 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
         recovery = build_odoo_release_recovery(self, record)
-        from control_plane.odoo_cutover_recovery import operation_aborted
+        from control_plane.odoo_cutover_recovery import (
+            operation_aborted,
+            operation_cutover,
+            CutoverEntryRefusedError,
+        )
 
         if (
             record.status == "fail"
@@ -17904,6 +17896,10 @@ class PostgresRecordStore(HumanSessionStore):
             and odoo_release_wrote_production(record)
             and recovery is None
             and not operation_aborted(self, record)
+            and not (
+                record.error_code == CutoverEntryRefusedError.code
+                and operation_cutover(self, record) is None
+            )
         ):
             record = record.model_copy(
                 update={

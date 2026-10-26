@@ -148,7 +148,7 @@ class OdooCutoverActivationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "persisted cutover"):
                 resolve_profile_cutover_plan(store, **arguments)
 
-    def test_native_reconciliation_claim_is_exclusive_uncharged_and_retains_phase_history(
+    def test_native_forward_reconciliation_is_exclusive_charged_and_retains_phase_history(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary:
@@ -244,7 +244,7 @@ class OdooCutoverActivationTests(unittest.TestCase):
                         prepared_claim, "original preparation must remain resumable"
                     )
                     assert prepared_claim is not None
-                    self.assertEqual(prepared_claim.attempt, held.attempt)
+                    self.assertEqual(prepared_claim.attempt, held.attempt + 1)
                     self.assertEqual(prepared_claim.phase, held.phase)
                     self.assertEqual(prepared_claim.checkpoints, held.checkpoints)
                     store.write_odoo_prod_promotion_operation_record(held)
@@ -269,7 +269,7 @@ class OdooCutoverActivationTests(unittest.TestCase):
             self.assertIsNone(claim("worker-c"))
             assert claimed is not None
             self.assertIn(claimed.lease_owner, {"worker-a", "worker-b"})
-            self.assertEqual(claimed.attempt, held.attempt)
+            self.assertEqual(claimed.attempt, held.attempt + 1)
             self.assertEqual(claimed.phase, held.phase)
             self.assertEqual(claimed.checkpoints, held.checkpoints)
 
@@ -295,7 +295,7 @@ class OdooCutoverActivationTests(unittest.TestCase):
                 self.assertEqual(unchanged, denied)
                 resumed = retry(denied_at + ODOO_CUTOVER_RECONCILIATION_DELAY)
                 assert resumed is not None
-                self.assertEqual(resumed.attempt, denied.attempt)
+                self.assertEqual(resumed.attempt, denied.attempt + 1)
                 self.assertEqual(resumed.phase, denied.phase)
                 self.assertEqual(resumed.checkpoints, denied.checkpoints)
             from control_plane.workflows.odoo_stable_operation_worker import (
@@ -304,11 +304,10 @@ class OdooCutoverActivationTests(unittest.TestCase):
 
             exhausted = held.model_copy(update={"attempt": DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS})
             store.write_odoo_prod_promotion_operation_record(exhausted)
-            capped = claim("worker-b")
-            assert capped is not None
-            self.assertEqual(capped.attempt, exhausted.attempt)
-            self.assertEqual(capped.phase, exhausted.phase)
-            self.assertEqual(capped.checkpoints, exhausted.checkpoints)
+            self.assertIsNone(claim("worker-b"))
+            self.assertEqual(
+                store.read_odoo_prod_promotion_operation_record(exhausted.operation_id), exhausted
+            )
 
     def test_pending_rollback_precedes_held_reconciliation(self) -> None:
         with TemporaryDirectory() as temporary:

@@ -39,6 +39,7 @@ from control_plane.contracts.odoo_prod_backup_restore_operation import (
     odoo_prod_backup_restore_operation_is_verification_replay_claim,
 )
 from control_plane.contracts.odoo_prod_promotion_operation import (
+    DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS as DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS,
     ODOO_PROD_PROMOTION_SAFE_RETRY_PHASES,
     OdooProdPromotionOperationPhase,
     OdooProdPromotionOperationRecord,
@@ -83,6 +84,11 @@ from control_plane.client_release import (
     client_release_grant_allows,
 )
 from control_plane.odoo_business_hours import BusinessHoursHeld, require_release_window
+from control_plane.odoo_cutover_recovery import (
+    CutoverEntryRefusedError,
+    cutover_reconciliation_uses_budget,
+    operation_cutover,
+)
 from control_plane.odoo_release_recovery import (
     PRODUCTION_WRITE_KEY,
     odoo_release_wrote_production,
@@ -165,7 +171,6 @@ DEFAULT_ODOO_STABLE_WORKER_POLL_SECONDS = 10
 # re-reads the release from GitHub, so it is slower than the operation poll.
 CLIENT_RELEASE_ADVANCE_SECONDS = 30
 DEFAULT_ODOO_STABLE_WORKER_ERROR_BACKOFF_SECONDS = 30
-DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS = 3
 DEFAULT_ODOO_STABLE_WORKER_MAX_CONSECUTIVE_ERRORS = 5
 SAFE_BOOTSTRAP_RETRY_PHASES = ("created",)
 SAFE_TARGET_REPLACEMENT_RETRY_PHASES = ("created",)
@@ -1651,6 +1656,7 @@ def _run_release_operation(
     terminal: Callable[[Any, Any], Any],
     retain_denied_hold: Callable[[], bool] = lambda: False,
     reconciling: bool = False,
+    attempt_charged: bool = True,
 ) -> bool:
     stop_event = Event()
     heartbeat_lost_event = Event()
@@ -1732,9 +1738,7 @@ def _run_release_operation(
                 "lease_expires_at": "",
                 "heartbeat_at": "",
                 "result": None,
-                # An authority refusal ran no recovery effects. Preserve the
-                # budget for actual provider attempts after authority returns.
-                "attempt": max(operation.attempt - (0 if reconciling else 1), 0),
+                "attempt": max(operation.attempt - int(attempt_charged), 0),
                 "error_code": error.code,
                 "error_message": "Unfinished cutover recovery was denied; retain the lane hold without effects.",
             }
@@ -1768,14 +1772,16 @@ def _run_release_operation(
             update={
                 "error_code": "business_hours_held",
                 "error_message": str(error),
-                "attempt": max(operation.attempt - (0 if reconciling else 1), 0),
+                "attempt": max(operation.attempt - int(attempt_charged), 0),
             }
         )
     except Exception as error:
         logging.exception(
             "%s operation %s failed before producing a result.", label, operation.operation_id
         )
-        if authorization_guard.denial_error is not None and (reconciling or retain_denied_hold()):
+        if isinstance(error, CutoverEntryRefusedError):
+            terminal_operation = failed(str(error), error.code)
+        elif authorization_guard.denial_error is not None and (reconciling or retain_denied_hold()):
             terminal_operation = denied_hold(authorization_guard.denial_error)
         elif (
             not reconciling
@@ -1825,7 +1831,6 @@ def _execute_prod_promotion_operation(
 ) -> bool:
     def release_authority(authorization: DurableOperationAuthorization) -> bool:
         from control_plane.odoo_release_recovery import odoo_release_continuation_allows
-        from control_plane.odoo_cutover_recovery import operation_cutover
 
         current = record_store.read_odoo_prod_promotion_operation_record(operation.operation_id)
 
@@ -1905,10 +1910,7 @@ def _execute_prod_promotion_operation(
             checkpoint_provider_effect(effect_name)
             started = True
 
-        from control_plane.odoo_cutover_recovery import (
-            operation_cutover,
-            abort_reconciliation_eligible,
-        )
+        from control_plane.odoo_cutover_recovery import abort_reconciliation_eligible
 
         recovery_record = (
             operation_cutover(cast(Any, record_store), operation) if reconciling else None
@@ -1979,8 +1981,6 @@ def _execute_prod_promotion_operation(
                 error_message=applied.error_message,
             )
 
-        from control_plane.odoo_cutover_recovery import operation_cutover
-
         operation_now = record_store.read_odoo_prod_promotion_operation_record(
             operation.operation_id
         )
@@ -2021,6 +2021,14 @@ def _execute_prod_promotion_operation(
             error_code="" if passed else f"promotion_{result.run_status}",
             error_message=result.error_message or "Odoo prod promotion failed.",
         )
+
+    if reconciling:
+        original_cutover = operation_cutover(cast(Any, record_store), operation)
+        if original_cutover is None:
+            raise ValueError("native reconciliation lost its original cutover")
+        attempt_charged = cutover_reconciliation_uses_budget(original_cutover)
+    else:
+        attempt_charged = True
 
     return _run_release_operation(
         label="Odoo prod promotion",
@@ -2066,6 +2074,7 @@ def _execute_prod_promotion_operation(
         terminal=terminal,
         retain_denied_hold=retain_denied_cutover_hold,
         reconciling=reconciling,
+        attempt_charged=attempt_charged,
     )
 
 
@@ -2189,6 +2198,7 @@ def _execute_prod_rollback_operation(
         terminal=terminal,
         retain_denied_hold=retain_denied_native_hold,
         reconciling=reconciling,
+        attempt_charged=not reconciling,
     )
 
 

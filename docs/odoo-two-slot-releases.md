@@ -137,9 +137,15 @@ new parallel shared truth or schema table. File/SQLite stores are isolated
 rehearsal paths. Provider exclusivity and the existing worker lease protect
 effects; payload storage is not itself a distributed lock.
 The native worker reacquires the original held operation under its lane lock,
-service-drain admission and a renewed lease. Reconciliation is an observation
-and continuation of that admitted release, not another deployment attempt: it
-preserves the attempt number, phase and checkpoint history. One production-write
+service-drain admission and a renewed lease. Reconciliation preserves the
+original phase and bounded checkpoint history. Forward replay uses the existing
+configured attempt limit; authority refusal refunds its reserved attempt.
+An original abort, inverse or terminal audit remains available after that limit.
+Maintenance without a passing receipt may enter or observe only its original
+atomic native attempt, which never starts a second upgrade child. Those original
+outcome observations do not consume the forward retry budget; a definite
+validation failure stays held. Once a passing receipt exists, startup replay uses
+the forward budget. One production-write
 checkpoint separates fresh admission from continuation. Dispatch guards read the
 current lease, original decision, ownership or Director authority, production
 identity and recovery pin without appending checkpoints. Production identity uses
@@ -543,7 +549,11 @@ old-slot handoff never runs readiness that would stop its writers again.
 An unpaused compatible abort verifies the
 already-serving old slot without stopping its writers or switching traffic. The final `aborted` state
 records failure with the old service restored, and is terminal for deployment,
-worker and unfinished-operation readers. A live or unknown native capture,
+worker and unfinished-operation readers. Before a native cutover row exists,
+authorization refusal during the installed host's entry phase proves no product
+effect began and finishes as a plain failure. Only that typed entry outcome and
+an absent row permit the exception to the completion provenance hold; legacy
+and uncertain-effect gates are unchanged. A live or unknown native capture,
 foreign tuple or pause, maintenance dispatch without recoverable evidence, or
 lost authority keeps the recovery hold. Pre-maintenance reconciliation always
 chooses the inverse: cancel or abandon the isolated verification, restore the
