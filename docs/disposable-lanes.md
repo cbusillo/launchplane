@@ -1343,9 +1343,13 @@ membership is not part of that digest. A full census runs immediately before
 each actual route dispatch, including retries of an unsent or busy writer.
 A continuing original that only observes its recorded writer needs no new census.
 Recipient preparation has durable per-target receipts under the original address
-plan. A lost update reply requires observation under that same key; an enabled or
-unknown flag never authorizes a blind repeat. Cancellation settles any original
-preparation first and leaves automatic deployment disabled. Legacy saved plans
+plan. A lost update reply requires exact original-recipient observation under
+that same key. A known enabled flag permits only repeating the convergent
+`autoDeploy: false` patch after its scope is rechecked; an unknown observation
+preserves the fence. No deployment or data effect is repeated. Cancellation
+settles checkpointed preparation with that same protective patch without
+re-entering forward route admission, and never re-enables automatic deployment.
+A preparation proved never dispatched is excluded instead. Legacy saved plans
 keep their original digest and never acquire an unreviewed preparation step.
 The bounded census runs in the worker; dispatch rechecks its lease and physical
 fence afterward. Matching

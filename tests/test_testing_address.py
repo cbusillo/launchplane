@@ -588,6 +588,7 @@ class TestingAddressTests(unittest.TestCase):
         native, run = self.native_address_execution()
         self.retained_auto_deploy = True
         self.lose_retained_reply = True
+        self.retained_update_applies = lost_reply_applies
         self.plan = self.plan.model_copy(update={"retained_automation": {"retained-target": True}})
 
         def inventory(**_kwargs: Any) -> AddressDomainInventory:
@@ -602,13 +603,25 @@ class TestingAddressTests(unittest.TestCase):
             self.assertEqual(
                 kwargs["payload"], {"composeId": "retained-target", "autoDeploy": False}
             )
-            if lost_reply_applies:
+            if self.retained_update_applies:
                 self.retained_auto_deploy = False
             if self.lose_retained_reply:
                 raise NativeSourceUnavailable("The provider update reply was lost")
 
         self.enterContext(
             patch.object(preparation, "inspect_address_domains", side_effect=inventory)
+        )
+        self.enterContext(
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                side_effect=lambda **_kwargs: {
+                    "composeId": "retained-target",
+                    "serverId": self.plan.server_id,
+                    "appName": self.plan.retained_projects[0],
+                    "autoDeploy": self.retained_auto_deploy,
+                },
+            )
         )
         self.enterContext(
             patch.object(
@@ -658,23 +671,58 @@ class TestingAddressTests(unittest.TestCase):
             self.operation,
         )
 
-    def test_unsettled_retained_preparation_cannot_retry_or_finish_cancellation(self) -> None:
+    def test_retained_preparation_reconciles_enabled_flag_under_original_key(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+        from control_plane import testing_address_preparation as preparation
 
         native, run, send = self.retained_recipient_execution(lost_reply_applies=False)
-        for cancel in (False, False, True):
-            with self.assertRaises(NativeSourceUnavailable):
-                run(cancel)
+        with self.assertRaises(NativeSourceUnavailable):
+            run(False)
         send.assert_called_once()
         self.assertNotIn("publish_v2", native.remote_modes)
-        self.retained_auto_deploy = False
-        result = run(True)
+        self.retained_update_applies = True
+        self.lose_retained_reply = False
+        profile = self.store.read_product_profile_record(self.product)
+        changed = profile.model_copy(
+            update={"updated_at": (self.now + timedelta(seconds=1)).isoformat()}
+        )
+        self.store.write_product_profile_record(changed)
+        with patch.object(
+            preparation,
+            "inspect_address_domains",
+            side_effect=AssertionError("Cancellation cannot re-enter the forward census"),
+        ):
+            result = run(True)
         payload = result.response_payload["result"]
         assert isinstance(payload, dict)
         self.assertTrue(payload["cancelled"])
-        send.assert_called_once()
+        self.assertEqual(send.call_count, 2)
         self.assertFalse(self.retained_auto_deploy)
         self.assertNotIn("publish_v2", native.remote_modes)
+        self.assertEqual(self.store.read_product_profile_record(self.product), changed)
+
+    def test_preparation_read_failure_before_checkpoint_can_resume_original_request(self) -> None:
+        from control_plane import testing_address_preparation as preparation
+        from control_plane.dokploy import api
+
+        _native, run, send = self.retained_recipient_execution(lost_reply_applies=True)
+        self.lose_retained_reply = False
+        with patch.object(
+            preparation,
+            "inspect_address_domains",
+            side_effect=api.DokployRequestFailed(
+                method="GET",
+                path="/api/project.all",
+                detail="temporary provider outage",
+                status_code=503,
+            ),
+        ):
+            with self.assertRaises(api.DokployRequestFailed):
+                run(False)
+        send.assert_not_called()
+        result = run(False)
+        self.assertEqual(result.status, "completed")
+        send.assert_called_once()
 
     def test_recipient_preparation_refuses_active_or_shared_targets_before_dispatch(self) -> None:
         from types import SimpleNamespace

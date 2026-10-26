@@ -59,13 +59,39 @@ class AddressRecipientPreparation(DurableProviderMutationAdapter):
     def reconciliation_key(self) -> str:
         return self.adapter.plan.digest
 
-    def read_automation(self) -> bool:
+    def observe_automation(self) -> bool:
         self.parent_lease.assert_current()
+        read_testing_address_recovery_copy(self.adapter.store, self.adapter.plan)
+        verify_testing_address_retained_custody(self.adapter.store, self.adapter.plan)
+        host, token = source.read_dokploy_config(
+            control_plane_root=self.adapter.root, database_url=self.adapter.store.database_url
+        )
+        try:
+            target = api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type="compose", target_id=self.target_id
+            )
+        except api.DokployRequestFailed as error:
+            if error.status_code in {401, 403}:
+                raise NativeSourceAuthorizationDenied(
+                    "The existing provider identity denied original recipient readback."
+                ) from error
+            raise
+        enabled = target.get("autoDeploy")
+        if (
+            target.get("composeId") != self.target_id
+            or target.get("serverId") != self.adapter.plan.server_id
+            or target.get("appName") not in self.adapter.plan.retained_projects
+            or type(enabled) is not bool
+        ):
+            raise NativeSourceUnavailable("The original retained recipient readback is unknown.")
+        return enabled
+
+    def read_automation(self) -> bool:
+        enabled = self.observe_automation()
         if self.settle_only:
-            read_testing_address_recovery_copy(self.adapter.store, self.adapter.plan)
-            verify_testing_address_retained_custody(self.adapter.store, self.adapter.plan)
-        else:
-            verify_testing_address_sources(self.adapter.store, self.adapter.plan)
+            require_unbound_address_recipients(self.adapter.store, frozenset({self.target_id}))
+            return enabled
+        verify_testing_address_sources(self.adapter.store, self.adapter.plan)
         host, token = source.read_dokploy_config(
             control_plane_root=self.adapter.root, database_url=self.adapter.store.database_url
         )
@@ -104,18 +130,22 @@ class AddressRecipientPreparation(DurableProviderMutationAdapter):
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        if reconciliation_key != self.reconciliation_key() or self.read_automation():
+        if reconciliation_key != self.reconciliation_key():
             return ProviderObservation("unknown")
-        return ProviderObservation("present", 200, {"automatic_deployment_disabled": True})
+        if not self.observe_automation():
+            return ProviderObservation("present", 200, {"automatic_deployment_disabled": True})
+        if self.settle_only and not provider_effect_phase:
+            return ProviderObservation("present", 200, {"not_dispatched": True})
+        return ProviderObservation(
+            "absent", retry_safe=True, preserve_effect_checkpoint=bool(provider_effect_phase)
+        )
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         try:
             enabled = self.read_automation()
-            if enabled and self.settle_only:
-                raise ValueError("Reconcile the original recipient preparation before cancelling.")
-        except (ValueError, FileNotFoundError) as error:
+        except Exception as error:
             raise ProviderMutationRejectedError(error) from error
         if enabled:
             host, token = source.read_dokploy_config(
