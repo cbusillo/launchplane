@@ -19,6 +19,11 @@ version or a failed forward release, including one whose automatic recovery
 restored the previous version. Pending, running and reconciliation-required operations
 keep the record open. This also settles older completed releases after a worker
 restart or deployment, independently of the current lane versions or invitation.
+Stopped outcomes name each failed or cancelled step and reuse its recorded,
+redacted failure reason. They separately report the version currently recorded
+in production, identifying the reviewed, previous or another version by commit.
+Unavailable reasons or production evidence are stated explicitly; a past
+successful promotion is never used to infer what production runs now.
 Temporary-hotfix review requests remain open for the Client to decide. Already
 closed records are left alone. The saved decision and original issue body remain
 unchanged. Retries reuse the
