@@ -223,6 +223,9 @@ class RecordFailure(BaseModel):
 
 # What each generic-web promotion failure code means, in Launchplane's words.
 PROMOTION_FAILURE_DESCRIPTIONS: dict[str, str] = {
+    "recipient_cutover_failed": "The prepared recipient failed its cutover qualification.",
+    "recipient_runtime_failed": "The recipient's running resources or writer identity did not match the reviewed preparation.",
+    "recipient_publication_failed": "Publishing the recipient's reviewed production binding failed.",
     "source_health_failed": (
         "The source lane's health check did not pass, so the promotion stopped before deploying."
     ),

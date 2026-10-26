@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,6 +25,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ArtifactIdentityReference,
     BackupGateEvidence,
+    promotion_failure,
 )
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence, DeploymentRecord
 from control_plane.contracts.ship_request import ShipRequest
@@ -66,6 +68,8 @@ from control_plane.workflows.production_promotion_backup import (
 )
 from control_plane.dokploy import api, source
 from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.http_error_evidence import log_handled_error_cause
+from control_plane.outbound_http import _ValidatedAddressConnector, resolve_private_http_destination
 
 from control_plane.production_recipient_evidence import (
     WRITER_ACTION_MARKER,
@@ -109,6 +113,24 @@ class RecipientCutoverPlan(BaseModel):
     release_required: Literal[True] = True
 
 
+def qualify_health_routes(request: RecipientCutoverRequest) -> None:
+    destinations = {}
+    for url in (*request.health_urls.values(), request.readiness_url):
+        parsed = urlsplit(url)
+        destinations[(parsed.hostname, parsed.port)] = url
+    for url in destinations.values():
+        destination = resolve_private_http_destination(url)
+        try:
+            with _ValidatedAddressConnector(destination.addresses)(
+                (destination.hostname, destination.port), 3, None
+            ):
+                continue
+        except ConnectionRefusedError:
+            continue
+        except OSError as error:
+            raise ValueError("Destination health route is unreachable from Launchplane.") from error
+
+
 def cutover_intent(
     root: Path,
     store: PostgresRecordStore,
@@ -146,6 +168,8 @@ def cutover_intent(
     PrivateHealthEndpointRecord.model_validate(
         {**endpoints[0].model_dump(mode="json"), "url": request.readiness_url}
     )
+    if check_freshness:
+        qualify_health_routes(request)
     policies = [
         ProductionBackupPolicyRecord.model_validate(row)
         for row in before["backup_policies"]
@@ -789,7 +813,9 @@ class RecipientCutoverAdapter:
                 # The reviewed host fence proved this attempt never paused a writer.
                 return ProviderObservation(
                     "present",
-                    response_payload=self.result("fail", writer_effect="none").response_payload,
+                    response_payload=self.failed_result(
+                        provider_operation_key, writer_effect="none"
+                    ).response_payload,
                 )
             if current.phase == "rolled_back":
                 if current.execution.get("native_inverse") or current.execution.get(
@@ -797,8 +823,8 @@ class RecipientCutoverAdapter:
                 ):
                     return ProviderObservation(
                         "present",
-                        response_payload=self.result(
-                            "fail", rollback_status="pass"
+                        response_payload=self.failed_result(
+                            provider_operation_key, rollback_status="pass"
                         ).response_payload,
                     )
                 return ProviderObservation("absent", retry_safe=True)
@@ -835,7 +861,8 @@ class RecipientCutoverAdapter:
                                 or current.publication.get("writer_binding")
                                 or None,
                             )
-                    except Exception:
+                    except Exception as error:
+                        log_handled_error_cause(error, self.trace_id)
                         return ProviderObservation("unknown")
                 if (
                     not current.execution.get("trigger_requested_at")
@@ -900,8 +927,8 @@ class RecipientCutoverAdapter:
             )
             self.record = record
             self.fail_pending_promotion(provider_operation_key, lease)
-            return self.result(
-                "fail",
+            return self.failed_result(
+                provider_operation_key,
                 rollback_status="pass",
                 provider_effect_performed=self.rollback_resume_pending,
             )
@@ -1065,6 +1092,7 @@ class RecipientCutoverAdapter:
             lease.checkpoint_effect("rollback_" + phase)
 
         pending: PromotionRecord | None = None
+        failure_code = "recipient_cutover_failed"
         try:
             if not isinstance(lease, ProviderEvidenceLease):
                 raise ValueError("Cutover requires an evidence-bound execution lease.")
@@ -1249,6 +1277,7 @@ class RecipientCutoverAdapter:
                     binding=writer_binding,
                 )
                 old_paused = True
+                failure_code = "destination_deploy_failed"
                 execute_dokploy_artifact_deploy(
                     host=host,
                     token=token,
@@ -1278,6 +1307,7 @@ class RecipientCutoverAdapter:
                     effect_started=lambda: None,
                 )
                 terminal_deployment = True
+            failure_code = "destination_health_failed"
             health = _verify_health_evidence_with_identity(
                 HealthcheckEvidence(
                     status="pending",
@@ -1295,8 +1325,10 @@ class RecipientCutoverAdapter:
                 raise ValueError(
                     "The replacement did not complete bootstrap with exact runtime identity."
                 )
+            failure_code = "recipient_runtime_failed"
             writer_action(self.root, record, old=False, action="inspect", checkpoint=checkpoint)
             self.verify_runtime(record, checkpoint)
+            failure_code = "recipient_publication_failed"
             checkpoint("publish_recipient_authority")
             publication = self.publication(
                 record, identity, health, deployment_id, authority=baseline
@@ -1347,6 +1379,7 @@ class RecipientCutoverAdapter:
             )
             return self.result("pass")
         except Exception as error:
+            log_handled_error_cause(error, self.trace_id)
             if (
                 isinstance(error, GenericWebPromotionSourceRefused)
                 and not started
@@ -1362,6 +1395,9 @@ class RecipientCutoverAdapter:
                     ValueError("Recipient release gates refused bootstrap.")
                 ) from error
             begin_recovery()
+            if pending is not None:
+                pending = pending.model_copy(update={"failure": promotion_failure(failure_code)})
+                self.store.write_promotion_record(pending)
             terminal_deployment = (
                 terminal_deployment
                 or isinstance(error, api.DokployDeploymentFailed)
@@ -1444,11 +1480,11 @@ class RecipientCutoverAdapter:
                                 }
                             )
                         )
-                    return self.result("fail", rollback_status="pass")
+                    return self.failed_result(provider_operation_key, rollback_status="pass")
             except ProviderMutationRejectedError:
                 raise
-            except Exception:
-                pass
+            except Exception as recovery_error:
+                log_handled_error_cause(recovery_error, self.trace_id)
             raise ProviderMutationUnknownError(
                 "Retain exact cutover custody; reconcile before restarting either writer."
             ) from error
@@ -1540,6 +1576,25 @@ class RecipientCutoverAdapter:
                     update={"deploy": pending.deploy.model_copy(update={"status": "fail"})}
                 )
             )
+
+    def failed_result(
+        self, key: str, *, provider_effect_performed: bool = True, **extra: str
+    ) -> ProviderMutationOutcome:
+        promotion_id = "promotion-recipient-" + canonical_sha256(key)[:24]
+        try:
+            promotion = self.store.read_promotion_record(promotion_id)
+        except FileNotFoundError:
+            return self.result("fail", provider_effect_performed=provider_effect_performed, **extra)
+        if promotion.failure is not None:
+            extra.update(
+                error_code=promotion.failure.code, error_message=promotion.failure.description
+            )
+        return self.result(
+            "fail",
+            provider_effect_performed=provider_effect_performed,
+            promotion_record_id=promotion_id,
+            **extra,
+        )
 
     def result(
         self,

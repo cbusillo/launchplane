@@ -43,6 +43,9 @@ class RecipientCutoverTests(unittest.TestCase):
     database_url = ""
 
     def setUp(self) -> None:
+        self.route_connector = self.enterContext(
+            patch("control_plane.production_recipient_cutover._ValidatedAddressConnector")
+        )
         self.publication_case = publication_tests.RecipientPublicationTests()
         self.publication_case.database_url = self.database_url
         with patch.object(self.publication_case, "customize_preparation", side_effect=self.seed):
@@ -470,6 +473,62 @@ class RecipientCutoverTests(unittest.TestCase):
         assert current is not None
         self.assertEqual(current.phase, "rolled_back")
         self.fixture.assert_old_preserved()
+
+    def test_unreachable_health_route_refuses_intent_and_writer_dispatch(self) -> None:
+        with patch.object(
+            self.route_connector.return_value, "side_effect", TimeoutError("private-route")
+        ):
+            with self.assertRaises(ValueError):
+                cutover_intent(self.fixture.root, self.store, self.record, self.request)
+            with self.assertRaises(ValueError):
+                self.run_release()
+        self.assertEqual(self.actions, [])
+        self.assertEqual(self.deploys, 0)
+        self.assertTrue(self.old_running)
+
+    def test_cold_health_listener_can_refuse_connection_on_a_reachable_route(self) -> None:
+        with patch.object(self.route_connector.return_value, "side_effect", ConnectionRefusedError):
+            intent = cutover_intent(self.fixture.root, self.store, self.record, self.request)
+        self.assertEqual(intent, self.record.activation)
+        self.assertEqual(self.actions, [])
+
+    def test_health_transport_failure_remains_readable_after_native_rollback(self) -> None:
+        from control_plane.client_release import _release_step_failure
+
+        with (
+            patch(
+                "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
+                side_effect=TimeoutError("sensitive://account:password@private-host/database"),
+            ),
+            self.assertLogs("control_plane.http_error_evidence") as logged,
+        ):
+            result = self.run_release()
+        self.assertFalse(self.new_running)
+        self.assertTrue(self.old_running)
+        failure = _release_step_failure(self.store, result.record, "fail")
+        assert failure is not None
+        promotion = self.store.read_promotion_record(failure.record_id)
+        from control_plane.contracts.promotion_record import promotion_failure
+
+        self.assertEqual(promotion.failure, promotion_failure("destination_health_failed"))
+        assert promotion.failure is not None
+        self.assertEqual(failure.reason, promotion.failure.description)
+        self.assertNotIn("sensitive", json.dumps(result.response_payload) + str(logged.output))
+        replay = self.run_release()
+        self.assertEqual(_release_step_failure(self.store, replay.record, "fail"), failure)
+
+    def test_unreachable_readiness_route_cannot_borrow_health_route_reachability(self) -> None:
+        request = self.request.model_copy(
+            update={"readiness_url": "http://192.168.200.21:19220/readyz"}
+        )
+        with patch.object(
+            self.route_connector.return_value,
+            "side_effect",
+            [ConnectionRefusedError(), TimeoutError()],
+        ):
+            with self.assertRaises(ValueError):
+                cutover_intent(self.fixture.root, self.store, self.record, request)
+        self.assertEqual(self.actions, [])
 
     def test_unknown_deploy_keeps_original_fence_and_never_restarts_old(self) -> None:
         def unknown(**kwargs: Any) -> None:
