@@ -5274,9 +5274,14 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     app,
                     "POST",
                     ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                    payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
-                        mode="json"
-                    ),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "readback",
+                            "reviewed_plan_sha256": OdooRehearsalAdapter.initial_prepare_binding(
+                                placed
+                            ),
+                        }
+                    ).model_dump(mode="json"),
                     headers={"Idempotency-Key": key} if key else {},
                 )
             self.assertEqual(read.status_code, 202)
