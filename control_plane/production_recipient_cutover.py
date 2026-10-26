@@ -493,7 +493,7 @@ WRITER_LIBRARY = (
 import base64,fcntl,hashlib,json,os,re,subprocess,sys,uuid
 from pathlib import Path
 WRITER_CUSTODY_ROOT=Path('/var/lib/launchplane/recipient-writers')
-def writer_identity_binding(value: object) -> dict[str, object] | None:
+def writer_identity_binding(value: object) -> object:
     if not isinstance(value,dict):
         return None
     return {key:item for key,item in value.items() if key!='deployed_at'}
