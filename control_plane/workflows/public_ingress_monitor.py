@@ -1310,64 +1310,79 @@ def _monitoring_reconciliation_observations(
 ) -> tuple[tuple[PublicIngressObservationRecord, str], ...]:
     reconciliations: list[tuple[PublicIngressObservationRecord, str]] = []
     for profile in profiles:
-        for lane in profile.lanes:
+        lanes = {(lane.context, lane.instance): lane for lane in profile.lanes}
+        for incident in record_store.list_public_ingress_incident_records(
+            product=profile.product, status="open"
+        ):
+            lane = lanes.get((incident.context, incident.instance))
+            if lane is None and incident.instance not in {"prod", "testing"}:
+                continue
             if (
                 lane_keys is not None
-                and (profile.product, lane.context, lane.instance) not in lane_keys
+                and (incident.product, incident.context, incident.instance) not in lane_keys
             ):
                 continue
-            open_incidents = record_store.list_public_ingress_incident_records(
-                product=profile.product,
-                context_name=lane.context,
-                instance_name=lane.instance,
-                status="open",
-            )
-            for incident in open_incidents:
-                # Delivery has its own recovery evidence; HTTP target retirement cannot resolve it.
-                if incident.check_name.startswith(
-                    ("production-delivery-", "testing-delivery-")
-                ) or (
-                    incident.check_name == DEPLOY_FENCE_CHECK_NAME
-                    and incident.check_kind == "provider"
-                ):
-                    continue
-                target_key = _incident_target_key(incident)
-                monitored = monitored_check_identity(incident.check_name)
-                if monitored is not None:
-                    kind, name = monitored
-                    target_key = (
-                        incident.product,
-                        incident.context,
-                        incident.instance,
-                        canonical_health_check_record_token(name),
-                        kind,
-                    )
-                if target_key in eligible_target_keys:
-                    continue
-                reconciliations.append(
-                    (
-                        _monitoring_reconciliation_observation(
-                            incident=incident,
-                            monitoring_intent=lane.health_monitoring.monitoring_intent,
-                            observed_at=observed_at,
-                        ),
-                        product_profile_record_sha256(profile),
-                    )
+            if incident.check_name.startswith(("production-delivery-", "testing-delivery-")) or (
+                incident.check_name == DEPLOY_FENCE_CHECK_NAME and incident.check_kind == "provider"
+            ):
+                continue
+            target_key = _incident_target_key(incident)
+            monitored = monitored_check_identity(incident.check_name)
+            if monitored is not None:
+                kind, name = monitored
+                target_key = (
+                    incident.product,
+                    incident.context,
+                    incident.instance,
+                    canonical_health_check_record_token(name),
+                    kind,
                 )
+            if target_key in eligible_target_keys:
+                continue
+            previous = (
+                record_store.list_public_ingress_observation_records(
+                    product=incident.product,
+                    context_name=incident.context,
+                    instance_name=incident.instance,
+                    check_name=incident.check_name,
+                    check_kind=incident.check_kind,
+                    limit=1,
+                )
+                if lane is None
+                else ()
+            )
+            if lane is None and not previous:
+                continue
+            reconciliations.append(
+                (
+                    _monitoring_reconciliation_observation(
+                        incident=incident,
+                        monitoring_intent=lane.health_monitoring.monitoring_intent
+                        if lane
+                        else previous[0].monitoring_intent,
+                        observed_at=observed_at,
+                        lane_removed=lane is None,
+                    ),
+                    product_profile_record_sha256(profile),
+                )
+            )
     return tuple(reconciliations)
 
 
 def _monitoring_reconciliation_observation(
     *,
     incident: PublicIngressIncidentRecord,
-    monitoring_intent: ProductLaneMonitoringIntent,
+    monitoring_intent: ProductLaneMonitoringIntent | Literal["legacy"],
     observed_at: str,
+    lane_removed: bool = False,
 ) -> PublicIngressObservationRecord:
     summary = (
         f"Monitoring configuration changed for {incident.product}/{incident.instance}; "
         f"{incident.check_kind} check {incident.check_name!r} is no longer incident-eligible "
         f"under {monitoring_intent} intent."
     )
+    if lane_removed:
+        summary = f"Lane removed from the current profile for {incident.product}/{incident.instance}; prior {incident.check_kind} check {incident.check_name!r} is no longer incident-eligible."
     return PublicIngressObservationRecord(
         record_id=build_public_ingress_reconciliation_observation_id(
             product=incident.product,
@@ -1447,13 +1462,20 @@ def deliver_public_ingress_incident_notifications(
                     incident_id=incident.incident_id,
                     destination_kind=destination.kind,
                 )
-                delivery = drivers.send(
-                    destination=destination,
-                    event=event,
-                    incident=incident,
-                    observation=observation,
-                    previous_attempts=previous_attempts,
-                )
+                if event == "resolved" and not failure_notification_delivered(
+                    previous_attempts, policy.policy_id, destination.destination_id
+                ):
+                    delivery = PublicIngressNotificationDelivery(
+                        delivery_status="skipped", action=INCIDENT_RESOLVED_SUPERSESSION_ACTION
+                    )
+                else:
+                    delivery = drivers.send(
+                        destination=destination,
+                        event=event,
+                        incident=incident,
+                        observation=observation,
+                        previous_attempts=previous_attempts,
+                    )
             attempt = PublicIngressNotificationAttemptRecord(
                 attempt_id=attempt_id,
                 incident_id=incident.incident_id,
@@ -2291,6 +2313,8 @@ def _reconcile_duplicate_incident(
             previous_material_fingerprint_sha256=incident.material_fingerprint_sha256,
             severity=incident.severity,
             summary=summary,
+            delivery_eligible=False,
+            suppression_reason="migration_reconciliation",
         ),
     )
 
@@ -3657,6 +3681,32 @@ def public_ingress_notification_drivers(
     )
 
 
+def failure_notification_delivered(
+    attempts: tuple[PublicIngressNotificationAttemptRecord, ...],
+    policy_id: str,
+    destination_id: str,
+) -> bool:
+    return any(
+        attempt.delivery_status == "delivered"
+        and attempt.event != "resolved"
+        and attempt.policy_id == policy_id
+        and attempt.destination_id == destination_id
+        for attempt in attempts
+    )
+
+
+def is_matching_incident_resolution(
+    incident: PublicIngressIncidentRecord, attempt: dict[str, object]
+) -> bool:
+    return (
+        attempt.get("event") == "resolved"
+        and incident.status == "resolved"
+        and incident.resolution_reason in {"recovered", "monitoring_intent_changed"}
+        and attempt.get("observation_id") == incident.resolved_observation_id
+        and attempt.get("incident_event_id") == incident.latest_material_event_id
+    )
+
+
 def deliver_public_ingress_notification_outbox_delivery(
     *,
     record: OutboxDeliveryRecord,
@@ -3680,12 +3730,46 @@ def deliver_public_ingress_notification_outbox_delivery(
         destination_payload = _dict_payload(payload.get("destination"))
         if record_store is not None:
             incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
+            event = _public_ingress_event_value(attempt_payload.get("event"))
+            matching_resolution = is_matching_incident_resolution(incident, attempt_payload)
+            if matching_resolution:
+                matching_resolution = failure_notification_delivered(
+                    record_store.list_public_ingress_notification_attempt_records(
+                        incident_id=incident.incident_id,
+                        destination_kind=_required_payload_text(destination_payload, "kind"),
+                    ),
+                    _required_payload_text(attempt_payload, "policy_id"),
+                    _required_payload_text(attempt_payload, "destination_id"),
+                )
+                if (
+                    not matching_resolution
+                    and destination_payload.get("kind") == "github_issue"
+                    and destination_payload.get("github_issue_number") is None
+                ):
+                    matching_resolution = any(
+                        previous.provider_operation_key
+                        and _dict_payload(previous.payload.get("attempt")).get("event")
+                        != "resolved"
+                        and _dict_payload(previous.payload.get("attempt")).get("policy_id")
+                        == attempt_payload.get("policy_id")
+                        and _dict_payload(previous.payload.get("destination")).get("destination_id")
+                        == destination_payload.get("destination_id")
+                        and _dict_payload(previous.payload.get("destination")).get("kind")
+                        == "github_issue"
+                        for previous in record_store.list_outbox_delivery_records(
+                            kind="public_ingress_notification",
+                            aggregate_type="public_ingress_incident",
+                            aggregate_id=incident.incident_id,
+                        )
+                    )
             retired_refusal = (
                 incident.status == "resolved"
                 and incident.resolution_reason == PRODUCTION_REQUEST_REFUSED
             )
             if (
-                incident.status == "resolved"
+                (incident.status == "resolved" and not matching_resolution)
+                or (event == "resolved" and not matching_resolution)
+                or retired_refusal
                 or incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK
             ):
                 if retired_refusal:
@@ -3699,7 +3783,7 @@ def deliver_public_ingress_notification_outbox_delivery(
                     reason=reason,
                 )
             if destination_payload.get("kind") == "discord":
-                if incident.notification_state != "active":
+                if incident.notification_state != "active" and not matching_resolution:
                     return _superseded_incident_outbox_delivery(
                         record=record, reason="incident_not_active"
                     )
@@ -3910,6 +3994,17 @@ def _superseded_incident_outbox_delivery(
 
 
 class PublicIngressNotificationOutboxStore(PublicIngressMonitorStore, Protocol):
+    def list_outbox_delivery_records(
+        self,
+        *,
+        states: tuple[str, ...] = (),
+        kind: str = "",
+        aggregate_type: str = "",
+        aggregate_id: str = "",
+        limit: int | None = None,
+        newest_first: bool = False,
+    ) -> tuple[OutboxDeliveryRecord, ...]: ...
+
     def enqueue_outbox_delivery_with_idempotency(
         self, request: OutboxWithIdempotencyRequest
     ) -> OutboxDeliveryRecord: ...
