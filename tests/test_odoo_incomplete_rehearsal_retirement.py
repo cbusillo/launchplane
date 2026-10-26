@@ -40,6 +40,135 @@ def native_fixture(record: Any, key: str, digest: str, disposed: bool = False) -
     ).model_dump(mode="json")
 
 
+class NeverStartedRehearsalRetirementTests(unittest.TestCase):
+    def test_never_started_and_refused_execute_dispose_without_rewriting_the_original(self) -> None:
+        from control_plane.odoo_incomplete_rehearsal_retirement import IncompleteRehearsalRetirement
+        from control_plane.provider_operations import (
+            ProviderMutationOutcome,
+            provider_operation_response_payload,
+            run_durable_provider_operation,
+        )
+
+        for refusal, pending in (
+            ("", False),
+            ("rehearsal_storage_capacity_insufficient", False),
+            ("rehearsal_precheck_refused", False),
+            ("", True),
+        ):
+            with self.subTest(refusal=refusal, pending=pending):
+                fixture = rehearsal.RehearsalScenario()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                store = fixture.store
+                prepared = fixture.record.model_copy(
+                    update={
+                        "state": "prepared",
+                        "compose_id": "own-compose",
+                        "project_id": "own-project",
+                        "environment_id": "own-environment",
+                    }
+                )
+                store.compare_and_write_odoo_upgrade_rehearsal(fixture.record, prepared)
+                prepare_rehearsal_local_credentials(
+                    store, fixture.identifier, actor=fixture.principal
+                )
+                adapter = fixture.adapter("prepare")
+
+                def prepare(key: str, lease: Any) -> ProviderMutationOutcome:
+                    lease.checkpoint_effect("prepare")
+                    return ProviderMutationOutcome(
+                        202,
+                        provider_operation_response_payload(
+                            trace_id=adapter.trace,
+                            records={"rehearsal": fixture.identifier},
+                            result=adapter.public(prepared),
+                        ),
+                    )
+
+                with patch.object(adapter, "apply", side_effect=prepare):
+                    completed = fixture.run_operation(adapter, "original-prepare")
+                key = "original-prepare"
+                if refusal:
+                    key = "refused-execute"
+                    with patch.object(
+                        OdooRehearsalAdapter,
+                        "host",
+                        return_value={
+                            "refusal_code": refusal,
+                            "completed": False,
+                        },
+                    ):
+                        completed = fixture.run_operation(fixture.adapter("execute"), key)
+                    self.assertEqual(completed.response_status_code, 409)
+                original = completed.record
+                operation = IncompleteRehearsalRetirement(fixture.adapter("retire-incomplete"), key)
+                if pending:
+                    with patch.object(
+                        OdooRehearsalAdapter, "host", side_effect=TimeoutError("held")
+                    ):
+                        with self.assertRaises(TimeoutError):
+                            fixture.run_operation(fixture.adapter("execute"), "uncertain-execute")
+                    with patch.object(type(operation), "host") as inspection:
+                        with self.assertRaises(RehearsalRefused):
+                            operation.plan()
+                        inspection.assert_not_called()
+                    self.assertEqual(
+                        store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared
+                    )
+                    continue
+                native = native_fixture(prepared, key, "a" * 64)
+
+                def host(mode: str, check: Any) -> dict[str, Any]:
+                    check()
+                    return {
+                        **native,
+                        **{
+                            field: mode == "apply"
+                            for field in (
+                                "disposed",
+                                "containers_absent",
+                                "volumes_absent",
+                                "network_absent",
+                                "raw_source_absent",
+                            )
+                        },
+                    }
+
+                with (
+                    patch.object(type(operation), "host", side_effect=host),
+                    patch.object(type(operation), "placement", return_value=True),
+                ):
+                    plan = operation.plan()
+                    operation.adapter.request = operation.adapter.request.model_copy(
+                        update={"reviewed_plan_sha256": plan["plan_sha256"]}
+                    )
+                    outcome = run_durable_provider_operation(
+                        store=store,
+                        scope=operation.reservation_scope(),
+                        route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                        idempotency_key=key,
+                        request_fingerprint=operation.request_fingerprint(),
+                        lease_owner="retirement-worker",
+                        response_trace_id="retirement-trace",
+                        adapter=operation,
+                    )
+                    self.assertEqual(outcome.status, "completed")
+                    result = cast(dict[str, Any], outcome.response_payload["result"])
+                    self.assertTrue(result["disposed"])
+                    self.assertEqual(operation.readback(), result)
+                    with self.assertRaises(RehearsalRefused):
+                        IncompleteRehearsalRetirement(operation.adapter, "unrelated-key").readback()
+                self.assertEqual(
+                    store.read_idempotency_record(
+                        scope=fixture.principal,
+                        route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                        idempotency_key=key,
+                    ),
+                    original,
+                )
+                self.assertFalse(store.list_held_provider_target_reservations())
+
+
 class IncompleteRehearsalRetirementTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = rehearsal.RehearsalScenario()
@@ -1330,6 +1459,41 @@ class LaterPhaseRetirementTests(unittest.TestCase):
 
 
 class IncompleteRetirementHostTests(unittest.TestCase):
+    def test_unused_prepared_runtime_requires_no_execute_or_capture_before_disposal(self) -> None:
+        import shutil
+
+        (self.root / "execute.started").unlink()
+        shutil.rmtree(self.root / "raw-source")
+        self.spec["execute_never_started"] = True
+        source = self.fixture.host["database_names"](self.spec)["source"]
+        for container in self.fixture.fixture.containers.values():
+            container["Config"]["Env"] = [
+                "ODOO_DB_NAME=" + source if value.startswith("ODOO_DB_NAME=") else value
+                for value in container["Config"]["Env"]
+            ]
+        for forbidden in (
+            "execute.started",
+            "execute.json",
+            "capture.pending",
+            "raw-source",
+            source,
+        ):
+            with self.subTest(forbidden=forbidden):
+                path = self.root / forbidden
+                path.touch()
+                with self.assertRaises(RuntimeError):
+                    self.fixture.run_host(self.spec)
+                path.unlink()
+                self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
+        plan = self.fixture.run_host(self.spec)
+        self.admit(plan)
+        self.spec["mode"] = "apply"
+        result = self.fixture.run_host(self.spec)
+        self.assertTrue(result["disposed"])
+        self.assertFalse(self.fixture.fixture.containers)
+        self.assertFalse(self.fixture.fixture.volumes)
+        self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
+
     def recovery_snapshot(self, role: str) -> dict[str, Any]:
         import hashlib
         import json

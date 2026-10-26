@@ -24,6 +24,31 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
 
 
 class RehearsalClientTests(unittest.TestCase):
+    def test_readback_sends_the_saved_original_binding_for_every_action(self) -> None:
+        for action in ("prepare", "execute", "simulate-final", "verify", "retire"):
+            with self.subTest(action=action):
+                code, result, post = self.call(
+                    "readback",
+                    action=action,
+                    saved_review=True,
+                    response_result={
+                        "completed": True,
+                        "public_route": False,
+                        "business_host_frozen": False,
+                    },
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(result["status"], "verified")
+                self.assertEqual(post.call_args.kwargs["body"]["reviewed_plan_sha256"], "a" * 64)
+                code, _, post = self.call("readback", action=action, saved_review=False)
+                self.assertNotEqual(code, 0)
+                post.assert_not_called()
+
+    def test_preflight_accepts_added_response_fields(self) -> None:
+        code, result, _, _ = self.preflight(changes={"future_observation": {"new": True}})
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "verified")
+
     def preflight(
         self,
         *,
@@ -193,7 +218,7 @@ class RehearsalClientTests(unittest.TestCase):
         *,
         lost: bool = False,
         changed: bool = False,
-        saved_review: bool = False,
+        saved_review: bool = True,
         reviewed_binding: str = "a" * 64,
         failure: tuple[int, dict[str, Any]] | None = None,
         failure_headers: dict[str, str] | None = None,
@@ -285,7 +310,7 @@ class RehearsalClientTests(unittest.TestCase):
             payload = root / "intent.json"
             payload.write_text(draft.model_dump_json())
             evidence = root / "review.json"
-            if mode == "apply" or saved_review:
+            if mode == "apply" or (mode == "readback" and saved_review):
                 reviewed_request = draft.model_dump(
                     mode="json", exclude={"mode", "reviewed_plan_sha256"}
                 )
@@ -432,6 +457,7 @@ class RehearsalClientTests(unittest.TestCase):
 
     def test_incomplete_retirement_requires_disposal_and_original_hold_release(self) -> None:
         receipt = {
+            "future_receipt_field": {"new": True},
             "action": "retire-incomplete",
             "state": "retired",
             "completed": True,
@@ -449,6 +475,7 @@ class RehearsalClientTests(unittest.TestCase):
             "shape_sha256": "c" * 64,
             "elapsed_seconds": {},
             "host_disposal": {
+                "future_custody_field": {"new": True},
                 "qualified": True,
                 "disposed": True,
                 "binding_sha256": "d" * 64,
@@ -466,6 +493,8 @@ class RehearsalClientTests(unittest.TestCase):
             code, result, _ = self.call(mode, action="retire-incomplete", response_result=receipt)
             self.assertEqual(code, 0)
             self.assertTrue(result["disposed"])
+            self.assertNotIn("future_receipt_field", result)
+            self.assertNotIn("future_custody_field", result["host_disposal"])
             for field in ("disposed", "original_operation_released", "raw_source_retained"):
                 with self.subTest(mode=mode, missing=field):
                     incomplete = {key: value for key, value in receipt.items() if key != field}

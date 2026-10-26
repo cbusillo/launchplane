@@ -93,7 +93,7 @@ def main() -> int:
             )
             if response.get("status") != "accepted":
                 raise ValueError("The preflight observation is unavailable.")
-            observed = RehearsalPreflightResult.model_validate(response["result"])
+            observed = RehearsalPreflightResult.model_validate(response["result"], extra="ignore")
             if (observed.product, observed.source_context) != (args.product, args.source_context):
                 raise ValueError("The preflight belongs to another source.")
             public = {
@@ -110,9 +110,7 @@ def main() -> int:
             print(json.dumps(public))
             return 0
         assert draft is not None
-        if args.mode == "apply" or (
-            draft.action in {"validate-business", "rebuild-final"} and args.mode == "readback"
-        ):
+        if args.mode in {"apply", "readback"}:
             if evidence is None:
                 raise ValueError("This readback requires its original saved review.")
             saved = json.loads(evidence.read_text())
@@ -184,7 +182,9 @@ def main() -> int:
             draft.action in {"retire-incomplete", "abandon-validation"}
             or draft.consumer_confirmation is not None
         ) and args.mode != "dry-run":
-            IncompleteRehearsalRetirementReceipt.model_validate(result)
+            result = IncompleteRehearsalRetirementReceipt.model_validate(
+                result, extra="ignore"
+            ).model_dump(mode="json")
         unobserved_readback = (
             args.mode == "readback"
             and result.get("completed") is False

@@ -1438,10 +1438,70 @@ class RehearsalScenario(unittest.TestCase):
             changed.operation_readback(prepared, "original-execute")
         with self.assertRaises(RehearsalRefused):
             adapter.operation_readback(
-                prepared.model_copy(update={"state": "upgraded"}), "original-execute"
+                prepared.model_copy(update={"rehearsal_id": "lp-rehearsal-" + "f" * 32}),
+                "original-execute",
             )
         self.assertEqual(self.store.list_held_provider_target_reservations(), before)
         self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), prepared)
+
+    def test_published_actions_read_the_original_request_without_replaying_effects(self) -> None:
+        from dataclasses import replace
+
+        prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
+        previous = self.record
+        for action, initial, final in (
+            ("execute", "prepared", "upgraded"),
+            ("simulate-final", "upgraded", "switched"),
+            ("verify", "switched", "verified"),
+            ("retire", "verified", "retired"),
+        ):
+            with self.subTest(action=action):
+                record = previous.model_copy(update={"state": initial, "compose_id": "own-compose"})
+                self.store.compare_and_write_odoo_upgrade_rehearsal(previous, record)
+                adapter = self.adapter(action)
+
+                def apply(key: str, lease: Any) -> Any:
+                    from control_plane.provider_operations import ProviderMutationOutcome
+                    from control_plane.provider_operations import (
+                        provider_operation_response_payload,
+                    )
+
+                    lease.checkpoint_effect(action)
+                    public = adapter.publish(
+                        record,
+                        {
+                            "completed": True,
+                            "state": final,
+                            "copies": [],
+                            "elapsed_seconds": {action: 1.0},
+                        },
+                    )
+                    return ProviderMutationOutcome(
+                        202,
+                        provider_operation_response_payload(
+                            trace_id=adapter.trace,
+                            records={"rehearsal": self.identifier},
+                            result=public,
+                        ),
+                    )
+
+                with patch.object(adapter, "apply", side_effect=apply) as effect:
+                    outcome = self.run_operation(adapter, "original-" + action)
+                    self.assertEqual(outcome.status, "completed")
+                    published = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+                    assert published is not None
+                    self.assertNotEqual(published.binding_sha256, record.binding_sha256)
+                    observed = adapter.operation_readback(published, "original-" + action)
+                    self.assertEqual(observed["operation_state"], "completed")
+                    with self.assertRaises(RehearsalRefused):
+                        adapter.operation_readback(published, "unrelated-key")
+                    changed = replace(
+                        adapter, request=adapter.request.model_copy(update={"reason": "changed"})
+                    )
+                    with self.assertRaises(RehearsalRefused):
+                        changed.operation_readback(published, "original-" + action)
+                    effect.assert_called_once()
+                previous = published
 
     def test_failure_events_keep_process_deaths_and_project_actual_host_tracebacks(
         self,
@@ -4781,7 +4841,11 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             "attachment": RehearsalHostSafetyTests.attachment_mismatch_fixture(),
         }
         payload = fixture.request.model_copy(
-            update={"mode": "readback", "action": "execute"}
+            update={
+                "mode": "readback",
+                "action": "execute",
+                "reviewed_plan_sha256": prepared.binding_sha256,
+            }
         ).model_dump(mode="json")
         for status, attachment_reason in (
             (None, "verified"),
@@ -5085,9 +5149,12 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 "POST",
                 ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
-                    mode="json"
-                ),
+                payload=self.fixture.request.model_copy(
+                    update={
+                        "mode": "readback",
+                        "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                    }
+                ).model_dump(mode="json"),
                 headers={"Idempotency-Key": "original-prepare"},
             )
             self.assertEqual(read.status_code, 202)
@@ -5145,9 +5212,12 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     app,
                     "POST",
                     ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                    payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
-                        mode="json"
-                    ),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "readback",
+                            "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                        }
+                    ).model_dump(mode="json"),
                     headers={"Idempotency-Key": "original-prepare"},
                 )
             self.assertEqual(read.status_code, 202)
