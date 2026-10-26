@@ -22043,14 +22043,6 @@ def create_launchplane_fastapi_app(
                 code="authorization_denied",
                 message="Workflow cannot reconcile route bindings for the requested product/context.",
             )
-        if director_evidence_refresh:
-            require_browser_repair_lane(
-                record_store=record_store,
-                product=binding_request.product,
-                context=binding_request.context,
-                instance=binding_request.instance,
-                trace_id=trace_id,
-            )
         if binding_request.mode == "apply" and not idempotency_key.strip():
             raise _launchplane_http_error(
                 status_code=400,
@@ -22133,6 +22125,14 @@ def create_launchplane_fastapi_app(
                     f"Unsupported route binding mutation preflight status: {preflight.status}"
                 )
 
+        if director_evidence_refresh:
+            require_browser_repair_lane(
+                record_store=record_store,
+                product=binding_request.product,
+                context=binding_request.context,
+                instance=binding_request.instance,
+                trace_id=trace_id,
+            )
         expected_current = binding_request.expected_current
         if binding_request.browser_review is not None:
             require_browser_repair_lane(
@@ -22169,8 +22169,10 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-        if director_evidence_refresh and not (
-            control_plane_route_binding_reconcile.is_evidence_only_route_binding_refresh(
+        if (
+            director_evidence_refresh
+            and reconcile_plan.status in {"ready", "unchanged"}
+            and not control_plane_route_binding_reconcile.is_evidence_only_route_binding_refresh(
                 reconcile_plan
             )
         ):

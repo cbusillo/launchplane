@@ -97,10 +97,12 @@ class RouteEvidenceRefreshTests(unittest.IsolatedAsyncioTestCase):
             route_binding_authority_projection(refreshed),
             route_binding_authority_projection(self.current),
         )
+        self.store.write_product_profile_record(self.profile.model_copy(update={"lanes": ()}))
         replay = await self.apply()
         self.assertEqual(replay.status_code, 202, replay.text)
         self.assertTrue(replay.json()["replayed"])
         self.assertEqual(self.read_binding(), refreshed)
+        self.store.write_product_profile_record(self.profile)
         self.current = refreshed
         unchanged = await self.apply(key="unchanged-evidence")
         self.assertEqual(unchanged.status_code, 202, unchanged.text)
@@ -135,7 +137,8 @@ class RouteEvidenceRefreshTests(unittest.IsolatedAsyncioTestCase):
                 self.current = original.model_copy(update={field: value})
                 self.store.write_route_binding_record(self.current)
                 response = await self.apply()
-                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["records"]["route_binding_status"], "conflict")
                 self.assertEqual(self.read_binding(), self.current)
         self.current = original.model_copy(
             update={
@@ -150,6 +153,16 @@ class RouteEvidenceRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handoff.status_code, 403, handoff.text)
         self.assertEqual(self.read_binding(), self.current)
 
+    async def test_director_receives_blocked_plan_diagnostics_without_writing(self) -> None:
+        self.store.write_ingress_route_audit_record(
+            _ingress_audit_record(status="pending", recorded_at="2026-07-19T00:00:00Z")
+        )
+        response = await self.apply()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["records"]["route_binding_status"], "blocked")
+        self.assertTrue(response.json()["result"]["findings"])
+        self.assertEqual(self.read_binding(), self.current)
+
     async def test_commit_rechecks_sources_and_product_ownership(self) -> None:
         original_commit = self.store.reconcile_route_binding_record
 
@@ -162,6 +175,7 @@ class RouteEvidenceRefreshTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, "reconcile_route_binding_record", side_effect=change_source):
             response = await self.apply()
         self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "route_binding_changed")
         self.assertEqual(self.read_binding(), self.current)
         self.store.write_dokploy_target_record(_dokploy_target_record(instance="prod"))
 
@@ -172,4 +186,9 @@ class RouteEvidenceRefreshTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.store, "reconcile_route_binding_record", side_effect=remove_lane):
             response = await self.apply()
         self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], "route_binding_changed")
         self.assertEqual(self.read_binding(), self.current)
+        self.store.write_product_profile_record(self.profile)
+        completed = await self.apply()
+        self.assertEqual(completed.status_code, 202, completed.text)
+        self.assertEqual(completed.json()["records"]["route_binding_status"], "refreshed")
