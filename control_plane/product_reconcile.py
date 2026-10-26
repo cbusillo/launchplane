@@ -2087,9 +2087,9 @@ def _preview_cleanup_guard(
     store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
     number: int,
+    original_reservation_id: str = "",
 ) -> None:
     from control_plane.disposable_lanes import (
-        DisposableLaneSafetyUnknown,
         DisposableLaneStore,
         resolve_disposable_preview,
         require_lane_target_ownership,
@@ -2103,12 +2103,24 @@ def _preview_cleanup_guard(
         )
     instance = profile.preview.slug_template.format(number=number)
     try:
-        resolve_disposable_preview(
-            cast(DisposableLaneStore, store),
-            profile,
-            profile.preview.context,
-            instance,
-        )
+        if original_reservation_id:
+            from control_plane.preview_reservation_recovery import (
+                require_unrecorded_preview_original,
+            )
+
+            require_unrecorded_preview_original(
+                cast(PostgresRecordStore, store),
+                profile=profile,
+                number=number,
+                reservation_id=original_reservation_id,
+            )
+        else:
+            resolve_disposable_preview(
+                cast(DisposableLaneStore, store),
+                profile,
+                profile.preview.context,
+                instance,
+            )
         target_store = cast(PreviewTargetOwnershipStore, store)
         require_lane_target_ownership(
             (
@@ -2118,7 +2130,7 @@ def _preview_cleanup_guard(
             context=profile.preview.context,
             instance=instance,
         )
-    except DisposableLaneSafetyUnknown as error:
+    except ValueError as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
 
 
@@ -2171,6 +2183,29 @@ def _plan_preview_target(
         plan.update(action="wait", held=True, reason="preview_cleanup_pr_state_unknown")
         return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     if pull_request.get("state") != "open":
+        if not live and isinstance(record_store, PostgresRecordStore):
+            from control_plane.preview_reservation_recovery import (
+                require_unrecorded_preview_original,
+            )
+
+            for reservation in record_store.list_odoo_preview_cleanup_originals(
+                product=profile.product, number=pull_request_number
+            ):
+                try:
+                    require_unrecorded_preview_original(
+                        record_store,
+                        profile=profile,
+                        number=pull_request_number,
+                        reservation_id=reservation.record_id,
+                    )
+                except ValueError:
+                    continue
+                live = True
+                lifecycle_token = (
+                    f"original:{reservation.record_id}:{reservation.request_fingerprint}"
+                )
+                plan["unrecorded_original_reservation_id"] = reservation.record_id
+                break
         return without_preview("pull_request_not_open")
     intent = change_client_review(
         body=str(pull_request.get("body") or ""),
@@ -2342,7 +2377,12 @@ def _run_preview_operation(
         ):
             raise _PullRequestMovedError
         if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
-            _preview_cleanup_guard(record_store, profile, pull_request_number)
+            _preview_cleanup_guard(
+                record_store,
+                profile,
+                pull_request_number,
+                str(plan.get("unrecorded_original_reservation_id") or ""),
+            )
 
     def execute_apply(**kwargs: object) -> dict[str, object]:
         checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
@@ -3215,11 +3255,60 @@ def request_product_reconcile_sweep(
         from control_plane.preview_reservation_recovery import (
             held_preview_reservations,
             original_preview_intent,
+            require_unrecorded_preview_original,
         )
 
-        for reservation in held_preview_reservations(record_store, product=profile.product):
+        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
+        originals = {
+            item.record_id: item
+            for item in held_preview_reservations(record_store, product=profile.product)
+        }
+        if isinstance(record_store, PostgresRecordStore) and product_profile_uses_odoo_driver(
+            profile
+        ):
+            from control_plane.preview_inventory_evidence import read_preview_inventory_evidence
+            from control_plane.workflows.generic_web_preview import preview_pr_number_from_slug
+
+            inventory = read_preview_inventory_evidence(
+                record_store=record_store,
+                context=profile.preview.context,
+                product=profile.product,
+                repository=profile.repository,
+            )
+            tracked = {
+                item.anchor_pr_number
+                for item in previews
+                if item.context == profile.preview.context
+                and item.state not in _ENDED_PREVIEW_STATES
+            }
+            if inventory.status in {"empty", "nonempty"}:
+                for slug in inventory.observed_slugs:
+                    number = preview_pr_number_from_slug(
+                        preview_slug=slug, slug_template=profile.preview.slug_template
+                    )
+                    if (
+                        number is None
+                        or number <= 0
+                        or number in tracked
+                        or profile.preview.slug_template.format(number=number) != slug
+                    ):
+                        continue
+                    originals.update(
+                        (item.record_id, item)
+                        for item in record_store.list_odoo_preview_cleanup_originals(
+                            product=profile.product, number=number
+                        )
+                    )
+        for reservation in originals.values():
             try:
                 original = original_preview_intent(reservation, profile=profile, store=record_store)
+                if reservation.state == "completed":
+                    require_unrecorded_preview_original(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        number=original.issued_plan.plan_request.pr_number,
+                        reservation_id=reservation.record_id,
+                    )
             except ValueError:
                 continue
             targets.append(
@@ -3237,7 +3326,6 @@ def request_product_reconcile_sweep(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
         for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(

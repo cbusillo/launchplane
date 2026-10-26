@@ -23274,6 +23274,7 @@ def create_launchplane_fastapi_app(
             action="preview_lifecycle.plan",
             product=plan_request.product,
             context=plan_request.context,
+            inherit_agent_read_role=director_agent_identity(identity),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -23390,6 +23391,16 @@ def create_launchplane_fastapi_app(
             action="preview_lifecycle.cleanup",
             product=cleanup_request.product,
             context=cleanup_request.context,
+            inherit_agent_read_role=False,
+        ) and (
+            cleanup_request.apply
+            or not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="preview_lifecycle.plan",
+                product=cleanup_request.product,
+                context=cleanup_request.context,
+                inherit_agent_read_role=director_agent_identity(identity),
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -23529,13 +23540,18 @@ def create_launchplane_fastapi_app(
         denied_actions_by_product: dict[str, str] = {}
         denied_profile: LaunchplaneProductProfileRecord | None = None
         denied_action = ""
+        required_actions = ("preview_lifecycle.plan",) + (
+            ("preview_lifecycle.cleanup",) if sweep_request.apply else ()
+        )
         for profile in requested_sweep_profiles:
-            for action in ("preview_lifecycle.plan", "preview_lifecycle.cleanup"):
+            for action in required_actions:
                 if not resolved_authz_policy_runtime.allows(
                     identity=identity,
                     action=action,
                     product=profile.product,
                     context=profile.preview.context,
+                    inherit_agent_read_role=director_agent_identity(identity)
+                    and not sweep_request.apply,
                 ):
                     denied_actions_by_product[profile.product] = action
                     if denied_profile is None:
@@ -23790,7 +23806,7 @@ def create_launchplane_fastapi_app(
                 )
                 resource_facts: dict[str, str] | None = None
                 if (
-                    profile.driver_id == "odoo"
+                    profile.driver_id in {"odoo", "generic-web"}
                     and observation.instance == "testing"
                     and facts.production_resources != "shared"
                 ):
@@ -23801,6 +23817,7 @@ def create_launchplane_fastapi_app(
                             product=profile.product,
                             context=observation.context,
                             now=store.disposable_lane_observation_time(),
+                            root=resolved_control_plane_root,
                         )
                     except NativeSourceAuthorizationDenied:
                         raise _launchplane_http_error(
@@ -25210,6 +25227,7 @@ def create_launchplane_fastapi_app(
             action="preview_desired_state.discover",
             product=desired_state_request.product,
             context=desired_state_request.context,
+            inherit_agent_read_role=director_agent_identity(identity),
         ):
             raise _launchplane_http_error(
                 status_code=403,

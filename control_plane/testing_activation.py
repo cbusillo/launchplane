@@ -334,6 +334,14 @@ def preparation_resources(
     return resources, row.record_id
 
 
+def shared_read_only_binding(binding: SecretBinding) -> bool:
+    return bool(
+        binding.declared_secret_class == "shared_safe"
+        and binding.sharing_reason
+        and binding.sharing_reason.kind == "read_only_source"
+    )
+
+
 def runtime_values(
     store: PostgresRecordStore,
     root: Path,
@@ -391,11 +399,7 @@ def runtime_values(
             "testing",
         ):
             raise TestingActivationRefusal("Testing credentials must have lane-specific bindings.")
-        if (
-            binding.declared_secret_class == "shared_safe"
-            and binding.sharing_reason
-            and binding.sharing_reason.kind == "read_only_source"
-        ):
+        if shared_read_only_binding(binding):
             shared.add(key)
         elif binding.declared_secret_class not in {"testing", "non_prod"}:
             raise TestingActivationRefusal("A carried key can reach a live writable system.")
@@ -956,8 +960,14 @@ class TestingActivationAdapter:
         return replacement
 
     def verify_provider(self, record: TestingActivationRecord) -> None:
+        self.verify_compose_provider(record)
+
+    def verify_compose_provider(
+        self, record: TestingActivationRecord, *, values: dict[str, str] | None = None
+    ) -> None:
         resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
-        values = runtime_values(self.store, self.root, record, resources)
+        if values is None:
+            values = runtime_values(self.store, self.root, record, resources)
         expected = json.loads(record.compose_source)
         for volume in expected["volumes"].values():
             volume["external"] = True
