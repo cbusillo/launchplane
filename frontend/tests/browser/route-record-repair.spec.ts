@@ -29,7 +29,7 @@ function bindingReview(applied: boolean, stored = false): RouteBindingRepairRevi
 }
 type Scenario = "saved" | "blocked" | "unchanged" | "denied" | "role-only" | "read-only" | "uncertain" | "stale" | "uncertain-stale" | "uncertain-conflict" | "readback-denied" | "readback-failed" |
   "storage-unavailable" | "missing-request" | "receipt-mismatch" | "receipt-digest-mismatch" | "current-drift" | "refresh" | "readback-refresh" | "edit" | "leave" |
-  "persistent-refusal" | "changed-confirmation" | "missing-binding";
+  "persistent-refusal" | "changed-confirmation" | "missing-binding" | "split";
 
 async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
   await page.goto("/ui/products?fixture=empty");
@@ -71,6 +71,9 @@ async function fixture(page: Page, kind: RepairKind, scenario: Scenario) {
       if (scenario === "readback-failed") return route.abort();
     }
     let review = kind === "domain" ? domainReview(applying, !applying && stored) : bindingReview(applying, !applying && stored);
+    if (scenario === "split" && review.operation === "reconcile-route-binding" && review.proposed_record) {
+      review = { ...review, proposed_record: { ...review.proposed_record, external_ingress: body.external_ingress } };
+    }
     if (activeConfirmation) review = { ...review, expected_confirmation: activeConfirmation };
     if (applying || !stored) review = { ...review, plan_sha256: activeDigest };
     if (applying) {
@@ -123,6 +126,23 @@ test("binding card refuses an unchanged verdict with no stored binding", async (
   await expect(panel.getByLabel("Route binding review", { exact: true })).toHaveCount(0);
   await expect(panel.getByRole("button", { name: "Apply reviewed route binding", exact: true })).toHaveCount(0);
   expect(calls.map(call => call.body.mode)).toEqual(["dry-run"]);
+});
+
+test("split ingress review preserves both custodians through save and readback @responsive", async ({ page }) => {
+  const { panel, calls } = await fixture(page, "binding", "split");
+  await panel.getByLabel("Route binding reason", { exact: true }).fill("Record both existing ingress paths.");
+  await panel.getByText("Separate externally managed domains", { exact: true }).click();
+  await panel.getByLabel("External domains", { exact: true }).fill(proposedDomains[0]);
+  await panel.getByLabel("Proxy custodian", { exact: true }).fill("Office proxy operator");
+  await panel.getByLabel("Configuration evidence URL", { exact: true }).fill("https://example.test/proxy-report");
+  await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
+  await expect(panel.getByText(/External ingress and TLS for/)).toContainText("Office proxy operator");
+  await expect(panel.getByRole("link", { name: "Configuration evidence", exact: true })).toHaveAttribute("href", "https://example.test/proxy-report");
+  await panel.getByRole("checkbox").check();
+  await panel.getByRole("button", { name: "Apply reviewed route binding", exact: true }).click();
+  await expect(panel.getByRole("status")).toContainText("current record readback verified");
+  const bodies = calls.map(call => call.body as unknown as { external_ingress: unknown });
+  expect(bodies.every(body => JSON.stringify(body.external_ingress) === JSON.stringify(bodies[0].external_ingress))).toBe(true);
 });
 
 for (const kind of ["domain", "binding"] as const) {

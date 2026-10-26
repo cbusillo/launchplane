@@ -17,6 +17,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressTargetObservation,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, compare_runtime_identity
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,8 @@ def read_lane_runtime_verification(
     summary: LaunchplaneLaneSummary,
     now: datetime | None = None,
 ) -> LaneRuntimeVerification:
+    split_binding = read_split_ingress_binding(record_store, profile, lane)
+    lane = split_ingress_monitoring_lane(profile, lane, split_binding)
     read_observations = getattr(record_store, "list_public_ingress_observation_records", None)
     evaluated_at = now or datetime.now(timezone.utc)
     deployment_at = (
@@ -161,6 +164,8 @@ def read_lane_runtime_verification(
         provenance = monitor_observation_provenance(observation, now=now)
         observed_at = _timestamp(observation.observed_at)
         authority_times = [profile.updated_at, deployment_at]
+        if split_binding is not None:
+            authority_times.append(split_binding.updated_at)
         if check.private_endpoint_key:
             read_endpoint = getattr(record_store, "read_private_health_endpoint_record", None)
             if read_endpoint is None or not callable(read_endpoint):

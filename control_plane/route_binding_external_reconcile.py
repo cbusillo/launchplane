@@ -19,6 +19,7 @@ from control_plane.contracts.route_binding_record import (
     RouteBindingSource,
     RouteBindingTls,
     route_binding_record_sha256,
+    EXTERNAL_INGRESS_ATTESTATION_WINDOW,
 )
 from control_plane.contracts.text_fields import require_text
 from control_plane.route_binding_reconcile import (
@@ -27,7 +28,7 @@ from control_plane.route_binding_reconcile import (
 )
 
 
-_ATTESTATION_FRESHNESS_WINDOW = timedelta(days=30)
+_ATTESTATION_FRESHNESS_WINDOW = EXTERNAL_INGRESS_ATTESTATION_WINDOW
 _ATTESTATION_REFRESH_THRESHOLD = timedelta(days=15)
 
 

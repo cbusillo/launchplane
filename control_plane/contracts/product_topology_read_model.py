@@ -36,7 +36,11 @@ from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     RouteBindingTerminationKind,
     RouteBindingTlsOwner,
+    RouteBindingExternalIngress,
+    RouteBindingIngressReadModel,
+    RouteBindingTlsReadModel,
 )
+from control_plane.split_ingress import split_ingress_monitoring_lane, split_ingress_check_name
 from control_plane.contracts.runtime_identity import (
     RuntimeIdentity,
     RuntimeIdentityStatus,
@@ -45,6 +49,7 @@ from control_plane.contracts.runtime_identity import (
 from control_plane.lane_runtime_verification import (
     LaneRuntimeVerification,
     lane_expected_runtime_identity,
+    monitor_observation_provenance,
 )
 from control_plane.public_dns_diagnostics import PublicDnsDiagnostic, build_public_dns_diagnostics
 
@@ -114,6 +119,16 @@ class ProductTopologyDomain(BaseModel):
     domain_name: str
     role: ProductTopologyDomainRole = "primary"
     tls_expected: bool = False
+    ingress: RouteBindingIngressReadModel | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    tls: RouteBindingTlsReadModel | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ProductTopologyPlacement(BaseModel):
@@ -184,6 +199,11 @@ class ProductProviderRecordedTopology(BaseModel):
     domains: tuple[ProductTopologyDomain, ...] = ()
     ingress: ProductTopologyIngress = Field(default_factory=ProductTopologyIngress)
     tls: ProductTopologyTlsOwnership = Field(default_factory=ProductTopologyTlsOwnership)
+    external_ingress: RouteBindingExternalIngress | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     trust_state: FreshnessStatus = "missing"
     provenance: DataProvenance = Field(
         default_factory=lambda: _missing_provenance(
@@ -340,13 +360,33 @@ def build_product_environment_topology(
     runtime_verification: LaneRuntimeVerification | None = None,
 ) -> ProductEnvironmentTopology:
     evaluated_at = now or datetime.now(timezone.utc)
-    desired = _desired_topology(profile=profile, lane=lane)
     route_binding = _read_route_binding_record(
         record_store=record_store,
         product=profile.product,
         context=lane.context,
         instance=lane.instance,
     )
+    lane = split_ingress_monitoring_lane(profile, lane, route_binding)
+    desired = _desired_topology(profile=profile, lane=lane)
+    if route_binding is not None and route_binding.external_ingress:
+        declared = tuple(
+            ProductTopologyDomain(
+                domain_name=domain.domain_name,
+                role=domain.role,
+                tls_expected=True,
+            )
+            for domain in route_binding.domains
+        )
+        desired = desired.model_copy(
+            update={
+                "domains": declared
+                + tuple(
+                    domain
+                    for domain in desired.domains
+                    if domain.domain_name not in {item.domain_name for item in declared}
+                )
+            }
+        )
     provider_recorded = _provider_recorded_topology(
         route_binding=route_binding,
         lane_summary=lane_summary,
@@ -382,6 +422,16 @@ def build_product_environment_topology(
         tls_evidence=tls_evidence,
         now=evaluated_at,
     )
+    if route_binding is not None and route_binding.external_ingress:
+        warnings = (
+            *warnings,
+            *_split_ingress_warnings(
+                record_store=record_store,
+                binding=route_binding,
+                lane_summary=lane_summary,
+                now=evaluated_at,
+            ),
+        )
     return ProductEnvironmentTopology(
         desired=desired,
         provider_recorded=provider_recorded,
@@ -400,6 +450,73 @@ def build_product_environment_topology(
             fallback="missing",
         ),
     )
+
+
+def _split_ingress_warnings(
+    *,
+    record_store: object,
+    binding: EnvironmentRouteBindingRecord,
+    lane_summary: LaunchplaneLaneSummary | None,
+    now: datetime,
+) -> tuple[ProductTopologyWarning, ...]:
+    warnings: list[ProductTopologyWarning] = []
+    expected = lane_expected_runtime_identity(lane_summary) if lane_summary is not None else None
+    for domain in binding.domains:
+        records = _optional_records(
+            record_store,
+            "list_public_ingress_observation_records",
+            product=binding.product,
+            context_name=binding.context,
+            instance_name=binding.instance,
+            check_kind="public_http",
+            check_name=split_ingress_check_name(domain.domain_name),
+            limit=1,
+        )
+        observation = next(
+            (
+                record
+                for record in records
+                if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
+            ),
+            None,
+        )
+        code: ProductTopologyWarningCode
+        if observation is None:
+            code = "public_ingress_observation_missing"
+        elif (
+            monitor_observation_provenance(observation, now=now).freshness_status != "verified"
+            or (observed_at := _parse_timestamp(observation.observed_at)) is None
+            or (authority_at := _parse_timestamp(binding.updated_at)) is None
+            or observed_at <= authority_at
+        ):
+            code = "stale_public_ingress_observation"
+        elif observation.status != "pass":
+            code = "public_ingress_failure"
+        else:
+            target = _public_runtime_identity_target(observation)
+            if (
+                target is not None
+                and target.status == "pass"
+                and target.runtime_identity_status == "match"
+                and (urlsplit(target.url).hostname or "") == domain.domain_name
+                and expected is not None
+                and compare_runtime_identity(
+                    expected=expected, observed=target.observed_runtime_identity
+                )[0]
+                == "match"
+            ):
+                continue
+            code = "public_runtime_identity_unverified"
+        warnings.append(
+            _warning(
+                code=code,
+                scope="observation",
+                severity="error",
+                domain_name=domain.domain_name,
+                detail="This split ingress hostname has no current passing strict runtime-identity observation.",
+            )
+        )
+    return tuple(warnings)
 
 
 def _desired_topology(
@@ -565,12 +682,25 @@ def _provider_recorded_topology(
             ProductTopologyDomain(
                 domain_name=domain.domain_name,
                 role=domain.role,
-                tls_expected=route_binding.tls.owner != "none",
+                tls_expected=route_binding.tls_for_domain(domain.domain_name).owner != "none",
+                ingress=RouteBindingIngressReadModel(
+                    **route_binding.ingress_for_domain(domain.domain_name).model_dump(
+                        exclude={"provider_evidence"}
+                    )
+                )
+                if route_binding.external_ingress
+                else None,
+                tls=RouteBindingTlsReadModel(
+                    owner=route_binding.tls_for_domain(domain.domain_name).owner
+                )
+                if route_binding.external_ingress
+                else None,
             )
             for domain in route_binding.domains
         ),
         ingress=ingress,
         tls=tls,
+        external_ingress=route_binding.external_ingress,
         trust_state=trust_state,
         provenance=provenance,
     )
@@ -1280,7 +1410,10 @@ def _topology_warnings(
                     code="stale_route_authority",
                     scope="authority",
                     severity=(
-                        "error" if route_binding.ingress.provider == "external" else "warning"
+                        "error"
+                        if route_binding.ingress.provider == "external"
+                        or route_binding.external_ingress
+                        else "warning"
                     ),
                     detail="The provider-neutral route-binding evidence is stale.",
                 )
@@ -1329,7 +1462,7 @@ def _topology_warnings(
                 observed=observed,
             )
         )
-        if route_binding.ingress.provider == "external":
+        if route_binding.ingress.provider == "external" or route_binding.external_ingress:
             warnings.append(
                 _warning(
                     code="external_ingress_internals_unsupported",
@@ -1532,9 +1665,19 @@ def _tls_warnings(
                     ),
                 )
             )
+        domain_ingress = (
+            route_binding.ingress_for_domain(tls.recorded.domain_name)
+            if tls.recorded.domain_name in recorded_domains
+            else route_binding.ingress
+        )
+        domain_tls = (
+            route_binding.tls_for_domain(tls.recorded.domain_name)
+            if tls.recorded.domain_name in recorded_domains
+            else route_binding.tls
+        )
         if (
-            tls.recorded.ingress_provider != route_binding.ingress.provider
-            or tls.recorded.termination_kind != route_binding.ingress.termination_kind
+            tls.recorded.ingress_provider != domain_ingress.provider
+            or tls.recorded.termination_kind != domain_ingress.termination_kind
         ):
             warnings.append(
                 _warning(
@@ -1548,7 +1691,7 @@ def _tls_warnings(
                     ),
                 )
             )
-        if tls.recorded.owner != route_binding.tls.owner:
+        if tls.recorded.owner != domain_tls.owner:
             warnings.append(
                 _warning(
                     code="tls_ownership_divergence",

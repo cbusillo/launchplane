@@ -933,6 +933,37 @@ an ORM column/table or remains only in the evidence payload.
   Product repositories must not own route bindings, TLS ownership, provider
   host ids, certificate ids, or edge topology.
 
+  A public generic-web lane may retain both an externally maintained business
+  ingress and a managed recovery route. Its optional `external_ingress` names
+  a proper subset of the tracked domains, the proxy custodian and an HTTPS
+  configuration-evidence URL. The top-level ingress and TLS fields describe
+  the remaining managed domains; per-domain readers resolve external edge
+  termination and external TLS for the named subset. The complete tracked
+  domain set stays in `domains`, with its primary/alias roles unchanged.
+  Legacy single-path records retain their existing serialized form and digest.
+
+  `POST /v1/route-bindings/reconcile` accepts this attestation in the existing
+  dry-run contract. The managed audit must match exactly the remaining hosts
+  and still join the canonical target and an active edge endpoint. An absent,
+  ambiguous or stale source stays blocked. Split authority can be saved only
+  through the signed-in administrator's reviewed Route binding card, with
+  CSRF, exact review digest, current-record CAS and atomic source comparisons,
+  including the public product profile. Custodian or domain changes cannot be
+  hidden in an evidence refresh. External custody uses the existing 30-day
+  attestation window. Agents may refresh unchanged managed evidence without
+  extending that window; only a signed-in review can renew the attestation.
+  The operation updates records only; it never changes a provider route.
+
+  Saving split authority also declares its full hostname set for public
+  monitoring. The existing monitor derives one strict runtime-identity HTTP
+  check per hostname using the lane's health path, plus each hostname's TLS
+  check using its resolved ownership. These mandatory checks do not require
+  duplicated profile entries and cannot be disabled by the legacy non-strict
+  check. Observations are bound to the current route record and must postdate
+  its authority. Missing, stale, failed or wrong-runtime observations for any
+  hostname keep topology/readiness unverified or blocked. Custodian-reported
+  configuration remains distinct from directly verified public behavior.
+
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from
 it. Keep unstable provider envelopes, replay/debug context, and raw evidence in

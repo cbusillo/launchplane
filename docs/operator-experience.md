@@ -838,6 +838,17 @@ types remain only for UI state and view models.
 
 ### Browser Route Contract
 
+The signed-in Route binding review can record separate external business-domain
+custody and managed recovery ingress. Expand **Separate externally managed
+domains**, name the custodian and configuration report, and review the complete
+hostname set. The remaining managed hosts still need their exact applied audit
+and active edge join. A blocked plan offers no Apply. A ready decision shows
+both custodians, binds their exact evidence and records a 30-day attestation;
+it changes no live route. Review again to renew external custody. Automated
+managed-evidence refresh preserves its original attestation deadline.
+Saving also enables strict runtime-identity HTTP checks and TLS checks for
+every hostname. The lane stays unverified until those observations are current.
+
 The light/dark switch saves only an explicit choice in browser local storage,
 scoped to the browser profile and Launchplane origin. The saved choice applies
 before the first render on every UI route, survives return visits, and updates

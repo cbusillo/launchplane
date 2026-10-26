@@ -30296,6 +30296,21 @@ class PostgresRecordStore(HumanSessionStore):
         replacement_record: EnvironmentRouteBindingRecord,
         sources: RouteBindingReviewSources,
     ) -> None:
+        if sources.product_profile is not None:
+            profile_statement = (
+                select(LaunchplaneProductProfileRow)
+                .where(LaunchplaneProductProfileRow.product == product)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                profile_statement = profile_statement.with_for_update()
+            profile_row = session.scalar(profile_statement)
+            if (
+                profile_row is None
+                or self._read_product_profile_payload(profile_row.payload)
+                != sources.product_profile
+            ):
+                raise RouteBindingSourceChanged("Reviewed product profile changed before commit.")
         # Fence the five planned rows and lane ownership through commit. This is
         # not an assertion about external provider truth or all historical audits.
         require_bundle_context_owner(

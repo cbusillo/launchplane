@@ -958,7 +958,7 @@ function ProductDiagnostics({ product }: { product: ProductSiteOverview }) {
               </div>
               <div>
                 <dt>Ingress path</dt>
-                <dd>{environment.topology.provider_recorded.ingress.path}</dd>
+                <dd>{environment.topology.provider_recorded.external_ingress ? "Separate business and recovery paths" : environment.topology.provider_recorded.ingress.path}</dd>
               </div>
             </dl>
           </section>

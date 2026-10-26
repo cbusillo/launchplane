@@ -40,6 +40,7 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.public_ingress_monitoring import (
     health_monitor_freshness_seconds,
@@ -101,6 +102,11 @@ NEW_TESTING_SOURCE_REF = "3" * 40
 
 
 class _PromotionStore(PostgresRecordStore):
+    def read_route_binding_record(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> EnvironmentRouteBindingRecord:
+        raise FileNotFoundError("This promotion fixture has no route binding")
+
     def __init__(
         self,
         *,

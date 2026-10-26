@@ -758,6 +758,7 @@ from control_plane.contracts.testing_route_refresh import (
 )
 from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
 from control_plane.contracts.route_binding_record import (
+    RouteBindingExternalIngress,
     route_binding_record_sha256,
     EnvironmentRouteBindingRecord,
     redacted_route_binding_record,
@@ -2636,6 +2637,10 @@ class RouteBindingReconcileEnvelope(BaseModel):
     context: str
     instance: str
     expected_current: control_plane_route_binding_reconcile.RouteBindingExpectedCurrent
+    external_ingress: RouteBindingExternalIngress | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     source_label: str = "operator-reconcile"
     browser_review: browser_route_repair.BrowserRouteRepairRequest | None = Field(
         default=None, exclude_if=lambda value: value is None
@@ -22196,9 +22201,28 @@ def create_launchplane_fastapi_app(
                 expected_current=expected_current,
                 source_label=binding_request.source_label,
                 evaluated_at=utc_now_timestamp(),
+                external_ingress=binding_request.external_ingress,
             ),
         )
 
+        if (
+            binding_request.mode == "apply"
+            and reconcile_plan.record is not None
+            and reconcile_plan.record.external_ingress is not None
+            and not isinstance(identity, GitHubHumanIdentity)
+            and not (
+                director_evidence_refresh
+                and control_plane_route_binding_reconcile.is_evidence_only_route_binding_refresh(
+                    reconcile_plan
+                )
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Split ingress authority requires the signed-in administrator's reviewed decision.",
+            )
         if (
             director_evidence_refresh
             and reconcile_plan.status in {"ready", "unchanged"}

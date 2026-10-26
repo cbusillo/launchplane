@@ -154,6 +154,11 @@ from control_plane.contracts.public_dns import (
 )
 from control_plane.outbound_http import probe_public_tls
 from control_plane.contracts.product_topology_read_model import product_lane_public_domains
+from control_plane.split_ingress import (
+    read_split_ingress_binding,
+    split_ingress_monitoring_lane,
+    split_ingress_check_name,
+)
 from control_plane.outbound_http import request_private_http
 from control_plane.outbound_http import PublicHttpResponse
 from control_plane.outbound_http import request_public_http
@@ -450,6 +455,9 @@ def discover_public_ingress_monitor_targets(
     )
     for profile in product_profiles:
         for lane in profile.lanes:
+            lane = split_ingress_monitoring_lane(
+                profile, lane, read_split_ingress_binding(record_store, profile, lane)
+            )
             for check in lane.health_monitoring.checks:
                 target = effective_health_check_monitor_target(
                     profile=profile,
@@ -672,8 +680,14 @@ def _health_check_monitor_target(
     private_endpoint_sha256 = ""
     private_endpoint_material_sha256 = ""
     private_tls_ca_pem = ""
+    binding = None
+    domain_check = False
     if check.kind == "public_http":
-        base_url = lane.base_url.strip().rstrip("/")
+        binding = read_split_ingress_binding(record_store, profile, lane)
+        domain_check = binding is not None and any(
+            check.name == split_ingress_check_name(domain.domain_name) for domain in binding.domains
+        )
+        base_url = "" if domain_check else lane.base_url.strip().rstrip("/")
         health_url = check.url.strip() or _monitor_health_url(
             profile=profile, lane=lane, base_url=base_url
         )
@@ -712,6 +726,9 @@ def _health_check_monitor_target(
         health_url=health_url,
         check_name=check.name,
         check_kind=check.kind,
+        route_binding_sha256=route_binding_record_sha256(binding)
+        if domain_check and binding is not None
+        else "",
         profile_sha256=product_profile_record_sha256(profile),
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         incident_eligible=product_lane_monitoring_incident_eligible(
@@ -3414,9 +3431,11 @@ def _tls_monitor_targets(
                 tls_domain_name=domain.domain_name,
                 tls_domain_role=domain.role,
                 tls_route_binding_status=route_binding.status,
-                tls_owner=route_binding.tls.owner,
-                tls_ingress_provider=route_binding.ingress.provider,
-                tls_termination_kind=route_binding.ingress.termination_kind,
+                tls_owner=route_binding.tls_for_domain(domain.domain_name).owner,
+                tls_ingress_provider=route_binding.ingress_for_domain(domain.domain_name).provider,
+                tls_termination_kind=route_binding.ingress_for_domain(
+                    domain.domain_name
+                ).termination_kind,
                 tls_source_kind=route_binding.source.source_kind,
                 tls_source_label=route_binding.source.source_label,
                 tls_source_record_ids=route_binding.source.source_record_ids,
@@ -3425,7 +3444,9 @@ def _tls_monitor_targets(
                 tls_recorded_at=route_binding.updated_at,
                 tls_freshness_status=route_binding.source.freshness_status,
                 tls_stale_after=route_binding.source.stale_after,
-                tls_provider_evidence=dict(route_binding.tls.provider_evidence),
+                tls_provider_evidence=dict(
+                    route_binding.tls_for_domain(domain.domain_name).provider_evidence
+                ),
                 route_binding_sha256=route_binding_record_sha256(route_binding),
             )
         )

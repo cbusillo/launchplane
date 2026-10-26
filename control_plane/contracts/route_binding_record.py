@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -14,6 +16,7 @@ RouteBindingStatus = Literal["active", "disabled"]
 RouteBindingTerminationKind = Literal["edge", "direct", "none"]
 RouteBindingIngressProvider = str
 RouteBindingTlsOwner = Literal["launchplane", "provider", "external", "none"]
+EXTERNAL_INGRESS_ATTESTATION_WINDOW = timedelta(days=30)
 
 _SECRET_KEY_TOKENS = (
     "secret",
@@ -114,6 +117,39 @@ class RouteBindingTls(BaseModel):
         return self
 
 
+class RouteBindingExternalIngress(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    domains: tuple[str, ...]
+    custodian: str = Field(min_length=1, max_length=200)
+    evidence_url: str = Field(min_length=1, max_length=2000)
+    attested_at: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+    @model_validator(mode="after")
+    def _validate_custody(self) -> "RouteBindingExternalIngress":
+        self.domains = tuple(_normalized_domain(domain) for domain in self.domains)
+        if not self.domains or len(set(self.domains)) != len(self.domains):
+            raise ValueError("External ingress requires unique domains")
+        self.custodian = require_text(self.custodian, "External ingress requires its custodian")
+        self.evidence_url = self.evidence_url.strip()
+        parsed = urlsplit(self.evidence_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("External ingress evidence requires a credential-free HTTPS URL")
+        if self.attested_at:
+            self.attestation_stale_after()
+        return self
+
+    def attestation_stale_after(self) -> datetime:
+        timestamp = datetime.fromisoformat(self.attested_at.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            raise ValueError("External ingress attestation requires a timezone")
+        return timestamp.astimezone(timezone.utc) + EXTERNAL_INGRESS_ATTESTATION_WINDOW
+
+
 class RouteBindingProviderTargetReadModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -191,6 +227,11 @@ class EnvironmentRouteBindingRecord(BaseModel):
     ingress: RouteBindingIngress
     domains: tuple[RouteBindingDomain, ...]
     tls: RouteBindingTls
+    external_ingress: RouteBindingExternalIngress | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     status: RouteBindingStatus = "active"
     source: RouteBindingSource
     updated_at: str
@@ -220,7 +261,33 @@ class EnvironmentRouteBindingRecord(BaseModel):
             raise ValueError("route binding requires exactly one primary domain")
         if self.tls.owner == "launchplane" and self.ingress.provider == "none":
             raise ValueError("Launchplane-owned TLS requires an ingress provider")
+        if self.external_ingress is not None:
+            if not self.external_ingress.attested_at:
+                raise ValueError("Recorded external ingress requires its attestation time")
+            if not set(self.external_ingress.domains) < seen_domains:
+                raise ValueError(
+                    "Split ingress requires external and managed subsets of recorded domains"
+                )
+            if self.ingress.provider in {"none", "external"} or self.tls.owner in {
+                "none",
+                "external",
+            }:
+                raise ValueError("Split ingress requires independently managed ingress and TLS")
         return self
+
+    def ingress_for_domain(self, domain_name: str) -> RouteBindingIngress:
+        if domain_name not in {domain.domain_name for domain in self.domains}:
+            raise ValueError("Domain is absent from route authority")
+        if self.external_ingress is not None and domain_name in self.external_ingress.domains:
+            return RouteBindingIngress(
+                provider="external", endpoint_key=f"external:{domain_name}", termination_kind="edge"
+            )
+        return self.ingress
+
+    def tls_for_domain(self, domain_name: str) -> RouteBindingTls:
+        if self.ingress_for_domain(domain_name).provider == "external" and self.external_ingress:
+            return RouteBindingTls(owner="external")
+        return self.tls
 
     @property
     def binding_key(self) -> str:
@@ -242,6 +309,11 @@ class EnvironmentRouteBindingReadModel(BaseModel):
     ingress: RouteBindingIngressReadModel
     domains: tuple[RouteBindingDomain, ...]
     tls: RouteBindingTlsReadModel
+    external_ingress: RouteBindingExternalIngress | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     status: RouteBindingStatus
     source: RouteBindingSource
     updated_at: str
@@ -283,6 +355,7 @@ def redacted_route_binding_record(
         tls=RouteBindingTlsReadModel(
             owner=record.tls.owner,
         ),
+        external_ingress=record.external_ingress,
         status=record.status,
         source=record.source,
         updated_at=record.updated_at,
