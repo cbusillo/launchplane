@@ -294,6 +294,7 @@ class PreviewPreservationContainerTests(unittest.TestCase):
             render_odoo_raw_compose_file(
                 image_reference="registry.example.test/odoo:fixture",
                 hold_web_until_integration_readback=True,
+                publish_host_ports=True,
                 mount_workflow_ssh=False,
             )
         )
