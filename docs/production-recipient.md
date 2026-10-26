@@ -429,7 +429,9 @@ without reopening an earlier released pause. Testing authorization uses the
 product profile's actual testing context, including when it differs from prod.
 Only the recorded application container is stopped or restored; the database and
 unrelated containers remain untouched. A resume restores the witnessed original
-running state. A stopped writer stays stopped. Host terminal witnesses support
+running state. Writer identity excludes the inventory's deployment timestamp;
+every other embedded identity field must still agree before a pause or resume.
+A stopped writer stays stopped. Host terminal witnesses support
 receipt/readback after a lost reply. Bounded custody lists the original writer
 operation and binding references, including carried pauses after supersession.
 Historical receipts read the retained host witness even if the provider target
