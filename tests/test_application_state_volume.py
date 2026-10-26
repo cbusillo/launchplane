@@ -520,6 +520,14 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
         self.assert_production_unchanged()
 
+        accepted = await self._testing_hold(mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+
     async def test_serving_application_lifts_without_deploy_or_reconcile_and_replays(self) -> None:
         await self.prepare_application_hold()
         self.serve_application()
