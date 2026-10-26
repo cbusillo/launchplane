@@ -10,7 +10,11 @@ from tests import test_testing_route_transport as transport_tests
 from control_plane.provider_operations import DurableProviderOperationResult
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.testing_address import TestingAddressPlan, address_binding
+from control_plane.contracts.testing_address import (
+    TestingAddressPlan,
+    address_binding,
+    retained_address_custody_sha256,
+)
 from control_plane.contracts.disposable_lane import DisposableTestingSupersession
 from control_plane.dokploy.testing_route import amend_testing_route_address
 from control_plane.dokploy.testing_address_recipients import qualify_testing_address_recipients
@@ -127,11 +131,9 @@ class TestingAddressTests(unittest.TestCase):
             recipient_sha256=canonical_json_sha256({"recipients": "stopped"}),
             domain_inventory_sha256=canonical_json_sha256({"inventory": "complete"}),
             operation_sha256={
-                self.operation.operation_id: canonical_json_sha256(
-                    self.store._payload_dict(self.operation)
-                )
+                self.operation.operation_id: retained_address_custody_sha256(self.operation)
             },
-            retirement_sha256=canonical_json_sha256(self.store._payload_dict(retained)),
+            retirement_sha256=retained_address_custody_sha256(retained),
             created_at=self.now,
         )
         self.reservation = self.store.reserve_mutation(
