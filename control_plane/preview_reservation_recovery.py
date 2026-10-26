@@ -201,6 +201,13 @@ def require_unrecorded_preview_original(
         )
         or any(
             profile.preview.slug_template.format(number=item.anchor_pr_number) == instance
+            and (
+                item.state != "destroyed"
+                or parse_launchplane_mutation_timestamp(item.updated_at, field_name="updated_at")
+                >= parse_launchplane_mutation_timestamp(
+                    reservation.created_at, field_name="created_at"
+                )
+            )
             for item in store.list_preview_records(context_name=profile.preview.context)
         )
     ):

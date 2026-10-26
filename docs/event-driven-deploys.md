@@ -350,7 +350,10 @@ reservation. The webhook request never waits on a deploy.
     is held. Teardown preserves resources shared with another lane or production,
     including target aliases and credentials outside the destroy set.
     A failed creation with no lifecycle record remains a cleanup candidate when
-    its retained original identifies the exact preview. Closed-PR reconciliation
+    its retained original identifies the exact preview, including a completed
+    failed creation or a failed recreation after an earlier retirement. The
+    sweep stops revisiting completed originals once newer retirement is recorded.
+    Closed-PR reconciliation
     uses that original as its lifecycle token and rechecks its product, context,
     PR, target naming and exclusive ownership before effects. Existing executor
     exclusion, recovery grace, original schedule quiescence, target supersession

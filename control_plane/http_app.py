@@ -23274,6 +23274,7 @@ def create_launchplane_fastapi_app(
             action="preview_lifecycle.plan",
             product=plan_request.product,
             context=plan_request.context,
+            inherit_agent_read_role=director_agent_identity(identity),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -23387,9 +23388,12 @@ def create_launchplane_fastapi_app(
         trace_id = next_trace_id()
         if not resolved_authz_policy_runtime.allows(
             identity=identity,
-            action="preview_lifecycle.cleanup",
+            action="preview_lifecycle.plan"
+            if director_agent_identity(identity) and not cleanup_request.apply
+            else "preview_lifecycle.cleanup",
             product=cleanup_request.product,
             context=cleanup_request.context,
+            inherit_agent_read_role=director_agent_identity(identity) and not cleanup_request.apply,
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -23529,10 +23533,8 @@ def create_launchplane_fastapi_app(
         denied_actions_by_product: dict[str, str] = {}
         denied_profile: LaunchplaneProductProfileRecord | None = None
         denied_action = ""
-        required_actions = (
-            ()
-            if director_agent_identity(identity) and not sweep_request.apply
-            else ("preview_lifecycle.plan", "preview_lifecycle.cleanup")
+        required_actions = ("preview_lifecycle.plan",) + (
+            ("preview_lifecycle.cleanup",) if sweep_request.apply else ()
         )
         for profile in requested_sweep_profiles:
             for action in required_actions:
@@ -23541,6 +23543,8 @@ def create_launchplane_fastapi_app(
                     action=action,
                     product=profile.product,
                     context=profile.preview.context,
+                    inherit_agent_read_role=director_agent_identity(identity)
+                    and not sweep_request.apply,
                 ):
                     denied_actions_by_product[profile.product] = action
                     if denied_profile is None:
@@ -25215,6 +25219,7 @@ def create_launchplane_fastapi_app(
             action="preview_desired_state.discover",
             product=desired_state_request.product,
             context=desired_state_request.context,
+            inherit_agent_read_role=director_agent_identity(identity),
         ):
             raise _launchplane_http_error(
                 status_code=403,

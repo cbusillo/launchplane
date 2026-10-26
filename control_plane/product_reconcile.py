@@ -2185,11 +2185,12 @@ def _plan_preview_target(
     if pull_request.get("state") != "open":
         if not live and isinstance(record_store, PostgresRecordStore):
             from control_plane.preview_reservation_recovery import (
-                held_preview_reservations,
                 require_unrecorded_preview_original,
             )
 
-            for reservation in held_preview_reservations(record_store, product=profile.product):
+            for reservation in record_store.list_odoo_preview_cleanup_originals(
+                product=profile.product, number=pull_request_number
+            ):
                 try:
                     require_unrecorded_preview_original(
                         record_store,
@@ -3254,11 +3255,24 @@ def request_product_reconcile_sweep(
         from control_plane.preview_reservation_recovery import (
             held_preview_reservations,
             original_preview_intent,
+            require_unrecorded_preview_original,
         )
 
-        for reservation in held_preview_reservations(record_store, product=profile.product):
+        originals = (
+            record_store.list_odoo_preview_cleanup_originals(product=profile.product)
+            if isinstance(record_store, PostgresRecordStore)
+            else held_preview_reservations(record_store, product=profile.product)
+        )
+        for reservation in originals:
             try:
                 original = original_preview_intent(reservation, profile=profile, store=record_store)
+                if reservation.state == "completed":
+                    require_unrecorded_preview_original(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        number=original.issued_plan.plan_request.pr_number,
+                        reservation_id=reservation.record_id,
+                    )
             except ValueError:
                 continue
             targets.append(

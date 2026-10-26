@@ -92,6 +92,28 @@ class DirectorPreviewOverrideTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response.status_code, 403, response.text)
             sweep.assert_not_called()
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/previews/lifecycle-plan",
+            headers={**self.headers, "Idempotency-Key": "preview-plan"},
+            payload={"product": self.before.product, "context": self.before.preview.context},
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        plan_id = response.json()["records"]["preview_lifecycle_plan_id"]
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/previews/lifecycle-cleanup",
+            headers={**self.headers, "Idempotency-Key": "preview-cleanup-report"},
+            payload={
+                "product": self.before.product,
+                "context": self.before.preview.context,
+                "plan_id": plan_id,
+                "apply": False,
+            },
+        )
+        self.assertEqual(response.status_code, 202, response.text)
 
     async def test_director_saves_one_preview_key_and_preserves_every_other_field(self) -> None:
         response = await self.post()
