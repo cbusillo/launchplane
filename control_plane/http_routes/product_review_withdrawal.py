@@ -94,10 +94,7 @@ def register_product_review_withdrawal_route(
         def execute() -> dict[str, object]:
             profile = store.read_product_profile_record(body.product)
             if profile.repository.casefold() != body.repository.casefold():
-                raise ReviewWithdrawalRefused(
-                    "The product does not own this repository.",
-                    reason=ReviewWithdrawalRefusalReason.REPOSITORY_MISMATCH,
-                )
+                raise ReviewWithdrawalRefused("The product does not own this repository.")
             with launchplane_github_token(
                 control_plane_root=control_plane_root,
                 context_name=profile.preview.context,

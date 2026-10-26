@@ -518,6 +518,15 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                     ReviewWithdrawalRefusalReason.NO_PENDING_LABELED_REQUEST.value,
                 )
                 self.assertEqual(source.deletes, 1)
+                mismatch = await request(
+                    app,
+                    "POST",
+                    "/v1/product-review/withdrawal",
+                    payload=apply | {"mode": "readback", "repository": "example/another"},
+                    headers={"Idempotency-Key": "test-1"},
+                )
+                self.assertEqual(mismatch.status_code, 409, mismatch.text)
+                self.assertNotIn("reason", mismatch.json()["detail"])
                 with patch(
                     "control_plane.http_routes.product_review_withdrawal.ReviewWithdrawalService.run",
                     side_effect=ReviewWithdrawalUnsettled("Outcome is unsettled"),
