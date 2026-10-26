@@ -7695,6 +7695,24 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertEqual(failed.last_plan["action"], "apply")
         self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
 
+    def test_unknown_live_pr_state_does_not_spend_pending_feedback_budget(self) -> None:
+        self.reconcile_preview()
+        self.write_preview(state="active")
+        self.github.pull_request["state"] = "unknown"
+        for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+            self.request("preview", 5)
+            unresolved = self.run_once()
+            self.assertEqual(unresolved.last_plan["reason"], "preview_cleanup_pr_state_unknown")
+            self.assertNotIn("feedback_recovery_failed_attempts", unresolved.last_plan)
+            self.assertNotIn("feedback_recovery_stop_reason", unresolved.last_plan)
+
+        self.write_preview(state="destroyed")
+        self.github.pull_request["state"] = "closed"
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+        self.assertEqual(recovered.last_plan["reason"], "pull_request_not_open")
+        self.assertFalse(self.sweep_preview())
+
     def test_recovery_discovers_feedback_beyond_the_default_history_limit(self) -> None:
         for number in range(10, 120):
             self.store.request_product_reconcile(

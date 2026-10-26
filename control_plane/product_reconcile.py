@@ -3048,10 +3048,11 @@ def run_product_reconcile_once(
     ):
         # Only unresolved reads or terminal clear delivery consume this budget. Open
         # PRs waiting for builds retain their ordinary event/sweep coverage.
-        if outcome.error or plan.get("reason") in {
-            "pull_request_not_open",
-            "preview_cleanup_pr_state_unknown",
-        }:
+        if (
+            outcome.error
+            or plan.get("reason") == "pull_request_not_open"
+            or (retired_failure and plan.get("reason") == "preview_cleanup_pr_state_unknown")
+        ):
             closed = not outcome.error and plan.get("reason") == "pull_request_not_open"
             previously_closed = request.last_plan.get("feedback_recovery_closed_observed") is True
             attempts = _feedback_recovery_failed_attempts(request.last_plan)
