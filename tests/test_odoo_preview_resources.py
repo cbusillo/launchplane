@@ -601,6 +601,63 @@ class PreviewResourceCollectorTests(unittest.TestCase):
 
 
 class PreviewRefreshResourceFenceTests(unittest.TestCase):
+    def test_newly_created_recipient_reaches_update_without_existing_resource_inspection(
+        self,
+    ) -> None:
+        from control_plane.workflows.odoo_preview_runtime import (
+            OdooPreviewDokployApplyRequest,
+            OdooPreviewDokployDryRunRequest,
+            _execute_refresh,
+            build_odoo_preview_dokploy_dry_run,
+        )
+        from tests.test_odoo_preview_runtime import _environment_values, _runtime_plan
+
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(),
+                environment_id="preview-environment",
+                template_compose_id="preview-template",
+            )
+        )
+        apply = OdooPreviewDokployApplyRequest(
+            dry_run_plan=plan,
+            image_reference="ghcr.io/example/preview@sha256:" + "a" * 64,
+            environment_values=_environment_values(),
+            wait_for_deploy=False,
+            smoke_check=False,
+        )
+        reached_update = RuntimeError("New recipient update reached")
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
+                return_value={"composeId": "new-recipient"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime._resolve_or_create_compose",
+                return_value=("new-recipient", True),
+            ),
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources"
+            ) as inspect,
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
+                side_effect=reached_update,
+            ),
+            self.assertRaises(RuntimeError) as failure,
+        ):
+            _execute_refresh(
+                host="fixture",
+                token="fixture",
+                request=apply,
+                provider_operation_title="fixture-operation",
+                provider_effect_checkpoint=None,
+                provider_lease_check=None,
+                expected_runtime_identity=None,
+                qualify_existing_preview=True,
+            )
+        self.assertIs(failure.exception, reached_update)
+        inspect.assert_not_called()
+
     def test_failed_first_or_changed_final_inspection_prevents_deployment(self) -> None:
         import click
         from contextlib import ExitStack
@@ -609,13 +666,13 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
         from tests.test_odoo_preview_apply_execution import _refresh_payload
         from tests.test_odoo_preview_runtime import _environment_values
 
-        for late in (False, True):
-            with self.subTest(late=late), ExitStack() as stack:
+        for late, creating in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(late=late, creating=creating), ExitStack() as stack:
                 apply = OdooPreviewApplyEnvelope.model_validate(_refresh_payload()).apply
                 apply = apply.model_copy(
                     update={
                         "dry_run_plan": apply.dry_run_plan.model_copy(
-                            update={"compose_ref": "preview-target"}
+                            update={} if creating else {"compose_ref": "preview-target"}
                         ),
                         "environment_values": _environment_values(),
                     }
@@ -660,7 +717,7 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
                     )
                 )
                 failure = click.ClickException("Foreign production mount appeared")
-                stack.enter_context(
+                inspection = stack.enter_context(
                     patch(
                         "control_plane.odoo_preview_resources.require_existing_preview_resources",
                         side_effect=[None, failure] if late else failure,
@@ -677,6 +734,7 @@ class PreviewRefreshResourceFenceTests(unittest.TestCase):
                     qualify_existing_preview=True,
                 )
                 self.assertEqual(result.status, "fail")
+                inspection.assert_called()
                 self.assertEqual(result.provider_effect_attempted, late)
                 deploy.assert_not_called()
                 if late:

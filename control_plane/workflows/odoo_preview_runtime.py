@@ -1700,8 +1700,6 @@ def _execute_refresh(
         if restore_upstream or restore_clean_snapshot or preserve_existing_data:
             environment_values["ODOO_MAX_CRON_THREADS"] = "0"
             environment_values["ENV_OVERRIDE_DISABLE_CRON"] = "true"
-        if qualify_existing_preview and creating_compose:
-            raise click.ClickException("Existing-preview qualification cannot create a target.")
         if creating_compose and not plan.template_compose_id:
             raise click.ClickException("Odoo preview compose create requires template_compose_id.")
         source_compose_id = plan.template_compose_id if creating_compose else plan.compose_ref
@@ -1799,7 +1797,7 @@ def _execute_refresh(
         )
 
         def qualify_resources() -> None:
-            if qualify_existing_preview or preserve_existing_data:
+            if (qualify_existing_preview and not created_compose) or preserve_existing_data:
                 from control_plane.odoo_preview_resources import require_existing_preview_resources
 
                 require_existing_preview_resources(

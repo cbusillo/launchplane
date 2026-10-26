@@ -617,10 +617,7 @@ def execute_odoo_preview_apply_result(
         expected_runtime_identity=resolved_runtime_identity,
         propagate_domain_lookup_error=propagate_domain_lookup_error,
         integration_allowances=resolved_environment.integration_allowances,
-        qualify_existing_preview=(
-            qualify_existing_preview
-            and not service_dry_run_plan.compose_ref.startswith("${created.composeId:")
-        ),
+        qualify_existing_preview=qualify_existing_preview,
         restore_upstream=upstream_source and not retained_copy,
         restore_clean_snapshot=snapshot_source and not retained_copy,
         preserve_existing_data=retained_copy,

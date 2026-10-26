@@ -6943,8 +6943,7 @@ def create_launchplane_fastapi_app(
                 creating_recipient = (
                     issued_plan.operation == "refresh"
                     and preview.state == "destroyed"
-                    and compose_id
-                    == f"${{created.composeId:{issued_plan.dry_run_plan.compose_name}}}"
+                    and compose_id.startswith("${created.composeId:")
                 )
                 if not creating_recipient and (
                     not compose_id or compose_id.startswith("${created.")

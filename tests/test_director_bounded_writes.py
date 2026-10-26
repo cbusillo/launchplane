@@ -195,8 +195,31 @@ class DirectorBoundedWritesFixture:
             }
         )
         self.store.write_preview_record(self.preview)
-        plan = self.payload["apply"]["dry_run_plan"]
-        plan["compose_ref"] = f"${{created.composeId:{plan['compose_name']}}}"
+        from control_plane.workflows.odoo_preview_runtime import (
+            OdooPreviewDokployDryRunRequest,
+            build_odoo_preview_dokploy_dry_run,
+        )
+        from tests.test_odoo_preview_runtime import _runtime_plan
+
+        previous = self.payload["apply"]["dry_run_plan"]
+        runtime = _runtime_plan().model_copy(
+            update={
+                "product": self.profile.product,
+                "repository": self.profile.repository,
+                "pr_number": self.preview.anchor_pr_number,
+                "preview_slug": previous["preview_slug"],
+                "preview_url": previous["preview_url"],
+            }
+        )
+        plan = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=runtime,
+                compose_name=previous["compose_name"],
+                environment_id=previous["environment_id"],
+                template_compose_id=previous["template_compose_id"],
+            )
+        )
+        self.payload["apply"]["dry_run_plan"] = plan.model_dump(mode="json")
         self.issue_preview()
 
     async def preview_apply(self) -> Any:
@@ -529,7 +552,6 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBound
         effects = []
 
         def execute(**kwargs: Any) -> Any:
-            self.assertFalse(kwargs["qualify_existing_preview"])
             for phase in ("compose_create", "compose_update"):
                 with kwargs["provider_mutation_guard"]():
                     kwargs["provider_effect_checkpoint"](phase)
