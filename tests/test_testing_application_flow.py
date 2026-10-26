@@ -3502,7 +3502,19 @@ class ApplicationFlowTests(unittest.TestCase):
                 self.assertEqual(post("refuse", key, **changes).status_code, 409)
                 self.assertEqual(self.adapter.current(), before)
                 self.assertEqual(self.writes, writes)
-        refused = post("refuse")
+        from threading import get_ident
+
+        handler_thread = get_ident()
+        lookup = self.store.read_testing_application_activation_operation
+
+        def worker_lookup(*args: Any, **kwargs: Any) -> Any:
+            self.assertNotEqual(get_ident(), handler_thread)
+            return lookup(*args, **kwargs)
+
+        with patch.object(
+            self.store, "read_testing_application_activation_operation", side_effect=worker_lookup
+        ):
+            refused = post("refuse")
         self.assertEqual(refused.status_code, 202, refused.text)
         self.assertEqual(refused.json()["result"]["outcome"], "refused")
         self.assertEqual(self.writes, writes)

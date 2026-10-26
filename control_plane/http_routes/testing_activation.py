@@ -180,16 +180,6 @@ def register_testing_activation_routes(
                 original_intent = None
                 fingerprint_body = body
                 if body.mode == "refuse":
-                    original = record_store.read_testing_application_activation_operation(
-                        product, body.context, scope, body.preparation_key
-                    )
-                    if original is None:
-                        raise TestingActivationRefusal(
-                            "Refusal requires the original application operation."
-                        )
-                    current = adapter.current()
-                    if current.published:
-                        raise TestingActivationRefusal("A published activation cannot be refused.")
                     fingerprint_body = body.model_copy(update={"mode": "apply"})
                 if body.application is not None:
 
@@ -197,6 +187,15 @@ def register_testing_activation_routes(
                         original = record_store.read_testing_application_activation_operation(
                             product, body.context, scope, body.preparation_key
                         )
+                        if body.mode == "refuse":
+                            if original is None:
+                                raise TestingActivationRefusal(
+                                    "Refusal requires the original application operation."
+                                )
+                            if adapter.current().published:
+                                raise TestingActivationRefusal(
+                                    "A published activation cannot be refused."
+                                )
                         fresh = None
                         if original is None:
                             fresh = adapter.current().model_dump(mode="json")
