@@ -102,6 +102,8 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         self.calls.append(arguments)
         if arguments[0] == "stop":
             self.containers[arguments[-1]]["State"]["Running"] = False
+        if arguments[0] == "start":
+            self.containers[arguments[-1]]["State"]["Running"] = True
         return b""
 
     def query(self, container: str, database: str, query: bytes) -> str:
@@ -153,6 +155,80 @@ class PreviewPreservationProgramTests(unittest.TestCase):
         self.assertFalse(
             any(call[0] == "rm" or call[:2] == ("volume", "rm") for call in self.calls)
         )
+
+    def test_stopped_original_database_is_captured_without_starting_application(self) -> None:
+        for container in self.containers.values():
+            container["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock()
+        receipt = self.preserve()
+        self.assertTrue(receipt["database_restore_verified"])
+        self.assertEqual(
+            [call for call in self.calls if call[0] == "start"], [("start", "database")]
+        )
+        self.assertFalse(self.containers["web"]["State"]["Running"])
+        self.assertFalse(self.containers["script-runner"]["State"]["Running"])
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_started_database_returns_to_stopped_after_failed_restore(self) -> None:
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock()
+        self.restored.side_effect = RuntimeError("restore failed")
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.assertFalse(self.path.exists())
+
+    def test_cold_database_refusals_restore_stopped_state(self) -> None:
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock(side_effect=TimeoutError())
+        with self.assertRaises(TimeoutError):
+            self.preserve()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.namespace["wait_database"] = Mock()
+        self.namespace["database_query"] = Mock(return_value='["foreign", "postgres"]')
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_each_cleanup_keeps_its_grace_after_work_or_earlier_cleanup_expires(self) -> None:
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
+                clock = Mock(return_value=100.0)
+                namespace.update(deadline=90.0, spec={}, wait_database=Mock())
+                database = {"Id": "fixture-db", "State": {"Running": False}}
+                complete = subprocess.CompletedProcess([], 0, b"", b"")
+                with (
+                    patch.object(subprocess, "run", return_value=complete) as run,
+                    patch.object(time, "monotonic", clock),
+                ):
+                    try:
+                        with namespace["preservation_database"](database):
+                            with namespace["preservation_cleanup"]():
+                                earlier_cleanup_deadline = namespace["deadline"]
+                            clock.return_value = earlier_cleanup_deadline + 1
+                            if failed:
+                                raise TimeoutError()
+                    except TimeoutError:
+                        self.assertTrue(failed)
+                    cleanup_timeout = run.call_args.kwargs["timeout"]
+                    command = run.call_args.args[0]
+                    self.assertGreater(cleanup_timeout, int(command[command.index("-t") + 1]))
+
+    def test_started_database_must_leave_the_memory_floor_available(self) -> None:
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock()
+        self.namespace["observe_memory_headroom"] = Mock(side_effect=[2048, 0])
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.restored.assert_not_called()
+
+    def test_additional_running_databases_refuse_before_application_stop(self) -> None:
+        self.namespace["database_query"] = Mock(return_value='["foreign", "postgres"]')
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
 
     def test_owned_interrupted_capture_can_resume_without_touching_original(self) -> None:
         self.restored.side_effect = RuntimeError("interrupted")
@@ -381,6 +457,83 @@ class _PreservationVerifierEngine:
                 status = 0 if user == "postgres" else 1
                 output = b"3" if status == 0 else b""
         return subprocess.CompletedProcess(arguments, status, output, b"")
+
+
+class PreviewPreservationRuntimeShapeTests(unittest.TestCase):
+    def test_existing_runner_read_only_binds_are_not_owned_or_exported_storage(self) -> None:
+        namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
+        source: dict[str, Any] = {
+            "compose_project": "fixture-preview",
+            "database_name": "fixture_db",
+            "preview_volumes": {role: f"fixture-{role}" for role in ("data", "logs", "database")},
+        }
+        destinations = {
+            "database": {"/var/lib/postgresql/data": "database"},
+            "web": {"/volumes/data": "data", "/volumes/logs": "logs"},
+            "script-runner": {"/volumes/data": "data", "/volumes/logs": "logs"},
+        }
+        containers: dict[str, dict[str, Any]] = {
+            service: {
+                "Id": service,
+                "ExecIDs": None,
+                "Config": {
+                    "Labels": {"com.docker.compose.service": service},
+                    "Env": ["PLATFORM_INSTANCE=preview", f"ODOO_DB_NAME={source['database_name']}"],
+                },
+                "HostConfig": {
+                    "ExtraHosts": ["fixture-host:host-gateway"] if service == "web" else []
+                },
+                "Mounts": [
+                    {
+                        "Type": "volume",
+                        "Name": source["preview_volumes"][role],
+                        "Destination": destination,
+                    }
+                    for destination, role in mounts.items()
+                ],
+            }
+            for service, mounts in destinations.items()
+        }
+        extra = {"Type": "bind", "Destination": "/root/.ssh", "RW": False}
+        containers["script-runner"]["Mounts"].append(extra)
+
+        def docker(*arguments: str) -> bytes:
+            if arguments[0] == "inspect":
+                return json.dumps([containers[arguments[1]]]).encode()
+            if arguments[-1].startswith("volume="):
+                role = next(
+                    role
+                    for role, name in source["preview_volumes"].items()
+                    if arguments[-1] == f"volume={name}"
+                )
+                return ("database" if role == "database" else "web\nscript-runner").encode()
+            return "\n".join(containers).encode()
+
+        namespace["docker"] = docker
+        self.assertEqual(set(namespace["preview_containers"](source)), set(containers))
+        for invalid in (
+            {"RW": True},
+            {"Type": "volume"},
+            {"Destination": "/volumes/data/filestore"},
+        ):
+            with self.subTest(invalid=invalid):
+                original = dict(extra)
+                extra.update(invalid)
+                with self.assertRaises(RuntimeError):
+                    namespace["preview_containers"](source)
+                extra.clear()
+                extra.update(original)
+        containers["web"]["HostConfig"]["ExtraHosts"] = ["fixture-host:192.0.2.1"]
+        with self.assertRaises(RuntimeError):
+            namespace["preview_containers"](source)
+        containers["web"]["HostConfig"]["ExtraHosts"] = []
+        containers["script-runner"]["Mounts"].remove(extra)
+        for service in ("web", "database"):
+            with self.subTest(service=service):
+                containers[service]["Mounts"].append(extra)
+                with self.assertRaises(RuntimeError):
+                    namespace["preview_containers"](source)
+                containers[service]["Mounts"].remove(extra)
 
 
 class PreviewPreservationVerifierCustodyTests(unittest.TestCase):
@@ -1088,6 +1241,96 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     "fixture-key", PREVIEW_PRESERVATION_CAPTURE_PHASE, "fixture-reconciliation"
                 )
             self.assertIs(raised.exception, inspect.side_effect)
+
+    def test_expired_preserving_destroy_resumes_only_its_revalidated_original(self) -> None:
+        from control_plane import odoo_preview_apply_http as preview_http
+        from control_plane.preview_preservation import PREVIEW_PRESERVATION_CAPTURE_PHASE
+
+        self.complete_original()
+        assert self.issued.plan_provenance is not None
+        attempts = 0
+
+        def execute(**kwargs: Any) -> dict[str, object]:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                kwargs["provider_effect_checkpoint"](PREVIEW_PRESERVATION_CAPTURE_PHASE)
+                return {"status": "fail", "provider_effect_attempted": True}
+            return preview_http.execute_odoo_preview_apply_result(**kwargs)
+
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=self.destroy,
+            issued_plan=self.issued,
+            reservation_scope="expired-preservation",
+            idempotency_key=self.issued.plan_provenance.plan_id,
+            request_fingerprint="expired-preservation",
+            trace_id="expired-preservation",
+            execute_apply=execute,
+            observe_apply=Mock(return_value=("unknown", None, False)),
+        )
+        reached_capture = RuntimeError("revalidated capture reached")
+        with (
+            patch.object(operation.adapter, "capture_schedule_binding"),
+            patch("control_plane.preview_preservation.run_preview_preservation"),
+            patch.object(preview_http, "datetime", wraps=datetime) as clock,
+            patch.object(
+                preview_http, "_build_odoo_preview_apply_inputs", return_value=self.issued
+            ) as rebuild,
+            patch.object(
+                preview_http, "_odoo_preview_service_environment", side_effect=reached_capture
+            ) as environment,
+        ):
+            first = operation.run(self.store)
+            self.assertEqual(first.status, "reconcile_required")
+            assert first.record is not None
+            clock.now.return_value = self.issued.plan_provenance.expires_at + timedelta(seconds=1)
+            with self.assertRaises(RuntimeError) as raised:
+                operation.run(self.store)
+            self.assertIs(raised.exception, reached_capture)
+            rebuild.assert_called_once()
+            retained = self.store.read_idempotency_record_by_id(first.record.record_id)
+            assert retained is not None
+            self.assertEqual(retained.idempotency_key, first.record.idempotency_key)
+            self.assertGreater(retained.attempt, first.record.attempt)
+            environment.reset_mock()
+            rebuild.reset_mock()
+            rebuild.return_value = self.issued.model_copy(
+                update={
+                    "dry_run_plan": self.issued.dry_run_plan.model_copy(
+                        update={"compose_ref": "changed-target"}
+                    )
+                }
+            )
+            self.assertEqual(operation.run(self.store).status, "reconcile_required")
+            rebuild.assert_called_once()
+            environment.assert_not_called()
+            with self.assertRaises(preview_http.OdooPreviewPlanProvenanceError):
+                preview_http.refresh_odoo_preview_issued_plan(
+                    control_plane_root=self.root,
+                    record_store=self.store,
+                    profile=self.profile,
+                    request=self.destroy,
+                    issued_plan=self.issued,
+                    database_url=self.store.database_url,
+                )
+            for unqualified in (None, first.record, self.original):
+                with (
+                    self.subTest(unqualified=unqualified),
+                    self.assertRaises(preview_http.OdooPreviewPlanProvenanceError),
+                ):
+                    preview_http.execute_odoo_preview_apply_result(
+                        control_plane_root_path=self.root,
+                        record_store=self.store,
+                        profile=self.profile,
+                        request=self.destroy,
+                        issued_plan=self.issued,
+                        database_url=self.store.database_url,
+                        deployment_record_id=first.record.record_id,
+                        recovery_reservation=unqualified,
+                    )
 
     def test_adoption_cannot_write_destroyed_lifecycle_without_retained_copy_verification(
         self,
