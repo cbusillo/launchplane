@@ -333,7 +333,7 @@ class PrerequisiteFixture(unittest.TestCase):
         if command[:3] == ["docker", "image", "inspect"]:
             reference = (
                 self.fixture.identity.image_reference
-                if self.drift != "image"
+                if self.drift != "image" and not (self.drift == "image_after" and self.inspections > 1)
                 else "foreign@sha256:" + "f" * 64
             )
             return subprocess.CompletedProcess(
@@ -641,6 +641,15 @@ class PrerequisiteTests(PrerequisiteFixture):
                         observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
                     )
 
+    def test_service_distinguishes_transport_and_invalid_evidence(self) -> None:
+        for failure, expected in ((OSError(PRIVATE), "transport"), (None, "result_validation")):
+            with self.subTest(stage=expected):
+                with patch.object(self, "remote", side_effect=failure):
+                    result = self.read()
+                self.assertEqual(result.failure_stage, expected)
+                self.assertEqual(result.runtime, "unknown")
+                self.assertNotIn(PRIVATE, result.model_dump_json())
+
     def test_producer_default_changes_are_consumed_and_not_copied(self) -> None:
         prefix = SOURCE_PREFIXES["cm_data"]
         port = prefix + ".port"
@@ -854,7 +863,9 @@ def resolve_connection_settings(values):
                 )
             }
         )
-        self.assertEqual(self.read().runtime, "unknown")
+        result = self.read()
+        self.assertEqual(result.runtime, "unknown")
+        self.assertEqual(result.failure_stage, "producer_inventory")
 
     def test_shared_parser_shadow_symlink_and_missing_inventory_fail_closed(self) -> None:
         parser = (
@@ -890,6 +901,7 @@ def resolve_connection_settings(values):
         original_producer = self.producer("cm_data").read_bytes()
         for drift in (
             "image",
+            "image_after",
             "container",
             "parameter",
             "file",

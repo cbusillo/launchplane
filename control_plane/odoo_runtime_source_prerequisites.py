@@ -288,6 +288,12 @@ def _authority(store: PrerequisiteStore, product: str) -> _Authority:
     return _Authority(snapshot, options, metadata)
 
 
+class PrerequisiteReadUnavailable(ValueError):
+    def __init__(self, stage: FailureStage) -> None:
+        super().__init__(stage)
+        self.stage = stage
+
+
 def runtime_prerequisites(
     connection: reads.OdooRuntimeConnection,
     *,
@@ -295,41 +301,51 @@ def runtime_prerequisites(
     authority: _Authority,
     observed_identity: str,
 ) -> SourcePrerequisiteResult:
-    reads.require_runtime_identity(
-        connection.selection.identity, parse_runtime_identity_payload(observed_identity)
-    )
-    program = CONTAINER_PROGRAM.replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH)).replace(
-        "__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)
-    )
-    frames: list[dict[str, object]] = []
-    _read_remote(
-        host=connection.host,
-        token=connection.token,
-        server_id=connection.server_id,
-        program=HOST_PROGRAM.replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)),
-        payload={
-            "project": connection.app_name,
-            "container": connection.evidence.container_id,
-            "identity": json.loads(observed_identity),
-            "files": files,
-            "addons": {name: value[0] for name, value in SOURCE_ADDONS.items()},
-            "prefixes": SOURCE_PREFIXES,
-            "option_fields": OPTION_FIELDS,
-            "authority": authority.options,
-            "metadata": authority.metadata,
-            "payload_addon": PAYLOAD_ADDON,
-            "payload_root": PAYLOAD_ROOT,
-            "container_program": program,
-        },
-        receive=frames.append,
-        timeout_seconds=60,
-    )
-    if len(frames) != 1 or set(frames[0]) != {"type", "result"} or frames[0]["type"] != "complete":
-        raise ValueError("Invalid prerequisite frame")
-    if len(json.dumps(frames[0])) > 16384:
-        raise ValueError("Oversized prerequisite frame")
-    result = SourcePrerequisiteResult.model_validate_json(json.dumps(frames[0]["result"]))
-    return result
+    stage: FailureStage = "runtime_inspection"
+    try:
+        reads.require_runtime_identity(
+            connection.selection.identity, parse_runtime_identity_payload(observed_identity)
+        )
+        program = CONTAINER_PROGRAM.replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH)).replace(
+            "__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)
+        )
+        frames: list[dict[str, object]] = []
+        stage = "transport"
+        _read_remote(
+            host=connection.host,
+            token=connection.token,
+            server_id=connection.server_id,
+            program=HOST_PROGRAM.replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)),
+            payload={
+                "project": connection.app_name,
+                "container": connection.evidence.container_id,
+                "identity": json.loads(observed_identity),
+                "files": files,
+                "addons": {name: value[0] for name, value in SOURCE_ADDONS.items()},
+                "prefixes": SOURCE_PREFIXES,
+                "option_fields": OPTION_FIELDS,
+                "authority": authority.options,
+                "metadata": authority.metadata,
+                "payload_addon": PAYLOAD_ADDON,
+                "payload_root": PAYLOAD_ROOT,
+                "container_program": program,
+            },
+            receive=frames.append,
+            timeout_seconds=60,
+        )
+        stage = "result_validation"
+        if (
+            len(frames) != 1
+            or set(frames[0]) != {"type", "result"}
+            or frames[0]["type"] != "complete"
+        ):
+            raise ValueError("Invalid prerequisite frame")
+        if len(json.dumps(frames[0])) > 16384:
+            raise ValueError("Oversized prerequisite frame")
+        result = SourcePrerequisiteResult.model_validate_json(json.dumps(frames[0]["result"]))
+        return result
+    except Exception:
+        raise PrerequisiteReadUnavailable(stage) from None
 
 
 def diagnose_source_prerequisites(
@@ -354,6 +370,8 @@ def diagnose_source_prerequisites(
         )
         stage = "producer_inventory"
         files = producer_files(manifest, connection, profile.repository)
+        if not files["payload"]:
+            return unknown_result("producer_inventory")
         stage = "runtime_inspection"
         before = reads.inspect_runtime_container(
             connection.host,
@@ -388,6 +406,8 @@ def diagnose_source_prerequisites(
         ):
             return unknown_result("drift")
         return result
+    except PrerequisiteReadUnavailable as error:
+        return unknown_result(error.stage)
     except Exception:
         _logger.debug("Source prerequisite read unavailable.")
         return unknown_result(stage)

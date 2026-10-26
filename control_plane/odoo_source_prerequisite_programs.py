@@ -372,8 +372,9 @@ def run():
     payload_raw,payload_snapshot=payload_bytes(roots)
     stage='payload_producer'
     payload_producer=load_payload_producer(payload_raw)
+    payload_key=payload_producer.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
     stage='payload_decode'
-    encoded=os.environ.get(payload_producer.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,'')
+    encoded=os.environ.get(payload_key,'')
     if len(encoded)>262144:
         raise ValueError()
     payload=payload_producer.decode_payload(encoded)
@@ -382,7 +383,7 @@ def run():
     failures={}
     for name in names:
         try:
-            stage='source_provenance'
+            stage='source_provenance' if spec['files'][name] else 'producer_inventory'
             raw,snapshots[name]=source_bytes(name,roots)
             stage='source_producer'
             modules[name]=load_producer(name,raw)
@@ -407,8 +408,9 @@ def run():
                 results.append(source_result(name,modules[name],payload_producer,payload,before))
         except Exception:
             results.append({'source':name,'failure_stage':'source_resolution'})
-    stage='drift'
+    stage='applied_parameters'
     after=parameters(keys,options) if keys else ({},{})
+    stage='drift'
     if (after!=(before,installed) or config_snapshot()[0]!=config or code_roots(options)!=roots):
         raise ValueError()
     if payload_bytes(roots)[1]!=payload_snapshot:
@@ -491,7 +493,7 @@ try:
     stage='host_execution'
     child=subprocess.run(['docker','exec','-i',before['Id'],'timeout','--kill-after=2s','20s','python3','-I','-c',spec['container_program']],
         input=json.dumps(payload),text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=25,check=False)
-    stage='host_inspection'
+    stage='drift'
     after=inspect()
     stage='drift' if before!=after else 'host_execution'
     if before!=after or child.returncode!=0 or len(child.stdout)>16384:

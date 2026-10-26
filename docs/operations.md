@@ -5391,13 +5391,8 @@ importers and shared applier, then rolls back and closes. An addon must be insta
 before its effective settings are reported. No source database connection,
 import, synchronization, account, configuration or lifecycle change occurs.
 
-Unavailable reads include a nullable `failure_stage` from a fixed vocabulary.
-Service stages distinguish capacity, authority, runtime selection/connection,
-artifact/inventory, runtime inspection, transport, validation and drift. Host
-stages distinguish inspection, execution and result validation. Container stages
-distinguish configuration, code roots, payload provenance/producer/decoding,
-applied-parameter reads, addon installation and drift. Source-specific provenance,
-producer, installation, resolution and drift failures appear on that source.
+Unavailable reads include nullable aggregate and per-source `failure_stage`
+fields from [the closed vocabulary](../control_plane/odoo_source_prerequisite_programs.py).
 A stage identifies the boundary that did not complete; it does not establish
 why it failed or authorize a correction. No exception text, file path, endpoint,
 login, parameter value or credential is added. Legacy responses without a stage
