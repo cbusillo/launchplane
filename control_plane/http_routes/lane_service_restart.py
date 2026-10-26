@@ -67,9 +67,23 @@ def register_service_restart_route(
         trace = dependencies.next_trace_id()
         payload = payload.model_copy(update={"reason": redact_dokploy_log_line(payload.reason)})
 
-        def refuse(code: str, message: str, status: int = 409) -> None:
+        def refuse(
+            code: str,
+            message: str,
+            status: int = 409,
+            *,
+            reason: str | None = None,
+            blocking_deployment_id: str | None = None,
+        ) -> None:
             raise dependencies.http_error(
-                status_code=status, trace_id=trace, code=code, message=message
+                status_code=status,
+                trace_id=trace,
+                code=code,
+                message=message,
+                reason=reason,
+                details={"blocking_deployment_id": blocking_deployment_id}
+                if blocking_deployment_id
+                else None,
             )
 
         operator = isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity) or (
@@ -177,7 +191,9 @@ def register_service_restart_route(
                     product=payload.product, context=payload.context, instance=payload.instance
                 ) as owner:
                     if owner is not None:
-                        raise ServiceRestartRefused("A release operation holds this lane.")
+                        raise ServiceRestartRefused(
+                            "release_operation_holds_lane", "A release operation holds this lane."
+                        )
                 plan, expected, host, token, health_url = plan_service_restart(
                     store=record_store,
                     root=dependencies.control_plane_root,
@@ -200,7 +216,12 @@ def register_service_restart_route(
                         "mutation_reconciliation_required",
                         "Original restart is unsettled; the lane or identity is temporarily unavailable. Preserve the original request.",
                     )
-                refuse("restart_refused", str(error))
+                refuse(
+                    "restart_refused",
+                    str(error),
+                    reason=error.reason,
+                    blocking_deployment_id=error.blocking_deployment_id,
+                )
                 raise AssertionError
             except (ValueError, click.ClickException, OSError):
                 if recovering:
@@ -211,6 +232,7 @@ def register_service_restart_route(
                 refuse(
                     "restart_refused",
                     "Restart identity is ambiguous, unsupported, or the lane is held by a release.",
+                    reason="restart_identity_unavailable",
                 )
                 raise AssertionError
             if payload.mode == "dry-run":
@@ -273,7 +295,12 @@ def register_service_restart_route(
                 )
                 raise AssertionError
             except ServiceRestartRefused as error:
-                refuse("restart_refused", str(error))
+                refuse(
+                    "restart_refused",
+                    str(error),
+                    reason=error.reason,
+                    blocking_deployment_id=error.blocking_deployment_id,
+                )
                 raise AssertionError
             if result.status in {"completed", "replayed", "adopted"}:
                 response = LaneServiceRestartResponse.model_validate(result.response_payload)
