@@ -14274,10 +14274,12 @@ class PostgresRecordStore(HumanSessionStore):
                         if binding_row
                         else None
                     )
-                    from control_plane.testing_publication_storage import testing_binding_authority
+                    from control_plane.testing_publication_storage import (
+                        testing_binding_matches_retained_publication,
+                    )
 
-                    if testing_binding_authority(binding) != testing_binding_authority(
-                        record.retained_route_binding
+                    if not testing_binding_matches_retained_publication(
+                        self, binding, record.retained_route_binding
                     ):
                         raise ValueError("The retained serving route authority changed.")
                     if readiness.route is not None:

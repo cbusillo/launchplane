@@ -896,8 +896,18 @@ an ORM column/table or remains only in the evidence payload.
   `POST /v1/route-bindings/odoo-testing/controller/run-once` performs bounded
   testing-only discovery from product profiles. Legacy service-owned bindings use
   the reconcile planner; published native testing bindings use fresh managed-route
-  observation joined to their original publication custody. Its contract contains no target selectors,
-  caps discovery at 25 records, pre-authorizes every exact instance, and applies
+  observation joined to their original publication custody.
+  A native observation also reconciles canonical and retained-alias domain roles
+  from the owned route, even before its evidence expires. Original address-plan
+  receipts stay immutable; custody accepts their original domain snapshot or
+  the complete host set from that same published route. Subsequent TLS probes
+  use the refreshed roles, without rewriting historical observations.
+  Native preparation, rebuild, activation and inverse comparisons resolve that
+  same custody before accepting a domain-only correction; missing or foreign
+  custody keeps their normal refusal. A successor publication preserves the
+  complete owned domain set while historical primary-only plans remain valid.
+  Its contract contains no target selectors, caps discovery at 25 records,
+  pre-authorizes every exact instance, and applies
   due refreshes sequentially. Absent, disabled, admin-owned, non-Odoo, and
   production records are not candidates. No schema migration is required.
   Externally managed ingress uses the separate native FastAPI

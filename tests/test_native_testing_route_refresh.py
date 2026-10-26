@@ -288,6 +288,119 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fixture.publish(inverse=True).state, "reversed")
         self.assertEqual(self.fixture.current(), self.fixture.before)
 
+    async def test_alias_refresh_preserves_rebuild_snapshot_inverse_and_retained_custody(
+        self,
+    ) -> None:
+        from control_plane.dokploy.testing_route import TestingLaneRoute, testing_route_rule
+        from control_plane.testing_publication import plan_testing_publication
+        from control_plane.testing_publication_storage import (
+            effective_after,
+            serving_snapshot_matches,
+            testing_binding_matches_retained_publication,
+        )
+
+        fixture = publication_tests.TestingPublicationTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        payload = fixture.route.model_dump()
+        payload["aliases"] = ("retained-testing.example.invalid",)
+        for router in payload["template"]["http"]["routers"].values():
+            router["rule"] = testing_route_rule(fixture.route.host, payload["aliases"])
+            if "tls" in router:
+                router["tls"]["domains"] = [
+                    {"main": name} for name in (fixture.route.host, *payload["aliases"])
+                ]
+        fixture.route = TestingLaneRoute.model_validate(payload)
+        fixture.plan = plan_testing_publication(
+            fixture.store,
+            candidate=fixture.candidate,
+            before=fixture.before,
+            route=fixture.route,
+            reservation=fixture.reservation,
+            now=fixture.now,
+        )
+        fixture.prepare()
+        published = fixture.publish()
+        expected = effective_after(published)
+        identity = fixture.plan.deployment.runtime_identity
+        assert identity is not None
+        routed = route_tests.TestingRouteTests()
+        routed.setUp()
+        self.frame.update(
+            old_identity=identity.model_dump(mode="json"),
+            old_endpoints=(fixture.route.new_backend,),
+            raw=routed.apply(fixture.route, fixture.route.new_backend, retire_old=True),
+            owned_file=json.dumps(route_document(fixture.route, fixture.route.new_backend)),
+        )
+        self.fetch.return_value.update(
+            composeId=fixture.candidate.compose_id,
+            name=fixture.candidate.namespace,
+            appName=fixture.fixture.provider_state["appName"],
+            serverId=fixture.candidate.server_id,
+        )
+        response = await refresh_testing_binding_http(
+            fixture.store,
+            fixture.fixture.root,
+            fixture.candidate.product,
+            fixture.candidate.context,
+            self.now,
+            "refresh-retained-alias",
+        )
+        self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
+        current = fixture.current()
+        self.assertTrue(serving_snapshot_matches(current, expected, store=fixture.store))
+        self.assertTrue(
+            testing_binding_matches_retained_publication(
+                fixture.store,
+                current.binding,
+                expected.binding,
+            )
+        )
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRecord,
+            TestingActivationRefusal,
+        )
+        from control_plane.testing_application_activation import require_retained_route_authority
+
+        activation = TestingActivationRecord.model_construct(
+            product=fixture.candidate.product,
+            context=fixture.candidate.context,
+            retained_target=expected.target,
+            retained_target_id=expected.target_id,
+            retained_provider=expected.provider,
+            retained_route_binding=expected.binding,
+        )
+        require_retained_route_authority(fixture.store, activation)
+        with patch.object(
+            fixture.store, "read_route_binding_record", side_effect=FileNotFoundError
+        ):
+            with self.assertRaises(TestingActivationRefusal):
+                require_retained_route_authority(fixture.store, activation)
+        with patch(
+            "control_plane.testing_publication_storage.read_publication", side_effect=ValueError
+        ):
+            with self.assertRaises(TestingActivationRefusal):
+                require_retained_route_authority(fixture.store, activation)
+        assert current.binding is not None
+        foreign = current.binding.model_copy(
+            update={
+                "source": current.binding.source.model_copy(
+                    update={
+                        "source_versions": {
+                            **current.binding.source.source_versions,
+                            "testing_address": "foreign-publication",
+                        }
+                    }
+                ),
+            }
+        )
+        fixture.store.write_route_binding_record(foreign)
+        with self.assertRaises(TestingActivationRefusal):
+            require_retained_route_authority(fixture.store, activation)
+        fixture.store.write_route_binding_record(current.binding)
+        self.assertEqual(fixture.publish(inverse=True).state, "reversed")
+        self.assertEqual(fixture.current(), fixture.before)
+
     async def test_route_authority_and_custody_changes_still_block_the_publication_inverse(
         self,
     ) -> None:
