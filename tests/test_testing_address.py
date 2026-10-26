@@ -208,6 +208,11 @@ class TestingAddressTests(unittest.TestCase):
             provider_target_key="fixture-historical-address-target",
         ).record
         legacy_payload = self.plan.model_dump(mode="json")
+        legacy_payload.pop("canonical_settings", None)
+        self.assertEqual(
+            TestingAddressPlan.model_validate(legacy_payload).digest,
+            canonical_json_sha256(legacy_payload),
+        )
         legacy_payload.pop("retained_automation", None)
         self.assertEqual(TestingAddressPlan.model_validate(legacy_payload).digest, self.plan.digest)
         for automation in ({"foreign-target": True}, {"retained-target": "true"}):

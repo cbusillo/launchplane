@@ -4,6 +4,14 @@ import inspect
 
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.docker_errors import docker_daemon_authorization_denied
+from control_plane.integration_readback import INTEGRATION_FAMILIES, IntegrationReadbackPolicy
+
+
+def sanitized_testing_readback_policy() -> IntegrationReadbackPolicy:
+    return IntegrationReadbackPolicy(
+        families=INTEGRATION_FAMILIES, allowed_integrations=(), protected_shopify_store_handles=()
+    )
+
 
 CANDIDATE_CONTAINER_PROBE = r"""
 import configparser, hmac, json, os, sys

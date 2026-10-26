@@ -486,7 +486,7 @@ except BaseException:
 """.replace("__CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES))
 
 
-def _read_remote(
+def run_managed_server_program(
     *,
     host: str,
     token: str,
@@ -538,6 +538,9 @@ def _read_remote(
         json.JSONDecodeError,
     ):
         raise NativeSourceUnavailable("The provider source stream is incomplete.") from None
+
+
+_read_remote = run_managed_server_program
 
 
 NATIVE_ODOO_SOURCE_READ_PROGRAM = (

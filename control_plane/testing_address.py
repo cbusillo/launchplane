@@ -1,4 +1,6 @@
 from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from functools import cached_property
 import json
@@ -23,6 +25,7 @@ from control_plane.dokploy.testing_route_execution import (
 )
 from control_plane.provider_operations import (
     ProviderEvidenceLease,
+    DurableProviderMutationAdapter,
     ProviderMutationOutcome,
     ProviderObservation,
     ProviderOperationLease,
@@ -66,7 +69,7 @@ class TestingAddressRequest(BaseModel):
 
 
 def address_plan_result(plan: TestingAddressPlan, *, applied: bool) -> dict[str, object]:
-    return {
+    result: dict[str, object] = {
         "plan_sha256": plan.digest,
         "product": plan.product,
         "context": plan.context,
@@ -81,9 +84,13 @@ def address_plan_result(plan: TestingAddressPlan, *, applied: bool) -> dict[str,
             target for target, enabled in plan.retained_automation.items() if enabled
         ),
     }
+    if plan.canonical_settings is not None:
+        result["canonical_settings_required"] = True
+        result["canonical_settings_verified"] = applied
+    return result
 
 
-class TestingAddressAdapter:
+class TestingAddressAdapter(DurableProviderMutationAdapter):
     def __init__(
         self,
         root: Path,
@@ -95,6 +102,31 @@ class TestingAddressAdapter:
     ) -> None:
         self.root, self.store, self.plan, self.trace_id = root, store, plan, trace_id
         self.cancel = cancel
+        self.canonical_lane_checkpoint: Callable[[], None] = lambda: None
+
+    @contextmanager
+    def canonical_lane(self) -> Iterator[None]:
+        if self.plan.canonical_settings is None:
+            yield
+            return
+        with exclude_address_executors(self.store, tuple(self.plan.operation_sha256)):
+            verify_testing_address_retained_custody(self.store, self.plan)
+            with self.store.testing_verification_lane_guard(
+                product=self.plan.product,
+                context=self.plan.context,
+            ) as checkpoint:
+                self.canonical_lane_checkpoint = checkpoint
+                try:
+                    yield
+                finally:
+                    self.canonical_lane_checkpoint = lambda: None
+
+    def retained_exclusion(self) -> AbstractContextManager[None]:
+        return (
+            nullcontext()
+            if self.plan.canonical_settings is not None
+            else exclude_address_executors(self.store, tuple(self.plan.operation_sha256))
+        )
 
     @cached_property
     def transport(self) -> DokployTestingRouteTransport:
@@ -180,7 +212,12 @@ class TestingAddressAdapter:
         return health
 
     def readback(self) -> dict[str, object]:
+        with self.canonical_lane():
+            return self.readback_original()
+
+    def readback_original(self) -> dict[str, object]:
         from control_plane.testing_serving_copy import published_testing_copy
+        from control_plane.testing_address_settings import verify_canonical_settings
 
         self.require_forward_operation()
         record = read_testing_address(self.store, self.plan.publication_key)
@@ -191,8 +228,9 @@ class TestingAddressAdapter:
             is None
         ):
             raise ValueError("The address amendment lost its native copy custody.")
-        with exclude_address_executors(self.store, tuple(self.plan.operation_sha256)):
+        with self.retained_exclusion():
             verify_testing_address_retained_custody(self.store, self.plan)
+            verify_canonical_settings(self)
             self.public_health()
         return address_plan_result(self.plan, applied=True)
 
@@ -217,7 +255,22 @@ class TestingAddressAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        with exclude_address_executors(self.store, tuple(self.plan.operation_sha256)):
+        try:
+            with self.canonical_lane():
+                return self.apply_held(lease)
+        except (ValueError, FileNotFoundError) as error:
+            assert isinstance(lease, ProviderEvidenceLease)
+            if not lease.evidence_reservation().provider_effect_started_at:
+                raise ProviderMutationRejectedError(error) from error
+            raise
+
+    def apply_held(self, lease: ProviderOperationLease) -> ProviderMutationOutcome:
+        from control_plane.testing_address_settings import (
+            apply_canonical_settings,
+            preflight_canonical_settings,
+        )
+
+        with self.retained_exclusion():
             if self.cancel:
                 return self.cancel_original(lease)
             record = read_testing_address(self.store, self.plan.publication_key)
@@ -227,14 +280,18 @@ class TestingAddressAdapter:
                         "The original address operation has another publication receipt."
                     )
             else:
+                preflight_canonical_settings(self, lease)
                 self.apply_original(lease)
+            apply_canonical_settings(self, lease)
+            if self.plan.canonical_settings is not None:
+                self.public_health()
             result = address_plan_result(self.plan, applied=True)
         return ProviderMutationOutcome(
             202,
             provider_operation_response_payload(
                 trace_id=self.trace_id, records={"testing_address": self.plan.digest}, result=result
             ),
-            provider_effect_performed=record is None,
+            provider_effect_performed=record is None or self.plan.canonical_settings is not None,
         )
 
     def require_forward_operation(self) -> None:
@@ -255,6 +312,7 @@ class TestingAddressAdapter:
 
         def guard() -> None:
             operation_lease.assert_current()
+            self.canonical_lane_checkpoint()
             verify_testing_address_sources(self.store, self.plan)
 
         original_effect = self.store.read_idempotency_record(
