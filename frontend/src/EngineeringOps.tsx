@@ -1,3 +1,4 @@
+import { EngineeringRuntimeSettingRemovalRoute } from "./EngineeringRuntimeSettingRemovalRoute";
 import {
   ArrowRight,
   KeyRound,
@@ -20,6 +21,8 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  { detail: "Review exact stored plain-setting removals and approve them as the signed-in administrator.",
+    icon: KeyRound, label: "Director controls", title: "Remove stored settings", view: "runtime-setting-removal" as const },
   {
     detail: "Select the service's existing Delivery App key and review obsolete service-token retirement.",
     icon: KeyRound,
@@ -72,6 +75,7 @@ export function EngineeringOpsRoute({
   view: EngineeringView;
   actorId: number;
 }) {
+  if (view === "runtime-setting-removal") return <EngineeringRuntimeSettingRemovalRoute admin={admin} actorId={actorId} />;
   if (view === "github-delivery") {
     return <EngineeringGitHubDeliveryRoute actorId={actorId} />;
   }

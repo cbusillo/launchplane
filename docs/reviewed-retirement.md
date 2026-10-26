@@ -149,3 +149,29 @@ prove current absence or unchanged survivors.
 After the first proposal containing this request is persisted, retain a rollback
 image with this request reader. Older strict readers cannot load that new proposal;
 rolling back the service image never restores removed authorization data.
+
+## Signed-in removal page
+
+Engineering Ops → **Remove stored settings** (`/ui/engineering/runtime-setting-removal`)
+uses the existing removal endpoint. Enter the product, exact stored scope,
+context/lane when applicable, selected names and reason. **Review removal** saves
+a fresh service review and shows the exact selected names, survivors, retirement
+intent and reader/rollback requirement. Changing any field invalidates that review.
+No stored values, secret bindings or rollback preimages are displayed.
+
+Before confirming, qualify the actual runtime consumers and the effective value
+that would be inherited from broader scopes. A context removal can change every
+lane without a more specific override; a global removal can reach other products.
+The page does not discover or attest those dependencies. Follow the live-site and
+Client boundaries in DIRECTION.md before approving the exact change.
+
+**Remove reviewed settings** uses the signed-in administrator's existing authority,
+CSRF protection and one retained operation key. The original request stays in that
+browser tab's session storage for same-request recovery after a lost reply or
+reload. An uncertain outcome locks edits and new reviews; **Retry original removal**
+reuses the request and key. Missing recovery storage blocks submission. A stale
+first attempt requires a fresh review; a stale retry after an uncertain response
+keeps the original operation locked. A committed removal is followed by an
+independent readback. An unavailable or mismatched readback stays unverified and
+blocks a new change until **Check current record** matches, including after reload.
+Runtime sync, deployment and production acceptance remain separate operations.
