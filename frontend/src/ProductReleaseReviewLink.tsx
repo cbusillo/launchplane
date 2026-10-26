@@ -42,6 +42,6 @@ export function ProductReleaseReviewLink({
     {showProductName ? <h1 data-route-heading tabIndex={-1}>{permitted ? review.display_name : "Product review"}</h1> : null}
     {permitted ? <AppLink className="button" to={`${ownerReviewPath()}?${new URLSearchParams({ product })}`}>Release review</AppLink> : null}
     {showProductName && loading ? <p role="status">Loading product review…</p> : null}
-    {!loading && (error || (showProductName && !permitted)) ? <p role="status">This product's release review is unavailable to you. Refresh to try again or open the link for your product.</p> : null}
+    {!loading && (error || (showProductName && !permitted)) ? <p role="status">This product's release review is unavailable. Refresh to try again.</p> : null}
   </div>;
 }
