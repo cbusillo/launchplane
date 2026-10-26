@@ -45,17 +45,35 @@ def require_existing_preview_resources(
     checkpoint: Callable[[], None],
     operation: OdooPreviewRuntimeOperation = "refresh",
     pending_filestore: bool = False,
+    unstarted: bool = False,
+    expected_server_id: str = "",
 ) -> str:
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=compose_id
     )
-    binding = _preview_resource_binding(payload, compose_id=compose_id, environment=environment)
+    if unstarted and (
+        not expected_server_id
+        or payload.get("serverId") != expected_server_id
+        or api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            require_complete=True,
+        )
+    ):
+        raise click.ClickException("Preview recipient is not unstarted on its reviewed server.")
+    binding = _preview_resource_binding(
+        payload, compose_id=compose_id, environment=environment, unstarted=unstarted
+    )
     if operation == "destroy":
         _require_preview_destroy_source(payload)
     volumes = [environment[key] for key in RESOURCE_KEYS]
     declaration = yaml.safe_load(str(payload.get("composeFile") or ""))
-    if pending_filestore or (
-        isinstance(declaration, dict) and "odoo_filestore" in declaration.get("volumes", {})
+    if (
+        unstarted
+        or pending_filestore
+        or (isinstance(declaration, dict) and "odoo_filestore" in declaration.get("volumes", {}))
     ):
         volumes.append(environment["ODOO_DATA_VOLUME"] + "-filestore")
     schedule_type, lookup_id, project, server_id = post_deploy._resolve_dokploy_schedule_runtime(
@@ -67,11 +85,18 @@ def require_existing_preview_resources(
     )
     if operation == "destroy":
         volumes = _preview_destroy_volumes(payload, project=project, environment=environment)
+    absent_volumes: list[str] = []
+    if unstarted and str(payload.get("composeFile") or "").strip():
+        _require_preview_destroy_source(payload, resource_environment=environment)
+        referenced = _preview_destroy_volumes(payload, project=project, environment=environment)
+        absent_volumes = sorted(set(referenced) - set(volumes))
+        volumes.extend(absent_volumes)
     spec = {
         "compose_id": compose_id,
         "project": project,
         "volumes": volumes,
         "operation": operation,
+        **({"unstarted": True, "absent_volumes": absent_volumes} if unstarted else {}),
         "pending_filestore": environment["ODOO_DATA_VOLUME"] + "-filestore"
         if pending_filestore
         else "",
@@ -146,7 +171,20 @@ def require_existing_preview_resources(
         host=host, token=token, target_type="compose", target_id=compose_id
     )
 
-    if _preview_resource_binding(latest, compose_id=compose_id, environment=environment) != binding:
+    if (
+        _preview_resource_binding(
+            latest, compose_id=compose_id, environment=environment, unstarted=unstarted
+        )
+        != binding
+        or unstarted
+        and api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            require_complete=True,
+        )
+    ):
         raise click.ClickException("Preview target changed during resource inspection.")
     return binding
 
@@ -165,7 +203,11 @@ def require_preview_resource_binding(
 
 
 def _preview_resource_binding(
-    payload: Mapping[str, object], *, compose_id: str, environment: dict[str, str]
+    payload: Mapping[str, object],
+    *,
+    compose_id: str,
+    environment: dict[str, str],
+    unstarted: bool = False,
 ) -> str:
     current = api.parse_dokploy_env_text(str(payload.get("env") or ""))
     volumes = [environment.get(key, "") for key in RESOURCE_KEYS]
@@ -173,7 +215,10 @@ def _preview_resource_binding(
         payload.get("composeId") != compose_id
         or len(set(volumes)) != len(RESOURCE_KEYS)
         or any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,200}", name) for name in volumes)
-        or any(current.get(key) != environment.get(key) for key in RESOURCE_KEYS)
+        or (not unstarted or any(key in current for key in RESOURCE_KEYS))
+        and any(current.get(key) != environment.get(key) for key in RESOURCE_KEYS)
+        or unstarted
+        and any(key.startswith("COMPOSE_") for key in current)
     ):
         raise click.ClickException("Existing preview storage changed or is unavailable.")
     fields = (
@@ -195,7 +240,9 @@ def _preview_resource_binding(
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def _require_preview_destroy_source(payload: Mapping[str, object]) -> None:
+def _require_preview_destroy_source(
+    payload: Mapping[str, object], *, resource_environment: dict[str, str] | None = None
+) -> None:
     if (
         payload.get("sourceType") != "raw"
         or payload.get("composePath") != "docker-compose.yml"
@@ -215,7 +262,9 @@ def _require_preview_destroy_source(payload: Mapping[str, object]) -> None:
         if declaration in (None, {}):
             continue
         if key == "odoo_filestore":
-            environment = api.parse_dokploy_env_text(str(payload.get("env") or ""))
+            environment = resource_environment or api.parse_dokploy_env_text(
+                str(payload.get("env") or "")
+            )
             if (
                 not isinstance(declaration, dict)
                 or set(declaration) != {"name", "driver", "driver_opts", "labels"}
@@ -365,11 +414,21 @@ def main():
         paths[name] = path
 
     destroying = spec.get("operation") == "destroy"
+    unstarted = spec.get("unstarted") is True
     pending = spec.get('pending_filestore')
     if pending and (pending not in names or not pending.endswith('-filestore')):
         raise RuntimeError('Invalid pending preview filestore')
-    existing_names = set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) if destroying or pending else names
-    if not destroying and names - existing_names - {pending}:
+    existing_names = set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) if destroying or pending or unstarted else names
+    if unstarted:
+        absent = set(spec.get("absent_volumes", [])) if pending else names
+        if not absent.issubset(names) or absent & existing_names:
+            raise RuntimeError("Unstarted preview has retained storage")
+        root = Path(docker("info", "--format", "{{.DockerRootDir}}").strip())
+        if root.resolve(strict=True) != root.absolute():
+            raise RuntimeError("Docker storage root is aliased")
+        if any((root / "volumes" / name).exists() or (root / "volumes" / name).is_symlink() for name in absent):
+            raise RuntimeError("Unstarted preview has unregistered storage")
+    if not destroying and not unstarted and names - existing_names - {pending}:
         raise RuntimeError('Preview storage is missing')
     for name in names:
         if name in existing_names:
@@ -400,6 +459,8 @@ def main():
     # Re-read complete inventory to include new consumers. An unrelated helper
     # disappearing is gone, not evidence of a hidden writable consumer.
     for _ in range(2):
+        if unstarted and names & set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) != names & existing_names:
+            raise RuntimeError("Unstarted preview storage changed")
         containers = []
         for item in container_inventory():
             config = item.get("Config")
@@ -411,6 +472,8 @@ def main():
             if not isinstance(mounts, list):
                 raise RuntimeError("Mount inventory unavailable")
             if ours:
+                if unstarted:
+                    raise RuntimeError("Preview recipient has started containers")
                 host = item.get("HostConfig")
                 if not destroying and (not isinstance(host, dict) or host.get("PortBindings") not in (None, {}) or host.get("NetworkMode") == "host"):
                     raise RuntimeError("Preview has shared host networking")

@@ -121,11 +121,11 @@ class DirectorBoundedWritesFixture:
             control_plane_root_path=self.root,
         )
 
-    def issue_preview(self) -> None:
+    def issue_preview(self, planned: Any = None) -> None:
         identity = configured_local_operator_identity(self.config)
         assert identity is not None
         issued = issue_odoo_preview_apply_plan(
-            result=_issued_plan(OdooPreviewApplyEnvelope.model_validate(self.payload)),
+            result=planned or _issued_plan(OdooPreviewApplyEnvelope.model_validate(self.payload)),
             plan_id=self.plan_id,
         )
         self.store.write_idempotency_record(
@@ -542,61 +542,6 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase, DirectorBound
         self.assertEqual(response.status_code, 202, response.text)
         execute.assert_called_once()
         self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
-
-    async def test_destroyed_preview_can_create_its_new_recipient(self) -> None:
-        from control_plane.odoo_preview_apply_http import _OdooPreviewServiceEnvironment
-        from control_plane.workflows.odoo_preview_runtime import OdooPreviewDokployApplyResult
-
-        self.prepare_destroyed_preview_creation()
-        history = self.store.list_preview_generation_records(preview_id=self.preview.preview_id)
-        effects = []
-
-        def execute(**kwargs: Any) -> Any:
-            for phase in ("compose_create", "compose_update"):
-                with kwargs["provider_mutation_guard"]():
-                    kwargs["provider_effect_checkpoint"](phase)
-                    effects.append(phase)
-            self.assertEqual(self.store.read_preview_record(self.preview.preview_id), self.preview)
-            plan = kwargs["request"].dry_run_plan
-            return OdooPreviewDokployApplyResult(
-                status="pass",
-                operation=plan.operation,
-                product=plan.product,
-                repository=plan.repository,
-                preview_slug=plan.preview_slug,
-                preview_url=plan.preview_url,
-                domain_host=plan.domain_host,
-                compose_name=plan.compose_name,
-                compose_id="new-preview-recipient",
-                created_compose=True,
-                provider_effect_attempted=True,
-            )
-
-        with (
-            patch(
-                "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",
-                return_value=OdooPreviewApplyEnvelope.model_validate(self.payload),
-            ),
-            patch(
-                "control_plane.odoo_preview_apply_http._odoo_preview_service_environment",
-                return_value=_OdooPreviewServiceEnvironment(values={}),
-            ),
-            patch("control_plane.lane_movement.require_forward_preview_build"),
-            patch(
-                "control_plane.odoo_preview_apply_http.execute_odoo_preview_dokploy_apply",
-                side_effect=execute,
-            ),
-        ):
-            response = await self.preview_apply()
-        self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(effects, ["compose_create", "compose_update"])
-        current = self.store.read_preview_record(self.preview.preview_id)
-        self.assertEqual(current.state, "active")
-        self.assertTrue(current.serving_generation_id)
-        retained = self.store.list_preview_generation_records(preview_id=current.preview_id)
-        self.assertTrue(
-            {item.generation_id for item in history} < {item.generation_id for item in retained}
-        )
 
     async def test_new_recipient_preserves_destroyed_preview_protections(self) -> None:
         for protection in (

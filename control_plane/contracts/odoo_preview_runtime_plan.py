@@ -276,8 +276,6 @@ def _validate_provider_capabilities(
             ("can_update_compose_env", capabilities.can_update_compose_env),
             ("can_deploy_compose", capabilities.can_deploy_compose),
             ("can_bind_domain", capabilities.can_bind_domain),
-            ("can_delete_compose", capabilities.can_delete_compose),
-            ("can_delete_domain", capabilities.can_delete_domain),
         ),
         "destroy": (
             ("can_delete_compose", capabilities.can_delete_compose),
@@ -388,12 +386,7 @@ def _actions_for_request(
             OdooPreviewRuntimeAction(action="deploy_preview_compose", target=target),
             OdooPreviewRuntimeAction(action="run_preview_smoke", target=request.preview_url),
         ),
-        (
-            OdooPreviewRuntimeAction(
-                action="delete_created_preview_domain", target=request.preview_url
-            ),
-            OdooPreviewRuntimeAction(action="delete_created_preview_compose", target=target),
-        ),
+        (),
     )
 
 

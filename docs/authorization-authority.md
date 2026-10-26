@@ -442,9 +442,17 @@ observations retain their separate service-collector requirement. Same-key
 observation and lifecycle finalization remain available after evidence expires.
 A unique service preview is required. A fresh issued refresh plan can rebuild
 an owned destroyed preview, retaining its history until the new generation
-passes. An existing target keeps its physical resource qualification. A newly
-created recipient uses the native creation and storage-isolation path; the
-same ownership and protection checkpoint still runs before every effect. The issued plan must postdate the
+passes. An existing deployed target keeps its physical resource qualification.
+A recipient with no deployment history stays on the creation path only after
+the service verifies its owned destroyed lifecycle, absence of a target binding,
+template server, unchanged configuration and complete unstarted-resource proof.
+An allocated provider shell is inspected before source, environment, data or
+deploy mutations. Its project must have no containers; ordinary storage and
+referenced auxiliary volumes must be absent, including unregistered backing
+directories. Snapshot preparation may retain only its qualified incomplete
+attempt and overlay custody. Unknown, queued, changed or foreign resources
+refuse. The same proof runs again before deployment and for every native
+creation-shaped request, including an existing shell found by name. The issued plan must postdate the
 recorded teardown authority; unknown teardown
 authority and stale plans still refuse. Other disposable-lane operations do not
 gain permission from destroyed history. A staff hold or recorded `in_use`, `only_copy` or shared
@@ -452,6 +460,18 @@ resource report refuses refresh even after that report expires or its binding
 changes. Resolve the real exception first through the existing target-policy or
 `/v1/disposable-lanes/observations` clear path; expiry never clears it. Positive reports confer no admission on this path and are not required.
 Destroy and stable testing retain their existing qualification requirements.
+
+An interrupted creation keeps its provider shell, domain, storage and original
+checkpoint. There is no automatic pre-deploy deletion: namespace allocation does
+not prove custody of globally named volumes that appear later. A qualified
+unstarted recipient keeps the ordinary creation-plan shape, so an original
+retry within its plan validity can continue without another allocation.
+Before a replacement request can supersede a held original, existing immutable
+intent, complete deployment and bound-job quiescence, expired lease, grace and
+atomic comparison still apply. Older plan/result rollback fields remain
+readable as historical evidence; new refresh plans advertise no destructive
+rollback and require no delete capability. Explicit preview destruction retains
+its independent qualification.
 
 Before changing an existing preview compose and again before deployment, the
 service runs a fixed read-only Docker inspector on that compose's actual server

@@ -105,6 +105,59 @@ class PreviewResourceInspectionTests(unittest.TestCase):
                 status = error.code if isinstance(error.code, int) else 1
         return status, dict(line.split("=", 1) for line in output.getvalue().splitlines())
 
+    def retain_unregistered_fixture_backings(self) -> None:
+        retained = self.root / "retained"
+        retained.mkdir()
+        for name, volume in self.volumes.items():
+            original = Path(volume["Mountpoint"]).parent
+            original.rename(retained / name)
+            volume["Mountpoint"] = str(retained / name / "_data")
+
+    def test_unstarted_requires_absent_containers_and_plain_storage(self) -> None:
+        self.spec["unstarted"] = True
+        self.retain_unregistered_fixture_backings()
+        saved_volumes = dict(self.volumes)
+        saved_containers = dict(self.containers)
+        self.volumes.clear()
+        self.containers.clear()
+        self.assertEqual(self.run_program()[0], 0)
+        self.containers.update(saved_containers)
+        self.assertNotEqual(self.run_program()[0], 0)
+        self.containers.clear()
+        self.volumes.update(saved_volumes)
+        self.assertNotEqual(self.run_program()[0], 0)
+        self.assertTrue(
+            all((Path(v["Mountpoint"]) / "needed-data").exists() for v in self.volumes.values())
+        )
+
+    def test_unstarted_refuses_unregistered_needed_backing(self) -> None:
+        self.spec["unstarted"] = True
+        self.containers.clear()
+        needed = Path(next(iter(self.volumes.values()))["Mountpoint"]) / "needed-data"
+        self.volumes.clear()
+        self.assertNotEqual(self.run_program()[0], 0)
+        self.assertTrue(needed.is_file())
+
+    def test_unstarted_refuses_storage_appearing_during_inventory(self) -> None:
+        self.spec["unstarted"] = True
+        self.retain_unregistered_fixture_backings()
+        volume = next(iter(self.volumes.items()))
+        self.volumes.clear()
+        self.containers.clear()
+        inspect = self.docker
+        inventories = 0
+
+        def changing(command: list[str], **kwargs: Any) -> Any:
+            nonlocal inventories
+            if command[1:3] == ["volume", "ls"]:
+                inventories += 1
+                if inventories == 2:
+                    self.volumes[volume[0]] = volume[1]
+            return inspect(command, **kwargs)
+
+        with patch.object(self, "docker", side_effect=changing):
+            self.assertNotEqual(self.run_program()[0], 0)
+
     def test_destroy_allows_missing_volumes_and_own_host_bindings(self) -> None:
         self.spec["operation"] = "destroy"
         self.containers["preview"]["HostConfig"] = {
@@ -601,63 +654,6 @@ class PreviewResourceCollectorTests(unittest.TestCase):
 
 
 class PreviewRefreshResourceFenceTests(unittest.TestCase):
-    def test_newly_created_recipient_reaches_update_without_existing_resource_inspection(
-        self,
-    ) -> None:
-        from control_plane.workflows.odoo_preview_runtime import (
-            OdooPreviewDokployApplyRequest,
-            OdooPreviewDokployDryRunRequest,
-            _execute_refresh,
-            build_odoo_preview_dokploy_dry_run,
-        )
-        from tests.test_odoo_preview_runtime import _environment_values, _runtime_plan
-
-        plan = build_odoo_preview_dokploy_dry_run(
-            request=OdooPreviewDokployDryRunRequest(
-                runtime_plan=_runtime_plan(),
-                environment_id="preview-environment",
-                template_compose_id="preview-template",
-            )
-        )
-        apply = OdooPreviewDokployApplyRequest(
-            dry_run_plan=plan,
-            image_reference="ghcr.io/example/preview@sha256:" + "a" * 64,
-            environment_values=_environment_values(),
-            wait_for_deploy=False,
-            smoke_check=False,
-        )
-        reached_update = RuntimeError("New recipient update reached")
-        with (
-            patch(
-                "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
-                return_value={"composeId": "new-recipient"},
-            ),
-            patch(
-                "control_plane.workflows.odoo_preview_runtime._resolve_or_create_compose",
-                return_value=("new-recipient", True),
-            ),
-            patch(
-                "control_plane.odoo_preview_resources.require_existing_preview_resources"
-            ) as inspect,
-            patch(
-                "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
-                side_effect=reached_update,
-            ),
-            self.assertRaises(RuntimeError) as failure,
-        ):
-            _execute_refresh(
-                host="fixture",
-                token="fixture",
-                request=apply,
-                provider_operation_title="fixture-operation",
-                provider_effect_checkpoint=None,
-                provider_lease_check=None,
-                expected_runtime_identity=None,
-                qualify_existing_preview=True,
-            )
-        self.assertIs(failure.exception, reached_update)
-        inspect.assert_not_called()
-
     def test_failed_first_or_changed_final_inspection_prevents_deployment(self) -> None:
         import click
         from contextlib import ExitStack
