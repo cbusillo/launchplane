@@ -74,13 +74,18 @@ Retained generic-web Compose testing lanes use the same `inspect` and reviewed
 `collect` path. Collection requires the current recipient's published, qualified
 activation and its original completed allocation. It reuses the activation's
 configuration, retained-reservation, safe-input and provider-render checks, with
-the image and generated identity fields from the current deployment inventory.
+the artifact from current deployment inventory. The provider's pending runtime
+identity must agree with the completed inventory apart from its completion time;
+provider image inputs retain the Compose deploy writer's artifact value.
 It then reads the registered host through the existing private transport. The
 fixed program checks every extant container, including stopped containers, actual
 mounts and bound ports, current image/environment inputs and allocation-labeled
 local volume backing. Testing credential values are compared with production's
 provider inputs and other containers' actual environments. The complete inspected
-inventory and service authority must remain unchanged across the read.
+inventory and service authority must remain unchanged across the read. The proof
+binds the provider configuration and owned resources; an unrelated restart
+between qualifications does not invalidate it when the fresh complete read
+still proves no shared resource or credential.
 
 Populated allocated volumes remain in place. The original qualified empty
 allocation and unchanged source/input custody establish reproducibility; the

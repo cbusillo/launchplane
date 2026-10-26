@@ -14,7 +14,7 @@ from control_plane.testing_compose_resources import (
 class RetainedComposeInspectionTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = self.enterContext(TemporaryDirectory())
-        self.root = Path(temporary)
+        self.root = Path(temporary).resolve()
         self.volumes: dict[str, dict[str, Any]] = {}
         self.rows: dict[str, dict[str, Any]] = {}
         self.spec: dict[str, Any] = {
@@ -32,7 +32,7 @@ class RetainedComposeInspectionTests(unittest.TestCase):
             },
         }
         for name, role in self.spec["volumes"].items():
-            path = self.root / name / "_data"
+            path = self.root / "volumes" / name / "_data"
             path.mkdir(parents=True)
             (path / "retained-data").write_text("needed during qualification")
             self.volumes[name] = {
@@ -86,6 +86,8 @@ class RetainedComposeInspectionTests(unittest.TestCase):
         self.calls: list[tuple[str, ...]] = []
 
     def docker(self, *arguments: str) -> str:
+        if arguments == ("info", "--format", "{{json .DockerRootDir}}"):
+            return json.dumps(str(self.root))
         self.calls.append(arguments)
         if arguments == ("ps", "-aq", "--no-trunc"):
             return "\n".join(self.rows)
@@ -167,6 +169,46 @@ class RetainedComposeInspectionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     inspect_retained_compose(self.spec, self.docker)
 
+    def test_unrelated_restart_between_qualifications_preserves_proof_but_conflicts_refuse(
+        self,
+    ) -> None:
+        before = inspect_retained_compose(self.spec, self.docker)
+        foreign = deepcopy(next(iter(self.rows.values())))
+        foreign["Id"] = "f" * 64
+        foreign["Config"]["Labels"] = {"com.docker.compose.project": "unrelated"}
+        foreign["Config"]["Env"] = ["DB_PASSWORD=other-password"]
+        foreign["Mounts"] = []
+        foreign["HostConfig"]["PortBindings"] = {}
+        foreign["NetworkSettings"]["Ports"] = {}
+        self.rows[foreign["Id"]] = foreign
+        self.assertEqual(inspect_retained_compose(self.spec, self.docker), before)
+        foreign["State"]["StartedAt"] = "later-restart"
+        self.assertEqual(inspect_retained_compose(self.spec, self.docker), before)
+        foreign["Config"]["Env"] = ["DB_PASSWORD=testing-password"]
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+
+    def test_declared_tmpfs_is_supported_without_adopting_anonymous_storage(self) -> None:
+        row = next(iter(self.rows.values()))
+        service = self.spec["render"]["services"][
+            row["Config"]["Labels"]["com.docker.compose.service"]
+        ]
+        service["tmpfs"] = ["/tmp:size=64m"]
+        row["HostConfig"]["Tmpfs"] = {"/tmp": "size=64m"}
+        row["Mounts"].append({"Type": "tmpfs", "Destination": "/tmp", "RW": True, "Source": ""})
+        self.assertTrue(inspect_retained_compose(self.spec, self.docker))
+        row["Mounts"].append(
+            {
+                "Type": "volume",
+                "Name": "anonymous",
+                "Destination": "/unowned",
+                "RW": True,
+                "Source": "",
+            }
+        )
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+
     def test_concurrent_inventory_drift_refuses(self) -> None:
         reads = 0
 
@@ -212,11 +254,12 @@ class RetainedComposeInspectionTests(unittest.TestCase):
 
 class ComposeResourceFixture:
     def __init__(self, root: Path, spec: dict[str, Any]) -> None:
+        self.root = root.resolve()
         self.spec = spec
         self.rows: dict[str, dict[str, Any]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
         for name, role in spec["volumes"].items():
-            path = root / name / "_data"
+            path = self.root / "volumes" / name / "_data"
             path.mkdir(parents=True, exist_ok=True)
             (path / "populated").write_text("retained")
             self.volumes[name] = {
@@ -271,6 +314,8 @@ class ComposeResourceFixture:
             row["NetworkSettings"] = {"Ports": deepcopy(row["HostConfig"]["PortBindings"])}
 
     def docker(self, *arguments: str) -> str:
+        if arguments == ("info", "--format", "{{json .DockerRootDir}}"):
+            return json.dumps(str(self.root))
         if arguments == ("ps", "-aq", "--no-trunc"):
             return "\n".join(self.rows)
         if arguments[0] == "inspect":

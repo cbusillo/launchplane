@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import re
 from typing import Any, Callable
+import click
 
 from control_plane.dokploy import api, native_copy_stream, source
 from control_plane import runtime_environments
@@ -24,6 +25,8 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.runtime_identity import (
     runtime_identity_env,
     COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
+    RUNTIME_IDENTITY_ENV_KEY,
+    parse_runtime_identity_payload,
 )
 
 
@@ -55,6 +58,12 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
 
     rows = {value: container(value) for value in containers}
     volumes = {name: read("volume", "inspect", name)[0] for name in spec["volumes"]}
+    docker_root = Path(read("info", "--format", "{{json .DockerRootDir}}"))
+    if not docker_root.is_absolute() or docker_root.is_symlink():
+        raise ValueError("Docker storage root unavailable")
+    volume_root = docker_root.resolve(strict=True) / "volumes"
+    if volume_root.is_symlink() or not volume_root.is_dir():
+        raise ValueError("Docker volume root unavailable")
     paths: list[Path] = []
     identities: set[tuple[int, int]] = set()
     for name, volume in volumes.items():
@@ -67,6 +76,7 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
             or not isinstance(labels, dict)
             or labels.get("io.launchplane.testing-resources") != spec["resources_sha256"]
             or labels.get("io.launchplane.testing-resource-role") != spec["volumes"][name]
+            or path != volume_root / name / "_data"
             or not path.is_absolute()
             or path.is_symlink()
             or path.parent.is_symlink()
@@ -192,11 +202,28 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
                 key, destination = mount["source"], mount["target"]
                 writable = not mount.get("read_only", False)
             expected_mounts.add((names[key], destination, writable))
+        tmpfs = service.get("tmpfs", [])
+        if isinstance(tmpfs, str):
+            tmpfs = [tmpfs]
+        if not isinstance(tmpfs, list) or any(
+            not isinstance(entry, str) or not entry.startswith("/") for entry in tmpfs
+        ):
+            raise ValueError("Unsupported tmpfs declaration")
+        expected_tmpfs = {entry.partition(":")[0]: entry.partition(":")[2] for entry in tmpfs}
+        memory_mounts = [mount for mount in mounts if mount.get("Type") == "tmpfs"]
+        volume_mounts = [mount for mount in mounts if mount.get("Type") == "volume"]
         if (
-            any(mount.get("Type") != "volume" for mount in mounts)
-            or {(mount.get("Name"), mount.get("Destination"), mount.get("RW")) for mount in mounts}
+            len(expected_tmpfs) != len(tmpfs)
+            or (host.get("Tmpfs") or {}) != expected_tmpfs
+            or {mount.get("Destination") for mount in memory_mounts} != set(expected_tmpfs)
+            or len(memory_mounts) != len(expected_tmpfs)
+            or len(volume_mounts) + len(memory_mounts) != len(mounts)
+            or {
+                (mount.get("Name"), mount.get("Destination"), mount.get("RW"))
+                for mount in volume_mounts
+            }
             != expected_mounts
-            or len(mounts) != len(expected_mounts)
+            or len(volume_mounts) != len(expected_mounts)
         ):
             raise ValueError("Actual mounts differ from custody")
         expected_bindings = {}
@@ -245,7 +272,7 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
         raise ValueError("Physical inventory changed")
     return hashlib.sha256(
         json.dumps(
-            {"containers": rows, "volumes": volumes, "images": images}, sort_keys=True
+            {"containers": owned, "volumes": volumes, "images": images}, sort_keys=True
         ).encode()
     ).hexdigest()
 
@@ -255,13 +282,15 @@ def collect_compose_resource_facts(
 ) -> dict[str, str]:
     try:
         return _collect_compose_resource_facts(store, root=root, product=product, context=context)
+    except native_copy_stream.NativeSourceAuthorizationDenied:
+        raise
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:
             raise native_copy_stream.NativeSourceAuthorizationDenied(
                 "The provider refused Compose qualification."
             ) from None
         raise ValueError("Compose qualification unavailable") from error
-    except (KeyError, TypeError, OSError) as error:
+    except (KeyError, TypeError, OSError, click.ClickException) as error:
         raise ValueError("Compose qualification incomplete") from error
 
 
@@ -306,24 +335,36 @@ def _collect_compose_resource_facts(
     if (
         inventory.runtime_identity is None
         or deployment.runtime_identity != inventory.runtime_identity
+        or deployment.artifact_identity is None
+        or deployment.artifact_identity != inventory.artifact_identity
+        or deployment.artifact_identity.artifact_id != inventory.runtime_identity.artifact_id
         or deployment.deployed_target is None
         or deployment.deployed_target.target_id != record.target_id
     ):
         raise ValueError("Current testing artifact unavailable")
-    current = record.model_copy(
-        update={"image_reference": inventory.runtime_identity.image_reference}
-    )
-    values = runtime_values(store, root, current, resources)
-    values.update(runtime_identity_env(inventory.runtime_identity))
-    values.update({key: current.image_reference for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS})
-    adapter.verify_compose_provider(current, values=values)
-    render = rendered_source(current, values, resources)
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
     )
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=record.target_id
     )
+    provider_values = api.parse_dokploy_env_text(str(payload.get("env") or ""))
+    observed_identity = parse_runtime_identity_payload(
+        provider_values.get(RUNTIME_IDENTITY_ENV_KEY)
+    )
+    if observed_identity is None or observed_identity.model_dump(
+        exclude={"deployed_at"}
+    ) != inventory.runtime_identity.model_dump(exclude={"deployed_at"}):
+        raise ValueError("Provider runtime identity differs from current inventory")
+    current = record.model_copy(
+        update={"image_reference": deployment.artifact_identity.artifact_id.strip()}
+    )
+    values = runtime_values(store, root, current, resources)
+    values.update(runtime_identity_env(observed_identity))
+    values[RUNTIME_IDENTITY_ENV_KEY] = provider_values[RUNTIME_IDENTITY_ENV_KEY]
+    values.update({key: current.image_reference for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS})
+    adapter.verify_compose_provider(current, values=values)
+    render = rendered_source(current, values, resources)
     bindings = runtime_environments.site_delivered_secret_bindings_from_store(
         record_store=store, context_name=context, instance_name="testing"
     )
@@ -384,6 +425,7 @@ def _collect_compose_resource_facts(
             "binding": binding.binding_sha256,
             "inventory": inventory.model_dump(mode="json"),
             "physical": frames[0]["sha256"],
+            "provider": adapter.recipient_configuration_sha256(payload),
         }
     )
     return {
@@ -395,7 +437,7 @@ def _collect_compose_resource_facts(
 
 
 COMPOSE_RESOURCE_PROGRAM = (
-    "import base64,hashlib,hmac,json,re,subprocess,sys,time\nfrom pathlib import Path\nfrom typing import Any,Callable\nfrom urllib.parse import urlparse\n"
+    "import base64,hashlib,hmac,json,re,subprocess,sys,time\nfrom pathlib import Path\nfrom typing import Any,Callable\n"
     + inspect.getsource(docker_daemon_authorization_denied)
     + "\n"
     + inspect.getsource(inspect_retained_compose)

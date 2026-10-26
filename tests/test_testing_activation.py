@@ -132,7 +132,13 @@ class ComposeQualificationTests(unittest.TestCase):
 class ActivationTests(unittest.TestCase):
     def retained_collection_fixture(self) -> Any:
         from datetime import datetime, timezone
-        from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+        from control_plane.workflows.generic_web_deploy import _build_runtime_identity
+        from control_plane.workflows.dokploy_deploy import (
+            update_dokploy_target_artifact,
+            dokploy_deploy_artifact_reference,
+        )
+        from tests.test_generic_web_deploy_recovery import _generic_web_recovery_target
+        from control_plane.dokploy import api
         from control_plane.workflows.inventory import build_environment_inventory
         from tests.test_evidence_ingestion import _deployment_record
         from control_plane.testing_activation import rendered_source, preparation_resources
@@ -148,14 +154,38 @@ class ActivationTests(unittest.TestCase):
             update={"policies": target.policies.model_copy(update={"staff_testing_hold": None})}
         )
         self.store.write_dokploy_target_record(target)
-        identity = RuntimeIdentity(
-            product=self.product,
-            context=self.context,
-            instance="testing",
+        profile = self.store.read_product_profile_record(self.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        ship_request = _generic_web_recovery_target().ship_request.model_copy(
+            update={
+                "artifact_id": record.image_reference,
+                "deploy_reference": record.image_reference.partition("@")[0] + ":sha-fixture",
+                "context": self.context,
+                "instance": "testing",
+            }
+        )
+        pending_identity = _build_runtime_identity(
+            profile=profile,
+            lane=lane,
+            ship_request=ship_request,
             deployment_record_id="current-testing",
-            artifact_id=record.image_reference,
-            source_git_ref=record.request.source_commit,
-            image_reference=record.image_reference,
+        )
+        update_dokploy_target_artifact(
+            host="https://fixture.invalid",
+            token="fixture",
+            target_type="compose",
+            target_id=record.target_id,
+            artifact_id=dokploy_deploy_artifact_reference(
+                ship_request=ship_request, target_type="compose"
+            ),
+            runtime_identity=pending_identity,
+        )
+        identity = _build_runtime_identity(
+            profile=profile,
+            lane=lane,
+            ship_request=ship_request,
+            deployment_record_id="current-testing",
+            deployed_at=datetime.now(timezone.utc).isoformat(),
         )
         deployment = _deployment_record(
             record_id=identity.deployment_record_id,
@@ -177,14 +207,7 @@ class ActivationTests(unittest.TestCase):
             )
         )
         resources, _ = preparation_resources(self.store, self.product, record.request, record.scope)
-        values = {
-            **self.values(self.store, self.root, record, resources),
-            **runtime_identity_env(identity),
-            "LAUNCHPLANE_IMAGE_REFERENCE": record.image_reference,
-        }
-        self.payloads[record.target_id]["env"] = "\n".join(
-            f"{key}={value}" for key, value in values.items()
-        )
+        values = api.parse_dokploy_env_text(self.payloads[record.target_id]["env"])
         self.enterContext(
             patch("control_plane.testing_compose_resources.runtime_values", side_effect=self.values)
         )
@@ -370,6 +393,12 @@ class ActivationTests(unittest.TestCase):
                     with self.assertRaises(DisposableLaneSafetyUnknown):
                         adapter._require_effect_admission()
                 self.store.write_disposable_lane_safety(safety)
+        active_payload = self.payloads[provider.target_id]
+        original_server = active_payload["serverId"]
+        active_payload["serverId"] = "different-registered-server"
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            adapter._require_effect_admission()
+        active_payload["serverId"] = original_server
         before = deepcopy(self.writes)
         foreign = deepcopy(next(iter(host.rows.values())))
         foreign["Id"] = "f" * 64
@@ -378,6 +407,48 @@ class ActivationTests(unittest.TestCase):
         with self.assertRaises(DisposableLaneSafetyUnknown):
             adapter._require_effect_admission()
         self.assertEqual(self.writes, before)
+
+    def test_retained_compose_read_failures_preserve_denials_and_unknown_facts(self) -> None:
+        import click
+        from datetime import datetime, timezone
+        from control_plane.dokploy import native_copy_stream
+        from control_plane.disposable_lane_collection import collect_testing_resource_facts
+        from control_plane.testing_compose_resources import collect_compose_resource_facts
+
+        self.retained_collection_fixture()
+        with patch.object(
+            native_copy_stream,
+            "_read_remote",
+            side_effect=click.ClickException("private-source-error"),
+        ):
+            self.assertEqual(
+                collect_testing_resource_facts(
+                    self.store,
+                    root=self.root,
+                    product=self.product,
+                    context=self.context,
+                    now=datetime.now(timezone.utc),
+                ),
+                {},
+            )
+            with self.assertRaises(ValueError) as refusal:
+                collect_compose_resource_facts(
+                    self.store, root=self.root, product=self.product, context=self.context
+                )
+            self.assertNotIn("private-source-error", str(refusal.exception))
+        with patch.object(
+            native_copy_stream,
+            "_read_remote",
+            side_effect=native_copy_stream.NativeSourceAuthorizationDenied("read-denied"),
+        ):
+            with self.assertRaises(native_copy_stream.NativeSourceAuthorizationDenied):
+                collect_testing_resource_facts(
+                    self.store,
+                    root=self.root,
+                    product=self.product,
+                    context=self.context,
+                    now=datetime.now(timezone.utc),
+                )
 
     def test_changed_retained_custody_stays_unknown(self) -> None:
         from datetime import datetime, timezone
