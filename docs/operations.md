@@ -2625,6 +2625,11 @@ as a verified administrator. Domain authority and Route binding are separate
 decisions: enter a reason, review the current and proposed records, then Apply,
 Leave records unchanged, or Investigate evidence. A blocked binding names its
 missing evidence and cannot be applied; an unchanged review needs no write.
+The domain verdict covers stored hostnames only; it says nothing about whether
+a route binding exists. The binding verdict uses the same persisted lane record
+as `GET /v1/route-bindings/records/current`. An unchanged binding review requires
+that record to be present, with matching current, expected and proposed digests;
+the browser rejects contradictory evidence instead of advising no change.
 The domain review preserves the destination and shows the proposed primary
 domain. These operations update Launchplane records only; they do not modify
 Dokploy, DNS or TLS, or establish website health. Existing no-op ingress audit
