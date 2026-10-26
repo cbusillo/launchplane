@@ -49,6 +49,12 @@ be `shared_safe` with recorded read-only-source evidence. These classifications
 are prerequisites, never proof of permissions. Local database credentials, borrowed
 testing bindings, undeclared external hosts, and external database URLs refuse.
 
+Compose environment maps and explicit `KEY=value` lists use the same checks
+through preparation, upstream qualification and cutover. Cutover requires the
+managed API writer credential in the application and excludes its value from
+the database environment in either form. Parsing does not rewrite the reviewed
+source or its retained recovery evidence.
+
 Both the application and database images must be immutable before planning can
 pass. During leased preparation, a bounded MariaDB client from the database
 image connects with TLS verification from the recipient's own private default

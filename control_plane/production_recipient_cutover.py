@@ -53,6 +53,7 @@ from control_plane.provider_operations import (
     ProviderEvidenceLease,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_activation_compose import environment_mapping
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
@@ -219,12 +220,14 @@ def cutover_intent(
     secret = store.read_secret_record(binding.secret_id)
     values = runtime_values(store, root, record)
     rendered = qualified_render(record, values)
-    application = rendered["services"][record.request.application_service].get("environment", {})
-    database = rendered["services"][record.request.database_service].get("environment", {})
+    application = environment_mapping(
+        rendered["services"][record.request.application_service].get("environment", {})
+    )
+    database = environment_mapping(
+        rendered["services"][record.request.database_service].get("environment", {})
+    )
     if (
-        not isinstance(application, dict)
-        or not isinstance(database, dict)
-        or not values.get(binding.binding_key)
+        not values.get(binding.binding_key)
         or application.get(binding.binding_key) != values[binding.binding_key]
         or values[binding.binding_key] in database.values()
         or any(

@@ -417,6 +417,43 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertEqual(self.deploys, 0)
         self.fixture.assert_old_preserved()
 
+    def test_cutover_accepts_both_compose_environment_forms(self) -> None:
+        application = self.record.request.application_service
+        database = self.record.request.database_service
+        for list_services in ((database,), (application,), (application, database)):
+            with self.subTest(list_services=list_services):
+                document = json.loads(self.record.compose_source)
+                for name in list_services:
+                    document["services"][name]["environment"] = [
+                        f"{key}={value}"
+                        for key, value in document["services"][name]["environment"].items()
+                    ]
+                record = self.record.model_copy(update={"compose_source": json.dumps(document)})
+                intent = cutover_intent(self.fixture.root, self.store, record, self.request)
+                binding = next(
+                    row
+                    for row in self.store.list_secret_bindings()
+                    if row.binding_id == self.request.writer_binding_id
+                )
+                self.assertEqual(intent["writer_secret_id"], binding.secret_id)
+                self.assertEqual(self.actions, [])
+
+    def test_cutover_refuses_api_credential_in_database_in_both_environment_forms(self) -> None:
+        for use_list in (False, True):
+            with self.subTest(use_list=use_list):
+                document = json.loads(self.record.compose_source)
+                database = document["services"][self.record.request.database_service]
+                environment = database["environment"]
+                environment["SYNC_API_TOKEN"] = "${SYNC_API_TOKEN}"
+                if use_list:
+                    database["environment"] = [
+                        f"{key}={value}" for key, value in environment.items()
+                    ]
+                record = self.record.model_copy(update={"compose_source": json.dumps(document)})
+                with self.assertRaises(ValueError):
+                    cutover_intent(self.fixture.root, self.store, record, self.request)
+                self.assertEqual(self.actions, [])
+
     def test_terminal_bad_health_stops_only_new_writer_and_restores_old(self) -> None:
         with patch(
             "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",

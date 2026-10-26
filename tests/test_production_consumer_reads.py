@@ -588,6 +588,23 @@ class SourceCycleTests(unittest.TestCase):
         self.assertEqual(result.snapshot, refreshed.snapshot)
         self.assertNotEqual(result.observation, refreshed.observation)
 
+    def test_current_source_accepts_database_environment_list(self) -> None:
+        expected = self.current()
+        with patch.object(
+            reader,
+            "qualified_render",
+            return_value={
+                "services": {
+                    "database": {
+                        "environment": [f"MARIADB_DATABASE={expected.spec['database']}"],
+                        "image": expected.spec["database_image"],
+                    }
+                }
+            },
+        ):
+            result = self.current()
+        self.assertEqual(result, expected)
+
     def test_running_successor_and_new_success_renew_without_accepting_failure(self) -> None:
         from datetime import timedelta
 
