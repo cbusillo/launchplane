@@ -402,14 +402,15 @@ policy; platform credentials refuse continuation. The existing runtime reader
 proves the actual container image and image-default environment. Only service
 identity, version and container IDs bind that proof to the storage inspection;
 no credentials or credential-derived hashes enter its persisted script.
-It preserves the volume's
-contents. Missing or changing
-evidence keeps the hold. Execution locks, repeated authority checks and atomic
+It preserves the volume's contents. Missing or changing evidence keeps the hold.
+Execution locks, repeated authority checks and atomic
 hold/receipt publication also cover this variant. Original reservations and
 unresolved activations remain unchanged; an unpublished activation retaining
 this exact recipient keeps its own interlock, even with no retained target
 reservations. This continuation never settles that operation. Independent
 original recipients and their custody remain preserved.
+A refusal or failure flag alone does not prove original effects settled. That
+proof belongs to the original operation's supported custody continuation.
 After a qualified lift, resume the original blocked operation through its own
 supported recovery path and original key. Hold clearance proves neither runtime
 configuration delivery nor a subsequent deployment or release.

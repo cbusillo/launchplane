@@ -11,6 +11,10 @@ from control_plane.dokploy.fresh_application import require_fresh_application_ru
 from control_plane.dokploy.api import JsonObject
 from control_plane.dokploy.api import parse_dokploy_env_text
 from control_plane.dokploy import source
+from control_plane.dokploy.post_deploy import (
+    DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES,
+    DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES,
+)
 from control_plane.dokploy.application_runtime import (
     fetch_application_runtime,
     application_runtime_matches,
@@ -102,6 +106,9 @@ def require_serving_application_provider(
         else "",
     )
     history = live.get("deployments")
+    terminal_statuses = (
+        DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES | DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES | {"error"}
+    )
     if (
         live.get("sourceType") != "docker"
         or live.get("dockerImage") != image
@@ -111,14 +118,9 @@ def require_serving_application_provider(
         or not history
         or not isinstance(history[0], dict)
         or history[0].get("deploymentId") != deployment.deploy.deployment_id
+        or history[0].get("status") not in DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
         or any(
-            not isinstance(row, dict) or row.get("status") not in {"done", "error"}
-            for row in history
-        )
-        or not any(
-            isinstance(row, dict)
-            and row.get("deploymentId") == deployment.deploy.deployment_id
-            and row.get("status") == "done"
+            not isinstance(row, dict) or row.get("status") not in terminal_statuses
             for row in history
         )
         or live.get("endpointSpecSwarm") not in (None, {"Mode": "dnsrr"})

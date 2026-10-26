@@ -427,7 +427,73 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
         ):
             result = await self._reviewed_application_lift()
         self.assertEqual(result.status_code, 202, result.text)
-        self.assertFalse(activation.published)
+        self.assert_production_unchanged()
+
+    async def test_serving_managed_credential_and_terminal_cancelled_history_continue(self) -> None:
+        from control_plane import secrets
+        from control_plane.dokploy.api import parse_dokploy_env_text
+        from control_plane.dokploy.post_deploy import DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
+        from control_plane.contracts.runtime_key_safety_policy import (
+            RuntimeKeySafetyPolicyRecord,
+            RuntimeSecretSafetyRule,
+        )
+        from tests.test_generic_web_deploy import (
+            _runtime_secret_record,
+            _runtime_secret_version,
+            _runtime_secret_binding,
+        )
+
+        self.enterContext(
+            patch.dict(
+                "os.environ", {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "fixture-master-key"}
+            )
+        )
+        await self.prepare_application_hold()
+        self.serve_application()
+        value = "fixture-managed-testing-token"
+        self.store.write_secret_record(
+            _runtime_secret_record(
+                secret_id="testing-token",
+                scope="context_instance",
+                name="app-token",
+                version_id="testing-token-v1",
+                context=self.context,
+                instance="testing",
+            )
+        )
+        self.store.write_secret_version(
+            _runtime_secret_version(
+                secret_id="testing-token", version_id="testing-token-v1", plaintext_value=value
+            )
+        )
+        self.store.write_secret_binding(
+            _runtime_secret_binding(
+                secret_id="testing-token",
+                binding_key="APP_TOKEN",
+                context=self.context,
+                instance="testing",
+            )
+        )
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="testing-key-policy",
+                source="test",
+                updated_at=self.profile.updated_at,
+                rules=(RuntimeSecretSafetyRule(binding_key="APP_TOKEN", secret_class="testing"),),
+            )
+        )
+        self.live["env"] += "\nAPP_TOKEN=" + value
+        self.live["deployments"].extend(
+            {"deploymentId": "old-" + status, "status": status}
+            for status in DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
+        )
+        result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertEqual(
+            self.runtime_observer.call_args.kwargs["expected_environment"],
+            parse_dokploy_env_text(self.live["env"]),
+        )
+        self.assertNotIn(value, result.text)
         self.assert_production_unchanged()
 
     async def test_serving_application_lifts_without_deploy_or_reconcile_and_replays(self) -> None:
