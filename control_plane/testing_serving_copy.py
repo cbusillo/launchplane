@@ -17,7 +17,7 @@ from control_plane.testing_address_storage import effective_testing_route, read_
 from control_plane.testing_publication_storage import (
     read_publication,
     read_snapshot,
-    testing_binding_authority,
+    testing_binding_matches_route,
 )
 
 
@@ -96,8 +96,9 @@ def published_testing_copy(
         or binding is None
         or binding.source.source_versions.get("testing_route") != route.digest
         or candidate_custody != candidate
-        or testing_binding_authority(binding)
-        != testing_binding_authority(address.plan.binding_after if address else plan.after.binding)
+        or not testing_binding_matches_route(
+            binding, address.plan.binding_after if address else plan.after.binding, route
+        )
         or snapshot.runtime is None
     ):
         raise ValueError("Serving testing copy no longer matches its publication custody.")

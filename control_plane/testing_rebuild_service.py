@@ -1178,7 +1178,11 @@ class NativeTestingRebuildExecution:
             if publication is not None and publication.state == "applied"
             else self.intent.before
         )
-        if not recovery and not serving_snapshot_matches(current, expected):
+        if not recovery and not serving_snapshot_matches(
+            current,
+            expected,
+            store=self.store,
+        ):
             raise NativeTestingRebuildAdmissionChanged(
                 "Testing serving configuration changed outside the original rebuild."
             )

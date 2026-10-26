@@ -13,7 +13,10 @@ from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     route_binding_record_sha256,
 )
-from control_plane.contracts.testing_route_refresh import TestingRouteRefreshSources
+from control_plane.contracts.testing_route_refresh import (
+    TestingRouteRefreshSources,
+    testing_route_domains,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import (
@@ -144,7 +147,8 @@ def plan_native_testing_route_refresh(
         due = _route_binding_refresh_due(
             current_record=current, evaluated_at=observed_at.isoformat()
         )
-        if not due:
+        domains = testing_route_domains(route)
+        if not due and current.domains == domains:
             return RouteBindingReconcilePlan(
                 status="unchanged",
                 current_record_sha256=digest,
@@ -156,6 +160,7 @@ def plan_native_testing_route_refresh(
         stamp = observed_at.isoformat()
         replacement = current.model_copy(
             update={
+                "domains": domains,
                 "source": current.source.model_copy(
                     update={
                         "source_versions": {

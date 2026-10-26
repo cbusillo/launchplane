@@ -27,6 +27,7 @@ from control_plane.contracts.testing_publication import (
     TestingPublicationRecord,
     TestingServingSnapshot,
 )
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.dokploy.testing_route import TestingLaneRoute
 from control_plane.testing_generation_retirement import RetainedTestingGeneration
 from control_plane.storage.postgres import PostgresRecordStore
@@ -42,15 +43,15 @@ ADDRESS_PLAN_ROUTE = ADDRESS_ROUTE + ":plan"
 def read_testing_address_recovery_copy(
     store: PostgresRecordStore, plan: TestingAddressPlan
 ) -> TestingServingSnapshot:
-    from control_plane.testing_publication_storage import read_snapshot, testing_binding_authority
+    from control_plane.testing_publication_storage import (
+        read_snapshot,
+        testing_binding_matches_route,
+    )
 
     current = read_snapshot(store, product=plan.product, context=plan.context)
     applied = read_testing_address(store, plan.publication_key)
-    expected_binding = (
-        plan.binding_after
-        if applied is not None and applied.state == "applied" and applied.plan == plan
-        else plan.before.binding
-    )
+    address_applied = applied is not None and applied.state == "applied" and applied.plan == plan
+    expected_binding = plan.binding_after if address_applied else plan.before.binding
     for snapshot in (current, plan.before):
         if (
             snapshot.provider.provider_id != "dokploy"
@@ -62,7 +63,12 @@ def read_testing_address_recovery_copy(
         current.target_id.target_id != plan.before.target_id.target_id
         or current.target.target_name != plan.before.target.target_name
         or current.target.project_name != plan.before.target.project_name
-        or testing_binding_authority(current.binding) != testing_binding_authority(expected_binding)
+        or expected_binding is None
+        or not testing_binding_matches_route(
+            current.binding,
+            expected_binding,
+            plan.route_after if address_applied else plan.route_before,
+        )
     ):
         raise ValueError("Protective address recovery cannot replace another copy or binding.")
     return current
@@ -107,7 +113,7 @@ def check_testing_address_sources(
     if (
         current.overrides is None
         or current.target.policies.staff_testing_hold is not None
-        or not serving_snapshot_matches(current, plan.before)
+        or not serving_snapshot_matches(current, plan.before, store=store)
     ):
         raise ValueError("The original testing copy changed before address publication.")
     profile = session.get(db.LaunchplaneProductProfileRow, plan.product, with_for_update=True)
@@ -437,29 +443,42 @@ def read_testing_address(
 
 
 def effective_testing_route(
-    store: PostgresRecordStore, publication: TestingPublicationRecord
+    store: PostgresRecordStore,
+    publication: TestingPublicationRecord,
+    *,
+    binding: EnvironmentRouteBindingRecord | None = None,
 ) -> TestingLaneRoute:
-    binding = store.read_route_binding_record(
-        product=publication.plan.candidate.product,
-        context_name=publication.plan.candidate.context,
-        instance_name="testing",
+    binding = (
+        binding
+        if binding is not None
+        else store.read_route_binding_record(
+            product=publication.plan.candidate.product,
+            context_name=publication.plan.candidate.context,
+            instance_name="testing",
+        )
     )
     key = binding.source.source_versions.get("testing_address")
-    if not key:
-        return publication.plan.route
-    record = read_testing_address(store, key)
-    if (
+    route = publication.plan.route
+    record = read_testing_address(store, key) if key else None
+    if key and (
         record is None
         or record.state != "applied"
-        or (
-            key != publication.plan.key
-            or record.plan.publication_sha256
-            != canonical_json_sha256(publication.model_dump(mode="json"))
-            or record.plan.route_before != publication.plan.route
-        )
+        or key != publication.plan.key
+        or record.plan.publication_sha256
+        != canonical_json_sha256(publication.model_dump(mode="json"))
+        or record.plan.route_before != route
     ):
         raise ValueError("The testing address has no applied original publication receipt.")
-    return record.plan.route_after
+    if record is not None:
+        route = record.plan.route_after
+    if (
+        (binding.product, binding.context, binding.instance)
+        != (publication.plan.candidate.product, publication.plan.candidate.context, "testing")
+        or binding.source.source_versions.get("testing_publication") != publication.plan.key
+        or binding.source.source_versions.get("testing_route") != route.digest
+    ):
+        raise ValueError("The testing binding does not belong to its published route.")
+    return route
 
 
 def amended_testing_maintenance_overrides(
