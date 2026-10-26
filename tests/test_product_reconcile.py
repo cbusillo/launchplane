@@ -7881,13 +7881,17 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertIn("An admin needs to set one", self.comment_body())
 
     def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
         self.github.add_run(50, PR_HEAD, event="pull_request")
-        self.github.pull_request["body"] = "## Client test notes\nTry the changed price list."
+        self.github.pull_request["body"] = (
+            f"## Client test notes\nTry the changed price list.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the business address?"
+        )
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["action"], "apply")

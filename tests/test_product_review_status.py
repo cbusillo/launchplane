@@ -860,10 +860,18 @@ class OwnerReviewStatusTests(unittest.TestCase):
         self.assertEqual(github.statuses[0]["state"], "failure")
 
     def test_real_notes_without_label_publish_review_and_missing_notes_fail(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+
         github = _GitHub(labels=())
         github.body = "## Client test notes\nTry the changed prices."
         self._publish(github)
         self.assertEqual(github.statuses[0]["state"], "pending")
+        self.store.write_product_review_decision_record(
+            _decision(decision="accepted", decided_at="2026-09-20T10:00:00Z")
+        )
+        github.body += f"\n### {OPEN_CLIENT_QUESTIONS}\n- What is the business address?"
+        self._publish(github)
+        self.assertEqual(github.statuses[0]["state"], "failure")
         github.body = "## Client test notes\n<!-- empty template -->"
         self._publish(github)
         self.assertEqual(github.statuses[0]["state"], "failure")

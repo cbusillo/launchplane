@@ -2516,12 +2516,19 @@ export function productReviewForFixture(
     repository: "example/control-plane",
     pull_request_number: 308,
     pull_request_url: "https://github.com/example/control-plane/pull/308",
-    pull_request_title: latestDecision || scenario === "notes-unavailable" ? "" : "Show the repair price on each model",
-    client_test_notes: latestDecision ? "" : {
+    pull_request_title: scenario === "notes-unavailable" ? "" : "Show the repair price on each model",
+    client_test_notes: {
       "missing-notes": "",
       "notes-unavailable": "",
       "nothing-to-test": "Nothing for the Client to test: CI tests only.",
+      "open-questions": "Check the contact page.\n### Open questions for the Client\n- What is the public business address?",
+      "answered-questions": "Check the contact page.\n### Open questions for the Client\n",
     }[scenario] ?? "1. Open **iPhone 15** repairs.\n2. Confirm each repair shows its price.",
+    client_test_notes_error: {
+      "missing-notes": "Client test notes are missing.",
+      "notes-unavailable": "Client test notes are missing.",
+      "open-questions": "Some Client facts are unanswered.",
+    }[scenario] ?? "",
     preview_url: previewUrl,
     head_sha: previewUrl ? "a".repeat(40) : "",
     preview_generation_id: previewUrl ? "fixture-review-generation" : "",

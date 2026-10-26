@@ -761,7 +761,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     runs-on: >-
       ${{ fromJSON(
       (github.event_name != 'pull_request' ||

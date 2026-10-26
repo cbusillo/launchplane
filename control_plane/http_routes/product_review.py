@@ -92,6 +92,7 @@ class ProductReviewResponse(BaseModel):
     pull_request_url: str
     pull_request_title: str
     client_test_notes: str
+    client_test_notes_error: str = ""
     preview_url: str
     head_sha: str
     preview_generation_id: str
@@ -201,6 +202,7 @@ def register_product_review_routes(
             ),
             pull_request_title=notes.title,
             client_test_notes=notes.client_test_notes,
+            client_test_notes_error=notes.client_test_notes_error,
             preview_url=preview.preview_url,
             head_sha=preview.head_sha,
             preview_generation_id=preview.generation_id,
@@ -320,6 +322,15 @@ def register_product_review_routes(
                 code="product_review_preview_unavailable",
                 message=_NO_PREVIEW_REASON,
             )
+        notes = dependencies.read_pull_request_notes(profile, envelope.pull_request, trace_id)
+        notes_error = notes.client_test_notes_error
+        if envelope.decision == "accepted" and notes_error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="client_test_notes_required",
+                message=notes_error,
+            )
         try:
             record_product_review_decision(
                 store=store,
@@ -348,6 +359,7 @@ def register_product_review_routes(
             identity=identity,
             pull_request_number=envelope.pull_request,
             trace_id=trace_id,
+            notes=notes,
         )
 
     app.add_api_route(

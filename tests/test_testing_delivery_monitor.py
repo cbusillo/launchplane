@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from control_plane.contracts.secret_record import SecretRecord
+from control_plane.notifications import DiscordNotificationNotSentError
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -49,6 +51,13 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
         self.profile = base.model_copy(update={"lanes": (self.lane,)})
         self.store.write_product_profile_record(self.profile)
         self.now = datetime.now(timezone.utc)
+        self.enterContext(
+            patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: self.now.isoformat(),
+            )
+        )
         self.store.write_public_ingress_notification_policy_record(
             PublicIngressNotificationPolicyRecord(
                 policy_id="existing-alerts",
@@ -65,6 +74,17 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
             )
         )
         self.deploy("old", self.now - timedelta(minutes=5))
+        self.store.write_secret_record(
+            SecretRecord(
+                secret_id="notifications",
+                scope="global",
+                integration="discord",
+                name="monitor",
+                current_version_id="test-version",
+                created_at=self.now.isoformat(),
+                updated_at=self.now.isoformat(),
+            )
+        )
 
     def deploy(
         self, candidate: str, at: datetime, *, instance: str = "testing", failed: bool = False
@@ -171,10 +191,14 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
     def test_notification_transport_failure_retries_without_duplicate_incident(self) -> None:
         self.reconcile(last_failed_error_code="deployment_failed")
         self.monitor()
-        sender = Mock(side_effect=[RuntimeError("transport failed"), None])
+        sender = Mock(side_effect=[DiscordNotificationNotSentError("transport failed"), None])
         drivers = PublicIngressNotificationDriverSet(
             secret_resolver=lambda _key: "https://discord.com/api/webhooks/example/test",
             discord_sender=sender,
+        )
+        ready_at = self.store.list_outbox_delivery_records()[0].next_attempt_at
+        self.enterContext(
+            patch.object(self.store, "_database_mutation_timestamp", return_value=ready_at)
         )
         first = run_outbox_worker_once(
             record_store=self.store,
@@ -183,11 +207,9 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
             notification_drivers=drivers,
         )
         self.assertEqual(first.status, "pending")
-        self.assertEqual(
-            self.store.list_public_ingress_notification_attempt_records()[0].delivery_status,
-            "failed",
-        )
         queued = self.store.list_outbox_delivery_records()[0]
+        self.assertTrue(queued.error_code)
+        self.assertFalse(queued.provider_operation_key)
         self.store.write_outbox_delivery_record(
             queued.model_copy(update={"next_attempt_at": self.now.isoformat()})
         )
@@ -200,13 +222,8 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
         )
         self.assertEqual(second.status, "delivered")
         self.assertEqual(sender.call_count, 2)
-        incident = self.store.list_public_ingress_incident_records()[0]
-        self.assertIn(incident.incident_id, str(sender.call_args))
+        self.assertIn(self.profile.product, str(sender.call_args))
         self.assertEqual(len(self.store.list_public_ingress_incident_records()), 1)
-        self.assertEqual(
-            self.store.list_public_ingress_notification_attempt_records()[0].delivery_status,
-            "delivered",
-        )
         self.assertEqual(self.store.list_outbox_delivery_records()[0].attempt, 2)
 
     def test_failed_render_operation_is_detected_before_reconcile_retries(self) -> None:

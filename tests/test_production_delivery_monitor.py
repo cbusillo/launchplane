@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from control_plane.contracts.secret_record import SecretRecord
+from control_plane.notifications import DiscordNotificationNotSentError
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -66,6 +68,13 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.lane = self.profile.lanes[0]
         self.store.write_product_profile_record(self.profile)
         self.now = datetime.now(timezone.utc)
+        self.enterContext(
+            patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: self.now.isoformat(),
+            )
+        )
         self.head = "b" * 40
         self.current = "a" * 40
         self.transport = Mock()
@@ -87,6 +96,17 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             )
         )
         self.deploy(self.current, minutes_ago=10)
+        self.store.write_secret_record(
+            SecretRecord(
+                secret_id="owner-notifications",
+                scope="global",
+                integration="discord",
+                name="monitor",
+                current_version_id="test-version",
+                created_at=self.timestamp(),
+                updated_at=self.timestamp(),
+            )
+        )
 
     def timestamp(self) -> str:
         return self.now.isoformat()
@@ -286,22 +306,31 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertEqual(self.store.list_deployment_records(), deployments)
         sender = Mock()
         resolver = Mock()
-        for _incident in incidents:
-            run_outbox_worker_once(
-                record_store=self.store,
-                control_plane_root=self.root,
-                lease_owner="test",
-                notification_drivers=PublicIngressNotificationDriverSet(
-                    secret_resolver=resolver,
-                    discord_sender=sender,
-                ),
-            )
+        queued = self.store.list_outbox_delivery_records()
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            return_value=max(value.next_attempt_at for value in queued),
+        ):
+            for _ in range(len(queued) + 1):
+                run_outbox_worker_once(
+                    record_store=self.store,
+                    control_plane_root=self.root,
+                    lease_owner="test",
+                    notification_drivers=PublicIngressNotificationDriverSet(
+                        secret_resolver=resolver,
+                        discord_sender=sender,
+                    ),
+                )
         sender.assert_not_called()
         resolver.assert_not_called()
 
-        attempts = self.store.list_public_ingress_notification_attempt_records()
-        self.assertEqual(len(attempts), len(incidents))
-        self.assertTrue(all(attempt.delivery_status == "skipped" for attempt in attempts))
+        self.assertTrue(
+            all(
+                value.state == "delivered" and not value.provider_operation_key
+                for value in self.store.list_outbox_delivery_records()
+            )
+        )
 
     def test_scheduled_recheck_resolves_historical_refusals_and_preserves_history(self) -> None:
         for source in ("b", "c", "d", "e"):
@@ -661,20 +690,25 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.seed_legacy_lag()
         sender = Mock()
         resolver = Mock(return_value="https://discord.com/api/webhooks/example/test")
-        result = run_outbox_worker_once(
-            record_store=self.store,
-            control_plane_root=self.root,
-            lease_owner="test",
-            notification_drivers=PublicIngressNotificationDriverSet(
-                secret_resolver=resolver,
-                discord_sender=sender,
-            ),
-        )
+        queued = self.store.list_outbox_delivery_records()[0]
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=queued.next_attempt_at
+        ):
+            result = run_outbox_worker_once(
+                record_store=self.store,
+                control_plane_root=self.root,
+                lease_owner="test",
+                notification_drivers=PublicIngressNotificationDriverSet(
+                    secret_resolver=resolver,
+                    discord_sender=sender,
+                ),
+            )
         sender.assert_not_called()
         resolver.assert_not_called()
         self.assertEqual(result.status, "delivered")
-        attempts = self.store.list_public_ingress_notification_attempt_records()
-        self.assertEqual(attempts[0].delivery_status, "skipped")
+        self.assertFalse(
+            self.store.read_outbox_delivery_record(result.delivery_id).provider_operation_key
+        )
 
     @patch.dict(
         "os.environ",
@@ -787,10 +821,14 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
 
     def test_notification_failure_retries_and_records_recovery(self) -> None:
         self.reject()
-        sender = Mock(side_effect=[RuntimeError("transport failed"), None])
+        sender = Mock(side_effect=[DiscordNotificationNotSentError("transport failed"), None])
         drivers = PublicIngressNotificationDriverSet(
             secret_resolver=lambda _key: "https://discord.com/api/webhooks/example/test",
             discord_sender=sender,
+        )
+        ready_at = self.store.list_outbox_delivery_records()[0].next_attempt_at
+        self.enterContext(
+            patch.object(self.store, "_database_mutation_timestamp", return_value=ready_at)
         )
         first = run_outbox_worker_once(
             record_store=self.store,
@@ -799,9 +837,9 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             notification_drivers=drivers,
         )
         self.assertEqual(first.status, "pending")
-        attempts = self.store.list_public_ingress_notification_attempt_records()
-        self.assertEqual(attempts[0].delivery_status, "failed")
         queued = self.store.list_outbox_delivery_records()[0]
+        self.assertTrue(queued.error_code)
+        self.assertFalse(queued.provider_operation_key)
         self.store.write_outbox_delivery_record(
             queued.model_copy(
                 update={
@@ -817,7 +855,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         )
         self.assertEqual(second.status, "delivered")
         self.assertEqual(sender.call_count, 2)
-        self.assertIn("launchplane_req_failure", str(sender.call_args))
+        self.assertIn(self.profile.product, str(sender.call_args))
         self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
 
     def test_recovery_preserves_a_failure_arriving_during_its_commit(self) -> None:
@@ -1030,7 +1068,10 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         incidents = self.store.list_public_ingress_incident_records(status="open")
         self.assertEqual({incident.incident_id for incident in incidents}, {original.incident_id})
         self.assertIn("launchplane_req_new_stage", incidents[0].summary)
-        self.assertEqual(len(self.store.list_outbox_delivery_records()), 2)
+        events = self.store.list_public_ingress_incident_event_records(
+            incident_id=original.incident_id
+        )
+        self.assertEqual(sorted(value.event for value in events), ["opened", "updated"])
 
     def test_explicit_lifecycle_change_retires_lag_attention(self) -> None:
         self.seed_legacy_lag()

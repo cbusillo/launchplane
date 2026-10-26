@@ -4,6 +4,7 @@ import unittest
 from typing import cast
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.outbox_inspection import inspect_outbox
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import get
 from tests.support.stores import _sqlite_database_url
@@ -140,6 +141,39 @@ class OutboxInspectionTests(unittest.IsolatedAsyncioTestCase):
                 if row["delivery_id"] == orphan.delivery_id
             )
             self.assertEqual(projected["routing"]["incident_status"], "unknown")
+
+    def test_failed_history_cannot_hide_active_work_or_newest_failure(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "records.sqlite3")
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            delivery = _workflow_delivery()
+            for index in range(3):
+                store.write_outbox_delivery_record(
+                    delivery.model_copy(
+                        update={
+                            "delivery_id": f"failed-{index}",
+                            "dedupe_key": f"failed-{index}",
+                            "state": "failed",
+                            "error_code": "provider_error",
+                            "created_at": f"2026-10-25T0{index}:00:00Z",
+                            "updated_at": "2026-10-26T00:00:00Z"
+                            if index == 0
+                            else f"2026-10-25T0{index}:00:00Z",
+                        }
+                    )
+                )
+            store.write_outbox_delivery_record(
+                delivery.model_copy(update={"created_at": "2026-10-25T03:00:00Z"})
+            )
+            result = inspect_outbox(store, limit=1)
+            self.assertEqual(
+                {row["delivery_id"] for row in result.deliveries},
+                {delivery.delivery_id, "failed-0"},
+            )
+            self.assertEqual(result.counts[f"{delivery.kind}:pending"], 1)
 
     async def test_other_context_cannot_inspect_global_destinations(self) -> None:
         app = create_launchplane_fastapi_app(

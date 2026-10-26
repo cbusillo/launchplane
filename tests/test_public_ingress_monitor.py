@@ -3450,7 +3450,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         delivered = deliver_public_ingress_notification_outbox_delivery(
             record=reminder_record,
             drivers=PublicIngressNotificationDriverSet(github_client=github_client),
-            mark_provider_started=lambda _key, _provider: None,
+            mark_provider_started=lambda _record, _key, _provider: None,
         )
 
         self.assertEqual([action for action, _payload in calls], ["find_marker", "comment"])
@@ -3830,7 +3830,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         result = deliver_public_ingress_notification_outbox_delivery(
             record=record,
             drivers=PublicIngressNotificationDriverSet(github_client=github_client),
-            mark_provider_started=lambda _provider_operation_key, _provider_id: self.fail(
+            mark_provider_started=lambda _record, _provider_operation_key, _provider_id: self.fail(
                 "existing provider marker must not be replaced"
             ),
         )
@@ -3886,7 +3886,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     "resolution without a prior issue must not call GitHub"
                 )
             ),
-            mark_provider_started=lambda _key, _provider: self.fail(
+            mark_provider_started=lambda _record, _key, _provider: self.fail(
                 "skipped resolution must not start a provider operation"
             ),
         )
