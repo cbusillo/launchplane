@@ -12676,6 +12676,18 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     def test_supported_application_route_original_intent_and_key_replay(self) -> None:
         self.fixture.assert_supported_http_activation(native_apply=True)
 
+    def test_unanswered_mount_refusal_original_request_and_receipt(self) -> None:
+        self.fixture.assert_http_unanswered_refusal()
+
+    def test_late_mount_after_durable_refusal_remains_recovery_only(self) -> None:
+        self.fixture.test_late_mount_after_durable_refusal_cannot_resume_forward_apply()
+
+    def test_unanswered_refusal_cannot_replace_live_original_execution(self) -> None:
+        self.fixture.test_unanswered_refusal_cannot_replace_a_live_original_lease()
+
+    def test_unanswered_refusal_fences_forward_storage_progress(self) -> None:
+        self.fixture.test_unanswered_refusal_rejects_stale_forward_progress_in_storage()
+
     def test_interrupted_http_apply_reuses_immutable_original_intent(self) -> None:
         self.fixture.assert_supported_http_activation(native_apply=True, interrupted=True)
 

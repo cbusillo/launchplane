@@ -301,12 +301,40 @@ Guards and the current-lease effect checkpoint precede the durable may-dispatch
 phase and actual dispatch. An admitted unanswered create, mount or deploy remains
 unknown even when a later readonly inspection changes the latest checkpoint.
 Absolute configuration writes can replay only against the positively owned,
-unused recipient. Unsettled create, mount or host-program outcomes remain unknown. A stable
+unused recipient. Unsettled create or host-program outcomes remain unknown. A stable
 original task/container with the expected image, environment and state may prove
 a failed task, HTTP error or health-identity mismatch. Empty task inventory,
 startup pending, transport failures and unreadable responses prove no failure.
 Missing, foreign, duplicate or running deployment evidence keeps the negative
 receipt pending.
+
+An original caller can explicitly abandon an unanswered conventional-application
+volume mount with `scripts/activate-generic-web-testing.py refuse`, using the
+identical request file, saved review, `--reviewed-dry-run` and original
+`--idempotency-key`. This is a receipt-only continuation of that original apply;
+it cannot reserve another key or enter Compose, answered-mount, image-deploy or
+published work. It uses the apply request fingerprint, original intent and
+reviewed plan. A live original lease or retained executor still blocks it.
+
+Under the reacquired original lease and retained executor lock, the service first
+records the existing recovery-only private-refusal decision. Every later apply
+and storage write is fenced against resuming forward work, including after a
+lost reply. The candidate must remain idle and private with complete empty
+deployment history and no configured source. A missing volume mount or exactly
+the original preparation's application-bound mount is allowed; foreign,
+duplicate or changed mounts retain the reservation. Automatic deployment must
+be disabled or the empty GitHub/Git source must have no branch. The fixed
+retained-capability programs are read-only; no program, mount, configuration,
+deployment or route mutation runs during refusal. A delayed volume-mount insert
+can only land on this preserved application and its original storage namespace.
+
+The result is the existing negative `publication_refused` receipt, with no
+deployment, separation or delivery credit. Recipients, staged credentials,
+preparation volumes, schedules and the staging hold remain in custody. A new
+generation requires its own reviewed preparation and activation keys; the old
+key only replays its negative result. Source-level provider qualification must
+cover the mount handler and automatic-deploy entry points; native use also
+requires checking the deployed provider contract and exact original recipient.
 
 If addressed routing changed before canonical publication refused, apply first
 records its restoration decision, settles the original forward writer, and uses

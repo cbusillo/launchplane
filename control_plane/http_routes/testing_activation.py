@@ -79,6 +79,10 @@ def register_testing_activation_routes(
                 dependencies, record_store, identity
             )
         try:
+            if body.mode == "refuse" and body.application is None:
+                raise TestingActivationRefusal(
+                    "Refusal requires an original application operation."
+                )
             if body.mode == "inspect":
                 from control_plane.testing_activation_inspection import (
                     inspect_application_activation,
@@ -174,6 +178,19 @@ def register_testing_activation_routes(
                         message="Apply requires the original key and reviewed plan.",
                     )
                 original_intent = None
+                fingerprint_body = body
+                if body.mode == "refuse":
+                    original = record_store.read_testing_application_activation_operation(
+                        product, body.context, scope, body.preparation_key
+                    )
+                    if body.application is None or original is None:
+                        raise TestingActivationRefusal(
+                            "Refusal requires the original application operation."
+                        )
+                    current = adapter.current()
+                    if current.published:
+                        raise TestingActivationRefusal("A published activation cannot be refused.")
+                    fingerprint_body = body.model_copy(update={"mode": "apply"})
                 if body.application is not None:
 
                     def captured_intent() -> dict[str, object]:
@@ -208,7 +225,7 @@ def register_testing_activation_routes(
                     route_path=ROUTE.format(product=product),
                     idempotency_key=idempotency_key.strip(),
                     request_fingerprint=request_fingerprint(
-                        {"product": product, **body.model_dump(mode="json")}
+                        {"product": product, **fingerprint_body.model_dump(mode="json")}
                     ),
                     trace_id=trace,
                     adapter=adapter,

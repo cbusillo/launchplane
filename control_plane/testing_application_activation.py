@@ -87,7 +87,6 @@ def undispatched_application_recipient(
 def unstarted_application_recipient(
     record: TestingActivationRecord, reservation: LaunchplaneIdempotencyRecord
 ) -> bool:
-    """Exact answered metadata markers exclude any original image deployment."""
     specification = record.request.application
     readiness = record.application_readiness
     if (
@@ -100,11 +99,6 @@ def unstarted_application_recipient(
             readiness is not None
             and (readiness.route is not None or readiness.private_health is not None)
         )
-    ):
-        return False
-    if (
-        record.phase == "create_application_mount"
-        and record.state_recipient.get("mount_verified") != "true"
     ):
         return False
     return record.phase in {
@@ -2048,11 +2042,24 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             if not self.mount_matches(record, live, resources):
                 raise TestingActivationRefusal("The answered original mount changed.")
         elif live.get("mounts") != []:
-            raise TestingActivationRefusal("An unrequested candidate mount appeared.")
+            resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
+            if (
+                record.request.application is None
+                or record.request.application.state.kind != "volume"
+                or not isinstance(resources, ApplicationTestingResources)
+                or not self.mount_matches(record, live, resources)
+            ):
+                raise TestingActivationRefusal("An unrequested candidate mount appeared.")
         if (
             record.state_recipient.get("application_configured") == "true"
             or live.get("sourceType") == "docker"
         ):
+            if (
+                record.request.application is not None
+                and record.request.application.state.kind == "volume"
+                and record.state_recipient.get("mount_verified") != "true"
+            ):
+                raise TestingActivationRefusal("The unanswered mount candidate acquired a source.")
             if (
                 live.get("sourceType") != "docker"
                 or live.get("dockerImage") not in {None, "", record.image_reference}
@@ -2064,6 +2071,12 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             require_fresh_application_runtime(
                 live, environment_id=record.environment_id, project_id=record.project_id
             )
+            if live.get("autoDeploy") is not False and (
+                live.get("sourceType") not in {"github", "git"}
+                or live.get("branch")
+                or live.get("customGitBranch")
+            ):
+                raise TestingActivationRefusal("Automatic candidate execution is unverified.")
 
     def require_terminal_candidate(
         self, record: TestingActivationRecord, operation_key: str
@@ -2115,10 +2128,14 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
 
     def candidate_refusal_ready(self, record: TestingActivationRecord) -> bool:
         """Only a deliberate positive refusal may abandon an original candidate."""
+        if self.request.mode == "refuse":
+            self.require_refusable_mount(record)
         if record.published:
             return False
         self.require_recovery_unused(record)
         if record.phase in {"restoring_application_route", "refusing_private_candidate"}:
+            return True
+        if self.request.mode == "refuse":
             return True
         if completed_application_forward_exclusion(self.store, record):
             return True
@@ -2149,6 +2166,23 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 return True
         return False
 
+    def require_refusable_mount(self, record: TestingActivationRecord) -> None:
+        if (
+            record.published
+            or record.request.application is None
+            or record.request.application.state.kind != "volume"
+            or record.phase not in {"create_application_mount", "refusing_private_candidate"}
+            or record.failure is not None
+            or record.state_recipient.get("application_deployment_id")
+            or record.state_recipient.get("mount_verified")
+            or record.application_readiness is not None
+            and (
+                record.application_readiness.route is not None
+                or record.application_readiness.private_health is not None
+            )
+        ):
+            raise TestingActivationRefusal("Only the original unanswered mount can be refused.")
+
     def refuse_after_failure(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome | None:
@@ -2161,6 +2195,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         )
         if current is None or current.failure is not None:
             return None
+        if self.request.mode == "refuse":
+            self.require_refusable_mount(current)
         assert isinstance(lease, ProviderEvidenceLease)
         if (
             undispatched_application_recipient(current, lease.evidence_reservation())
@@ -2205,9 +2241,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                         current = self.save(current, phase="restoring_application_route")
                     self.restore_application_route(current, lease, check)
                 else:
-                    # Before a private-health result, require the answered original
-                    # application job; unresolved create/mount/bootstrap phases stay held.
                     if unstarted:
+                        if current.phase != "refusing_private_candidate":
+                            current = self.save(current, phase="refusing_private_candidate")
                         self.require_unstarted_candidate(current)
                     else:
                         self.require_terminal_candidate(current, provider_operation_key)
@@ -2240,7 +2276,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         with self.evidence(lease):
             record = self.current()
             if (
-                record.phase in {"restoring_application_route", "refusing_private_candidate"}
+                self.request.mode == "refuse"
+                or record.phase in {"restoring_application_route", "refusing_private_candidate"}
                 or completed_application_forward_exclusion(self.store, record)
             ) or (
                 record.application_readiness is not None
@@ -2422,6 +2459,12 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     provider_operation_response_payload(
                         trace_id=self.trace_id, records={}, result=self.result(record)
                     ),
+                )
+            if self.request.mode == "refuse":
+                self.require_refusable_mount(record)
+                self.require_recovery_unused(record)
+                return ProviderObservation(
+                    "absent", retry_safe=True, preserve_effect_checkpoint=True
                 )
             parent = self.store.read_testing_application_activation_operation(
                 self.product, self.request.context, self.scope, self.request.preparation_key

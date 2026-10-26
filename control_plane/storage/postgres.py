@@ -13962,6 +13962,12 @@ class PostgresRecordStore(HumanSessionStore):
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
             before = TestingActivationRecord.model_validate(expected) if expected else None
+            if before is not None and (
+                before.failure is not None
+                or before.phase == "refusing_private_candidate"
+                and record.phase not in {"refusing_private_candidate", "refused"}
+            ):
+                raise ValueError("A refused application cannot resume forward work.")
             refused = record.failure is not None
             restoring = record.phase in {
                 "restoring_application_route",
