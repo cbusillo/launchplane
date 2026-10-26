@@ -511,9 +511,6 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(unlabeled.status_code, 409, unlabeled.text)
                 self.assertEqual(
-                    unlabeled.json()["detail"]["code"], "product_review_withdrawal_refused"
-                )
-                self.assertEqual(
                     unlabeled.json()["detail"]["reason"],
                     ReviewWithdrawalRefusalReason.NO_PENDING_LABELED_REQUEST.value,
                 )
@@ -527,6 +524,9 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(mismatch.status_code, 409, mismatch.text)
                 self.assertNotIn("reason", mismatch.json()["detail"])
+                self.assertEqual(
+                    unlabeled.json()["detail"]["code"], mismatch.json()["detail"]["code"]
+                )
                 with patch(
                     "control_plane.http_routes.product_review_withdrawal.ReviewWithdrawalService.run",
                     side_effect=ReviewWithdrawalUnsettled("Outcome is unsettled"),
