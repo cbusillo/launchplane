@@ -111,8 +111,12 @@ def main() -> int:
                 report = response
             else:
                 report = read()
-                if response.result.read_back_matches is not True or any(
-                    entry.action != "already_agrees" for entry in report.result.entries
+                if (
+                    response.result.read_back_matches is not True
+                    or not report.result.entries
+                    or {entry.key for entry in report.result.entries}
+                    != {entry.key for entry in review.result.entries}
+                    or any(entry.action != "already_agrees" for entry in report.result.entries)
                 ):
                     raise ValueError("Independent readback does not agree.")
         print(
