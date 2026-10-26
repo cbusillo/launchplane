@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { readReleaseReview } from "./api";
+import { readReleaseReviewAccess } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
-import type { ReleaseReviewResponse } from "./generated/openapi.ts";
+import type { ReleaseReviewAccessResponse } from "./generated/openapi.ts";
 import { AppLink, ownerReviewPath } from "./router";
 
 export function ProductReleaseReviewLink({
@@ -15,7 +15,7 @@ export function ProductReleaseReviewLink({
   fixtureMode: DevFixtureMode;
   showProductName?: boolean;
 }) {
-  const [review, setReview] = useState<ReleaseReviewResponse | null>(null);
+  const [review, setReview] = useState<ReleaseReviewAccessResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
@@ -26,7 +26,7 @@ export function ProductReleaseReviewLink({
     setError(false);
     const read = fixtureMode
       ? loadDevFixtures().then(fixtures => ({ ...fixtures.releaseReviewForFixture(fixtureMode), product }))
-      : readReleaseReview(product, controller.signal);
+      : readReleaseReviewAccess(product, controller.signal);
     void read.then(payload => {
       if (!controller.signal.aborted && payload.product === product) setReview(payload);
     }).catch(() => {
@@ -38,10 +38,10 @@ export function ProductReleaseReviewLink({
   }, [product, fixtureMode]);
 
   const permitted = review?.product === product && (admin || review.viewer_is_owner);
-  return <>
-    {showProductName ? <h1>{permitted ? review.display_name : "Product review"}</h1> : null}
-    {permitted ? <AppLink to={`${ownerReviewPath()}?${new URLSearchParams({ product })}`}>Release review</AppLink> : null}
+  return <div aria-busy={loading} data-release-review-access={loading ? "loading" : "settled"}>
+    {showProductName ? <h1 data-route-heading tabIndex={-1}>{permitted ? review.display_name : "Product review"}</h1> : null}
+    {permitted ? <AppLink className="button" to={`${ownerReviewPath()}?${new URLSearchParams({ product })}`}>Release review</AppLink> : null}
     {showProductName && loading ? <p role="status">Loading product review…</p> : null}
-    {showProductName && !loading && (!permitted || error) ? <p role="status">This product's release review is unavailable to you. Refresh to try again or open the link for your product.</p> : null}
-  </>;
+    {!loading && (error || (showProductName && !permitted)) ? <p role="status">This product's release review is unavailable to you. Refresh to try again or open the link for your product.</p> : null}
+  </div>;
 }
