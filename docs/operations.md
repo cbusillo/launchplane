@@ -5738,3 +5738,22 @@ Hostname activation must target a join that includes this revision.
 Downgrade refuses. Images from before this revision reject it, so an image
 rollback across it needs this image or a later one; the hostname compatibility
 image above is no longer a rollback target once the archive has run.
+
+
+### Preview idle reservation retirement
+
+Release revision `b0a2c4e6f8d1` follows the non-runtime profile archive. It
+removes only the retired preview-idle scope's stop/start reservations and
+original-intent records. Other operations, target fences and preview data are
+unchanged. The gateway's persisted receipt and current lane observation recover
+sleep and wake under the existing executor lock; see
+[preview idle behavior](clean-testing-snapshots.md).
+
+Normal migration selects `b1b3d5f7a9e2` for an already-applied delivery-drop
+branch, `b2c4e6a8f0d3` for an already-applied hostname-only branch, and
+`f87c72d690ab` for their already-applied compatibility joins. These empty joins
+retain each branch's existing approval boundary. They never activate the
+prepared delivery drop or hostname transition on an unapproved database.
+Downgrade cannot reconstruct deleted idle intents. An image rollback to code
+that still requires them cannot recover a sleeping preview from its gateway
+receipt alone; use this image or a later one.

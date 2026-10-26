@@ -9578,7 +9578,6 @@ class PostgresRecordStore(HumanSessionStore):
         self, *, product: str, limit: int = 101
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
-        from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
         from control_plane.product_reconcile import reconcile_reservation_scope
 
         original = aliased(LaunchplaneIdempotencyRow)
@@ -9598,9 +9597,7 @@ class PostgresRecordStore(HumanSessionStore):
             model_type=LaunchplaneIdempotencyRecord,
             orm_model=LaunchplaneIdempotencyRow,
             filters=(
-                LaunchplaneIdempotencyRow.route_path.in_(
-                    (ODOO_PREVIEW_APPLY_ROUTE, PREVIEW_IDLE_ROUTE)
-                ),
+                LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
                 LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
                 or_(
                     LaunchplaneIdempotencyRow.scope == reconcile_reservation_scope(product),

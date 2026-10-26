@@ -32,6 +32,10 @@ from control_plane.storage.migrations.versions import (
     a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
     a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    b0a2c4e6f8d1_retire_preview_idle_reservations as idle_retirement,
+    b1b3d5f7a9e2_join_idle_retirement as idle_retirement_join,
+    b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
+    f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -77,13 +81,17 @@ class SchemaMigrationTests(unittest.TestCase):
         self,
     ) -> None:
         for revision, target in (
-            (retired_delivery.revision, archive_retirement_join.revision),
-            (retirement_join.revision, archive_retirement_join.revision),
-            (topics_join.revision, archive_retirement_join.revision),
-            (public_host_fences.revision, archive_hostnames_join.revision),
-            (topics_hostnames.revision, archive_hostnames_join.revision),
-            (public_host_join.revision, archive_compatibility_join.revision),
-            (compatibility_join.revision, archive_compatibility_join.revision),
+            (retired_delivery.revision, idle_retirement_join.revision),
+            (retirement_join.revision, idle_retirement_join.revision),
+            (topics_join.revision, idle_retirement_join.revision),
+            (public_host_fences.revision, idle_hostnames_join.revision),
+            (topics_hostnames.revision, idle_hostnames_join.revision),
+            (public_host_join.revision, idle_compatibility_join.revision),
+            (compatibility_join.revision, idle_compatibility_join.revision),
+            (archive_retirement_join.revision, idle_retirement_join.revision),
+            (archive_hostnames_join.revision, idle_hostnames_join.revision),
+            (archive_compatibility_join.revision, idle_compatibility_join.revision),
+            (idle_retirement.down_revision, SCHEMA_MIGRATION_TARGET_REVISION),
             (discussion_topics.revision, SCHEMA_MIGRATION_TARGET_REVISION),
             (retired_preview.revision, SCHEMA_MIGRATION_TARGET_REVISION),
         ):
@@ -96,9 +104,9 @@ class SchemaMigrationTests(unittest.TestCase):
                     target,
                 )
         for revision in (
-            archive_retirement_join.revision,
-            archive_hostnames_join.revision,
-            archive_compatibility_join.revision,
+            idle_retirement_join.revision,
+            idle_hostnames_join.revision,
+            idle_compatibility_join.revision,
         ):
             with self.subTest(revision=revision):
                 self.assertEqual(
@@ -112,7 +120,7 @@ class SchemaMigrationTests(unittest.TestCase):
                     schema_migration_target(
                         current_revision=SCHEMA_MIGRATION_TARGET_REVISION, target_revision=target
                     ),
-                    archive_retirement_join.revision,
+                    idle_retirement_join.revision,
                 )
 
     def test_delivery_preview_join_preserves_explicit_topics_route(self) -> None:

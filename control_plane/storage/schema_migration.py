@@ -27,6 +27,10 @@ from control_plane.storage.migrations.versions import (
     a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
     a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    b0a2c4e6f8d1_retire_preview_idle_reservations as idle_retirement,
+    b1b3d5f7a9e2_join_idle_retirement as idle_retirement_join,
+    b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
+    f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
 )
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
@@ -34,7 +38,7 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-SCHEMA_MIGRATION_TARGET_REVISION = profile_archive.revision
+SCHEMA_MIGRATION_TARGET_REVISION = idle_retirement.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
@@ -44,6 +48,7 @@ SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     discussion_topics.revision,
     topics_join.revision,
     profile_archive.revision,
+    idle_retirement.revision,
 )
 _RECOGNIZED_SOURCE_REVISIONS = (
     *SCHEMA_MIGRATION_SUPPORTED_REVISIONS,
@@ -54,6 +59,9 @@ _RECOGNIZED_SOURCE_REVISIONS = (
     archive_retirement_join.revision,
     archive_hostnames_join.revision,
     archive_compatibility_join.revision,
+    idle_retirement_join.revision,
+    idle_hostnames_join.revision,
+    idle_compatibility_join.revision,
 )
 _ARCHIVE_JOIN_BY_SOURCE = {
     retired_delivery.revision: archive_retirement_join.revision,
@@ -64,6 +72,20 @@ _ARCHIVE_JOIN_BY_SOURCE = {
     public_host_join.revision: archive_compatibility_join.revision,
     compatibility_join.revision: archive_compatibility_join.revision,
 }
+_IDLE_JOIN_BY_SOURCE = {
+    **{
+        source: {
+            archive_retirement_join.revision: idle_retirement_join.revision,
+            archive_hostnames_join.revision: idle_hostnames_join.revision,
+            archive_compatibility_join.revision: idle_compatibility_join.revision,
+        }[target]
+        for source, target in _ARCHIVE_JOIN_BY_SOURCE.items()
+    },
+    archive_retirement_join.revision: idle_retirement_join.revision,
+    archive_hostnames_join.revision: idle_hostnames_join.revision,
+    archive_compatibility_join.revision: idle_compatibility_join.revision,
+}
+
 _HELD_DELIVERY_TARGETS = frozenset(
     {retired_delivery.revision, retirement_join.revision, topics_join.revision}
 )
@@ -91,6 +113,10 @@ def schema_migration_action(
 
 
 def schema_migration_target(*, current_revision: str, target_revision: str) -> str:
+    if target_revision == idle_retirement.revision and current_revision in _IDLE_JOIN_BY_SOURCE:
+        return _IDLE_JOIN_BY_SOURCE[current_revision]
+    if current_revision == idle_retirement.revision and target_revision in _HELD_DELIVERY_TARGETS:
+        return idle_retirement_join.revision
     if target_revision == profile_archive.revision and current_revision in _ARCHIVE_JOIN_BY_SOURCE:
         return _ARCHIVE_JOIN_BY_SOURCE[current_revision]
     if current_revision == profile_archive.revision and target_revision in _HELD_DELIVERY_TARGETS:
