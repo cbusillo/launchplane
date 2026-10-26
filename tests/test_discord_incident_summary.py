@@ -22,6 +22,7 @@ from control_plane.discord_incident_summary import (
 from control_plane.notifications import DiscordNotificationError, DiscordNotificationNotSentError
 from control_plane.outbox_inspection import inspect_outbox
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows import public_ingress_monitor as monitor
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressNotificationDriverSet,
     _store_monitor_observation,
@@ -405,9 +406,29 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
         self.assertFalse(row.provider_operation_key)
         self.assertEqual(self.sent, [])
 
+    def test_critical_message_stays_bound_to_its_rendered_material_state(self) -> None:
+        self.observe("prod", critical=True)
+        original = monitor._deliver_direct_notification_outbox
+        changed = False
+
+        def transition_before_final_read(**kwargs: Any) -> OutboxDeliveryRecord:
+            nonlocal changed
+            if not changed:
+                changed = True
+                self.observe("prod", critical=True, time="12:01:00", code="dns_failure")
+            return original(**kwargs)
+
+        with patch.object(
+            monitor, "_deliver_direct_notification_outbox", side_effect=transition_before_final_read
+        ):
+            self.drain("12:01:01")
+        self.assertEqual(sum(_is_red(value) for value in self.sent), 1)
+        attempts = self.store.list_public_ingress_notification_attempt_records()
+        self.assertEqual(sum(value.delivery_status == "skipped" for value in attempts), 1)
+
     def test_changes_between_render_and_admission_never_send_stale_conditions(self) -> None:
         marker = self.store.mark_outbox_delivery_provider_started
-        for index, change in enumerate(("resolved", "silenced", "material")):
+        for index, change in enumerate(("resolved", "silenced", "material", "return")):
             for critical in (False, True):
                 with self.subTest(change=change, critical=critical):
                     instance = f"race-{index}-{critical}"
@@ -436,13 +457,15 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
                                     "resolved_at": f"2026-10-25T{hour}:04:00Z",
                                     "resolved_observation_id": incident.latest_observation_id,
                                 }
-                            elif change == "material":
+                            elif change in {"material", "return"}:
                                 self.observe(
                                     instance,
                                     critical=critical,
                                     time=f"{hour}:04:00",
                                     code="dns_failure" if critical else "testing_delivery_failed",
                                 )
+                                if change == "return":
+                                    self.observe(instance, critical=critical, time=f"{hour}:04:01")
                                 changed = True
                                 return marker(**kwargs)
                             self.store.write_public_ingress_incident_record(
@@ -455,12 +478,14 @@ class DiscordIncidentSummaryTests(unittest.TestCase):
                         self.store, "mark_outbox_delivery_provider_started", side_effect=admit
                     ):
                         self.drain(f"{hour}:05:00")
-                    if change != "material":
+                    if change not in {"material", "return"}:
                         self.assertEqual(len(self.sent), before)
                     else:
-                        self.assertLessEqual(len(self.sent), before + int(critical))
+                        self.assertLessEqual(
+                            len(self.sent), before + int(critical or change == "return")
+                        )
                     self.drain(f"{hour}:10:00")
-                    if change == "material":
+                    if change in {"material", "return"}:
                         self.assertEqual(len(self.sent), before + 1)
                         self.observe(
                             instance, critical=critical, time=f"{hour}:11:00", status="pass"

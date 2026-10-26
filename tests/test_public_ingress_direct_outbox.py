@@ -54,7 +54,6 @@ class DirectNotificationOutboxTests(unittest.TestCase):
             )
         )
         incident = store.list_public_ingress_incident_records()[0]
-        observation = store.read_public_ingress_observation_record(incident.latest_observation_id)
         sent: list[dict[str, object]] = []
         drivers = self._capturing_discord(sent)
         self._work(store, drivers, "2026-05-30T00:04:00Z")
@@ -66,8 +65,8 @@ class DirectNotificationOutboxTests(unittest.TestCase):
         self._drain_loop(store, drivers, "2026-05-30T00:10:00Z")
 
         self.assertEqual(len(sent), 2)
-        self.assertIn(observation.record_id, str(sent[0]))
-        self.assertIn(observation.observed_at, str(sent[0]))
+        self.assertIn(incident.incident_id, str(sent[0]))
+        self.assertTrue(_is_red(sent[0]))
         attempts = store.list_public_ingress_notification_attempt_records()
         self.assertEqual(sum(attempt.delivery_status == "delivered" for attempt in attempts), 1)
         self.assertFalse(_is_red(sent[1]))

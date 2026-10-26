@@ -8454,7 +8454,7 @@ class PostgresRecordStore(HumanSessionStore):
             destination = record.payload.get("destination")
             if not isinstance(attempt, dict) or not isinstance(destination, dict):
                 continue
-            if destination.get("kind") not in {"email", "discord"}:
+            if destination.get("kind") != "email":
                 continue
             group_key = (
                 record.aggregate_id,
@@ -8706,7 +8706,14 @@ class PostgresRecordStore(HumanSessionStore):
                     for value in current
                     if value.status == "open" and value.notification_state == "active"
                 ]
-                if any(value not in active_states for value in states):
+                attempt = record.payload.get("attempt")
+                event_id = attempt.get("incident_event_id") if isinstance(attempt, dict) else None
+                stale_event = record.aggregate_type == "public_ingress_incident" and any(
+                    value.latest_material_event in {"opened", "updated"}
+                    and value.latest_material_event_id != event_id
+                    for value in current
+                )
+                if stale_event or any(value not in active_states for value in states):
                     session.commit()
                     return OutboxDeliveryCompletionResult(
                         status="notification_state_changed", record=current_record

@@ -1658,7 +1658,9 @@ into one current window before a send attempt; retries retain their original
 identity, backoff and attempt budget. A new critical condition still pages at once.
 
 Before delivery, both paths re-read current state. Cleared incidents and obsolete
-material alerts are superseded. Summaries render current conditions and compare
+material alerts are superseded. Discord uses the event-bound material state and
+final admission check instead of the old startup-backlog message rewrite. Email
+retains its existing backlog compaction. Summaries render current conditions and compare
 them with the latest posted or provider-started snapshot, ordered by send window.
 An older window cannot post after a newer one starts. Changing the destination
 secret identity starts coverage for that destination; rotating a version under

@@ -3744,19 +3744,6 @@ def deliver_public_ingress_notification_outbox_delivery(
                     return _superseded_incident_outbox_delivery(
                         record=record, reason="discord_summary"
                     )
-                if (
-                    incident.material_fingerprint_sha256
-                    and (
-                        observation := record_store.read_public_ingress_observation_record(
-                            str(attempt_payload["observation_id"])
-                        )
-                    ).material_fingerprint_sha256
-                    and incident.material_fingerprint_sha256
-                    != observation.material_fingerprint_sha256
-                ):
-                    return _superseded_incident_outbox_delivery(
-                        record=record, reason="material_state_changed"
-                    )
         summary_delivery_id = payload.get(PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY)
         if summary_delivery_id and summary_delivery_id != record.delivery_id:
             return _superseded_incident_outbox_delivery(
@@ -3965,10 +3952,20 @@ def _deliver_direct_notification_outbox(
     if record_store is None:
         raise ValueError("direct notification outbox requires record store")
     incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
-    summary = payload.get(PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY) == record.delivery_id
+    summary = (
+        payload.get(PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY) == record.delivery_id
+        and destination_payload.get("kind") != "discord"
+    )
     observation = record_store.read_public_ingress_observation_record(
         incident.latest_observation_id if summary else str(attempt_payload["observation_id"])
     )
+    if (
+        destination_payload.get("kind") == "discord"
+        and not summary
+        and observation.material_fingerprint_sha256
+        and incident.material_fingerprint_sha256 != observation.material_fingerprint_sha256
+    ):
+        return _superseded_incident_outbox_delivery(record=record, reason="material_state_changed")
     event = _public_ingress_event_value(attempt_payload.get("event"))
     body = _required_payload_text(payload, "body")
     if summary:
