@@ -1,4 +1,6 @@
 import json
+import io
+import logging
 import os
 import stat
 import time
@@ -10,12 +12,14 @@ from urllib.parse import urlsplit
 
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
+from fastapi import FastAPI
 from httpx2 import Response
 
 from control_plane import secrets
 from control_plane.cli_local_consumer import local_consumer
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.secret_record import SecretSharingReason
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.local_consumer import prepare_consumer, receive_consumer
 from control_plane.local_consumer_contract import (
@@ -23,6 +27,8 @@ from control_plane.local_consumer_contract import (
     DELIVERY_LIFETIME_SECONDS,
     DELIVERY_ROUTE,
     VERIFY_ROUTE,
+    ConsumerDeliveryEnvelope,
+    ConsumerDeliveryResponse,
     ConsumerPackage,
     ConsumerRequest,
     ConsumerVerificationResponse,
@@ -36,7 +42,13 @@ from control_plane.local_consumer_delivery import (
     prepare_delivery,
     verify_delivery,
 )
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    GitHubActionsPolicyRule,
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+)
 from control_plane.service_auth import BearerIdentityConfig
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -48,8 +60,8 @@ from tests.http_app_test_support import (
 )
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import sqlite_database_url, _write_runtime_key_safety_policy
-from tests.support.auth import _local_operator_policy
 from tests.support.tls import server_tls_context
+from tests.support.auth import _StubVerifier, _identity
 
 FAKE_VALUE = "fictional-testing-bridge-credential"
 
@@ -392,29 +404,350 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(response.json()["package"])
         value.assert_not_called()
 
-    async def test_nonhuman_with_existing_config_actions_cannot_issue(self) -> None:
-        app = create_launchplane_fastapi_app(
+    def agent_app(
+        self,
+        *,
+        instances: tuple[str, ...] = ("testing",),
+        token_label: str = "local-owner-write",
+        configured_origin: bool = True,
+    ) -> FastAPI:
+        return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             record_store_factory=lambda: self.store,
-            authz_policy=_local_operator_policy(
-                actions=("product_config.plan", "product_config.apply")
+            human_session_manager=self.sessions if configured_origin else None,
+            authz_policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=(token_label,),
+                        products=("example-site",),
+                        contexts=("example-site",),
+                        instances=instances,
+                        actions=("product_config.plan", "product_config.apply"),
+                    ),
+                ),
             ),
             bearer_identity_config=BearerIdentityConfig(
                 local_operator_token="fixture-operator-token",
                 local_operator_subject="local-owner-agent",
-                local_operator_token_label="local-owner-write",
+                local_operator_token_label=token_label,
             ),
+        )
+
+    async def test_agent_exact_testing_delivery_and_scope_refusals(self) -> None:
+        body: dict[str, object] = {"request": self.request.model_dump(mode="json")}
+        app = self.agent_app()
+        headers = {"Authorization": "Bearer fixture-operator-token"}
+        response = await _asgi_request(app, "POST", DELIVERY_ROUTE, headers=headers, payload=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        body.update(mode="apply", reviewed_plan_digest=response.json()["plan_digest"])
+        response = await _asgi_request(app, "POST", DELIVERY_ROUTE, headers=headers, payload=body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn(FAKE_VALUE, response.text)
+        for environment in ("prod", "pr-1"):
+            body["request"] = {**self.request.model_dump(mode="json"), "environment": environment}
+            response = await _asgi_request(
+                app, "POST", DELIVERY_ROUTE, headers=headers, payload=body
+            )
+            self.assertEqual(response.status_code, 400, response.text)
+        body["request"] = self.request.model_dump(mode="json")
+        response = await _asgi_request(
+            self.agent_app(instances=("prod",)),
+            "POST",
+            DELIVERY_ROUTE,
+            headers=headers,
+            payload=body,
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+
+    async def test_agent_refuses_shared_or_non_testing_credentials_before_decryption(self) -> None:
+        binding = self.store.list_secret_bindings(limit=None)[0]
+        app = self.agent_app()
+        body: dict[str, object] = {"request": self.request.model_dump(mode="json")}
+        headers = {"Authorization": "Bearer fixture-operator-token"}
+        review = await _asgi_request(app, "POST", DELIVERY_ROUTE, headers=headers, payload=body)
+        self.assertEqual(review.status_code, 200, review.text)
+        for change in (
+            {
+                "sharing_reason": SecretSharingReason(
+                    kind="site_shared", reason="fixture", evidence="fixture"
+                )
+            },
+            {"declared_secret_class": "prod_only"},
+            {"declared_secret_class": "shared_safe"},
+        ):
+            with (
+                self.subTest(change=change),
+                patch("control_plane.local_consumer_delivery.copy_source_value") as value,
+            ):
+                self.store.write_secret_binding(binding.model_copy(update=change))
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    DELIVERY_ROUTE,
+                    headers={"Authorization": "Bearer fixture-operator-token"},
+                    payload={"request": self.request.model_dump(mode="json")},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertFalse(response.json()["ready_to_deliver"])
+                self.assertIsNone(response.json()["package"])
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    DELIVERY_ROUTE,
+                    headers=headers,
+                    payload={
+                        **body,
+                        "mode": "apply",
+                        "reviewed_plan_digest": review.json()["plan_digest"],
+                    },
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                value.assert_not_called()
+        self.store.write_secret_binding(binding)
+        record = self.store.read_secret_record(binding.secret_id)
+        for change in (
+            {"scope": "context", "instance": ""},
+            {"scope": "global", "context": "", "instance": ""},
+            {"integration": "service"},
+            {"integration": "worker"},
+        ):
+            with (
+                self.subTest(change=change),
+                patch("control_plane.local_consumer_delivery.copy_source_value") as value,
+            ):
+                self.store.write_secret_record(record.model_copy(update=change))
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    DELIVERY_ROUTE,
+                    headers=headers,
+                    payload={
+                        **body,
+                        "mode": "apply",
+                        "reviewed_plan_digest": review.json()["plan_digest"],
+                    },
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                value.assert_not_called()
+
+    async def test_worker_identity_cannot_issue_a_local_delivery(self) -> None:
+        worker = _identity()
+        policy = LaunchplaneAuthzPolicy(
+            schema_version=2,
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository=worker.repository,
+                    products=(self.request.product,),
+                    contexts=(self.request.context,),
+                    instances=("testing",),
+                    actions=("product_config.plan", "product_config.apply"),
+                ),
+            ),
+        )
+        self.assertTrue(
+            policy.allows(
+                identity=worker,
+                action="product_config.plan",
+                product=self.request.product,
+                context=self.request.context,
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+            )
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(worker),
+            record_store_factory=lambda: self.store,
+            authz_policy=policy,
+            human_session_manager=self.sessions,
         )
         with patch("control_plane.local_consumer_delivery.copy_source_value") as value:
             response = await _asgi_request(
                 app,
                 "POST",
                 DELIVERY_ROUTE,
-                headers={"Authorization": "Bearer fixture-operator-token"},
+                headers={"Authorization": "Bearer valid-token"},
                 payload={"request": self.request.model_dump(mode="json")},
             )
         self.assertEqual(response.status_code, 403, response.text)
         value.assert_not_called()
+
+    async def test_agent_delivery_requires_the_configured_service_origin_and_same_token_label(
+        self,
+    ) -> None:
+        headers = {"Authorization": "Bearer fixture-operator-token"}
+        body: dict[str, object] = {"request": self.request.model_dump(mode="json")}
+        response = await _asgi_request(
+            self.agent_app(),
+            "POST",
+            DELIVERY_ROUTE,
+            headers=headers,
+            payload={
+                "request": {
+                    **self.request.model_dump(mode="json"),
+                    "service_origin": "https://other.example",
+                }
+            },
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        response = await _asgi_request(
+            self.agent_app(configured_origin=False),
+            "POST",
+            DELIVERY_ROUTE,
+            headers=headers,
+            payload=body,
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        reviewed = await _asgi_request(
+            self.agent_app(), "POST", DELIVERY_ROUTE, headers=headers, payload=body
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        with patch("control_plane.local_consumer_delivery.copy_source_value") as value:
+            response = await _asgi_request(
+                self.agent_app(token_label="different-credential"),
+                "POST",
+                DELIVERY_ROUTE,
+                headers=headers,
+                payload={
+                    **body,
+                    "mode": "apply",
+                    "reviewed_plan_digest": reviewed.json()["plan_digest"],
+                },
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        value.assert_not_called()
+
+    def test_delivery_cli_never_sends_authentication_to_a_different_service_origin(self) -> None:
+        with patch("requests.Session.post") as post:
+            result = CliRunner().invoke(
+                local_consumer,
+                ["deliver", "--directory", str(self.directory)],
+                env={
+                    "LAUNCHPLANE_SERVICE_URL": "https://other.example",
+                    "LAUNCHPLANE_SERVICE_TOKEN": "fixture-operator-token",
+                },
+            )
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        post.assert_not_called()
+
+    async def test_agent_cli_prepare_deliver_receive_keeps_secrets_out_of_output_and_evidence(
+        self,
+    ) -> None:
+        logs = io.StringIO()
+        handler = logging.StreamHandler(logs)
+        logger = logging.getLogger()
+        self.addCleanup(logger.setLevel, logger.level)
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(handler)
+        self.addCleanup(logger.removeHandler, handler)
+        runner = CliRunner(env={"LAUNCHPLANE_SERVICE_URL": self.request.service_origin})
+        directory = self.root / "agent-client"
+        prepared = runner.invoke(
+            local_consumer,
+            [
+                "prepare",
+                "--directory",
+                str(directory),
+                "--service-origin",
+                self.request.service_origin,
+                "--product",
+                self.request.product,
+                "--context",
+                self.request.context,
+                "--endpoint-key",
+                self.request.endpoint_key,
+                "--server-url",
+                self.request.server_url,
+            ],
+        )
+        self.assertEqual(prepared.exit_code, 0, prepared.output)
+        self.request = ConsumerRequest.model_validate_json(
+            (directory / "request.json").read_bytes()
+        )
+        app = self.agent_app()
+        body: dict[str, object] = {"request": self.request.model_dump(mode="json")}
+        headers = {"Authorization": "Bearer fixture-operator-token"}
+        review = await _asgi_request(app, "POST", DELIVERY_ROUTE, headers=headers, payload=body)
+        self.assertEqual(review.status_code, 200, review.text)
+        body.update(mode="apply", reviewed_plan_digest=review.json()["plan_digest"])
+        issued = await _asgi_request(app, "POST", DELIVERY_ROUTE, headers=headers, payload=body)
+        self.assertEqual(issued.status_code, 200, issued.text)
+        with (
+            patch.dict(os.environ, {"FIXTURE_AUTH": "fixture-operator-token"}),
+            patch("requests.Session.post", side_effect=[review, issued]) as post,
+        ):
+            args = ["deliver", "--directory", str(directory), "--bearer-token-env", "FIXTURE_AUTH"]
+            dry_run = runner.invoke(local_consumer, args)
+            self.assertEqual(dry_run.exit_code, 0, dry_run.output)
+            self.assertFalse((directory / "package.json").exists())
+            delivered = runner.invoke(
+                local_consumer,
+                args + ["--reviewed-plan-digest", json.loads(dry_run.output)["plan_digest"]],
+            )
+            self.assertEqual(delivered.exit_code, 0, delivered.output)
+            for call in post.call_args_list:
+                self.assertEqual(call.args[0], self.request.service_origin + DELIVERY_ROUTE)
+                self.assertFalse(call.kwargs["allow_redirects"])
+        with (
+            patch(
+                "control_plane.local_consumer._verify_service",
+                side_effect=lambda package: verify_delivery(self.store, package),
+            ),
+            patch("control_plane.local_consumer._verify_bridge"),
+        ):
+            received = runner.invoke(
+                local_consumer,
+                [
+                    "receive",
+                    "--directory",
+                    str(directory),
+                    "--package-file",
+                    str(directory / "package.json"),
+                ],
+            )
+        self.assertEqual(received.exit_code, 0, received.output)
+        self.assertEqual((directory / "bridge.token").read_text(), FAKE_VALUE)
+        evidence = self.root / "evidence.json"
+        evidence.write_text(
+            "\n".join(
+                [
+                    prepared.output,
+                    dry_run.output,
+                    delivered.output,
+                    received.output,
+                    logs.getvalue(),
+                ]
+            )
+        )
+        for forbidden in (
+            FAKE_VALUE,
+            "fixture-operator-token",
+            (directory / "recipient.pem").read_text(),
+            self.request.public_key,
+            "PRIVATE KEY",
+            "PUBLIC KEY",
+        ):
+            self.assertNotIn(forbidden, evidence.read_text())
+        self.assertEqual(stat.S_IMODE((directory / "package.json").stat().st_mode), 0o600)
+
+    def test_delivery_cli_failures_never_echo_responses_or_authentication(self) -> None:
+        with patch(
+            "control_plane.cli_local_consumer.deliver_consumer",
+            side_effect=ValueError(FAKE_VALUE + "private-key-value"),
+        ):
+            result = CliRunner().invoke(
+                local_consumer,
+                [
+                    "deliver",
+                    "--directory",
+                    str(self.directory),
+                    "--service-url",
+                    self.request.service_origin,
+                ],
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertNotIn(FAKE_VALUE, result.output)
+        self.assertNotIn("private-key-value", result.output)
 
     def test_shared_secret_reference_refuses_before_decryption(self) -> None:
         binding = self.store.list_secret_bindings(limit=None)[0]
@@ -599,8 +932,40 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
-                verified = verify_delivery(store, ConsumerPackage.model_validate_json(body))
-                result = json.dumps({"status": "current", "package_digest": verified}).encode()
+                if self.path == DELIVERY_ROUTE:
+                    if self.headers.get("Authorization") != "Bearer fixture-service-auth":
+                        self.send_error(403)
+                        return
+                    envelope = ConsumerDeliveryEnvelope.model_validate_json(body)
+                    package = None
+                    if envelope.mode == "dry-run":
+                        plan = prepare_delivery(
+                            store, envelope.request, actor="fixture", trace_id="tls-plan"
+                        )
+                    else:
+                        package = issue_delivery(
+                            store,
+                            envelope.request,
+                            actor="fixture",
+                            trace_id="tls-apply",
+                            reviewed_plan_digest=envelope.reviewed_plan_digest,
+                        )
+                        plan = package.plan
+                    result = (
+                        ConsumerDeliveryResponse(
+                            trace_id="tls",
+                            request_fingerprint=digest(envelope.request),
+                            ready_to_deliver=True,
+                            plan_digest=digest(plan),
+                            version_id=plan.version_id,
+                            package=package,
+                        )
+                        .model_dump_json()
+                        .encode()
+                    )
+                else:
+                    verified = verify_delivery(store, ConsumerPackage.model_validate_json(body))
+                    result = json.dumps({"status": "current", "package_digest": verified}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(result)))
@@ -644,6 +1009,8 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
                 "ALL_PROXY": "http://127.0.0.1:9",
                 "NO_PROXY": "",
                 "no_proxy": "",
+                "FIXTURE_AUTH": "fixture-service-auth",
+                "LAUNCHPLANE_SERVICE_URL": origin,
             },
         ):
             with self.assertLogs(level="DEBUG") as logs:
@@ -652,6 +1019,26 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((self.directory / "bridge.token").read_text(), FAKE_VALUE)
             self.assertFalse(messages)
             self.assertFalse(any("Authorization" in headers for headers in control_headers))
+            args = [
+                "deliver",
+                "--directory",
+                str(self.directory),
+                "--bearer-token-env",
+                "FIXTURE_AUTH",
+            ]
+            runner = CliRunner()
+            with self.assertLogs(level="DEBUG") as delivery_logs:
+                reviewed = runner.invoke(local_consumer, args)
+                self.assertEqual(reviewed.exit_code, 0, reviewed.output)
+                applied = runner.invoke(
+                    local_consumer,
+                    args + ["--reviewed-plan-digest", json.loads(reviewed.output)["plan_digest"]],
+                )
+                self.assertEqual(applied.exit_code, 0, applied.output)
+            for forbidden in (FAKE_VALUE, "fixture-service-auth", "PRIVATE KEY", "PUBLIC KEY"):
+                self.assertNotIn(
+                    forbidden, "\n".join(delivery_logs.output) + reviewed.output + applied.output
+                )
             # The default HTTPS trust bundle must also work for WSS, even when
             # the interpreter's own CA paths don't include this fixture issuer.
             with patch("requests.utils.DEFAULT_CA_BUNDLE_PATH", str(cert_file)):
@@ -665,6 +1052,10 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 _verify_service(package)
             self.assertEqual(control_paths, [VERIFY_ROUTE])
+            control_paths.clear()
+            refused = runner.invoke(local_consumer, args)
+            self.assertNotEqual(refused.exit_code, 0)
+            self.assertEqual(control_paths, [DELIVERY_ROUTE])
             ws_state["redirect"] = True
             ws_paths.clear()
             with self.assertRaises((ValueError, InvalidStatus)):
