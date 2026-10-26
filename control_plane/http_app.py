@@ -12577,7 +12577,9 @@ def create_launchplane_fastapi_app(
         storage_update = director_conditional_write and director_testing_storage_allowed(
             existing_profile, profile
         )
-        health_url_correction = testing_health_url_correction_allowed(existing_profile, profile)
+        health_url_correction = (director_conditional_write or dry_run) and (
+            testing_health_url_correction_allowed(existing_profile, profile)
+        )
         if director_conditional_write and not (
             scan_activation or snapshot_activation or storage_update or health_url_correction
         ):

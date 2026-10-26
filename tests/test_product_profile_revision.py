@@ -8,8 +8,11 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.http_app_test_support import _product_profile_write_policy
-from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+from tests.http_app_test_support import (
+    _product_profile_write_policy,
+    _local_operator_bearer_config,
+    _RejectingVerifier,
+)
 from tests.support.auth import StubVerifier, identity, scoped_agent_transport
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.support.http import request
@@ -20,6 +23,7 @@ from control_plane.release_review import build_release_review
 from control_plane.release_request import record_release_request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from urllib.parse import urlsplit
+from control_plane.testing_address_storage import testing_health_url_correction_allowed
 
 
 class ProductProfileRevisionTests(unittest.IsolatedAsyncioTestCase):
@@ -204,6 +208,9 @@ class TestingHealthUrlCorrectionTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_other_profile_changes_and_scoped_callers_still_refuse(self) -> None:
+        malformed = self.before.model_copy(deep=True)
+        malformed.lanes[self.lane_index].health_url = "https://[malformed"
+        self.assertFalse(testing_health_url_correction_allowed(malformed, self.after))
         for changed in (
             self.after.model_copy(update={"display_name": "Unreviewed name"}),
             self.after.model_copy(update={"lanes": tuple(reversed(self.after.lanes))}),

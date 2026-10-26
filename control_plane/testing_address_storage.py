@@ -43,7 +43,10 @@ ADDRESS_PLAN_ROUTE = ADDRESS_ROUTE + ":plan"
 
 
 def canonical_health_url(url: str, route: TestingLaneRoute, previous_host: str) -> str:
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return url
     if parsed.hostname != previous_host:
         return url
     return parsed._replace(scheme="https", netloc=route.host).geturl()
@@ -58,7 +61,10 @@ def testing_health_url_correction_allowed(
     for index, lane in enumerate(existing.lanes):
         if lane.instance != "testing" or not lane.health_url:
             continue
-        origin, health = urlsplit(lane.base_url), urlsplit(lane.health_url)
+        try:
+            origin, health = urlsplit(lane.base_url), urlsplit(lane.health_url)
+        except ValueError:
+            continue
         if (
             origin.scheme != "https"
             or not origin.hostname

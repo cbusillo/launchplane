@@ -187,7 +187,7 @@ class TestingAddressTests(unittest.TestCase):
         self.assertEqual(urlsplit(rewritten).path, urlsplit(original).path)
         self.assertEqual(urlsplit(rewritten).query, urlsplit(original).query)
         self.assertEqual(urlsplit(rewritten).fragment, urlsplit(original).fragment)
-        for url in ("", "https://independent-health.example.invalid/check"):
+        for url in ("", "https://independent-health.example.invalid/check", "https://[malformed"):
             with self.subTest(url=url):
                 self.assertEqual(
                     canonical_health_url(url, self.plan.route_after, self.plan.route_before.host),
