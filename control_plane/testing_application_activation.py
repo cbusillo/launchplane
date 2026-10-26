@@ -119,7 +119,9 @@ def unstarted_application_recipient(
 def require_retained_route_authority(store: Any, record: TestingActivationRecord) -> None:
     """Corrections may refuse forward work, but cannot redirect this inverse."""
     from control_plane.testing_candidate_runtime import testing_serving_target_authority
-    from control_plane.testing_publication_storage import testing_binding_authority
+    from control_plane.testing_publication_storage import (
+        testing_binding_matches_retained_publication,
+    )
 
     target = store.read_dokploy_target_record(context_name=record.context, instance_name="testing")
     target_id = store.read_dokploy_target_id_record(
@@ -140,8 +142,9 @@ def require_retained_route_authority(store: Any, record: TestingActivationRecord
         or target_id.target_id != record.retained_target_id.target_id
         or provider.model_dump(exclude={"updated_at", "source_label"})
         != record.retained_provider.model_dump(exclude={"updated_at", "source_label"})
-        or testing_binding_authority(binding)
-        != testing_binding_authority(record.retained_route_binding)
+        or not testing_binding_matches_retained_publication(
+            store, binding, record.retained_route_binding
+        )
     ):
         raise TestingActivationRefusal("The original serving recipient or route authority changed.")
 
@@ -559,7 +562,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     "The exact predecessor deployment changed.",
                     code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
                 )
-            from control_plane.testing_publication_storage import testing_binding_authority
+            from control_plane.testing_publication_storage import (
+                testing_binding_matches_retained_publication,
+            )
 
             try:
                 binding = self.store.read_route_binding_record(
@@ -567,8 +572,8 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 )
             except FileNotFoundError:
                 binding = None
-            if testing_binding_authority(binding) != testing_binding_authority(
-                record.retained_route_binding
+            if not testing_binding_matches_retained_publication(
+                self.store, binding, record.retained_route_binding
             ):
                 raise TestingActivationRefusal(
                     "The original serving route authority changed.",

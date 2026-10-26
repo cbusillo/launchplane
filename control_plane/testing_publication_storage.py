@@ -76,9 +76,18 @@ def testing_binding_matches_route(
 
 
 def serving_snapshot_matches(
-    actual: TestingServingSnapshot, expected: TestingServingSnapshot
+    actual: TestingServingSnapshot,
+    expected: TestingServingSnapshot,
+    *,
+    route: TestingLaneRoute | None = None,
 ) -> bool:
     """Serving authority and custody identify a copy; observation metadata does not."""
+    if (
+        route is not None
+        and expected.binding is not None
+        and testing_binding_matches_route(actual.binding, expected.binding, route)
+    ):
+        actual = actual.model_copy(update={"binding": expected.binding})
     values = []
     for snapshot in (actual, expected):
         payload = snapshot.model_dump(mode="json")
@@ -86,6 +95,26 @@ def serving_snapshot_matches(
         payload["binding"] = testing_binding_authority(snapshot.binding)
         values.append(payload)
     return _same(*values)
+
+
+def testing_binding_matches_retained_publication(
+    store: db.PostgresRecordStore,
+    actual: EnvironmentRouteBindingRecord | None,
+    expected: EnvironmentRouteBindingRecord | None,
+) -> bool:
+    if testing_binding_authority(actual) == testing_binding_authority(expected):
+        return True
+    if expected is None:
+        return False
+    key = expected.source.source_versions.get("testing_publication", "")
+    publication = read_publication(store, key) if key else None
+    if publication is None or publication.state != "applied":
+        return False
+    from control_plane.testing_address_storage import effective_testing_route
+
+    return testing_binding_matches_route(
+        actual, expected, effective_testing_route(store, publication)
+    )
 
 
 def _snapshot(
@@ -415,7 +444,9 @@ def publish(
         _sources(store, session, plan, runtime_after=prior.state == "applied")
         expected = plan.before if prior.state == "planned" else effective_after(prior)
         current = _snapshot(store, session, plan.candidate.product, plan.candidate.context)
-        if not serving_snapshot_matches(current, expected):
+        if not serving_snapshot_matches(
+            current, expected, route=plan.route if prior.state == "applied" else None
+        ):
             raise ValueError("Serving authority changed since the original publication.")
         health = (
             prior.public_health

@@ -468,7 +468,7 @@ class TestingAddressTests(unittest.TestCase):
         owned = route_document(route, route.new_backend)
         identity = self.fixture.plan.deployment.runtime_identity
         assert identity is not None
-        frame = {
+        frame: dict[str, Any] = {
             "old_identity": identity.model_dump(mode="json"),
             "old_endpoints": (route.new_backend,),
             "raw": raw,
