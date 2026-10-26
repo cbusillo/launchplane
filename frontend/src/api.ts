@@ -1,3 +1,4 @@
+import { validateRemovalResponse } from "./runtime-setting-removal";
 import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
 import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
 import type { ApplyTestingHoldData, ApplyTestingHoldResponse, ReadTestingHoldData, ReadTestingHoldResponse } from "./generated/openapi.ts";
@@ -1192,4 +1193,14 @@ export function readProviderHoldAttention(
   if (page.limit !== undefined) query.set("limit", String(page.limit));
   if (page.cursor) query.set("cursor", page.cursor);
   return requestJson(`${PROVIDER_HOLD_ATTENTION_ROUTE}${query.size ? `?${query}` : ""}`, "GET", undefined, signal);
+}
+
+export async function removeRuntimeSettings(
+  payload: import("./generated/openapi.ts").RuntimeSettingRemovalRequest,
+  options: import("./browser-operation").BrowserOperationOptions,
+): Promise<import("./runtime-setting-removal").RemovalResponse> {
+  const response = await requestJson<import("./generated/openapi.ts").RuntimeSettingRemovalResponse>(
+    BROWSER_WRITE_ROUTES.runtimeSettingRemoval, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
+  );
+  return validateRemovalResponse(response, payload);
 }

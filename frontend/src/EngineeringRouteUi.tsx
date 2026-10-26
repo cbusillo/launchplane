@@ -24,6 +24,7 @@ const ENGINEERING_VIEWS: Exclude<EngineeringView, "hub">[] = [
   "governance-projection",
   "github-delivery",
   "privileged-operations",
+  "runtime-setting-removal",
 ];
 
 export function EngineeringRouteFrame({
