@@ -1797,7 +1797,12 @@ class GenericWebDeployProviderMutationAdapter:
         if self._standing_effect_started:
             return
         self._require_standing_testing_admission()
-        self._require_compose_effect_authority()
+        try:
+            self._require_compose_effect_authority()
+        except (FileNotFoundError, ValueError) as error:
+            raise DisposableLaneSafetyUnknown(
+                "Compose first-effect custody is unavailable."
+            ) from error
         if (
             self._pre_effect_inventory_digest is not None
             and self._pre_effect_inventory_digest != self._current_testing_inventory_digest()

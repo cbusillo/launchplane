@@ -138,13 +138,42 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
         if not isinstance(mounts, list):
             raise ValueError("Mount inventory unavailable")
         for mount in mounts:
-            backing = Path(mount["Source"]).resolve(strict=True) if mount.get("Source") else None
+            if mount.get("Type") == "tmpfs":
+                continue
+            source_path = mount.get("Source")
+            if not isinstance(source_path, str) or not Path(source_path).is_absolute():
+                raise ValueError("Mount backing unavailable")
+            if (
+                belongs
+                and mount.get("Type") == "volume"
+                and (
+                    mount.get("Name") not in volumes
+                    or Path(source_path).resolve(strict=True)
+                    != Path(volumes[mount["Name"]]["Mountpoint"])
+                )
+            ):
+                raise ValueError("Actual volume backing differs from custody")
+            backing = (
+                Path(mount["Source"]).resolve(strict=belongs or row["State"].get("Running") is True)
+                if mount.get("Source")
+                else None
+            )
+            if (
+                not belongs
+                and mount.get("Type") == "bind"
+                and mount.get("RW") is False
+                and backing is not None
+                and any(backing in path.parent.parents for path in paths)
+            ):
+                continue
             overlaps = backing is not None and any(
                 backing == path or backing in path.parents or path in backing.parents
                 for path in paths
             )
             aliases = (
-                backing is not None and (backing.stat().st_dev, backing.stat().st_ino) in identities
+                backing is not None
+                and backing.exists()
+                and (backing.stat().st_dev, backing.stat().st_ino) in identities
             )
             if not belongs and (mount.get("Name") in volumes or overlaps or aliases):
                 raise ValueError("Storage shared outside testing recipient")
@@ -329,7 +358,13 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
                     ):
                         raise ValueError("Service storage isolation unavailable")
                 elif mount.get("Type") == "bind":
-                    backing = Path(source).resolve(strict=True)
+                    if not isinstance(source, str) or not Path(source).is_absolute():
+                        raise ValueError("Service mount backing unavailable")
+                    backing = Path(source).resolve()
+                    if mount.get("ReadOnly") is True and any(
+                        backing in path.parents for path in paths
+                    ):
+                        continue
                     if not Path(source).is_absolute() or any(
                         backing == path or backing in path.parents or path in backing.parents
                         for path in paths

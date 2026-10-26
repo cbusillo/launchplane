@@ -475,7 +475,7 @@ class ActivationTests(unittest.TestCase):
     ) -> None:
         from concurrent.futures import ThreadPoolExecutor
         from threading import Event
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone, timedelta
         from control_plane.disposable_lane_collection import collect_testing_resource_facts
         from control_plane.dokploy import native_copy_stream
         from control_plane.storage.postgres import PostgresRecordStore
@@ -495,7 +495,16 @@ class ActivationTests(unittest.TestCase):
         second = PostgresRecordStore(database_url=self.store.database_url)
         self.addCleanup(second.close)
         profile = self.store.read_product_profile_record(self.product)
-        for drift in (False, True):
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        safety = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+        assert safety is not None
+        policy = self.store.list_runtime_key_safety_policy_records(status="active", limit=1)[0]
+        for drift in ("none", "inventory", "evidence", "policy"):
+            second.write_environment_inventory(inventory)
+            second.write_disposable_lane_safety(safety)
+            second.write_runtime_key_safety_policy_record(policy)
             with self.subTest(drift=drift):
                 adapter = self.retained_deploy_adapter()
                 entered, release, renewed = Event(), Event(), Event()
@@ -524,14 +533,36 @@ class ActivationTests(unittest.TestCase):
                     host.read(**arguments)
 
                 def checkpoint(**arguments: Any) -> Any:
-                    if drift:
-                        second.write_product_profile_record(
-                            profile.model_copy(
+                    if drift == "inventory":
+                        second.write_environment_inventory(
+                            inventory.model_copy(
                                 update={
-                                    "lifecycle_state": "retired",
-                                    "preview": profile.preview.model_copy(
-                                        update={"enabled": False}
-                                    ),
+                                    "updated_at": (
+                                        datetime.fromisoformat(
+                                            inventory.updated_at.replace("Z", "+00:00")
+                                        )
+                                        + timedelta(seconds=1)
+                                    ).isoformat()
+                                }
+                            )
+                        )
+                    elif drift == "evidence":
+                        second.write_disposable_lane_safety(
+                            safety.model_copy(
+                                update={
+                                    "isolation_evidence": "service:testing-resource-inspection:"
+                                    + "0" * 64
+                                }
+                            )
+                        )
+                    elif drift == "policy":
+                        second.write_runtime_key_safety_policy_record(
+                            policy.model_copy(
+                                update={
+                                    "rules": tuple(
+                                        rule.model_copy(update={"secret_class": "prod_only"})
+                                        for rule in policy.rules
+                                    )
                                 }
                             )
                         )
@@ -587,7 +618,7 @@ class ActivationTests(unittest.TestCase):
                         )
                     finally:
                         release.set()
-                    if drift:
+                    if drift != "none":
                         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 
                         with self.assertRaises(DisposableLaneSafetyUnknown):
@@ -596,13 +627,13 @@ class ActivationTests(unittest.TestCase):
                     else:
                         result = future.result(timeout=20)
                 self.assertEqual(reads, ["physical"])
-                self.assertEqual(provider_writes, [] if drift else ["image"])
+                self.assertEqual(provider_writes, [] if drift != "none" else ["image"])
                 reservation = self.store.read_idempotency_record(
                     scope=self.scope,
                     route_path="/v1/drivers/generic-web/deploy",
                     idempotency_key=f"compose-preflight-{drift}",
                 )
-                if drift:
+                if drift != "none":
                     if reservation is not None:
                         self.assertFalse(reservation.provider_effect_phase)
                         self.assertFalse(reservation.provider_effect_started_at)

@@ -79,7 +79,9 @@ identity must agree with the completed inventory apart from its completion time;
 provider image inputs retain the Compose deploy writer's artifact value.
 It then reads the registered host through the existing private transport. The
 fixed program checks every extant container, including stopped containers, and
-current/previous Swarm service declarations even without tasks. It checks actual
+current/previous Swarm service declarations even without tasks. Read-only
+administrative parents remain permitted; exact allocations, children, writable
+parents and uncertain live backing remain protected. It checks actual
 mounts and bound ports, current image/environment inputs and allocation-labeled
 local volume backing. Testing credential values are compared with production's
 provider inputs and other containers' actual environments. The complete inspected

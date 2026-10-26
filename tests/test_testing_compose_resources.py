@@ -158,7 +158,7 @@ class RetainedComposeInspectionTests(unittest.TestCase):
 
     def test_custody_and_actual_mount_and_environment_drift_refuse(self) -> None:
         baseline = deepcopy(self.rows)
-        for component in ("labels", "mount", "environment", "missing", "stopped"):
+        for component in ("labels", "mount", "source", "environment", "missing", "stopped"):
             with self.subTest(component=component):
                 self.rows = deepcopy(baseline)
                 row = next(iter(self.rows.values()))
@@ -166,6 +166,8 @@ class RetainedComposeInspectionTests(unittest.TestCase):
                     row["Config"]["Labels"]["com.docker.compose.project"] = "other"
                 elif component == "mount":
                     row["Mounts"][0]["Name"] = "unqualified-volume"
+                elif component == "source":
+                    row["Mounts"][0]["Source"] = str(self.root)
                 elif component == "environment":
                     row["Config"]["Env"] = ["DB_PASSWORD=live-password"]
                 elif component == "stopped":
@@ -201,7 +203,6 @@ class RetainedComposeInspectionTests(unittest.TestCase):
         ]
         service["tmpfs"] = ["/tmp:size=64m"]
         row["HostConfig"]["Tmpfs"] = {"/tmp": "size=64m"}
-        row["Mounts"].append({"Type": "tmpfs", "Destination": "/tmp", "RW": True, "Source": ""})
         self.assertTrue(inspect_retained_compose(self.spec, self.docker))
         row["Mounts"].append(
             {
@@ -247,6 +248,52 @@ class RetainedComposeInspectionTests(unittest.TestCase):
             "Mounts"
         ] = [{"Type": "volume", "Source": next(iter(self.volumes)), "Target": "/data"}]
         with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+
+    def test_image_digest_metadata_must_agree_with_the_actual_image(self) -> None:
+        row = next(iter(self.rows.values()))
+        service = self.spec["render"]["services"][
+            row["Config"]["Labels"]["com.docker.compose.service"]
+        ]
+        image = "ghcr.io/example/site@sha256:" + "a" * 64
+        service["image"] = row["Config"]["Image"] = image
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+        self.images[row["Image"]]["RepoDigests"] = [image]
+        self.assertTrue(inspect_retained_compose(self.spec, self.docker))
+
+    def test_read_only_administrative_parents_keep_exact_and_writable_mounts_protected(
+        self,
+    ) -> None:
+        foreign = deepcopy(next(iter(self.rows.values())))
+        foreign["Id"] = "f" * 64
+        foreign["Config"]["Labels"] = {"com.docker.compose.project": "monitor"}
+        foreign["Config"]["Env"] = []
+        foreign["HostConfig"]["PortBindings"] = {}
+        foreign["NetworkSettings"]["Ports"] = {}
+        foreign["Mounts"] = [
+            {"Type": "bind", "Source": str(self.root), "Destination": "/host", "RW": False}
+        ]
+        self.rows[foreign["Id"]] = foreign
+        self.assertTrue(inspect_retained_compose(self.spec, self.docker))
+        foreign["Mounts"][0]["RW"] = True
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+        foreign["Mounts"][0].update(
+            RW=False, Source=next(iter(self.volumes.values()))["Mountpoint"]
+        )
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+        foreign["Mounts"][0]["Source"] = str(
+            Path(next(iter(self.volumes.values()))["Mountpoint"]).parent
+        )
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+        foreign["Mounts"][0]["Source"] = str(self.root / "retired-bind")
+        foreign["State"]["Running"] = False
+        self.assertTrue(inspect_retained_compose(self.spec, self.docker))
+        foreign["State"]["Running"] = True
+        with self.assertRaises(FileNotFoundError):
             inspect_retained_compose(self.spec, self.docker)
 
     def test_concurrent_inventory_drift_refuses(self) -> None:
