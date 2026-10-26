@@ -55,7 +55,7 @@ export function PromotionRecoveryPanel({ product, fixtureMode }: { product: stri
     setConfirmed(false);
     setError(failure instanceof LaunchplaneApiError
       ? `${action} stopped: HTTP ${failure.statusCode}, ${failure.code || "request_failed"}. Trace: ${failure.traceId || "unavailable"}. Stop and retain the original operation. Do not retry Apply.`
-      : `${action} is unverified. Stop and retain the original operation. Stop and retain the original operation. Do not retry Apply.`);
+      : `${action} is unverified. Stop and retain the original operation. Do not retry Apply.`);
   }
   function operationStorageKey(target: PromotionRecoveryTarget): string {
     return `${storageKey}:${encodeURIComponent(target.decisionRecordId)}:${target.step}:${target.attempt}`;
