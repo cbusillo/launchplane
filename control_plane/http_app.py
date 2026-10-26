@@ -6932,7 +6932,14 @@ def create_launchplane_fastapi_app(
                     allow_destroyed=issued_plan.operation == "refresh",
                 )
                 compose_id = issued_plan.dry_run_plan.compose_ref
-                if not compose_id or compose_id.startswith("${created."):
+                creating_recipient = (
+                    issued_plan.operation == "refresh"
+                    and preview.state == "destroyed"
+                    and compose_id.startswith("${created.composeId:")
+                )
+                if not creating_recipient and (
+                    not compose_id or compose_id.startswith("${created.")
+                ):
                     raise DisposableLaneSafetyUnknown(
                         "The existing preview target is not resolved."
                     )
@@ -6942,11 +6949,15 @@ def create_launchplane_fastapi_app(
                     )
                 except FileNotFoundError:
                     target_id = None
-                if (target_id is not None and compose_id != target_id.target_id) or any(
-                    item.target_id == compose_id
-                    and (item.context, item.instance)
-                    != (issued_plan.context, issued_plan.preview_slug)
-                    for item in lane_store.list_dokploy_target_id_records()
+                if (
+                    (creating_recipient and target_id is not None)
+                    or (target_id is not None and compose_id != target_id.target_id)
+                    or any(
+                        item.target_id == compose_id
+                        and (item.context, item.instance)
+                        != (issued_plan.context, issued_plan.preview_slug)
+                        for item in lane_store.list_dokploy_target_id_records()
+                    )
                 ):
                     raise DisposableLaneSafetyUnknown(
                         "The discovered preview target changed or aliases another lane."
