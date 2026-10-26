@@ -1412,7 +1412,10 @@ release checks continue to validate the original copy custody, and completed
 restore rendering uses the amended canonical address without rewriting its
 generation witness.
 
-New address plans also bind canonical settings application. They preserve the
+New address plans also bind canonical settings application. The native transport
+compresses fixed code before encoding and restores it in the remote loader,
+keeping the existing message and payload bounds, guarded dispatch and
+original-program diagnostics. The plans preserve the
 current provider payload and change only its canonical URL and freeze parameter,
 including the existing website bootstrap URL. The plan binds the remaining
 provider environment, the sole native website and its database values. Planning
