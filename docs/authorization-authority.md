@@ -452,9 +452,9 @@ referenced auxiliary volumes must be absent, including unregistered backing
 directories. Snapshot preparation may retain only its qualified incomplete
 attempt and overlay custody. Unknown, queued, changed or foreign resources
 refuse. The same proof runs again before deployment and for every native
-creation-shaped request, including an existing shell found by name. The issued plan must postdate the
-recorded teardown authority; unknown teardown
-authority and stale plans still refuse. Other disposable-lane operations do not
+creation-shaped request, including an existing shell found by name. The issued
+plan must postdate the recorded teardown authority; unknown teardown authority
+and stale plans still refuse. Other disposable-lane operations do not
 gain permission from destroyed history. A staff hold or recorded `in_use`, `only_copy` or shared
 resource report refuses refresh even after that report expires or its binding
 changes. Resolve the real exception first through the existing target-policy or
@@ -468,10 +468,12 @@ unstarted recipient keeps the ordinary creation-plan shape, so an original
 retry within its plan validity can continue without another allocation.
 Before a replacement request can supersede a held original, existing immutable
 intent, complete deployment and bound-job quiescence, expired lease, grace and
-atomic comparison still apply. Older plan/result rollback fields remain
-readable as historical evidence; new refresh plans advertise no destructive
-rollback and require no delete capability. Explicit preview destruction retains
-its independent qualification.
+atomic comparison still apply. Plan/result rollback fields retain their issued shape for original-operation
+compatibility; they are historical metadata and are never executed by refresh.
+Refresh requires no delete capability. Explicit preview destruction retains its
+independent qualification. An interrupted provider effect remains held until
+original-operation reconciliation or the guarded replacement path settles it;
+removing automatic deletion deliberately preserves that recovery wait.
 
 Before changing an existing preview compose and again before deployment, the
 service runs a fixed read-only Docker inspector on that compose's actual server

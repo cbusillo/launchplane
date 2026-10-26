@@ -135,8 +135,13 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         self.containers.clear()
         needed = Path(next(iter(self.volumes.values()))["Mountpoint"]) / "needed-data"
         self.volumes.clear()
-        self.assertNotEqual(self.run_program()[0], 0)
-        self.assertTrue(needed.is_file())
+        for pending in ("", "preview-data-filestore"):
+            with self.subTest(pending=pending):
+                spec = {**self.spec, "pending_filestore": pending}
+                if pending:
+                    spec["volumes"] = [*self.spec["volumes"], pending]
+                self.assertNotEqual(self.run_program(spec)[0], 0)
+                self.assertTrue(needed.is_file())
 
     def test_unstarted_refuses_storage_appearing_during_inventory(self) -> None:
         self.spec["unstarted"] = True

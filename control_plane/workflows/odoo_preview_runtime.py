@@ -522,11 +522,22 @@ def _preview_target_is_unstarted(
             host=host, token=token, target_type="compose", target_id=target.target_id
         )
         server_id = str(template.get("serverId") or "").strip()
-        if not server_id or payload.get("serverId") != server_id:
+        if (
+            not server_id
+            or payload.get("serverId") != server_id
+            or dokploy_api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=target.target_id,
+                require_complete=True,
+            )
+        ):
             return False
         environment = preview_resource_environment(compose_name)
+        filestore = None
         if profile.preview.clean_testing_snapshot:
-            prepare_preview_filestore(
+            filestore = prepare_preview_filestore(
                 host=host,
                 token=token,
                 server_id=server_id,
@@ -550,7 +561,7 @@ def _preview_target_is_unstarted(
             checkpoint=lambda: None,
             unstarted=True,
             expected_server_id=server_id,
-            pending_filestore=profile.preview.clean_testing_snapshot,
+            pending_filestore=filestore is not None,
         )
     except NativeSourceAuthorizationDenied:
         raise
@@ -1205,8 +1216,14 @@ def build_odoo_preview_dokploy_dry_run(
 
     status: OdooPreviewDokployDryRunStatus = "blocked" if blockers else "ready"
     operations: tuple[OdooPreviewDokployOperation, ...] = ()
+    rollback_operations: tuple[OdooPreviewDokployOperation, ...] = ()
     if status == "ready":
         operations = _operations(request=request, compose_ref=compose_ref, domain_host=domain_host)
+        rollback_operations = _rollback_operations(
+            request=request,
+            compose_ref=compose_ref,
+            domain_host=domain_host,
+        )
 
     return OdooPreviewDokployDryRunPlan(
         status=status,
@@ -1226,6 +1243,7 @@ def build_odoo_preview_dokploy_dry_run(
         domain_certificate_type=request.domain_certificate_type,
         blockers=tuple(blockers),
         operations=operations,
+        rollback_operations=rollback_operations,
         summary=(
             "Odoo preview Dokploy dry-run plan is ready"
             if status == "ready"
@@ -2696,6 +2714,30 @@ def _operations(
             )
         )
     return tuple(operations)
+
+
+def _rollback_operations(
+    *, request: OdooPreviewDokployDryRunRequest, compose_ref: str, domain_host: str
+) -> tuple[OdooPreviewDokployOperation, ...]:
+    if request.runtime_plan.operation == "destroy" or request.runtime_plan.target is not None:
+        return ()
+    spec = request.endpoint_spec
+    return (
+        OdooPreviewDokployOperation(
+            name="domain_delete",
+            method="POST",
+            path=spec.domain_delete_path,
+            target=domain_host,
+            payload_keys=("domainId",),
+        ),
+        OdooPreviewDokployOperation(
+            name="compose_delete",
+            method="POST",
+            path=spec.compose_delete_path,
+            target=compose_ref,
+            payload_keys=("composeId", "deleteVolumes"),
+        ),
+    )
 
 
 def _compose_ref(*, runtime_plan: OdooPreviewRuntimePlan) -> str:

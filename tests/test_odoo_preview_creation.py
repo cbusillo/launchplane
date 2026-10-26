@@ -1,5 +1,6 @@
 from contextlib import ExitStack, redirect_stdout
 import io
+import json
 from datetime import datetime, timedelta, timezone
 import subprocess
 import sys
@@ -258,6 +259,17 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         args = command[1:]
         if args[:2] == ["volume", "ls"]:
             value = "\n".join(sorted(self.host_volumes))
+        elif args[:2] == ["volume", "inspect"]:
+            name = args[-1]
+            self.assertIn(name, self.host_volumes)
+            value = json.dumps(
+                {
+                    "Name": name,
+                    "Driver": "local",
+                    "HasOptions": False,
+                    "Mountpoint": str(self.fixture.root.resolve() / "volumes" / name / "_data"),
+                }
+            )
         elif args[0] == "ps":
             value = ""
         elif args[0] == "info":
@@ -320,6 +332,32 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         preview = self.fixture.store.read_preview_record(self.fixture.preview.preview_id)
         self.assertEqual(preview.state, "active")
         self.assertTrue(preview.serving_generation_id)
+
+    async def test_original_issued_rollback_metadata_survives_deploy_and_continuation(self) -> None:
+        import json
+        from pathlib import Path
+        from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsResult
+
+        legacy = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "odoo_preview_issued_creation_rollback.json"
+            ).read_text()
+        )
+        value = self.plan().model_dump(mode="json")
+        for field, metadata in legacy.items():
+            value[field].update(metadata)
+        original = OdooPreviewApplyInputsResult.model_validate(value)
+        self.fixture.payload["apply"]["dry_run_plan"] = original.dry_run_plan.model_dump(
+            mode="json"
+        )
+        self.fixture.issue_preview(original)
+        first = await self.fixture.preview_apply()
+        self.assertEqual(first.status_code, 409, first.text)
+        self.assertEqual(first.json()["error"]["code"], "mutation_reconciliation_required")
+        result = await self.fixture.preview_apply()
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertEqual(result.json()["result"]["status"], "pass")
+        self.assertFalse(any(path.endswith(".delete") for path in self.mutations))
 
     async def test_protection_blocks_original_continuation_without_another_effect(self) -> None:
         self.assertEqual((await self.fixture.preview_apply()).status_code, 409)
@@ -397,13 +435,10 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.plan().runtime_plan.target)
         self.assertEqual(self.mutations, mutations)
 
-    async def test_unavailable_snapshot_custody_cannot_normalize_an_existing_target(self) -> None:
-        import click
+    def enable_clean_snapshot(self) -> None:
         from control_plane.clean_testing_snapshot import CleanTestingSnapshot
         from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 
-        self.assertEqual((await self.fixture.preview_apply()).status_code, 409)
-        mutations = list(self.mutations)
         profile = self.fixture.profile.model_copy(deep=True)
         profile.preview.clean_testing_snapshot = True
         budget = OdooTestingDrillStorageBudget(
@@ -427,8 +462,15 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
             captured_at=datetime.now(timezone.utc).isoformat(),
             storage_budget=budget,
         )
+        self.fixture.store.write_clean_testing_snapshot(snapshot)
+
+    async def test_unavailable_snapshot_custody_cannot_normalize_an_existing_target(self) -> None:
+        import click
+
+        self.assertEqual((await self.fixture.preview_apply()).status_code, 409)
+        mutations = list(self.mutations)
+        self.enable_clean_snapshot()
         with (
-            patch.object(self.fixture.store, "read_clean_testing_snapshot", return_value=snapshot),
             patch(
                 "control_plane.preview_filestore.prepare_preview_filestore",
                 side_effect=click.ClickException("Needed foreign snapshot storage"),
@@ -437,6 +479,30 @@ class InterruptedPreviewCreationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(self.plan().runtime_plan.target)
         prepare.assert_called_once()
         self.assertEqual(self.mutations, mutations)
+
+    async def test_missing_snapshot_declaration_cannot_admit_retained_storage(self) -> None:
+        self.assertEqual((await self.fixture.preview_apply()).status_code, 409)
+        self.enable_clean_snapshot()
+        name = self.environment["ODOO_DB_VOLUME"]
+        self.host_volumes.add(name)
+        directory = self.fixture.root.resolve() / "volumes" / name / "_data"
+        directory.mkdir(parents=True)
+        needed = directory / "needed-data"
+        needed.write_text("preserve me")
+        with patch("control_plane.preview_filestore.prepare_preview_filestore", return_value=None):
+            self.assertIsNotNone(self.plan().runtime_plan.target)
+        self.assertEqual(needed.read_text(), "preserve me")
+
+    async def test_deployed_recipient_is_refused_before_snapshot_host_work(self) -> None:
+        self.assertEqual((await self.fixture.preview_apply()).status_code, 409)
+        self.enable_clean_snapshot()
+        assert self.compose is not None
+        self.compose["deployments"] = [{"deploymentId": "busy", "status": "queued"}]
+        with patch(
+            "control_plane.preview_filestore.prepare_preview_filestore",
+            side_effect=AssertionError("Deployed recipients cannot acquire snapshot locks"),
+        ):
+            self.assertIsNotNone(self.plan().runtime_plan.target)
 
     async def test_refused_new_storage_is_neither_deleted_nor_deployed(self) -> None:
         self.interrupt = False

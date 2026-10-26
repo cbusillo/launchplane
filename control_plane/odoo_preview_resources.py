@@ -426,8 +426,6 @@ def main():
         root = Path(docker("info", "--format", "{{.DockerRootDir}}").strip())
         if root.resolve(strict=True) != root.absolute():
             raise RuntimeError("Docker storage root is aliased")
-        if any((root / "volumes" / name).exists() or (root / "volumes" / name).is_symlink() for name in absent):
-            raise RuntimeError("Unstarted preview has unregistered storage")
     if not destroying and not unstarted and names - existing_names - {pending}:
         raise RuntimeError('Preview storage is missing')
     for name in names:
@@ -459,8 +457,11 @@ def main():
     # Re-read complete inventory to include new consumers. An unrelated helper
     # disappearing is gone, not evidence of a hidden writable consumer.
     for _ in range(2):
-        if unstarted and names & set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) != names & existing_names:
-            raise RuntimeError("Unstarted preview storage changed")
+        if unstarted:
+            if names & set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) != names & existing_names:
+                raise RuntimeError("Unstarted preview storage changed")
+            if any((root / "volumes" / name).exists() or (root / "volumes" / name).is_symlink() for name in names - existing_names):
+                raise RuntimeError("Unstarted preview has unregistered storage")
         containers = []
         for item in container_inventory():
             config = item.get("Config")

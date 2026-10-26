@@ -386,7 +386,12 @@ def _actions_for_request(
             OdooPreviewRuntimeAction(action="deploy_preview_compose", target=target),
             OdooPreviewRuntimeAction(action="run_preview_smoke", target=request.preview_url),
         ),
-        (),
+        (
+            OdooPreviewRuntimeAction(
+                action="delete_created_preview_domain", target=request.preview_url
+            ),
+            OdooPreviewRuntimeAction(action="delete_created_preview_compose", target=target),
+        ),
     )
 
 
