@@ -1,4 +1,9 @@
 import { validateRemovalResponse } from "./runtime-setting-removal";
+import type { CredentialInventoryResponse } from "./generated/openapi.ts";
+
+export function readCredentialInventory(signal?: AbortSignal): Promise<CredentialInventoryResponse> {
+  return requestJson("/v1/admin/credential-inventory", "GET", undefined, signal);
+}
 import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
 import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
 import type { ApplyTestingHoldData, ApplyTestingHoldResponse, ReadTestingHoldData, ReadTestingHoldResponse } from "./generated/openapi.ts";

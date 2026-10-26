@@ -42,6 +42,7 @@ dev = [
 
 [project.scripts]
 launchplane = "control_plane.cli:main"
+launchplane-credential-inventory = "control_plane.credential_inventory_collection:main"
 
 [project.entry-points."launchplane.cutover_hosts"]
 dokploy = "control_plane.dokploy.cutover_host:DokployCutoverHost"

@@ -1,4 +1,5 @@
 import { EngineeringRuntimeSettingRemovalRoute } from "./EngineeringRuntimeSettingRemovalRoute";
+import { CredentialsRoute } from "./CredentialsRoute";
 import {
   ArrowRight,
   KeyRound,
@@ -21,6 +22,8 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  { detail: "Read credential names, source coverage, collection freshness and drift.",
+    icon: KeyRound, label: "Director controls", title: "Credentials", view: "credentials" as const },
   { detail: "Review exact stored plain-setting removals and approve them as the signed-in administrator.",
     icon: KeyRound, label: "Director controls", title: "Remove stored settings", view: "runtime-setting-removal" as const },
   {
@@ -75,6 +78,7 @@ export function EngineeringOpsRoute({
   view: EngineeringView;
   actorId: number;
 }) {
+  if (view === "credentials") return <CredentialsRoute key={actorId} admin={admin} />;
   if (view === "runtime-setting-removal") return <EngineeringRuntimeSettingRemovalRoute admin={admin} actorId={actorId} />;
   if (view === "github-delivery") {
     return <EngineeringGitHubDeliveryRoute actorId={actorId} />;
