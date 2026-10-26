@@ -32,6 +32,11 @@ class ActivationClientTests(unittest.TestCase):
     def test_refused_apply_readback_and_receipt_preserve_the_negative_result(self) -> None:
         self.exercise_review_and_replay(refused=True)
 
+    def test_explicit_refusal_binds_the_review_and_original_key_without_exposing_values(
+        self,
+    ) -> None:
+        self.exercise_review_and_replay(refused=True, submit_mode="refuse")
+
     def test_provider_backoff_survives_supported_caller_refusal(self) -> None:
         self.exercise_review_and_replay(refused=False, external_refusal=True)
 
@@ -61,6 +66,7 @@ class ActivationClientTests(unittest.TestCase):
         read_error: Exception | None = None,
         read_mode: str = "receipt",
         inspection: bool = False,
+        submit_mode: str = "apply",
     ) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/activate-generic-web-testing.py")
@@ -96,7 +102,7 @@ class ActivationClientTests(unittest.TestCase):
             )
         )
         modes: tuple[str, ...] = (
-            ("dry-run", "apply", "apply", "readback", "receipt")
+            ("dry-run", submit_mode, submit_mode, "readback", "receipt")
             if refused
             else ("dry-run", "apply", "apply")
         )
@@ -199,7 +205,7 @@ class ActivationClientTests(unittest.TestCase):
                     "--evidence-file",
                     str(evidence),
                 ]
-                if mode == "apply":
+                if mode == submit_mode:
                     args.extend(["--reviewed-dry-run", "--idempotency-key", "original-activation"])
                     apply_args = args
                 elif mode in {"receipt", "inspect"} or (
@@ -212,7 +218,7 @@ class ActivationClientTests(unittest.TestCase):
                     patch("sys.argv", args),
                     redirect_stdout(output),
                 ):
-                    expected_refusal = external_refusal and mode == "apply"
+                    expected_refusal = external_refusal and mode == submit_mode
                     expected_error = read_error is not None and mode == read_mode
                     self.assertEqual(
                         client["main"](), int(expected_refusal or expected_error), output.getvalue()

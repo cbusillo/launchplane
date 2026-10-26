@@ -98,7 +98,7 @@ class TestingActivationRequest(BaseModel):
     # These are existing lane setting names, never volume names or port values.
     volume_keys: dict[str, str]
     port_keys: tuple[str, ...]
-    mode: Literal["dry-run", "apply", "readback", "receipt", "inspect"] = "dry-run"
+    mode: Literal["dry-run", "apply", "refuse", "readback", "receipt", "inspect"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     application: TestingApplicationSpecification | None = Field(
