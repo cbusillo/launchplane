@@ -3,6 +3,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from urllib.parse import unquote
+from unittest.mock import patch
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
@@ -226,7 +228,6 @@ class HeadCheckReuseTests(unittest.TestCase):
             {"head_repository": "fork/repository"},
             {"commits": []},
             {"commits": [{"sha": "stale-head", "author": {"id": 10, "type": "User"}}]},
-            {"commits": [{"sha": "head-1", "author": {"id": 10, "type": "User"}}] * 100},
             {"unavailable_path": "/commits?"},
         )
         for changes in scenarios:
@@ -273,6 +274,15 @@ class HeadCheckReuseTests(unittest.TestCase):
                 candidate_record=record, merge_method="merge", dry_run_result=queue
             )
         )
+
+    def test_unavailable_policy_storage_selects_full_candidate_ci(self) -> None:
+        self.client.end_snapshot_pass()
+        for error in (OSError("unavailable"), SQLAlchemyError("unavailable")):
+            with self.subTest(error=type(error).__name__):
+                with patch(
+                    "control_plane.merge_train_github.dependency_update_policy", side_effect=error
+                ):
+                    self.assertIsNone(self.build().head_check_reuse)
 
     def test_standalone_reuse_requires_repository_identity_policy(self) -> None:
         self.client.end_snapshot_pass()

@@ -431,11 +431,10 @@ def build_merge_train_dry_run_result(
             for pr in snapshot.pull_requests
             if _targets_merge_train_base(pull_request=pr, base_branch=snapshot.base_branch)
         }
-        dependency_ids = set(repository_policy.enqueue.dependency_update_github_user_ids) | {
-            bot.github_user_id for bot in repository_policy.enqueue.dependency_update_bots
-        }
         dependency_numbers = {
-            pr.number for pr in snapshot.pull_requests if pr.actor_id in dependency_ids
+            pr.number
+            for pr in snapshot.pull_requests
+            if pr.actor_id in repository_policy.enqueue.dependency_identity_ids
         }
         group_areas = new_candidate and not any(
             entry.owner_review_required for entry in eligible_entries

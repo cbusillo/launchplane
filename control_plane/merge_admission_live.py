@@ -437,7 +437,7 @@ class LiveMergeAdmissionEvaluator:
         if candidate_record.candidate.head_check_reuse is not None:
             if not isinstance(self.technical_check_client, GitHubMergeTrainClient) or (
                 self.technical_check_client.read_head_check_reuse(
-                    candidate=candidate_record.candidate
+                    candidate=candidate_record.candidate, repository_policy=repository_policy
                 )
                 is None
             ):

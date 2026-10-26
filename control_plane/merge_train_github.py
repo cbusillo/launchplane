@@ -1507,7 +1507,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         return True
 
     def read_head_check_reuse(
-        self, *, candidate: MergeTrainBatchCandidate
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        repository_policy: MergeTrainRepositoryPolicy | None = None,
     ) -> MergeTrainHeadCheckReuse | None:
         # An equal tree does not establish the candidate's current commit pair.
         if (
@@ -1571,7 +1574,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 != candidate.repository.casefold()
             ):
                 return None
-            if not self._head_checks_have_trusted_source(pull):
+            if not self._head_checks_have_trusted_source(pull, repository_policy=repository_policy):
                 return None
             if (
                 _git_commit_identity(
@@ -1654,7 +1657,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 != candidate.base_sha
             ):
                 return None
-        except (MergeTrainGitHubError, TenantAdmissionControllerError, ValueError) as error:
+        except (
+            MergeTrainGitHubError,
+            TenantAdmissionControllerError,
+            ValueError,
+            OSError,
+            SQLAlchemyError,
+        ) as error:
             if isinstance(error, MergeTrainGitHubError) and error.rate_limited:
                 raise
             # Missing/unreadable evidence selects full CI, never a reusable pass.
@@ -1691,17 +1700,19 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             ),
         )
 
-    def _head_checks_have_trusted_source(self, pull_request: dict[str, object]) -> bool:
+    def _head_checks_have_trusted_source(
+        self,
+        pull_request: dict[str, object],
+        *,
+        repository_policy: MergeTrainRepositoryPolicy | None,
+    ) -> bool:
         policy = dependency_update_policy(
             pull_request,
             store=self._branch_refresh_store,
-            repository_policy=self._snapshot_policy,
+            repository_policy=repository_policy or self._snapshot_policy,
         )
         if policy is None:
             return False
-        dependency_ids = set(policy.dependency_update_github_user_ids) | {
-            bot.github_user_id for bot in policy.dependency_update_bots
-        }
 
         def trusted_identity(identity: object) -> bool:
             if not isinstance(identity, dict):
@@ -1709,7 +1720,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             user_id = identity.get("id")
             if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
                 return False
-            if user_id in dependency_ids:
+            if user_id in policy.dependency_identity_ids:
                 return False
             return identity.get("type") == "User" or (
                 identity.get("type") == "Bot"
