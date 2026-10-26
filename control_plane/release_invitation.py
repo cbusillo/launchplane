@@ -615,6 +615,46 @@ def _settle_release_records(
             backoff.release_records[decision.record_id] = float("inf")
 
 
+def _stopped_release_outcome(
+    *,
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    run: "ClientReleaseRunView",
+) -> str:
+    names = {
+        "backup": "verified backup",
+        "promote": "deployment of the reviewed version",
+        "rollback": "rollback safety check"
+        if run.rollback_drill
+        else "rollback to the last accepted release",
+        "recovery": "automatic recovery",
+    }
+    failures = [
+        f"The {names[step.kind]} step ({step.step}) stopped: "
+        + (step.failure.reason if step.failure else "No failure reason was recorded for this step.")
+        for step in run.steps
+        if step.status in {"fail", "cancelled"}
+    ]
+    try:
+        production = release_version(store=store, profile=profile, instance="prod")
+    except (FileNotFoundError, ValueError):
+        live = "The version currently recorded in production could not be verified."
+    else:
+        version = (
+            ("rejected" if decision.release_start == "rollback" else "reviewed")
+            if production == decision.checklist.candidate
+            else "previous"
+            if production == decision.checklist.production
+            else "another"
+        )
+        live = (
+            f"Production is currently recorded as running the {version} version "
+            f"({production.source_commit[:7]})."
+        )
+    return "\n\n".join([*failures, live]).replace("@", "@\u200b")
+
+
 def _settle_release_record(
     *,
     store: ReleaseReviewStore,
@@ -681,11 +721,19 @@ def _settle_release_record(
                 marker=marker,
             )
             if not any(marker in _receipt_lines(comment) for comment in comments):
+                details = (
+                    "\n\n"
+                    + _stopped_release_outcome(
+                        store=store, profile=profile, decision=decision, run=run
+                    )
+                    if run.state == "stopped"
+                    else ""
+                )
                 result = github_api_request(
                     path=f"{path}/comments",
                     token=token,
                     method="POST",
-                    body={"body": f"{marker}\n{outcome}: this release has finished.\n"},
+                    body={"body": f"{marker}\n{outcome}: this release has finished.{details}\n"},
                 )
                 if not isinstance(result, dict) or not isinstance(result.get("id"), int):
                     raise ValueError("Release outcome publication was not confirmed.")

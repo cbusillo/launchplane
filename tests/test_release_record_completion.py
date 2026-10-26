@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.client_release import (
+    ClientReleaseFailureView,
     ClientReleaseRunView,
     ClientReleaseStepView,
 )
@@ -265,6 +266,104 @@ class ReleaseRecordCompletionTests(unittest.TestCase):
             )
             self.advance()
             self.assertEqual(self.issue["state"], "closed" if status == "pass" else "open")
+
+    def test_stopped_outcome_explains_failure_and_reads_current_production(self) -> None:
+        failure = ClientReleaseFailureView(
+            code="snapshot_time_limit",
+            reason="The safety check could not start within its time limit.",
+            record_id="failed-operation",
+            recorded_at="2026-10-24T16:00:00Z",
+        )
+        self.release_run = ClientReleaseRunView(
+            decision_record_id=self.decision.record_id,
+            rollback_drill=True,
+            state="stopped",
+            steps=(
+                ClientReleaseStepView(
+                    step="promote-1", kind="promote", status="pass", operation_id="promoted"
+                ),
+                ClientReleaseStepView(
+                    step="rollback-1",
+                    kind="rollback",
+                    status="fail",
+                    operation_id=failure.record_id,
+                    failure=failure,
+                ),
+            ),
+        )
+        for label, version in (
+            ("reviewed", self.decision.checklist.candidate),
+            ("previous", self.decision.checklist.production),
+            (
+                "another",
+                self.decision.checklist.production.model_copy(update={"source_commit": "c" * 40}),
+            ),
+        ):
+            with self.subTest(version=label):
+                self.issue["state"] = "open"
+                self.comments.clear()
+                with patch(
+                    "control_plane.release_invitation.release_version", return_value=version
+                ):
+                    self.advance()
+                body = self.comments[0]["body"]
+                self.assertIn(failure.reason, body)
+                self.assertIn("rollback", body.lower())
+                self.assertIn(label, body.split("\n\n")[-1])
+                self.assertIn(version.source_commit[:7], body)
+                self.assertEqual(self.issue["state"], "closed")
+
+    def test_missing_failure_or_production_evidence_is_explicit_without_blocking_settlement(
+        self,
+    ) -> None:
+        self.release_run = ClientReleaseRunView(
+            decision_record_id=self.decision.record_id,
+            rollback_drill=False,
+            state="stopped",
+            steps=(
+                ClientReleaseStepView(
+                    step="backup-1", kind="backup", status="cancelled", operation_id="cancelled"
+                ),
+            ),
+        )
+        with patch(
+            "control_plane.release_invitation.release_version",
+            side_effect=ValueError("Unavailable"),
+        ) as read_production:
+            self.advance()
+        read_production.assert_called()
+        body = self.comments[0]["body"]
+        self.assertIn("backup", body.lower())
+        self.assertNotIn(self.decision.checklist.candidate.source_commit[:7], body)
+        self.assertNotIn(self.decision.checklist.production.source_commit[:7], body)
+        self.assertEqual(self.issue["state"], "closed")
+
+    def test_failed_rejection_rollback_identifies_rejected_version(self) -> None:
+        self.store.write_release_review_decision_record(
+            self.decision.model_copy(
+                update={
+                    "release_start": "rollback",
+                    "decision": "changes_requested",
+                    "reason": "Client rejected the hotfix",
+                }
+            )
+        )
+        self.release_run = ClientReleaseRunView(
+            decision_record_id=self.decision.record_id,
+            rollback_drill=False,
+            state="stopped",
+            steps=(
+                ClientReleaseStepView(
+                    step="rollback-1", kind="rollback", status="fail", operation_id="rollback"
+                ),
+            ),
+        )
+        with patch(
+            "control_plane.release_invitation.release_version",
+            return_value=self.decision.checklist.candidate,
+        ):
+            self.advance()
+        self.assertIn("rejected", self.comments[0]["body"].split("\n\n")[-1])
 
     def test_lost_comment_or_close_response_and_concurrent_ticks_do_not_duplicate_outcomes(
         self,
