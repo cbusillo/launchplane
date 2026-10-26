@@ -233,7 +233,5 @@ def _mark_provider_started(
     )
     if getattr(update, "status", "") == "notification_state_changed":
         raise DiscordNotificationSuperseded(refresh_required=True)
-    if getattr(update, "status", "") == "summary_already_covered":
-        raise DiscordNotificationSuperseded
     if getattr(update, "status", "") != "updated":
         raise RuntimeError("outbox_provider_marker_not_recorded")
