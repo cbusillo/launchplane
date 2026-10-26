@@ -83,7 +83,18 @@ def split_ingress_check_base_url(lane: ProductLaneProfile, health_url: str) -> s
 
 def _url_key(url: str) -> tuple[str, str, str, str]:
     parsed = urlsplit(url.strip())
-    return parsed.scheme, parsed.netloc, parsed.path or "/", parsed.query
+    authority = parsed.netloc
+    if "@" not in authority and parsed.hostname:
+        try:
+            port = parsed.port
+        except ValueError:
+            pass
+        else:
+            host = parsed.hostname
+            authority = f"[{host}]" if ":" in host else host
+            if port is not None and port != {"https": 443, "http": 80}.get(parsed.scheme):
+                authority = f"{authority}:{port}"
+    return parsed.scheme, authority, parsed.path or "/", parsed.query
 
 
 def read_split_ingress_binding(

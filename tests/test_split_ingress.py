@@ -135,25 +135,9 @@ def split_observation(
 
 
 class SplitIngressTests(unittest.TestCase):
-    def test_split_public_checks_replace_legacy_and_outside_host_checks(self) -> None:
+    def test_split_projection_retains_checks_dns_and_recovery_policy(self) -> None:
         profile = _strict_public_profile(domain_name="business.example.test")
         lane = profile.lanes[0]
-        lane = lane.model_copy(
-            update={
-                "health_monitoring": lane.health_monitoring.model_copy(
-                    update={
-                        "checks": (
-                            *lane.health_monitoring.checks,
-                            ProductLaneHealthCheck(
-                                name="other-host",
-                                kind="public_http",
-                                url="http://outside.example.test/healthz",
-                            ),
-                        ),
-                    }
-                )
-            }
-        )
         binding = split_binding()
         effective = split_ingress_monitoring_lane(profile, lane, binding)
         self.assertEqual(
@@ -163,7 +147,6 @@ class SplitIngressTests(unittest.TestCase):
         self.assertTrue(
             all(check.require_runtime_identity for check in effective.health_monitoring.checks)
         )
-        self.assertIn("other-host", {check.name for check in lane.health_monitoring.checks})
         self.assertEqual(
             split_ingress_custody_hosts(binding, "https://outside.example.test/healthz"), ()
         )
@@ -215,6 +198,51 @@ class SplitIngressTests(unittest.TestCase):
                 lane,
                 tuple(d.domain_name for d in binding.domains),
                 expectation.public_name,
+            ).conflict
+        )
+
+    def test_policy_normalizes_equivalent_https_authorities_without_widening_custody(self) -> None:
+        profile = _strict_public_profile(domain_name="business.example.test")
+        lane = profile.lanes[0]
+        domains = tuple(d.domain_name for d in split_binding().domains)
+        for authority, accepted in (
+            ("Business.example.test", True),
+            ("business.example.test:443", True),
+            ("business.example.test:8443", False),
+            ("user@business.example.test", False),
+        ):
+            url = f"https://{authority}/healthz"
+            configured = lane.model_copy(
+                update={
+                    "health_url": url,
+                    "health_monitoring": lane.health_monitoring.model_copy(
+                        update={
+                            "checks": (
+                                lane.health_monitoring.checks[0].model_copy(update={"url": url}),
+                            ),
+                        }
+                    ),
+                }
+            )
+            candidate = profile.model_copy(update={"lanes": (configured,)})
+            policy = split_ingress_monitoring_policy(candidate, configured, domains, domains[0])
+            self.assertEqual(not policy.conflict, accepted, authority)
+        insecure = lane.health_monitoring.checks[0].model_copy(
+            update={"url": "http://business.example.test/healthz"}
+        )
+        configured = lane.model_copy(
+            update={
+                "health_monitoring": lane.health_monitoring.model_copy(
+                    update={"checks": (insecure,)},
+                )
+            }
+        )
+        self.assertTrue(
+            split_ingress_monitoring_policy(
+                profile.model_copy(update={"lanes": (configured,)}),
+                configured,
+                domains,
+                domains[0],
             ).conflict
         )
 
