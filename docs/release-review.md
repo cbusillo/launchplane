@@ -819,7 +819,7 @@ diagnostic refusal if they cannot settle. Terminal records do not block.
 The durable provider runner records an exit receipt after its adapter, heartbeat
 and final settlement attempt have ended. A matching receipt makes a
 `reconcile_required` reservation diagnostic, even while its former lease is
-unexpired. The receipt binds the request fingerprint, attempt and lease owner;
+unexpired. The receipt binds the request fingerprint, attempt and `lease_owner`;
 a retry cannot inherit it. The unknown product outcome and exclusive target
 reservation remain unchanged. This proof survives service restart without
 replaying or settling the product operation. Historical holds and interrupted
