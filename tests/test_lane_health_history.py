@@ -3,7 +3,9 @@ from pathlib import Path
 from urllib.parse import urlencode
 from tempfile import TemporaryDirectory
 import json
+import os
 import unittest
+from unittest.mock import patch
 from click.testing import CliRunner
 
 from control_plane.contracts.public_ingress_monitoring import (
@@ -22,6 +24,7 @@ from tests.http_app_test_support import (
 from tests.support.auth import _identity, _StubVerifier
 from tests.support.http import request
 from tests.support.stores import _sqlite_database_url
+from tests.test_http_app_product import _seed_product_incident_read_records
 
 START = datetime(2026, 10, 1, tzinfo=timezone.utc)
 REQUIRED: tuple[tuple[PublicIngressCheckKind, str], ...] = (("public_http", "health"),)
@@ -74,6 +77,108 @@ def observation(
 
 
 class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_retired_context_reads_preserve_scope_and_authorization(self) -> None:
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "incident-test-key",
+                    "LAUNCHPLANE_SECRET_KEYS_JSON": "",
+                },
+            )
+        )
+        with TemporaryDirectory() as temporary:
+            url = _sqlite_database_url(Path(temporary) / "records.sqlite")
+            _seed_product_environment_read_records(url)
+            _seed_product_incident_read_records(url)
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            profile = store.read_product_profile_record("example-site")
+            retired_context = "example-site-retired"
+            store.write_product_profile_record(
+                profile.model_copy(update={"historical_contexts": (retired_context,)})
+            )
+            incident = store.read_public_ingress_incident_record("incident-example-site-prod")
+            store.write_public_ingress_incident_record(
+                incident.model_copy(update={"context": retired_context})
+            )
+            store.write_public_ingress_observation_record(
+                observation("retired-failure", 0, status="fail").model_copy(
+                    update={"context": retired_context}
+                )
+            )
+            base = "/v1/products/example-site/environments/prod"
+            paths = (
+                base + "/public-ingress/incidents",
+                base + "/public-ingress/incidents/" + incident.incident_id,
+                base + "/health-history?" + urlencode({"since": stamp(0), "until": stamp(60)}),
+            )
+            for authorized_context in (retired_context, "example-site"):
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_product_environment_read_policy(context=authorized_context),
+                    record_store_factory=lambda: store,
+                )
+                for path in paths:
+                    with self.subTest(authorized_context=authorized_context, path=path):
+                        response = await request(
+                            app,
+                            "GET",
+                            path
+                            + ("&" if "?" in path else "?")
+                            + urlencode({"historical_context": retired_context}),
+                            headers={"Authorization": "Bearer valid-token"},
+                        )
+                        if authorized_context != retired_context:
+                            self.assertEqual(response.status_code, 403, response.text)
+                            continue
+                        self.assertEqual(response.status_code, 200, response.text)
+                        payload = response.json()
+                        result = payload.get(
+                            "history", payload.get("incident_list", payload.get("incident"))
+                        )
+                        if "incident" in payload:
+                            result = result["incident"]
+                        self.assertEqual(result["context"], retired_context)
+                        if "history" in payload:
+                            self.assertEqual(
+                                [
+                                    (item["record_id"], item["status"])
+                                    for item in result["observations"]
+                                ],
+                                [("retired-failure", "fail")],
+                            )
+                        if "incident_list" in payload:
+                            self.assertEqual(
+                                [item["incident_id"] for item in result["incidents"]],
+                                [incident.incident_id],
+                            )
+                for context in ("unowned-context", " "):
+                    response = await request(
+                        app,
+                        "GET",
+                        paths[0] + "?" + urlencode({"historical_context": context}),
+                        headers={"Authorization": "Bearer valid-token"},
+                    )
+                    self.assertEqual(response.status_code, 404, response.text)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            response = await request(
+                app, "GET", paths[0], headers={"Authorization": "Bearer valid-token"}
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertNotIn(
+                incident.incident_id,
+                [item["incident_id"] for item in response.json()["incident_list"]["incidents"]],
+            )
+            response = await request(
+                app, "GET", paths[1], headers={"Authorization": "Bearer valid-token"}
+            )
+            self.assertEqual(response.status_code, 404, response.text)
+
     async def test_complete_pagination_includes_passes_and_equal_timestamp_records(self) -> None:
         with TemporaryDirectory() as temporary:
             url = _sqlite_database_url(Path(temporary) / "records.sqlite")
