@@ -94,6 +94,9 @@ mounts and bound ports, current image/environment inputs and allocation-labeled
 local volume backing. Testing credential values are compared with production's
 provider inputs and other containers' actual environments. The complete inspected
 inventory and service authority must remain unchanged across the read. The proof
+resolves each quiet-listed Swarm ID to one full inspected identity and compares
+complete service snapshots. Failed host reads retain bounded source locations
+without reporting inspected values. The proof
 binds the provider configuration and owned resources; an unrelated restart
 between qualifications does not invalidate it when the fresh complete read
 still proves no shared resource or credential.
