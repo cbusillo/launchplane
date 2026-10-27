@@ -83,6 +83,28 @@ class SchemaMigrationTests(unittest.TestCase):
                 (),
             )
 
+    def test_preceding_target_reads_additive_schema_without_downgrading_it(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
+            command.upgrade(alembic_config(url), integration_attestations.down_revision)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            before = set(inspect(engine).get_table_names())
+            self.assertTrue(set(retired_delivery.RETIRED_TABLES) & before)
+            self.assertNotIn("launchplane_integration_attestations", before)
+            command.upgrade(alembic_config(url), integration_attestations.revision)
+            self.assertEqual(
+                schema_migration_action(
+                    current_revision=integration_attestations.revision,
+                    target_revision=integration_attestations.down_revision,
+                ),
+                "compatible_ahead",
+            )
+            self.assertTrue(before <= set(inspect(engine).get_table_names()))
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            store.verify_schema()
+
     def test_migration_preserves_existing_application_loggers(self) -> None:
         application_logger = logging.getLogger("control_plane.merge_train_controller_run_once")
         original_disabled = application_logger.disabled

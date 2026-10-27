@@ -5855,3 +5855,8 @@ require it. Retain its qualified deployed image as activation's previous-image
 rollback target. Source delivery alone does not qualify it. Older images cannot
 recognize the additive revision and are below the new rollback floor. Image
 rollback retains the additive table and its immutable evidence.
+Compatibility also reads populated restoration and attestation evidence on
+carried Client decisions. Both additive fields are omitted when empty, so its
+ordinary carries remain readable by the preceding image. Activation uses the
+same read contract unchanged. Do not roll activation back past this compatible
+image after any populated carry has been saved.
