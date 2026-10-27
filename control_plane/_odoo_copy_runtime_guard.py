@@ -7,6 +7,16 @@ from control_plane._odoo_snapshot_files import CLEAN_SNAPSHOT_STATE_DIRECTORY
 from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
 from control_plane.preview_gateway import PREVIEW_GATEWAY_INSPECTION_LIBRARY
 
+
+def preview_has_source_connection(environment: dict[str, str]) -> bool:
+    return any(
+        value
+        and key != "DATA_WORKFLOW_SSH_DIR"
+        and key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+        for key, value in environment.items()
+    )
+
+
 COPY_WEB_GATE_READ_PROGRAM = r"""
 import hashlib,os,sys
 from pathlib import Path
@@ -100,6 +110,7 @@ def inspect_volume_backings(volumes, all_containers, own, *, expected_binding=No
 
 COPY_RUNTIME_INSPECTION_LIBRARY = (
     VOLUME_BACKING_INSPECTION_LIBRARY
+    + inspect.getsource(preview_has_source_connection)
     + PREVIEW_GATEWAY_INSPECTION_LIBRARY
     + "\nCOPY_WEB_GATE_READ_PROGRAM="
     + repr(COPY_WEB_GATE_READ_PROGRAM)
@@ -182,7 +193,7 @@ def inspect_copy_runtime(spec, *, expected_instance):
                 raise CopyReadbackRefused(ReadbackPredicate.HOST_ALIASES)
             if any(environment.get(key) for key in ("GITHUB_TOKEN", "GH_TOKEN", "SSH_AUTH_SOCK", "DATA_WORKFLOW_SSH_KEY", "ODOO_KEY", "ODOO_SMTP_PASSWORD")):
                 raise CopyReadbackRefused(ReadbackPredicate.CREDENTIALS)
-            if expected_instance == 'preview' and any(value and key.startswith(('ODOO_UPSTREAM_', 'DATA_WORKFLOW_SSH_')) for key, value in environment.items()):
+            if expected_instance == 'preview' and preview_has_source_connection(environment):
                 raise CopyReadbackRefused(ReadbackPredicate.CREDENTIALS)
         if service != "web":
             networks = container.get("NetworkSettings", {}).get("Networks")

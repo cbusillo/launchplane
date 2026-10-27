@@ -2412,7 +2412,7 @@ def _build_preview_summary(
         active_count=len(summaries),
         inventory=inventory
         if records_allowed
-        else inventory.model_copy(update={"observed_slugs": ()}),
+        else inventory.model_copy(update={"observed_slugs": (), "sleep_observations": ()}),
         unobserved_record_slugs=tuple(sorted(tracked_slugs - observed_slugs))
         if comparable and records_allowed
         else (),

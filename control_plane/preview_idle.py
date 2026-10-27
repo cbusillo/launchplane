@@ -324,6 +324,10 @@ class PreviewIdleAdapter:
         )
 
 
+class PreviewCannotSleep(ValueError):
+    pass
+
+
 class PreviewIdleScheduler:
     def __init__(self, store: PostgresRecordStore, *, control_plane_root: Path) -> None:
         self.store, self.control_plane_root = store, control_plane_root
@@ -355,25 +359,33 @@ class PreviewIdleScheduler:
     def _bind(
         self, profile: LaunchplaneProductProfileRecord, preview_id: str, host: str, token: str
     ) -> dict[str, Any] | None:
+        try:
+            return self._require_binding(profile, preview_id, host, token)
+        except PreviewCannotSleep:
+            return None
+
+    def _require_binding(
+        self, profile: LaunchplaneProductProfileRecord, preview_id: str, host: str, token: str
+    ) -> dict[str, Any]:
         if (
             not profile.is_active
             or not profile.preview.enabled
             or not product_profile_uses_odoo_driver(profile)
         ):
-            return None
+            raise PreviewCannotSleep("Idle sleep is not enabled for this product.")
         preview = self.store.read_preview_record(preview_id)
         if preview.context != profile.preview.context or preview.anchor_repo not in {
             profile.repository,
             profile.repository.partition("/")[2],
         }:
-            return None
+            raise PreviewCannotSleep("Preview ownership does not match the product.")
         generation_id = preview.serving_generation_id
         if (
             preview.state != "active"
             or not generation_id
             or preview.active_generation_id != generation_id
         ):
-            return None
+            raise PreviewCannotSleep("No current serving preview generation is recorded.")
         generation = self.store.read_preview_generation_record(generation_id)
         identity = generation.runtime_identity
         if (
@@ -386,7 +398,7 @@ class PreviewIdleScheduler:
             or identity.preview_id != preview_id
             or identity.preview_generation_id != generation_id
         ):
-            return None
+            raise PreviewCannotSleep("The serving generation has not passed identity verification.")
         slug = resolve_generic_web_preview_slug(
             profile=profile,
             preview_slug="",
@@ -402,7 +414,9 @@ class PreviewIdleScheduler:
             if entry[2] == name
         ]
         if len(matches) != 1 or identity.instance != name:
-            return None
+            raise PreviewCannotSleep(
+                "The preview target cannot be uniquely bound to its generation."
+            )
         authority_binding = require_disposable_lane(
             self.store,
             product=profile.product,
@@ -415,12 +429,12 @@ class PreviewIdleScheduler:
         for registered in self.store.list_dokploy_target_id_records():
             if registered.target_id == compose_id:
                 if (registered.context, registered.instance) != (profile.preview.context, slug):
-                    return None
+                    raise PreviewCannotSleep("The provider target is registered to another lane.")
                 target = self.store.read_dokploy_target_record(
                     context_name=registered.context, instance_name=registered.instance
                 )
                 if target.policies.staff_testing_hold is not None:
-                    return None
+                    raise PreviewCannotSleep("Staff testing is holding this preview awake.")
         payload = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=compose_id
         )
@@ -431,16 +445,19 @@ class PreviewIdleScheduler:
             or not isinstance(declaration, dict)
             or PREVIEW_GATEWAY_SERVICE not in declaration.get("services", {})
         ):
-            return None
+            raise PreviewCannotSleep(
+                "The idle gateway is missing; an ordinary rebuild installs it."
+            )
         env = api.parse_dokploy_env_text(str(payload.get("env") or ""))
         raw_identity = runtime_identity_env(identity)["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"]
         if env.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON") != raw_identity:
-            return None
-        if any(
-            value and key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
-            for key, value in env.items()
-        ):
-            return None
+            raise PreviewCannotSleep(
+                "The provider runtime identity differs from the serving generation."
+            )
+        from control_plane._odoo_copy_runtime_guard import preview_has_source_connection
+
+        if preview_has_source_connection(env):
+            raise PreviewCannotSleep("Upstream or SSH connection settings remain on this preview.")
         budget = next(
             (
                 lane.odoo_testing_drill_storage

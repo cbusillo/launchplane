@@ -409,6 +409,49 @@ class PreviewIdleOperationTests(unittest.TestCase):
         assert completed is not None
         self.assertEqual(completed.state, "completed")
 
+    def test_directory_without_source_connection_does_not_prevent_sleep(self) -> None:
+        self.provider["env"] += "\nDATA_WORKFLOW_SSH_DIR=/var/lib/unused-reader"
+        self.run_preview()
+        self.assertEqual(self.value["gateway"]["mode"], "asleep")
+
+    def test_source_connections_still_prevent_sleep(self) -> None:
+        original = self.provider["env"]
+        for key in ("ODOO_UPSTREAM_HOST", "DATA_WORKFLOW_SSH_KEY", "DATA_WORKFLOW_SSH_USER"):
+            with self.subTest(key=key):
+                self.provider["env"] = original + f"\n{key}=fixture"
+                self.run_preview()
+                self.assertFalse(self.effects)
+
+    def test_inventory_observes_sleep_and_reports_coverage_gaps_without_effects(self) -> None:
+        from control_plane.preview_sleep_evidence import collect_preview_sleep_observations
+
+        def read() -> Any:
+            return collect_preview_sleep_observations(
+                store=self.store,
+                profile=self.profile,
+                root=self.root,
+                host="fixture",
+                token="fixture",
+                inventory=(("env", "compose-fixture", self.identity.instance),),
+                prefix="fixture",
+            )[0]
+
+        self.assertEqual(read().state, "awake")
+        self.value = observation(mode="asleep", running=False)
+        self.assertEqual(read().state, "asleep")
+        self.provider["env"] += "\nODOO_UPSTREAM_HOST=private-source"
+        blocked = read()
+        self.assertEqual(blocked.state, "cannot_sleep")
+        self.assertIn("connection settings", blocked.reason)
+        self.assertNotIn("private-source", blocked.reason)
+        self.provider["composeFile"] = "services: {web: {}}"
+        self.assertIn("gateway is missing", read().reason)
+        self.provider["composeFile"] = "services: {preview-router: {}}"
+        self.store.write_preview_record(self.preview.model_copy(update={"state": "destroyed"}))
+        self.assertIn("serving preview record", read().reason)
+        self.assertFalse(self.effects)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
     def test_interrupted_stop_resumes_original_intent_before_wake(self) -> None:
         self.interrupt = True
         self.run_preview()
@@ -800,6 +843,80 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
 
 class PreviewIdleRuntimeTests(unittest.TestCase):
+    def test_native_inspection_allows_only_an_unmounted_directory_without_connection(self) -> None:
+        spec = {
+            "generation": {"instance": "preview", "namespace": "fixture"},
+            "compose_project": "fixture",
+            "database_name": "fixture_db",
+            "preview_volumes": {
+                "data": "fixture-data",
+                "logs": "fixture-logs",
+                "database": "fixture-db",
+            },
+            "database_data_directory": "/database",
+            "image_reference": "fixture-image",
+            "usage_only": True,
+        }
+        containers: dict[str, Any] = {
+            name: {
+                "Id": name,
+                "Config": {
+                    "Image": "fixture-image",
+                    "Labels": {
+                        "com.docker.compose.project": "fixture",
+                        "com.docker.compose.service": name,
+                    },
+                    "Env": [
+                        "PLATFORM_INSTANCE=preview",
+                        "ODOO_DB_HOST=database",
+                        "ODOO_DB_NAME=fixture_db",
+                        "ODOO_MAX_CRON_THREADS=0",
+                        "DATA_WORKFLOW_SSH_DIR=/unused",
+                    ],
+                },
+                "Mounts": [
+                    {"Type": "volume", "Name": volume, "Destination": "/database"}
+                    for volume in (
+                        ["fixture-db"] if name == "database" else ["fixture-data", "fixture-logs"]
+                    )
+                ],
+                "NetworkSettings": {
+                    "Networks": {
+                        "fixture-net": {},
+                        **({"dokploy-network": {}} if name == "web" else {}),
+                    }
+                },
+            }
+            for name in ("web", "script-runner", "database")
+        }
+
+        def docker(*arguments: str) -> bytes:
+            if arguments[0] == "ps":
+                return "\n".join(containers).encode()
+            return json.dumps([{"Labels": {"com.docker.compose.project": "fixture"}}]).encode()
+
+        self.namespace["docker"] = docker
+        self.namespace["one_inspection"] = lambda name: (
+            containers[name]
+            if name in containers
+            else {
+                "Labels": {"com.docker.compose.project": "fixture"},
+                "Containers": {name: {} for name in containers},
+            }
+        )
+        self.namespace["inspect_volume_backings"] = Mock()
+        inspect_runtime = self.namespace["inspect_copy_runtime"]
+        self.assertEqual(set(inspect_runtime(spec, expected_instance="preview")), set(containers))
+        containers["web"]["Config"]["Env"].append("ODOO_UPSTREAM_HOST=fixture-source")
+        with self.assertRaises(self.namespace["CopyReadbackRefused"]):
+            inspect_runtime(spec, expected_instance="preview")
+        containers["web"]["Config"]["Env"].pop()
+        containers["web"]["Mounts"].append(
+            {"Type": "bind", "Source": "/unused", "Destination": "/root/.ssh"}
+        )
+        with self.assertRaises(self.namespace["CopyReadbackRefused"]):
+            inspect_runtime(spec, expected_instance="preview")
+
     def setUp(self) -> None:
         self.namespace: dict[str, Any] = {}
         module = ast.parse(PREVIEW_IDLE_RUNTIME_PROGRAM)

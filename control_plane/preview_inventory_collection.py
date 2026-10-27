@@ -12,6 +12,7 @@ from control_plane.contracts.preview_inventory_scan_record import (
     PREVIEW_INVENTORY_COLLECTION_SOURCE,
     PreviewInventoryScanRecord,
     PreviewInventoryScanStatus,
+    PreviewSleepObservation,
     build_preview_inventory_scan_id,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -48,8 +49,10 @@ def collect_preview_inventory(
             raise PreviewLifecycleSweepCancelled()
         if not profile.is_active or not profile.preview.enabled:
             continue
+        scanned_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         status: PreviewInventoryScanStatus = "pass"
         slugs: tuple[str, ...] = ()
+        sleep_observations: tuple[PreviewSleepObservation, ...] = ()
         error_message = ""
         try:
             descriptor = read_driver_descriptor(profile.driver_id)
@@ -84,6 +87,28 @@ def collect_preview_inventory(
                 raise click.ClickException(
                     "Provider inventory has ambiguous duplicate preview slugs."
                 )
+            if descriptor.driver_id == "odoo" or base == "odoo":
+                from control_plane.preview_sleep_evidence import collect_preview_sleep_observations
+                from control_plane.storage.postgres import PostgresRecordStore
+
+                sleep_observations = collect_preview_sleep_observations(
+                    store=cast(PostgresRecordStore, record_store),
+                    profile=profile,
+                    root=control_plane_root,
+                    host=host,
+                    token=token,
+                    inventory=inventory,
+                    prefix=effective_preview_app_name_prefix(profile=profile),
+                )
+            else:
+                sleep_observations = tuple(
+                    PreviewSleepObservation(
+                        slug=slug,
+                        state="cannot_sleep",
+                        reason="Idle sleep is not supported by this preview driver.",
+                    )
+                    for slug in slugs
+                )
         except FileNotFoundError:
             status, slugs = "unsupported", ()
             error_message = "Preview inventory is unsupported for this driver."
@@ -94,7 +119,6 @@ def collect_preview_inventory(
             # Do not persist provider response text or credential-bearing errors.
             status, slugs = "unavailable", ()
             error_message = "Provider inventory collection is unavailable."
-        scanned_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         scan = PreviewInventoryScanRecord(
             scan_id=build_preview_inventory_scan_id(
                 context_name=profile.preview.context, scanned_at=scanned_at
@@ -110,6 +134,7 @@ def collect_preview_inventory(
             preview_count=len(slugs),
             preview_slugs=slugs,
             error_message=error_message,
+            sleep_observations=sleep_observations,
         )
         record_store.write_preview_inventory_scan_record(scan)
         entries.append(

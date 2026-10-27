@@ -6,7 +6,10 @@ from typing import Literal
 from pydantic import BaseModel
 
 from control_plane.contracts.data_provenance import DataProvenance
-from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_inventory_scan_record import (
+    PreviewInventoryScanRecord,
+    PreviewSleepObservation,
+)
 
 PREVIEW_INVENTORY_STALE_AFTER = timedelta(minutes=30)
 PREVIEW_INVENTORY_SCAN_READ_LIMIT = 100
@@ -16,6 +19,7 @@ class PreviewInventoryEvidence(BaseModel):
     status: Literal["empty", "nonempty", "failed", "stale", "unsupported", "unavailable", "missing"]
     observed_count: int | None = None
     observed_slugs: tuple[str, ...] = ()
+    sleep_observations: tuple[PreviewSleepObservation, ...] = ()
     provenance: DataProvenance
 
 
@@ -82,6 +86,7 @@ def inventory_scan_evidence(scan: PreviewInventoryScanRecord) -> PreviewInventor
         status=status,
         observed_count=scan.preview_count if scan.status == "pass" and not scan.truncated else None,
         observed_slugs=scan.preview_slugs if scan.status == "pass" and not scan.truncated else (),
+        sleep_observations=scan.sleep_observations if fresh else (),
         provenance=DataProvenance(
             source_kind="record",
             source_record_id=scan.scan_id,
