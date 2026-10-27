@@ -328,7 +328,13 @@ class RehearsalTimingTests(unittest.TestCase):
             verifier.publish(current, verification)
         history = business_validation_history(current.model_dump(mode="json"))
         verification["copies"][-1]["business_validation_sha256"] = canonical_json_sha256(history)
-        self.assertEqual(verifier.publish(current, verification)["state"], "verified")
+        with self.assertRaises(RehearsalRefused):
+            verifier.publish(current, verification)
+        validated = rehearsal_tests.with_passing_business_validation(current)
+        self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(current, validated)
+        history = business_validation_history(validated.model_dump(mode="json"))
+        verification["copies"][-1]["business_validation_sha256"] = canonical_json_sha256(history)
+        self.assertEqual(verifier.publish(validated, verification)["state"], "verified")
 
 
 class HostTimingTests(unittest.TestCase):
