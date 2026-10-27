@@ -699,6 +699,14 @@ fingerprint survive navigation/reload; a pre-dispatch failure or explicit client
 refusal remains definitive. A retry that began uncertain still requires evidence
 that the original operation settled before its identity can be discarded.
 
+Unreadable API responses show a plain-language failure and HTTP status instead
+of browser JSON parser text or the response body. This includes a gateway page
+during a service restart and a failed session refresh before dispatch. A fresh
+route-record review can be requested after the service recovers. An unreadable
+apply response is never proof of a refusal or completion, even with a 2xx or 4xx
+status; original-request recovery retains its key. Structured service errors
+still show their specific reason and trace.
+
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing
 only profile-declared input requests. It exposes no existing values or admin

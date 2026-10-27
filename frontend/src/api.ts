@@ -135,6 +135,25 @@ export class LaunchplaneApiError extends Error {
   }
 }
 
+export class LaunchplaneResponseError extends Error {
+  code = "unreadable_response";
+  traceId = "";
+  statusCode: number;
+
+  constructor(statusCode: number) {
+    const reason = statusCode >= 500
+      ? "Launchplane is temporarily unavailable"
+      : "Launchplane returned an unreadable response";
+    super(`${reason} (HTTP ${statusCode}).`);
+    this.name = "LaunchplaneResponseError";
+    this.statusCode = statusCode;
+  }
+}
+
+export function isLaunchplaneHttpError(error: unknown): error is LaunchplaneApiError | LaunchplaneResponseError {
+  return error instanceof LaunchplaneApiError || error instanceof LaunchplaneResponseError;
+}
+
 let browserMutationQueue: Promise<void> = Promise.resolve();
 const sessionExpiryListeners = new Set<() => void>();
 
@@ -212,7 +231,16 @@ async function performJsonRequest<T>(
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
   });
-  const payload = (await response.json()) as T | ApiErrorPayload;
+  let payload: T | ApiErrorPayload;
+  try {
+    payload = await response.json() as T | ApiErrorPayload;
+  } catch (error) {
+    if (signal?.aborted || error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new LaunchplaneResponseError(response.status);
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new LaunchplaneResponseError(response.status);
+  }
   if (!response.ok) {
     const errorPayload = payload as ApiErrorPayload;
     const errorMessage =
