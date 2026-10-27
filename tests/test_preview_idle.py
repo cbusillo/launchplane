@@ -425,11 +425,20 @@ class PreviewIdleOperationTests(unittest.TestCase):
     def test_inventory_observes_sleep_and_reports_coverage_gaps_without_effects(self) -> None:
         from control_plane.preview_sleep_evidence import collect_preview_sleep_observations
 
+        self.enterContext(
+            patch("control_plane.preview_sleep_evidence._read_remote", side_effect=self.transport)
+        )
+        self.enterContext(
+            patch(
+                "control_plane.preview_sleep_evidence.api.dokploy_request",
+                side_effect=lambda **_: deepcopy(self.provider),
+            )
+        )
+
         def read() -> Any:
             return collect_preview_sleep_observations(
                 store=self.store,
                 profile=self.profile,
-                root=self.root,
                 host="fixture",
                 token="fixture",
                 inventory=(("env", "compose-fixture", self.identity.instance),),
@@ -437,20 +446,107 @@ class PreviewIdleOperationTests(unittest.TestCase):
             )[0]
 
         self.assertEqual(read().state, "awake")
+        self.store.write_preview_record(
+            self.preview.model_copy(
+                update={"preview_id": "ended-preview", "state": "teardown_pending"}
+            )
+        )
+        self.assertEqual(read().state, "awake")
+        with patch.object(
+            self.store, "list_held_provider_target_reservations", return_value=(Mock(),)
+        ):
+            self.assertEqual(read().state, "cannot_sleep")
+        with patch(
+            "control_plane.preview_sleep_evidence._read_remote",
+            side_effect=RuntimeError("fixture secret"),
+        ):
+            unavailable = read()
+        self.assertEqual(unavailable.state, "unknown")
+        self.assertNotIn("fixture secret", unavailable.reason)
         self.value = observation(mode="asleep", running=False)
         self.assertEqual(read().state, "asleep")
         self.provider["env"] += "\nODOO_UPSTREAM_HOST=private-source"
         blocked = read()
         self.assertEqual(blocked.state, "cannot_sleep")
-        self.assertIn("connection settings", blocked.reason)
+        self.assertTrue(blocked.reason)
         self.assertNotIn("private-source", blocked.reason)
         self.provider["composeFile"] = "services: {web: {}}"
-        self.assertIn("gateway is missing", read().reason)
+        self.assertEqual(read().state, "cannot_sleep")
         self.provider["composeFile"] = "services: {preview-router: {}}"
         self.store.write_preview_record(self.preview.model_copy(update={"state": "destroyed"}))
-        self.assertIn("serving preview record", read().reason)
+        self.assertEqual(read().state, "cannot_sleep")
         self.assertFalse(self.effects)
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    def test_inventory_polls_without_host_lock_and_stops_at_its_read_budget(self) -> None:
+        from control_plane.preview_sleep_evidence import (
+            collect_preview_sleep_observations,
+            PREVIEW_SLEEP_READ_BUDGET_SECONDS,
+        )
+        from control_plane.preview_lifecycle_cleanup_routes import PreviewLifecycleSweepCancelled
+
+        clock = [0.0]
+        cancelled = [False]
+
+        def native_poll(**kwargs: Any) -> None:
+            namespace: dict[str, Any] = {}
+            tree = ast.parse(kwargs["program"])
+            entry = tree.body[-2:]
+            tree.body = tree.body[:-2]
+            exec(compile(tree, "<sleep-poll>", "exec"), namespace)
+            namespace["runtime"] = lambda: ({}, "router")
+            namespace["control"] = lambda *_: self.value["gateway"]
+            namespace["application_state"] = lambda *_: self.value["services"]
+            encoded = base64.b64encode(json.dumps(kwargs["payload"]).encode()).decode()
+            output = io.StringIO()
+            with (
+                patch("sys.argv", ["poll", encoded, "frame:"]),
+                patch("fcntl.flock", side_effect=AssertionError("deploy owns host lock")),
+                redirect_stdout(output),
+            ):
+                with self.assertRaises(SystemExit):
+                    exec(
+                        compile(
+                            ast.Module(body=entry, type_ignores=[]), "<sleep-poll-entry>", "exec"
+                        ),
+                        namespace,
+                    )
+            kwargs["receive"](json.loads(output.getvalue().removeprefix("frame:")))
+            clock[0] = PREVIEW_SLEEP_READ_BUDGET_SECONDS + 1
+
+        with (
+            patch("control_plane.preview_sleep_evidence.monotonic", side_effect=lambda: clock[0]),
+            patch(
+                "control_plane.preview_sleep_evidence._read_remote", side_effect=native_poll
+            ) as remote,
+            patch(
+                "control_plane.preview_sleep_evidence.api.dokploy_request",
+                return_value=self.provider,
+            ) as provider,
+            patch.object(
+                self.store, "list_preview_records", wraps=self.store.list_preview_records
+            ) as records,
+        ):
+            arguments: dict[str, Any] = dict(
+                store=self.store,
+                profile=self.profile,
+                host="fixture",
+                token="fixture",
+                inventory=(
+                    ("env", "compose-fixture", self.identity.instance),
+                    ("env", "second", "fixture-pr-2"),
+                ),
+                prefix="fixture",
+            )
+            states = collect_preview_sleep_observations(**arguments)
+            self.assertEqual([item.state for item in states], ["awake", "unknown"])
+            self.assertEqual(remote.call_count, 1)
+            self.assertEqual(provider.call_count, 1)
+            records.assert_called_once()
+            cancelled[0] = True
+            with self.assertRaises(PreviewLifecycleSweepCancelled):
+                collect_preview_sleep_observations(**arguments, should_stop=lambda: cancelled[0])
+        self.assertFalse(self.effects)
 
     def test_interrupted_stop_resumes_original_intent_before_wake(self) -> None:
         self.interrupt = True

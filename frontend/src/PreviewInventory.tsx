@@ -55,7 +55,8 @@ export function PreviewInventory({ product, refreshToken }: { product: ProductSi
           && (inventory.status === "empty" || inventory.status === "nonempty");
         return <li key={slug}><strong>{slug}</strong>: {fresh && observation?.state === "asleep" ? "Asleep"
           : fresh && observation?.state === "awake" ? "Awake"
-          : `Cannot sleep: ${fresh && observation?.reason ? observation.reason : "sleep eligibility needs a fresh observation."}`}</li>;
+          : fresh && observation?.state === "cannot_sleep" ? `Cannot sleep: ${observation.reason}`
+          : `Sleep status unknown: ${fresh && observation?.reason ? observation.reason : "a fresh observation is needed."}`}</li>;
       })}</ul>
     </section> : null}
     <p>Identity and lifecycle records do not prove current provider presence. Select a change to read its history.</p>

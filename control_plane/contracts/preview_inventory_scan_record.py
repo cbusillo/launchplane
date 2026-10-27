@@ -22,7 +22,7 @@ class PreviewSleepObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     slug: str
-    state: Literal["awake", "asleep", "cannot_sleep"]
+    state: Literal["awake", "asleep", "cannot_sleep", "unknown"]
     reason: str = ""
 
 

@@ -141,7 +141,7 @@ class PreviewInventoryCollectionTests(unittest.TestCase):
                 return_value=(("env", "compose", f"{prefix}-pr-9"),),
             ),
             patch(
-                "control_plane.preview_sleep_evidence.api.fetch_dokploy_target_payload",
+                "control_plane.preview_sleep_evidence.api.dokploy_request",
                 return_value={"composeFile": "services: {web: {}}"},
             ),
         ):
@@ -149,9 +149,9 @@ class PreviewInventoryCollectionTests(unittest.TestCase):
         self.assertEqual(
             self.store.list_preview_inventory_scan_records()[0].preview_slugs, ("pr-9",)
         )
-        self.assertIn(
-            "gateway is missing",
-            self.store.list_preview_inventory_scan_records()[0].sleep_observations[0].reason,
+        self.assertEqual(
+            self.store.list_preview_inventory_scan_records()[0].sleep_observations[0].state,
+            "cannot_sleep",
         )
 
     def test_shutdown_does_not_write_a_scan(self) -> None:

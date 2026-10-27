@@ -15,16 +15,20 @@ SSH settings still refuse sleep. Native inspection continues to require exclusiv
 volumes, private application resources and no credential bind mounts.
 
 Product Ops shows each provider-observed preview's last sleep observation from
-the existing inventory collector: awake, asleep, or cannot sleep with a reason.
+the existing inventory collector: awake, asleep, cannot sleep with a reason,
+or unknown when observation is unavailable.
 The collector includes previews without a successful lifecycle record and
 drivers without idle support. It reads gateway status without visiting the
-application or requesting a wake. Native inspection failures are recorded as
-unverified sleep eligibility with no provider exception text. Missing or expired
-evidence cannot establish awake or asleep. Individual observations require the
+application or requesting a wake. The lock-free poll never takes the host's
+preview operation lock. Provider reads and polls use bounded timeouts and an
+aggregate per-product budget, with shutdown checked between previews. Read
+failures and exhausted budgets report unknown without provider exception text.
+Missing or expired evidence cannot establish a sleep state. Individual observations require the
 same `preview.read` authorization as individual preview identities.
 
 Older Odoo previews acquire the gateway on their next ordinary, identity-bound
-rebuild that preserves their data. A first upstream restore still needs its
+rebuild that preserves their data. Retained upstream settings still prevent
+sleep and are shown as a source-connection reason even with a gateway. A first upstream restore still needs its
 dedicated source mount and cannot use that gateway. No inventory scan retrofits
 or replaces an existing preview. People using a preview and unique working-copy
 custody remain protected; obtain their or the Director's word before a rebuild

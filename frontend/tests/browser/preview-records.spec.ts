@@ -83,7 +83,7 @@ async function setup(page: Page) {
     delay: () => { delayFirst = true; }, release: () => release?.(), delayed: () => Boolean(release) };
 }
 
-test("provider previews expose sleep gaps and discard expired sleep evidence", async ({ page }) => {
+test("provider previews expose sleep gaps and discard expired sleep evidence", { tag: "@layout" }, async ({ page }, testInfo) => {
   const fixture = await setup(page);
   const now = new Date(await page.evaluate(() => Date.now()));
   fixture.product.preview.trust_state = "verified";
@@ -103,6 +103,8 @@ test("provider previews expose sleep gaps and discard expired sleep evidence", a
   await expect(sleep.getByRole("listitem").filter({ hasText: "pr-45" })).toContainText("Asleep");
   await expect(sleep.getByRole("listitem").filter({ hasText: "pr-99" })).toContainText("Cannot sleep:");
   await expect(sleep).toContainText(fixture.product.preview.inventory.sleep_observations![2].reason);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await sleep.screenshot({ path: smokeArtifact(`preview-sleep-${testInfo.project.name}.png`) });
   await page.clock.fastForward(60_001);
   await expect(sleep).not.toContainText("Asleep");
   await expect(sleep).not.toContainText("Awake");

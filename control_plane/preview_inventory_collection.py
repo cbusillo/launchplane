@@ -94,11 +94,11 @@ def collect_preview_inventory(
                 sleep_observations = collect_preview_sleep_observations(
                     store=cast(PostgresRecordStore, record_store),
                     profile=profile,
-                    root=control_plane_root,
                     host=host,
                     token=token,
                     inventory=inventory,
                     prefix=effective_preview_app_name_prefix(profile=profile),
+                    should_stop=should_stop,
                 )
             else:
                 sleep_observations = tuple(
@@ -109,6 +109,8 @@ def collect_preview_inventory(
                     )
                     for slug in slugs
                 )
+        except PreviewLifecycleSweepCancelled:
+            raise
         except FileNotFoundError:
             status, slugs = "unsupported", ()
             error_message = "Preview inventory is unsupported for this driver."
