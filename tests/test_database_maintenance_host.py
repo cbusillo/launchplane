@@ -9,6 +9,8 @@ import threading
 import time
 from typing import Any
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from control_plane import database_maintenance_host as host
@@ -57,6 +59,205 @@ def state_file(root: Path, **changes: Any) -> Path:
 
 
 class DatabaseMaintenanceHostTests(unittest.TestCase):
+    def test_only_api_thaws_for_a_fresh_http_probe_then_refreezes_before_socket_and_fence_cleanup(
+        self,
+    ) -> None:
+        requests = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                requests.append(self.path)
+                self.send_response(200 if self.path == "/v1/health" else 404)
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok"}).encode())
+
+            def log_message(self, _format: str, *args: Any) -> None:
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = state_file(root, revision="verified")
+            state = json.loads(path.read_text())
+            phase = {
+                "phase_id": "a" * 32,
+                "table": "lpmaint_" + "a" * 32,
+                "namespace": "synthetic",
+                "active": True,
+                "health_passed": False,
+            }
+            frozen = {identifier: True for identifier in state["containers"]}
+            changes = []
+            actions = []
+            fenced = False
+
+            def freeze(original: dict[str, Any], wanted: bool) -> None:
+                identifier = next(
+                    key
+                    for key, value in state["originals"].items()
+                    if value["pid"] == original["pid"]
+                )
+                changes.append((identifier, wanted))
+                frozen[identifier] = wanted
+                actions.append("freeze" if wanted else "thaw")
+
+            def read(original: dict[str, Any]) -> tuple[str, str]:
+                identifier = next(
+                    key
+                    for key, value in state["originals"].items()
+                    if value["pid"] == original["pid"]
+                )
+                return ("1", "1") if frozen[identifier] else ("0", "0")
+
+            def network(_state: dict[str, Any], *arguments: str, **_values: Any) -> str:
+                nonlocal fenced
+                if arguments[:3] == ("nft", "-f", "-"):
+                    fenced = True
+                    actions.append("fence")
+                    return ""
+                if arguments == ("ss", "-Hlx"):
+                    return ""
+                if arguments == ("ss", "-Knt", "state", "connected"):
+                    self.assertTrue(frozen[state["api"]])
+                    actions.append("destroy")
+                    return ""
+                if arguments == ("ss", "-Hnt", "state", "connected"):
+                    return ""
+                if arguments[:3] == ("nft", "delete", "table"):
+                    self.assertTrue(frozen[state["api"]])
+                    actions.append("unfence")
+                    fenced = False
+                    return ""
+                if arguments == ("nft", "-j", "list", "tables"):
+                    return json.dumps(
+                        {"nftables": [{"table": {"name": phase["table"]}}] if fenced else []}
+                    )
+                if arguments[:4] == ("nft", "-j", "list", "table"):
+                    if not fenced:
+                        raise AssertionError("The actual API probe requires its network fence")
+                    entries = []
+                    for name in ("output", "postrouting"):
+                        entries.extend(
+                            [
+                                {
+                                    "chain": {
+                                        "name": name,
+                                        "hook": name,
+                                        "type": "filter",
+                                        "prio": host.API_EGRESS_PRIORITY,
+                                    }
+                                },
+                                {
+                                    "rule": {
+                                        "chain": name,
+                                        "expr": [
+                                            {
+                                                "match": {
+                                                    "op": "!=",
+                                                    "left": {"meta": {"key": "oifname"}},
+                                                    "right": "lo",
+                                                }
+                                            },
+                                            {"counter": {"packets": 1}},
+                                            {"drop": None},
+                                        ],
+                                    }
+                                },
+                            ]
+                        )
+                    return json.dumps({"nftables": entries})
+                raise AssertionError("Unexpected namespace operation")
+
+            process = Mock(returncode=0)
+            process.poll.return_value = 0
+
+            def start(command: list[str]) -> Mock:
+                self.assertTrue(fenced)
+                self.assertFalse(frozen[state["api"]])
+                self.assertTrue(frozen["own-train"])
+                exec(compile(command[-1], "<actual-health-program>", "exec"), {})
+                return process
+
+            def require_cpu(_state: dict[str, Any], *, api_thawed: bool) -> None:
+                self.assertEqual(frozen[state["api"]], not api_thawed)
+                self.assertTrue(frozen["own-train"])
+
+            with (
+                patch.object(host, "qualify_api_namespace", return_value=phase),
+                patch.object(host, "api_namespace_command", side_effect=network),
+                patch.object(
+                    host,
+                    "inspect_container",
+                    return_value={
+                        "State": {
+                            "Running": True,
+                            "Pid": state["originals"][state["api"]]["pid"],
+                            "StartedAt": state["originals"][state["api"]]["started_at"],
+                        }
+                    },
+                ),
+                patch.object(host, "set_freezer", side_effect=freeze),
+                patch.object(host, "read_freezer", side_effect=read),
+                patch.object(host, "require_no_api_database_clients"),
+                patch.object(host, "require_verification_cpu_hold", side_effect=require_cpu),
+                patch.object(host, "install_watchdog"),
+                patch.object(host, "remove_watchdog"),
+                patch.object(host, "start_process", side_effect=start),
+                patch.object(host, "run", return_value=""),
+                patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_PORT": str(server.server_address[1])}),
+            ):
+                host.verify_api_health(path)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(changes, [(state["api"], False), (state["api"], True)])
+            self.assertLess(actions.index("freeze"), actions.index("destroy"))
+            self.assertLess(actions.index("destroy"), actions.index("unfence"))
+            self.assertTrue(
+                json.loads((root / "verification-complete.json").read_text())["health_passed"]
+            )
+
+    def test_pending_health_cleanup_precedes_keeper_termination_and_missing_health_blocks_resume(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = state_file(root, verification_phase={"phase_id": "own", "active": True})
+            (root / "commit-pending.json").write_text("{}")
+            events = []
+            with (
+                patch.object(
+                    host,
+                    "cleanup_api_probe",
+                    side_effect=lambda _state: events.append("cleanup"),
+                    create=True,
+                ),
+                patch.object(
+                    host, "terminate_keeper", side_effect=lambda _state: events.append("terminate")
+                ),
+                patch.object(host, "original_containers", return_value=[]),
+                patch.object(host, "operator", return_value={"revision": "verified"}),
+                patch.object(host, "resume_original") as resume,
+                patch.object(host, "remove_watchdog"),
+            ):
+                with self.assertRaises(host.RecoveryRequired):
+                    host.release(path)
+                resume.assert_not_called()
+            self.assertEqual(events[:2], ["cleanup", "terminate"])
+
+    def test_a_late_health_timer_cannot_touch_an_inactive_or_different_phase(self) -> None:
+        with TemporaryDirectory() as temporary:
+            state = json.loads(state_file(Path(temporary)).read_text())
+            for phase in (
+                {"phase_id": "old", "active": False},
+                {"phase_id": "new", "active": True},
+            ):
+                state["verification_phase"] = phase
+                with patch.object(host, "run") as run:
+                    host.cleanup_api_probe(state, phase_id="old")
+                    run.assert_not_called()
+
     def test_source_terminal_result_reaches_the_watchdog_without_an_exception_heuristic(
         self,
     ) -> None:
@@ -256,7 +457,11 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 patch.object(
                     host, "resume_original", side_effect=lambda identifier, _state: identifier
                 ),
-                patch.object(host, "operator", return_value={"revision": "verified-revision"}),
+                patch.object(
+                    host,
+                    "operator",
+                    return_value={"revision": "verified-revision", "outcome": "before"},
+                ),
             ):
                 host.release(path)
             state = json.loads(path.read_text())
@@ -292,6 +497,7 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 patch.object(host, "terminate_keeper"),
                 patch.object(host, "operator_container", return_value=None),
                 patch.object(host, "remove_watchdog"),
+                patch.object(host, "require_database_cluster"),
                 patch.object(
                     host,
                     "operator",
@@ -309,6 +515,26 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 host.release(path)
             self.assertCountEqual(resumed, ["own-api", "own-train"])
             self.assertTrue(json.loads(path.read_text())["released"])
+
+    def test_changed_live_cluster_cannot_reuse_a_sticky_resume_proof(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            safe = {
+                "hold_id": "synthetic",
+                "system_identifier": "own-cluster",
+                "image_id": "synthetic-image",
+                "revision": "verified",
+            }
+            path = state_file(root, safe_to_resume=safe, revision=safe["revision"])
+            (root / "commit-pending.json").write_text("{}")
+            with (
+                patch.object(host, "terminate_keeper"),
+                patch.object(host, "read_database", return_value="another-cluster"),
+                patch.object(host, "resume_original") as resume,
+            ):
+                with self.assertRaises(host.RecoveryRequired):
+                    host.release(path)
+                resume.assert_not_called()
 
     def test_release_settles_a_started_original_after_crash_before_progress_save(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -355,6 +581,7 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 patch.object(host, "terminate_keeper"),
                 patch.object(host, "operator_container", return_value=None),
                 patch.object(host, "remove_watchdog"),
+                patch.object(host, "require_database_cluster"),
                 patch.object(host, "run", side_effect=run),
                 patch.object(
                     host, "inspect_container", side_effect=lambda identifier: containers[identifier]

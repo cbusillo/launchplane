@@ -5659,7 +5659,9 @@ credentials, grants and product resources are excluded.
 On the documented Launchplane host, copy only the reviewed image's
 `control_plane/database_maintenance_host.py` into a private directory. The
 standalone driver needs Python 3.11+, root's existing Docker/systemd access and
-a dedicated cgroup-v2 freezer for every original writer container:
+a dedicated cgroup-v2 freezer for every original writer container. The same
+host must already support `nsenter`, `nft` and `ss` for the API's dedicated
+network namespace; qualification adds no packages or capability grants:
 
 ```bash
 python3 database_maintenance_host.py plan --api-container API_CONTAINER \
@@ -5677,6 +5679,11 @@ is read-only, temporary storage is RAM-backed, and its only host mount is privat
 maintenance state. The credential-free browser may remain running. Every own
 writer must match the image; an outside same-source container with the same DB
 credential, even dormant, refuses qualification. Unknown identities refuse.
+The plan also reads the API's network namespace, connection transport, mounts,
+capability bounds and namespace peers. Host/shared namespaces, local database
+transport overrides, local proxies, Unix listeners, bind/socket mounts and an
+API able to change network policy refuse the controlled-health qualification.
+Other containers supply only PID metadata for this namespace census.
 
 Before any freeze, `hold` installs and reads back a persistent systemd calendar
 timer/service, records every original restart policy, and suppresses automatic
@@ -5705,8 +5712,10 @@ checks physical state and unexpected containers throughout the window.
 After freeze and **before disconnecting any backend**, the keeper uses existing
 exact executor-exit receipts and execution-lock observations. These preserve
 historical running/UNKNOWN provider fences unchanged; an expired lease alone
-never proves an executor absent. Additional active own-worker catalogs refuse
-admission, and the train must be idle or in its qualified pre-effect selection
+never proves an executor absent. Every additional running idempotency reservation
+also refuses unless that exact record has an existing executor-exclusion proof;
+expiry alone is insufficient. Historical reconcile-required fences are preserved.
+Additional active own-worker catalogs refuse admission, and the train must be idle or in its qualified pre-effect selection
 phase. Qualify every permitted worker's lost-pool/lease-expiry resume before use.
 Remote work is not declared settled because its CPU froze.
 
@@ -5778,8 +5787,10 @@ python3 database_maintenance_host.py submit --state STATE_JSON --receipt-file RE
 
 Rehearsal compares the actual restore with every source aggregate, applies only
 the prepared revision, and proves the exact retired table/function set,
-retained data, compatibility and full schema invariants. The receipt binds the
-same hold/snapshot/transaction and actual dump hash. The private FIFO submits it;
+retained data, compatibility and full schema invariants. Non-serving readonly
+startup, retained-history, train and expiry callbacks must also pass on the
+restored clone without changing credentials; no application service runs there.
+The receipt binds the same hold/snapshot/transaction and actual dump hash. The private FIFO submits it;
 terminal input is monitored only for EOF. The live transaction repeats the
 checks, including full invariants on its held Connection before COMMIT.
 
@@ -5796,12 +5807,55 @@ held. It emits `recovery_required`; there is no automatic restore or drop retry.
 Preserve the failed state and bring the Director a separate exact full-restore
 decision, since later writes could otherwise be lost.
 
-On a passing verifier, release fsyncs a resume proof bound to hold, cluster,
-revision and image **before** thaw/start or policy restoration. It resumes exact
-original IDs, checks running/health and restores their original policies. A
-partial resume records progress; subsequent cleanup retries reuse the safe
-proof because legitimate resumed writes may have changed rows. They never
-refreeze healthy services or demand the old full hashes again. A crash after
+Before reopening writers, the matching image runs its actual non-serving
+privileged-worker startup/schema probe, retained-history and train readers,
+and existing expiry callback against the committed live database. A generated
+in-memory URL adds enforced transaction read-only options to both actual store
+engines; no credential is printed or copied. Expiry must return success and
+zero changes. If a credential would expire, readonly enforcement refuses its
+write and verification fails. An earlier empty count is not expiry proof.
+
+The original API then gets a bounded health-only thaw with all other writer
+CPUs still frozen and deployments held. Before thaw, the driver proves zero
+other DB clients and atomically installs its own UUID-named nftables table in
+that exact API namespace. `inet` OUTPUT and POSTROUTING hooks drop every
+non-loopback IPv4/IPv6 packet; exact hook/rule readback and continuous checks
+hold through the phase. A second persistent, phase-bound timer performs cleanup
+independently at the short health deadline. It consumes the existing root
+capabilities; the API itself cannot alter the fence.
+
+Only the API CPU thaws. A fresh actual loopback HTTP GET to `/v1/health` must
+return HTTP 200 and the service's success payload. An unauthenticated TCP probe
+to its in-place database endpoint must fail, with a kernel packet drop observed.
+No database credential is transmitted by that probe. Before removing its own
+network table, the driver physically refreezes the API, destroys connected TCP
+sockets while preserving listeners, requires only inert TIME-WAIT sockets and
+zero DB clients, then verifies fence removal while the API remains frozen.
+Buffered requests cannot escape during final resume. Health completion is saved
+only after these readbacks. Both the normal release and deadline watchdog do
+this refreeze/socket-settlement/owned-unfence cleanup before terminating a keeper.
+
+Cleanup holds the same private state lock through native transitions. Phase ID
+and active intent bind timer actions; deactivation and loaded-unit cleanup
+precede final CPU resume, so a late timer cannot freeze a released API. No SQL
+session's death can remove the API's network fence. Unqualified namespace loss
+or native effects remain UNKNOWN; there is no broad firewall flush or blind
+replacement of another phase's rules.
+
+An after-state requires the completed runtime and health receipt before release
+fsyncs its resume proof bound to hold, cluster, revision and image. A proved
+before-state abort can reopen unchanged. A running frozen original can repeat
+missing verification through `database_maintenance_host.py verify --state STATE_JSON`.
+If the API is stopped after reboot and the after-state lacks health proof, the
+driver cannot start it with full network before a namespace fence exists. It
+keeps writers stopped and reports recovery required; bring the Director the
+concrete missing recovery action. No new container, credential or database
+configuration is substituted to bypass that boundary.
+
+Release resumes exact original IDs, checks running/health and restores their
+original policies. A partial resume records progress; subsequent cleanup retries
+reuse the safe proof because legitimate resumed writes may have changed rows.
+They never refreeze healthy services or demand the old full hashes again. A crash after
 starting a stopped original, before progress is recorded, may leave its same
 container ID/image/project running with a newer PID. Only the already bound safe
 proof and persisted resume-start intent allow fresh thawed-cgroup qualification

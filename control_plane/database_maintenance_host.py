@@ -8,6 +8,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import select
 import shlex
@@ -18,10 +19,13 @@ import sys
 import time
 from typing import Any, cast
 from uuid import uuid4
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 
 RECOVERY_REQUIRED_EXIT = 75
+HEALTH_PROBE_SECONDS = 30
+HEALTH_REFREEZE_SECONDS = 45
+API_EGRESS_PRIORITY = 300
 
 
 class RecoveryRequired(RuntimeError):
@@ -534,17 +538,18 @@ def terminate_keeper(state: dict[str, Any]) -> None:
         raise RuntimeError("The exact keeper backend has not released its transaction.")
 
 
-def install_watchdog(state_path: Path, state: dict[str, Any]) -> None:
-    unit = "lp-maint-" + state["hold_id"]
+def install_watchdog(state_path: Path, state: dict[str, Any], *, health: bool = False) -> None:
+    unit = "lp-maint-" + state["hold_id"] + ("-health" if health else "")
     root = Path("/etc/systemd/system")
     command = shlex.join(
         [
             sys.executable,
             str(state_path.parent / "driver.py"),
-            "release",
+            "refreeze" if health else "release",
             "--state",
             str(state_path),
         ]
+        + (["--phase-id", state["verification_phase"]["phase_id"]] if health else [])
     )
     (root / (unit + ".service")).write_text(
         "[Unit]\nDescription=Launchplane maintenance recovery\nAfter=docker.service\n"
@@ -553,7 +558,9 @@ def install_watchdog(state_path: Path, state: dict[str, Any]) -> None:
         + f"\nRestart=on-failure\nRestartPreventExitStatus={RECOVERY_REQUIRED_EXIT}\nRestartSec=15s\nTimeoutStartSec=900s\n"
     )
     deadline = (
-        datetime.fromisoformat(state["expires_at"])
+        datetime.fromisoformat(
+            state["verification_phase"]["deadline"] if health else state["expires_at"]
+        )
         .astimezone(timezone.utc)
         .strftime("%Y-%m-%d %H:%M:%S UTC")
     )
@@ -579,20 +586,21 @@ def install_watchdog(state_path: Path, state: dict[str, Any]) -> None:
         raise RuntimeError("The durable recovery watchdog was not read back.")
 
 
-def remove_watchdog(state: dict[str, Any]) -> None:
-    if state.get("watchdog_removed"):
+def remove_watchdog(state: dict[str, Any], *, health: bool = False) -> None:
+    progress = state["verification_phase"] if health else state
+    if progress.get("watchdog_removed"):
         return
-    unit = "lp-maint-" + state["hold_id"]
+    unit = "lp-maint-" + state["hold_id"] + ("-health" if health else "")
     state_path = Path(state["job_directory"]) / "state.json"
-    if not state.get("watchdog_disabled"):
+    if not progress.get("watchdog_disabled"):
         run("systemctl", "disable", "--now", unit + ".timer")
         if "ActiveState=active" in run(
             "systemctl", "show", unit + ".timer", "--property=ActiveState"
         ):
             raise RuntimeError("The recovery watchdog remains active after release.")
-        state["watchdog_disabled"] = True
+        progress["watchdog_disabled"] = True
         save(state_path, state)
-    if not state.get("watchdog_service_settled"):
+    if not progress.get("watchdog_service_settled"):
         service = dict(
             line.split("=", 1)
             for line in run(
@@ -608,14 +616,400 @@ def remove_watchdog(state: dict[str, Any]) -> None:
             if service["ActiveState"] == "failed":
                 run("systemctl", "reset-failed", unit + ".service")
             run("systemctl", "stop", unit + ".service")
-        state["watchdog_service_settled"] = True
+        progress["watchdog_service_settled"] = True
         save(state_path, state)
     for suffix in (".timer", ".service"):
         (Path("/etc/systemd/system") / (unit + suffix)).unlink(missing_ok=True)
     sync_path(Path("/etc/systemd/system"))
     run("systemctl", "daemon-reload")
-    state["watchdog_removed"] = True
+    progress["watchdog_removed"] = True
     save(state_path, state)
+
+
+def api_namespace_command(
+    state: dict[str, Any], *arguments: str, input_text: str | None = None
+) -> str:
+    phase = state["verification_phase"]
+    path = Path(f"/proc/{state['originals'][state['api']]['pid']}/ns/net")
+    if os.readlink(path) != phase["namespace"]:
+        raise RecoveryRequired("The API network namespace changed during verification.")
+    return run("nsenter", "--net=" + str(path), *arguments, input_text=input_text, timeout=10)
+
+
+def read_database(state: dict[str, Any], query: str) -> str:
+    return run(
+        "docker",
+        "exec",
+        "--env",
+        "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=5000",
+        "-i",
+        state["postgres"],
+        "sh",
+        "-c",
+        'exec psql -X -At -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"',
+        "census",
+        state["database"],
+        input_text=query,
+        timeout=10,
+    ).strip()
+
+
+def require_no_api_database_clients(state: dict[str, Any]) -> None:
+    if (
+        read_database(
+            state,
+            "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND backend_type='client backend' AND pid<>pg_backend_pid();\n",
+        )
+        != "0"
+    ):
+        raise RecoveryRequired("Another database client exists during the physical API fence.")
+
+
+def require_database_cluster(state: dict[str, Any]) -> None:
+    if (
+        read_database(state, "SELECT system_identifier FROM pg_control_system();\n")
+        != state["system_identifier"]
+    ):
+        raise RecoveryRequired("The durable resume proof belongs to another live database cluster.")
+
+
+def require_verification_cpu_hold(state: dict[str, Any], *, api_thawed: bool) -> None:
+    for observed in original_containers(state):
+        identifier = observed["Id"]
+        original = state["originals"][identifier]
+        if (
+            observed["Image"] != state["image_id"]
+            or observed["HostConfig"]["RestartPolicy"]["Name"] != "no"
+        ):
+            raise RecoveryRequired(
+                "An original service lost its verification identity or restart hold."
+            )
+        if not observed["State"]["Running"]:
+            if identifier == state["api"]:
+                raise RecoveryRequired(
+                    "The stopped API has no qualified namespace for health verification."
+                )
+            continue
+        expected = ("0", "0") if identifier == state["api"] and api_thawed else ("1", "1")
+        if (
+            observed["State"]["Pid"] != original["pid"]
+            or observed["State"]["StartedAt"] != original["started_at"]
+            or read_freezer(original) != expected
+        ):
+            raise RecoveryRequired(
+                "An original process left its controlled verification CPU state."
+            )
+
+
+def qualify_api_namespace(state: dict[str, Any], *, frozen: bool = True) -> dict[str, Any]:
+    check_originals(state)
+    if frozen:
+        require_verification_cpu_hold(state, api_thawed=False)
+    observed = inspect_container(state["api"])
+    original = state["originals"][state["api"]]
+    if not observed["State"]["Running"] or observed["State"]["Pid"] != original["pid"]:
+        raise RecoveryRequired("The original API must remain running and frozen for verification.")
+    namespace = os.readlink(f"/proc/{original['pid']}/ns/net")
+    if (
+        namespace == os.readlink("/proc/self/ns/net")
+        or observed["HostConfig"]["NetworkMode"] == "host"
+    ):
+        raise RecoveryRequired("The API requires its own non-host network namespace.")
+    environment = dict(item.split("=", 1) for item in observed["Config"]["Env"] if "=" in item)
+    url = urlsplit(environment["LAUNCHPLANE_DATABASE_URL"])
+    if (
+        not url.hostname
+        or url.hostname == "localhost"
+        or {"host", "hostaddr", "service"} & parse_qs(url.query, keep_blank_values=True).keys()
+    ):
+        raise RecoveryRequired(
+            "The database connection has an unqualified local or service override."
+        )
+    try:
+        address = ipaddress.ip_address(url.hostname)
+    except ValueError:
+        address = None
+    if address is not None and (address.is_loopback or address.is_unspecified):
+        raise RecoveryRequired("The API database must use a non-loopback network connection.")
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        proxy = urlsplit(environment.get(key, ""))
+        if proxy.hostname in {"localhost", "127.0.0.1", "::1"} or environment.get(
+            key, ""
+        ).startswith("unix:"):
+            raise RecoveryRequired(
+                "A local API proxy transport is not qualified for the network fence."
+            )
+    status = dict(
+        line.split(":", 1)
+        for line in Path(f"/proc/{original['pid']}/status").read_text().splitlines()
+        if ":" in line
+    )
+    if int(status["CapBnd"].strip(), 16) & ((1 << 12) | (1 << 21)):
+        raise RecoveryRequired("The API can change its own network fence.")
+    if any(
+        "sock" in str(item.get("Destination", "")) or item.get("Type") == "bind"
+        for item in observed["Mounts"]
+    ):
+        raise RecoveryRequired(
+            "API bind/socket mounts are not qualified for the network-fenced probe."
+        )
+    for identifier in run("docker", "ps", "-q", "--no-trunc").split():
+        if identifier == state["api"]:
+            continue
+        peer_pid = int(run("docker", "inspect", "--format", "{{.State.Pid}}", identifier).strip())
+        if peer_pid > 0 and os.readlink(f"/proc/{peer_pid}/ns/net") == namespace:
+            raise RecoveryRequired("Another container shares the API network namespace.")
+    phase: dict[str, Any] = {
+        "phase_id": uuid4().hex,
+        "namespace": namespace,
+        "active": True,
+        "health_passed": False,
+    }
+    phase["table"] = "lpmaint_" + phase["phase_id"]
+    observed_state = {**state, "verification_phase": phase}
+    api_namespace_command(observed_state, "nft", "-j", "list", "tables")
+    if api_namespace_command(observed_state, "ss", "-Hlx").strip():
+        raise RecoveryRequired("An API Unix listener could bypass the network fence.")
+    return phase
+
+
+def require_api_egress_fence(state: dict[str, Any]) -> None:
+    phase = state["verification_phase"]
+    table = phase["table"]
+    if not re.fullmatch(r"lpmaint_[a-f0-9]{32}", table):
+        raise RecoveryRequired("The API fence does not have exact maintenance custody.")
+    document = json.loads(api_namespace_command(state, "nft", "-j", "list", "table", "inet", table))
+    chains = {
+        item["chain"]["name"]: item["chain"] for item in document["nftables"] if "chain" in item
+    }
+    if set(chains) != {"output", "postrouting"} or any(
+        chains[name].get("hook") != name
+        or chains[name].get("type") != "filter"
+        or chains[name].get("prio") != API_EGRESS_PRIORITY
+        for name in chains
+    ):
+        raise RecoveryRequired("The API fence hook readback disagrees.")
+    rules = [item["rule"] for item in document["nftables"] if "rule" in item]
+    for name in chains:
+        selected = [item for item in rules if item.get("chain") == name]
+        if len(selected) != 1:
+            raise RecoveryRequired("The API fence rule inventory disagrees.")
+        expressions = selected[0]["expr"]
+        if (
+            len(expressions) != 3
+            or expressions[0].get("match")
+            != {"op": "!=", "left": {"meta": {"key": "oifname"}}, "right": "lo"}
+            or "counter" not in expressions[1]
+            or expressions[2] != {"drop": None}
+        ):
+            raise RecoveryRequired("The API non-loopback drop is not verified.")
+
+
+def cleanup_api_probe(state: dict[str, Any], *, phase_id: str | None = None) -> None:
+    phase = state.get("verification_phase", {})
+    if not phase.get("active") or phase_id is not None and phase.get("phase_id") != phase_id:
+        return
+    observed = inspect_container(state["api"])
+    if observed["State"]["Running"]:
+        original = state["originals"][state["api"]]
+        if (
+            observed["State"]["Pid"] != original["pid"]
+            or observed["State"]["StartedAt"] != original["started_at"]
+        ):
+            raise RecoveryRequired("The API process changed before network-fence cleanup.")
+        set_freezer(original, True)
+        api_namespace_command(state, "ss", "-Knt", "state", "connected")
+        remaining = api_namespace_command(state, "ss", "-Hnt", "state", "connected").splitlines()
+        if any(line.split()[0] != "TIME-WAIT" for line in remaining):
+            raise RecoveryRequired("Buffered API TCP connections remain before network unfence.")
+        tables = json.loads(api_namespace_command(state, "nft", "-j", "list", "tables"))["nftables"]
+        if any(item.get("table", {}).get("name") == phase["table"] for item in tables):
+            require_api_egress_fence(state)
+            api_namespace_command(state, "nft", "delete", "table", "inet", phase["table"])
+        tables = json.loads(api_namespace_command(state, "nft", "-j", "list", "tables"))["nftables"]
+        if any(item.get("table", {}).get("name") == phase["table"] for item in tables):
+            raise RecoveryRequired("The owned API network fence remains after cleanup.")
+        if read_freezer(original) != ("1", "1"):
+            raise RecoveryRequired("The API left its physical hold during network unfence.")
+    require_no_api_database_clients(state)
+    phase["active"] = False
+    phase["cleaned"] = True
+    save(Path(state["job_directory"]) / "state.json", state)
+
+
+def verify_api_health(state_path: Path) -> None:
+    with locked_state(state_path) as state:
+        receipt_path = state_path.parent / "verification-complete.json"
+        if receipt_path.exists():
+            receipt = json.loads(receipt_path.read_text())
+            if all(
+                receipt.get(key) == state[key]
+                for key in ("hold_id", "system_identifier", "image_id", "revision")
+            ) and receipt.get("health_passed"):
+                return
+            raise RecoveryRequired("The existing API verification receipt has different custody.")
+        cleanup_api_probe(state)
+        if state.get("verification_phase"):
+            remove_watchdog(state, health=True)
+        phase = qualify_api_namespace(state)
+        phase["deadline"] = (
+            datetime.now(timezone.utc) + timedelta(seconds=HEALTH_REFREEZE_SECONDS)
+        ).isoformat()
+        state["verification_phase"] = phase
+        save(state_path, state)
+    process = None
+    try:
+        with locked_state(state_path) as state:
+            require_no_api_database_clients(state)
+            if api_namespace_command(state, "ss", "-Hlx").strip():
+                raise RecoveryRequired("An API Unix listener could bypass the network fence.")
+            table = state["verification_phase"]["table"]
+            rules = "add table inet " + table + "\n"
+            for hook in ("output", "postrouting"):
+                rules += (
+                    "add chain inet "
+                    + table
+                    + " "
+                    + hook
+                    + " { type filter hook "
+                    + hook
+                    + " priority "
+                    + str(API_EGRESS_PRIORITY)
+                    + "; policy accept; }\n"
+                )
+                rules += "add rule inet " + table + " " + hook + ' oifname != "lo" counter drop\n'
+            api_namespace_command(state, "nft", "-f", "-", input_text=rules)
+            require_api_egress_fence(state)
+            install_watchdog(state_path, state, health=True)
+            if (
+                datetime.fromisoformat(state["verification_phase"]["deadline"])
+                - datetime.now(timezone.utc)
+            ).total_seconds() < HEALTH_PROBE_SECONDS:
+                raise RecoveryRequired(
+                    "The independent API refreeze deadline has insufficient headroom."
+                )
+            set_freezer(state["originals"][state["api"]], False)
+        process = start_process(
+            [
+                "docker",
+                "exec",
+                state["api"],
+                "python",
+                "-c",
+                "import json,os,urllib.request\n"
+                "port=int(os.environ.get('LAUNCHPLANE_SERVICE_PORT','8080'))\n"
+                "with urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/health',timeout=5) as response:\n"
+                " payload=json.load(response)\n"
+                " if response.status!=200 or payload.get('status')!='ok':raise SystemExit(1)\n",
+            ]
+        )
+        deadline = time.monotonic() + HEALTH_PROBE_SECONDS
+        while time.monotonic() < deadline:
+            with locked_state(state_path) as state:
+                phase = state["verification_phase"]
+                if not phase["active"]:
+                    raise RecoveryRequired("The controlled API thaw ended before health readback.")
+                require_verification_cpu_hold(state, api_thawed=True)
+                require_api_egress_fence(state)
+                require_no_api_database_clients(state)
+            if process.poll() is not None:
+                if process.returncode:
+                    raise RecoveryRequired("The original API health command failed.")
+                run(
+                    "docker",
+                    "exec",
+                    state["api"],
+                    "python",
+                    "-c",
+                    "import os,socket;from urllib.parse import urlsplit;u=urlsplit(os.environ['LAUNCHPLANE_DATABASE_URL'])\n"
+                    "try:\n s=socket.create_connection((u.hostname,u.port or 5432),timeout=1)\n"
+                    "except OSError:raise SystemExit(0)\n"
+                    "else:s.close();raise SystemExit(1)",
+                    timeout=5,
+                )
+                with locked_state(state_path) as state:
+                    phase = state["verification_phase"]
+                    if not phase["active"]:
+                        raise RecoveryRequired(
+                            "The API phase ended before blocked-egress readback."
+                        )
+                    require_api_egress_fence(state)
+                    require_no_api_database_clients(state)
+                    document = json.loads(
+                        api_namespace_command(
+                            state, "nft", "-j", "list", "table", "inet", phase["table"]
+                        )
+                    )
+                    dropped = sum(
+                        expression["counter"]["packets"]
+                        for item in document["nftables"]
+                        if "rule" in item
+                        for expression in item["rule"]["expr"]
+                        if "counter" in expression
+                    )
+                    if dropped <= 0:
+                        raise RecoveryRequired("No actual non-loopback packet drop was observed.")
+                    phase["health_passed"] = True
+                    save(state_path, state)
+                break
+            time.sleep(0.1)
+        else:
+            raise RecoveryRequired("The controlled API health check exceeded its deadline.")
+    finally:
+        with locked_state(state_path) as state:
+            cleanup_api_probe(state, phase_id=phase["phase_id"])
+            remove_watchdog(state, health=True)
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            if process.stdout:
+                process.stdout.close()
+            if process.stdin:
+                process.stdin.close()
+    with locked_state(state_path) as state:
+        phase = state["verification_phase"]
+        if not phase["health_passed"] or not phase["cleaned"] or phase["active"]:
+            raise RecoveryRequired("The actual API verification did not complete under its fence.")
+        save(
+            state_path.parent / "verification-complete.json",
+            {
+                **{
+                    key: state[key]
+                    for key in ("hold_id", "system_identifier", "image_id", "revision")
+                },
+                "phase_id": phase["phase_id"],
+                "health_passed": True,
+            },
+        )
+
+
+def verify_services(state_path: Path) -> None:
+    with locked_state(state_path) as state:
+        cleanup_api_probe(state)
+        if state.get("released") or state.get("safe_to_resume"):
+            proof = {"outcome": "before"}
+        else:
+            if not (state_path.parent / "commit-pending.json").exists():
+                raise ValueError("There is no committed maintenance outcome to verify.")
+            terminate_keeper(state)
+            controller = operator_container(state)
+            if controller is not None:
+                run("docker", "rm", "-f", controller["Id"])
+                if operator_container(state) is not None:
+                    raise RecoveryRequired(
+                        "The original keeper has not exited before verification."
+                    )
+            proof = operator(state, "verify")
+            state["revision"] = proof["revision"]
+            save(state_path, state)
+    if proof.get("outcome") != "before":
+        verify_api_health(state_path)
+    release(state_path)
 
 
 def release(state_path: Path) -> None:
@@ -630,6 +1024,7 @@ def release(state_path: Path) -> None:
         pending = (state_path.parent / "commit-pending.json").exists()
         writers_held: bool | None = None
         try:
+            cleanup_api_probe(state)
             terminate_keeper(state)
             safe = state.get("safe_to_resume")
             if safe and any(
@@ -638,6 +1033,8 @@ def release(state_path: Path) -> None:
                 raise RecoveryRequired(
                     "The durable resume proof belongs to another maintenance runtime."
                 )
+            if safe:
+                require_database_cluster(state)
             if pending and not safe:
                 for observed in original_containers(state):
                     if observed["HostConfig"]["RestartPolicy"]["Name"] != "no":
@@ -651,6 +1048,20 @@ def release(state_path: Path) -> None:
                 writers_held = True
                 proof = operator(state, "verify")
                 state["revision"] = proof["revision"]
+                receipt_path = state_path.parent / "verification-complete.json"
+                if proof.get("outcome") != "before":
+                    if not receipt_path.exists():
+                        raise RecoveryRequired(
+                            "Actual runtime and API health verification is incomplete."
+                        )
+                    verified = json.loads(receipt_path.read_text())
+                    if any(
+                        verified.get(key) != state[key]
+                        for key in ("hold_id", "system_identifier", "image_id", "revision")
+                    ) or not verified.get("health_passed"):
+                        raise RecoveryRequired(
+                            "The completed runtime verification belongs to another state."
+                        )
                 state["safe_to_resume"] = {
                     key: state[key]
                     for key in ("hold_id", "system_identifier", "image_id", "revision")
@@ -675,6 +1086,8 @@ def release(state_path: Path) -> None:
                 raise
             state["keeper_termination_unverified"] = type(error).__name__
             save(state_path, state)
+        if state.get("verification_phase"):
+            remove_watchdog(state, health=True)
         resumed = set(state.get("resumed_containers", []))
         errors = []
         state["resume_started"] = True
@@ -802,6 +1215,7 @@ def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         project=state["project"],
         operators=set(),
     )
+    qualify_api_namespace(state, frozen=False)
     overlay = {
         "services": {
             "launchplane-maintenance": {
@@ -947,16 +1361,20 @@ def hold(state_path: Path) -> None:
                             update_state(
                                 state_path, database_released=True, revision=event["revision"]
                             )
+                            if (state_path.parent / "commit-pending.json").exists():
+                                verify_api_health(state_path)
                             release(state_path)
                             print(line.decode(), flush=True)
                             return
                         print(line.decode(), flush=True)
     finally:
-        if commands is not None:
-            os.close(commands)
-        if keeper and keeper.stdin:
-            keeper.stdin.close()
-        release(state_path)
+        try:
+            release(state_path)
+        finally:
+            if commands is not None:
+                os.close(commands)
+            if keeper and keeper.stdin:
+                keeper.stdin.close()
 
 
 def dump(state_path: Path) -> None:
@@ -1042,17 +1460,20 @@ def interrupted(_signum: int, _frame: object) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bounded full writer hold of Launchplane only.")
-    parser.add_argument("mode", choices=("plan", "hold", "release", "dump", "submit"))
+    parser.add_argument(
+        "mode", choices=("plan", "hold", "release", "dump", "submit", "verify", "refreeze")
+    )
     parser.add_argument("--state", type=Path)
     parser.add_argument("--receipt-file", type=Path)
     parser.add_argument("--api-container")
     parser.add_argument("--postgres-container")
     parser.add_argument("--duration-seconds", type=int, default=1800)
     parser.add_argument("--state-root", default="/var/lib/launchplane-maintenance")
+    parser.add_argument("--phase-id", default="")
     arguments = parser.parse_args()
     for number in (signal.SIGHUP, signal.SIGTERM):
         signal.signal(number, interrupted)
-    if arguments.mode in {"dump", "submit", "release"}:
+    if arguments.mode in {"dump", "submit", "release", "verify", "refreeze"}:
         if not isinstance(arguments.state, Path):
             parser.error("This mode requires --state.")
         state_path = arguments.state
@@ -1064,7 +1485,15 @@ def main() -> int:
             dump(state_path)
         else:
             try:
-                release(state_path)
+                if arguments.mode == "refreeze":
+                    if not arguments.phase_id:
+                        parser.error("refreeze requires the exact phase id.")
+                    with locked_state(state_path) as state:
+                        cleanup_api_probe(state, phase_id=arguments.phase_id)
+                elif arguments.mode == "verify":
+                    verify_services(state_path)
+                else:
+                    release(state_path)
             except RecoveryRequired:
                 return RECOVERY_REQUIRED_EXIT
         return 0
@@ -1087,7 +1516,10 @@ def main() -> int:
         flush=True,
     )
     if arguments.mode == "hold":
-        hold(state_path)
+        try:
+            hold(state_path)
+        except RecoveryRequired:
+            return RECOVERY_REQUIRED_EXIT
     return 0
 
 

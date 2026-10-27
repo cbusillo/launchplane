@@ -16986,3 +16986,83 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 connection.execute(table.update().values(status="execution_failed"))
                 require_no_active_executors(connection)
                 self.assertEqual(connection.scalar(select(table.c.status)), "execution_failed")
+
+    def test_unknown_running_reservation_refuses_unless_its_exact_executor_is_excluded(
+        self,
+    ) -> None:
+        from control_plane.database_maintenance_cli import require_no_active_executors
+        from control_plane.storage.migrations.versions import (
+            c8d2e4f6a9b1_add_integration_attestations as current,
+        )
+        from control_plane.storage import postgres
+        from control_plane import service_deploy_drain
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), current.revision)
+            store = postgres.PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            reservation = store.reserve_mutation(
+                scope="synthetic-api-scheduler",
+                route_path="service:synthetic-scheduler",
+                idempotency_key="current",
+                request_fingerprint="synthetic",
+                lease_owner="synthetic",
+            )
+            with store._engine.connect() as connection:
+                with self.assertRaises(RuntimeError):
+                    require_no_active_executors(connection)
+                with patch.object(
+                    service_deploy_drain,
+                    "_operation_observations",
+                    return_value=(
+                        {
+                            "operation_id": reservation.record.record_id,
+                            "blocks_drain": False,
+                            "execution_excluded": True,
+                        },
+                    ),
+                ):
+                    require_no_active_executors(connection)
+                self.assertEqual(
+                    connection.scalar(select(postgres.LaunchplaneIdempotencyRow.state)),
+                    "running",
+                )
+
+    def test_nonserving_runtime_probes_enforce_readonly_and_preserve_every_row(self) -> None:
+        from control_plane.database_maintenance_cli import verify_application_reads
+        from control_plane.database_maintenance import database_snapshot
+        from control_plane.database_maintenance_host import RecoveryRequired
+        from control_plane.storage.migrations.versions import (
+            c8d2e4f6a9b1_add_integration_attestations as current,
+        )
+        from control_plane.storage.postgres import PostgresRecordStore
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), current.revision)
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.connect() as connection:
+                before = database_snapshot(connection)
+                verify_application_reads(connection)
+                self.assertEqual(database_snapshot(connection), before)
+                for attribute in ("_engine", "_preview_lock_engine"):
+
+                    def attempt_write(store: PostgresRecordStore, *, limit: int) -> int:
+                        with getattr(store, attribute).begin() as writer:
+                            writer.execute(
+                                text("UPDATE alembic_version SET version_num=version_num")
+                            )
+                        return 0
+
+                    with (
+                        self.subTest(engine=attribute),
+                        patch.object(
+                            PostgresRecordStore,
+                            "expire_ordinary_agent_deliveries",
+                            attempt_write,
+                        ),
+                    ):
+                        with self.assertRaises(RecoveryRequired):
+                            verify_application_reads(connection)
+                    self.assertEqual(database_snapshot(connection), before)

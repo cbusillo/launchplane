@@ -15,6 +15,7 @@ from typing import Any
 from collections.abc import Callable
 
 from sqlalchemy import text
+from sqlalchemy import inspect
 from sqlalchemy.engine import Connection
 
 from control_plane.database_maintenance import (
@@ -52,6 +53,7 @@ def require_no_active_executors(connection: Connection) -> None:
         LaunchplanePrivilegedOperationRow,
         LaunchplaneOutboxDeliveryRow,
         LaunchplaneMergeTrainControllerStateRow,
+        LaunchplaneIdempotencyRow,
     )
 
     store = PostgresRecordStore(
@@ -65,6 +67,20 @@ def require_no_active_executors(connection: Connection) -> None:
             observations = _operation_observations(store, session, now)
             if any(item["blocks_drain"] for item in observations):
                 raise RuntimeError("An existing provider executor has not been excluded.")
+            excluded = {
+                item["operation_id"]
+                for item in observations
+                if item.get("execution_excluded") is True
+            }
+            if any(
+                identifier not in excluded
+                for identifier in session.scalars(
+                    select(LaunchplaneIdempotencyRow.record_id).where(
+                        LaunchplaneIdempotencyRow.state == "running"
+                    )
+                )
+            ):
+                raise RuntimeError("An unqualified API or scheduler reservation is still running.")
             for row_type, column, active in (
                 (LaunchplaneOdooStableBootstrapOperationRow, "status", ("running",)),
                 (LaunchplaneOdooProdBackupRestoreOperationRow, "status", ("running",)),
@@ -239,6 +255,7 @@ def rehearsal_receipt(
     verify_committed_database(
         connection, {"system_identifier": identifier, "before": restored, "after": after}
     )
+    verify_application_reads(connection)
     return {
         **{key: held[key] for key in ("hold_id", "snapshot", "transaction")},
         "system_identifier": identifier,
@@ -248,6 +265,45 @@ def rehearsal_receipt(
         "revision": revision,
         "action": "apply",
     }
+
+
+def verify_application_reads(connection: Connection) -> None:
+    from control_plane.storage.factory import build_privileged_operation_worker_store
+    from control_plane.privileged_operation_worker import (
+        OrdinaryAgentDeliveryCleanupState,
+        run_ordinary_agent_delivery_cleanup_once,
+    )
+    import time
+
+    options = " ".join(connection.engine.url.normalized_query.get("options", ()))
+    url = connection.engine.url.update_query_dict(
+        {"options": options + " -c default_transaction_read_only=on"}
+    ).render_as_string(hide_password=False)
+    store = build_privileged_operation_worker_store(database_url=url)
+    try:
+        for engine in (store._engine, store._preview_lock_engine):
+            if engine is None:
+                raise RecoveryRequired("The runtime verification engine is unavailable.")
+            with engine.connect() as reader:
+                if reader.scalar(text("SHOW transaction_read_only")) != "on":
+                    raise RecoveryRequired("The actual runtime probe is not enforced read-only.")
+        store.verify_schema()
+        cleanup = run_ordinary_agent_delivery_cleanup_once(
+            record_store=store,
+            limit=100,
+            state=OrdinaryAgentDeliveryCleanupState(),
+            now_monotonic=time.monotonic(),
+            error_backoff_seconds=15,
+        )
+        if cleanup.status != "succeeded" or cleanup.expired_deliveries:
+            raise RecoveryRequired(
+                "The existing expiry callback did not pass without credential changes."
+            )
+        store.list_ordinary_agent_delivery_activation_records()
+        store.list_ordinary_agent_delivery_activation_event_records()
+        store.list_merge_train_controller_state_records()
+    finally:
+        store.close()
 
 
 def keep_database(
@@ -350,6 +406,7 @@ def keep_database(
                 else {"system_identifier": identifier, "before": before, "after": before}
             )
             revision = verify_committed_database(verifier, proof)
+            verify_application_reads(verifier)
         save(
             arguments.job_directory / "database-safe.json",
             {"revision": revision, "hold_id": arguments.hold_id},
@@ -449,10 +506,26 @@ def main() -> int:
                     raise RuntimeError("The recovery proof belongs to another maintenance attempt.")
                 try:
                     revision = verify_committed_database(connection, proof)
+                    verify_application_reads(connection)
                 except RecoveryRequired:
                     emit("database_unsafe", hold_id=arguments.hold_id)
                     return 0
-                emit("database_verified", revision=revision, hold_id=arguments.hold_id)
+                from control_plane.storage.migrations.versions import (
+                    e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,
+                )
+
+                outcome = (
+                    "before"
+                    if set(retirement.RETIRED_TABLES)
+                    <= set(inspect(connection).get_table_names(schema="public"))
+                    else "after"
+                )
+                emit(
+                    "database_verified",
+                    revision=revision,
+                    hold_id=arguments.hold_id,
+                    outcome=outcome,
+                )
                 return 0
             if arguments.mode == "revision":
                 emit(
