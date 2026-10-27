@@ -9,6 +9,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from control_plane.client_test_notes import change_client_review, owner_test_notes
+from control_plane.contracts.integration_attestation import IntegrationAttestationRecord
 from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
 )
@@ -20,6 +21,7 @@ from control_plane.contracts.product_review import (
     ProductReviewCarryCommit,
     ProductReviewDecisionRecord,
     ProductReviewIntegratedChange,
+    ProductReviewTreeRestoration,
     PRODUCT_REVIEW_REASON_MAX_LENGTH,
 )
 from control_plane.dependency_update_review import DEPENDENCY_UPDATE_NOTES, pure_dependency_update
@@ -102,6 +104,7 @@ def carry_owner_acceptance(
                 read=read,
                 refreshes=refreshes,
                 accepted_record_id=accepted.record_id,
+                pull_request_number=pull_request_number,
             )
             if integration is None:
                 return None
@@ -274,6 +277,7 @@ def _accepted_base_integration(
     read: SourceControlRead,
     refreshes: tuple[MergeTrainBranchRefreshRecord, ...],
     accepted_record_id: str,
+    pull_request_number: int,
 ) -> ProductReviewCarry | None:
     read = cache(read)
     commits = {str(value["sha"]): value for value in _complete_commits(comparison, accepted_head)}
@@ -288,6 +292,19 @@ def _accepted_base_integration(
     side: list[ProductReviewCarryCommit] = []
     visited: set[str] = set()
     refresh_ids: list[str] = []
+    restored_trees: list[ProductReviewTreeRestoration] = []
+    attestations: list[IntegrationAttestationRecord] = []
+    attestation_reader = getattr(store, "list_integration_attestation_records", None)
+    saved_attestations = (
+        cast(
+            tuple[IntegrationAttestationRecord, ...],
+            attestation_reader(
+                repository=profile.repository, pull_request_number=pull_request_number
+            ),
+        )
+        if callable(attestation_reader)
+        else ()
+    )
     current = head
     merged = False
     while current != accepted_head:
@@ -297,6 +314,12 @@ def _accepted_base_integration(
         parents = commit.get("parents")
         if not isinstance(parents, list) or len(parents) not in {1, 2}:
             return None
+        restoration = _restored_side_tree(current, commits)
+        if restoration is not None:
+            restored_trees.append(restoration)
+            visited.update(restoration.commit_shas)
+            current = restoration.ancestor_sha
+            continue
         declared_none = _has_none_trailer(_object(commit.get("commit")).get("message"))
         refresh = next(
             (
@@ -312,7 +335,27 @@ def _accepted_base_integration(
             ),
             None,
         )
-        if not declared_none and refresh is None:
+        attestation = next(
+            (
+                record
+                for record in saved_attestations
+                if record.evidence.product == profile.product
+                and record.evidence.repository == profile.repository
+                and record.evidence.pull_request_number == pull_request_number
+                and record.evidence.base_branch == base_branch
+                and record.evidence.owner_github_id == profile.owner.github_id
+                and record.evidence.source_decision_id == accepted_record_id
+                and record.evidence.merge_sha == current
+                and record.evidence.tree_sha
+                == _object(_object(commit.get("commit")).get("tree")).get("sha")
+                and len(parents) == 2
+                and record.evidence.parent_shas
+                == tuple(_object(parent).get("sha") for parent in parents)
+                and record.evidence.parent_shas[0] == accepted_head
+            ),
+            None,
+        )
+        if not declared_none and refresh is None and attestation is None:
             return None
         if len(parents) == 2:
             imported = _text(_object(parents[1]).get("sha"))
@@ -325,6 +368,8 @@ def _accepted_base_integration(
             side.append(ProductReviewCarryCommit(sha=current, client_impact="none"))
         elif refresh is not None:
             refresh_ids.append(refresh.record_id)
+        elif attestation is not None:
+            attestations.append(attestation)
         visited.add(current)
         current = _text(_object(parents[0]).get("sha"))
     if not merged:
@@ -340,16 +385,75 @@ def _accepted_base_integration(
             evidence=evidence,
         ):
             return None
+    integrated_changes = tuple(evidence.changes[number] for number in sorted(evidence.changes))
+    batch_record_ids = tuple(sorted(evidence.batch_record_ids))
+    for record in attestations:
+        attested = _IntegrationEvidence()
+        comparison = _object(
+            read(f"{prefix}/compare/{accepted_head}...{record.evidence.merge_sha}")
+        )
+        attested_commits = _complete_commits(comparison, accepted_head)
+        if not attested_commits:
+            return None
+        for commit in attested_commits:
+            sha = str(commit["sha"])
+            if sha != record.evidence.merge_sha and not _integrated_change_reviewed(
+                sha=sha,
+                base_branch=base_branch,
+                store=store,
+                profile=profile,
+                read=read,
+                evidence=attested,
+            ):
+                return None
+        if {
+            entry.pull_request_number: entry.model_dump(exclude={"engineering_basis"})
+            for entry in record.evidence.integrated_changes
+        } != {
+            number: entry.model_dump(exclude={"engineering_basis"})
+            for number, entry in attested.changes.items()
+        } or set(record.evidence.batch_record_ids) != attested.batch_record_ids:
+            return None
     return ProductReviewCarry(
         record_id=accepted_record_id,
         head_sha=accepted_head,
-        reason="accepted_base_integration" if side else "merge_train_base_refresh",
+        reason="accepted_base_integration" if side or attestations else "merge_train_base_refresh",
         comparison_base_sha=base,
         commits=tuple(reversed(side)),
         refresh_record_ids=tuple(reversed(refresh_ids)),
-        integrated_changes=tuple(evidence.changes[number] for number in sorted(evidence.changes)),
-        batch_record_ids=tuple(sorted(evidence.batch_record_ids)),
+        integrated_changes=integrated_changes,
+        batch_record_ids=batch_record_ids,
+        restored_trees=tuple(reversed(restored_trees)),
+        integration_attestation_ids=tuple(record.record_id for record in reversed(attestations)),
     )
+
+
+def _restored_side_tree(
+    head: str, commits: dict[str, dict[str, object]]
+) -> ProductReviewTreeRestoration | None:
+    tree = _text(_object(_object(commits[head].get("commit")).get("tree")).get("sha"))
+    if re.fullmatch(r"[0-9a-f]{40}", tree) is None:
+        return None
+    current = head
+    skipped: list[str] = []
+    while current in commits and current not in skipped:
+        commit = commits[current]
+        if (
+            current != head
+            and _object(_object(commit.get("commit")).get("tree")).get("sha") == tree
+        ):
+            return ProductReviewTreeRestoration(
+                head_sha=head,
+                ancestor_sha=current,
+                tree_sha=tree,
+                commit_shas=tuple(reversed(skipped)),
+            )
+        parents = commit.get("parents")
+        if not isinstance(parents, list) or len(parents) != 1:
+            return None
+        skipped.append(current)
+        current = _text(_object(parents[0]).get("sha"))
+    return None
 
 
 def _integrated_change_reviewed(
@@ -365,10 +469,10 @@ def _integrated_change_reviewed(
     changes = read(f"{prefix}/commits/{sha}/pulls?per_page=100")
     if not isinstance(changes, list) or not changes or len(changes) >= 100:
         return False
-    for value in changes:
-        number = _object(value).get("number")
-        if type(number) is not int or number <= 0:
-            return False
+    numbers = [_object(value).get("number") for value in changes]
+    if any(type(number) is not int or number <= 0 for number in numbers):
+        return False
+    for number in sorted(set(cast(list[int], numbers))):
         if _merged_change_reviewed(
             number=number,
             base_branch=base_branch,

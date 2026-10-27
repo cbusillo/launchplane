@@ -5835,20 +5835,26 @@ validation changes may therefore refuse older values transactionally at startup.
 Preflight that backup's preview settings against the selected image before
 release rather than weakening validation to admit them.
 
-### Integration-attestation compatibility image
+### Additive integration-attestation storage
 
-This image carries the additive attestation migration and empty compatibility
-join and recognizes their revision paths. Normal startup still targets the
-preceding hostname/idle-retirement release. It does not add the attestation
-runtime or require its table. Deploy and qualify this image before activating
-the table in the subsequent release. Retain it as activation's previous-image
-rollback target. The later release uses these two migration files byte-for-byte
-unchanged. This image can start against that additive schema without migrating
-backward; older images cannot recognize its revision. The held delivery drop
-retains its separate approved application path.
+The attestation release targets `c8d2e4f6a9b1`, following the current
+hostname/idle-retirement release target. It adds only
+`launchplane_integration_attestations` and its PR lookup index. The default path
+still never applies the held delivery drop. An already-applied delivery branch
+joins at `d1a5b7c9d2e4`; that join is empty. Runtime recognizes the preceding
+release and compatibility revisions and these additions; the HTTP service still
+checks its required tables. Explicit approved delivery-drop requests from the
+additive revision use the same join, preserving the existing separate approval.
 Legacy adoption recognizes the future table as belonging to Launchplane and
 refuses to stamp an unversioned database containing it as an older schema.
 
+Before activating this target, deploy the compatibility slice containing these
+same two migration files and recognized revision paths while startup still uses
+the preceding target. That slice creates no attestation table and does not
+require it. Retain its qualified deployed image as activation's previous-image
+rollback target. Source delivery alone does not qualify it. Older images cannot
+recognize the additive revision and are below the new rollback floor. Image
+rollback retains the additive table and its immutable evidence.
 Compatibility also reads populated restoration and attestation evidence on
 carried Client decisions. Both additive fields are omitted when empty, so its
 ordinary carries remain readable by the preceding image. Activation uses the

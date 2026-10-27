@@ -1,0 +1,205 @@
+{
+  "ahead_by": 13,
+  "behind_by": 0,
+  "commits": [
+    {
+      "commit": {
+        "message": "Retain hosted checkout payment references after account deletion",
+        "tree": {
+          "sha": "5d2da63c83643eab4fe5b5a730e7d65a3ce1f40f"
+        }
+      },
+      "parents": [
+        {
+          "sha": "8eb7372176f57e73d7c1d53801ddc26eaf3131cc"
+        }
+      ],
+      "sha": "b873b437664ff827cd2e186deeb1ed9c595b76e2"
+    },
+    {
+      "commit": {
+        "message": "Retain collections across concurrent deletion and payment approval",
+        "tree": {
+          "sha": "ea77ca9e01d895e56562a7c72427d4dac00ac324"
+        }
+      },
+      "parents": [
+        {
+          "sha": "b873b437664ff827cd2e186deeb1ed9c595b76e2"
+        }
+      ],
+      "sha": "16ab4c2cc9ba7cb2067ab7a4b21e153ded3ac7f7"
+    },
+    {
+      "commit": {
+        "message": "Clarify deletion races and prove retained payment namespace",
+        "tree": {
+          "sha": "7beee1b9e84fc526dd814f880246ac9e6ad59a64"
+        }
+      },
+      "parents": [
+        {
+          "sha": "16ab4c2cc9ba7cb2067ab7a4b21e153ded3ac7f7"
+        }
+      ],
+      "sha": "71e2e7a820c8b9a55b67d6532f9d3cbb74156ba2"
+    },
+    {
+      "commit": {
+        "message": "Remove retired Launchplane workflow callers and exclusive helpers",
+        "tree": {
+          "sha": "99690e9dc596d4f009596211d7d0e2a80cc71467"
+        }
+      },
+      "parents": [
+        {
+          "sha": "8eb7372176f57e73d7c1d53801ddc26eaf3131cc"
+        }
+      ],
+      "sha": "de9b27f8e8cb08378b1e22c3f84784defb57df6b"
+    },
+    {
+      "commit": {
+        "message": "Remove promotion-only smoke output plumbing and stale runbook references",
+        "tree": {
+          "sha": "bacf766cbe6dd0736d232b6c36f32838101a109b"
+        }
+      },
+      "parents": [
+        {
+          "sha": "de9b27f8e8cb08378b1e22c3f84784defb57df6b"
+        }
+      ],
+      "sha": "c522249ad3f0595999b365d9d40d592ba457d99b"
+    },
+    {
+      "commit": {
+        "message": "Clarify retained legacy smoke dependency and link release authority",
+        "tree": {
+          "sha": "1cf44ce0a0444f342428b500a3fc9261cb5735de"
+        }
+      },
+      "parents": [
+        {
+          "sha": "c522249ad3f0595999b365d9d40d592ba457d99b"
+        }
+      ],
+      "sha": "e0bc73705ff317a06b7ea957eb62bd059fa9571c"
+    },
+    {
+      "commit": {
+        "message": "Merge pull request #584 from cbusillo/work/vrdel-1026\n\nDelete dead Launchplane workflow callers and exclusive scripts",
+        "tree": {
+          "sha": "1cf44ce0a0444f342428b500a3fc9261cb5735de"
+        }
+      },
+      "parents": [
+        {
+          "sha": "8eb7372176f57e73d7c1d53801ddc26eaf3131cc"
+        },
+        {
+          "sha": "e0bc73705ff317a06b7ea957eb62bd059fa9571c"
+        }
+      ],
+      "sha": "4834e57ef37cff568c867a2b4f48919c95e9d31d"
+    },
+    {
+      "commit": {
+        "message": "Launchplane merge train merge-train-batch-cbusillo-verireel-main-79d68fd2c94b3f4f: merge PR #583",
+        "tree": {
+          "sha": "45f1847c43f7634f7c035a11b5937bdc526503ea"
+        }
+      },
+      "parents": [
+        {
+          "sha": "4834e57ef37cff568c867a2b4f48919c95e9d31d"
+        },
+        {
+          "sha": "71e2e7a820c8b9a55b67d6532f9d3cbb74156ba2"
+        }
+      ],
+      "sha": "a01053cbf3447e3261106f8c451db76765220ff5"
+    },
+    {
+      "commit": {
+        "message": "Merge pull request #585 from cbusillo/launchplane/train/cbusillo/verireel/main/merge-train-batch-cbusillo-verireel-main-79d68fd2c94b3f4f\n\nLaunchplane batch: #583",
+        "tree": {
+          "sha": "45f1847c43f7634f7c035a11b5937bdc526503ea"
+        }
+      },
+      "parents": [
+        {
+          "sha": "4834e57ef37cff568c867a2b4f48919c95e9d31d"
+        },
+        {
+          "sha": "a01053cbf3447e3261106f8c451db76765220ff5"
+        }
+      ],
+      "sha": "ce1012d52a38b7e5dde5e8763b2ecae6ac46316b"
+    },
+    {
+      "commit": {
+        "message": "Preserve invoice custody while integrating recurring cancellation\n\nClient-impact: visible",
+        "tree": {
+          "sha": "9246661b678d4dd3b96b61f97e6fd3fbfdccf089"
+        }
+      },
+      "parents": [
+        {
+          "sha": "1373b7f09057aefb84c5bf2a2b5dfe7cb8b762dc"
+        },
+        {
+          "sha": "ce1012d52a38b7e5dde5e8763b2ecae6ac46316b"
+        }
+      ],
+      "sha": "92652085d8e2c92197d419011fbbfdfd4be43b15"
+    },
+    {
+      "commit": {
+        "message": "Explain unresolved recurring lookup as a support hold\n\nClient-impact: visible",
+        "tree": {
+          "sha": "21568c0f6152215d0a81625f05752b3b99d2a424"
+        }
+      },
+      "parents": [
+        {
+          "sha": "92652085d8e2c92197d419011fbbfdfd4be43b15"
+        }
+      ],
+      "sha": "496a0c834864db6a3ca75123df79d9f89370d712"
+    },
+    {
+      "commit": {
+        "message": "Keep recurring lookup retry behavior outside account deletion\n\nClient-impact: visible",
+        "tree": {
+          "sha": "f6c6d630089ad8ca113ff85857fb57c463a54bb5"
+        }
+      },
+      "parents": [
+        {
+          "sha": "496a0c834864db6a3ca75123df79d9f89370d712"
+        }
+      ],
+      "sha": "35c85f5be9490084917df40e3d9fbb70400479b7"
+    },
+    {
+      "commit": {
+        "message": "Remove unaccepted support-hold changes from the accepted billing fix\n\nClient-impact: visible",
+        "tree": {
+          "sha": "9246661b678d4dd3b96b61f97e6fd3fbfdccf089"
+        }
+      },
+      "parents": [
+        {
+          "sha": "35c85f5be9490084917df40e3d9fbb70400479b7"
+        }
+      ],
+      "sha": "dda6c19cd4066e015cd9fda5a78925471911612f"
+    }
+  ],
+  "merge_base_commit": {
+    "sha": "1373b7f09057aefb84c5bf2a2b5dfe7cb8b762dc"
+  },
+  "status": "ahead",
+  "total_commits": 13
+}

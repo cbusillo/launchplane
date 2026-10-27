@@ -44,7 +44,7 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-SCHEMA_MIGRATION_TARGET_REVISION = idle_hostnames_join.revision
+SCHEMA_MIGRATION_TARGET_REVISION = integration_attestations.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,

@@ -62,6 +62,27 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_additive_attestation_migration_preserves_held_delivery_tables(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary) / 'migration.db'}"
+            command.upgrade(alembic_config(url), integration_attestations.down_revision)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            held_before = set(retired_delivery.RETIRED_TABLES) & set(
+                inspect(engine).get_table_names()
+            )
+            self.assertTrue(held_before)
+            command.upgrade(alembic_config(url), SCHEMA_MIGRATION_TARGET_REVISION)
+            self.assertTrue(held_before <= set(inspect(engine).get_table_names()))
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            self.assertEqual(
+                store.list_integration_attestation_records(
+                    repository="example/product", pull_request_number=1
+                ),
+                (),
+            )
+
     def test_preceding_target_reads_additive_schema_without_downgrading_it(self) -> None:
         with TemporaryDirectory() as temporary:
             url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
