@@ -1,5 +1,6 @@
 """Prepare independently backed empty storage without changing the retained lane."""
 
+from control_plane.host_package import host_schedules_match
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -669,7 +670,7 @@ def run_preparation_schedule(
         if (
             current is None
             or current != original
-            or current.get("script") != resources.script("prepare")
+            or not host_schedules_match(current.get("script"), resources.script("prepare"))
             or current.get("enabled") is not False
         ):
             raise ValueError("Original preparation schedule provenance is unavailable.")
@@ -681,7 +682,7 @@ def run_preparation_schedule(
         existing_read = find(name)
         if existing_read is not None:
             if (
-                existing_read.get("script") != resources.script("readback")
+                not host_schedules_match(existing_read.get("script"), resources.script("readback"))
                 or existing_read.get("enabled") is not False
             ):
                 raise ValueError("The readback schedule has different provenance.")

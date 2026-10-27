@@ -1,3 +1,8 @@
+from control_plane.host_package_runtime import (
+    HOST_PACKAGE_VERSION_MARKER,
+    HOST_PROGRAM_VERSION_MARKER,
+)
+from control_plane.host_package_installer import HOST_PACKAGE_INSTALLED_MARKER
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.preview_clean_snapshot import build_preview_clean_snapshot_script
 from control_plane.filestore_permissions import FILESTORE_PERMISSION_SHELL
@@ -195,6 +200,7 @@ print("{ODOO_COMPANY_EMAIL_CONTRACT_MARKER}=" + str(supported).lower())
 '''
 ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
     {
+        HOST_PACKAGE_INSTALLED_MARKER,
         "log_available",
         "odoo_module_update_completed",
         "odoo_module_update_image_match",
@@ -249,6 +255,8 @@ ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
     | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
     | {
+        HOST_PACKAGE_VERSION_MARKER,
+        HOST_PROGRAM_VERSION_MARKER,
         "website_settings_sha256",
         "clean_snapshot_database_sha256",
         "clean_snapshot_filestore_sha256",
@@ -455,7 +463,7 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
     if key in {"connection_isolation_resource_sha256", "connection_isolation_operation_sha256"}:
         return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
-    if key == "website_settings_sha256":
+    if key in {HOST_PACKAGE_VERSION_MARKER, HOST_PROGRAM_VERSION_MARKER, "website_settings_sha256"}:
         return bool(re.fullmatch(r"[0-9a-f]{64}", value))
     if key == "website_bootstrap_company_email_skip_reason":
         return value == ODOO_COMPANY_EMAIL_SKIP_REASON
@@ -560,9 +568,24 @@ def run_manual_data_schedule(
     resolved_schedule_execution_timeout_seconds: int,
     before_provider_mutation: Callable[[str], None] | None = None,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    installed_host_package_version: str | None = None,
     on_observation: Callable[[str, str], None] | None = None,
 ) -> dict[str, str]:
     api.validate_dokploy_schedule_script(schedule_payload)
+    from control_plane.dokploy.host_package import ensure_schedule_host_package
+
+    from control_plane.host_package import host_invocation
+
+    invocation = host_invocation(schedule_payload.get("script"))
+    if invocation is None or invocation.package_version != installed_host_package_version:
+        ensure_schedule_host_package(
+            host=host,
+            token=token,
+            target_id=schedule_lookup_id,
+            schedule_type=schedule_type,
+            payload=schedule_payload,
+            provider_mutation_guard=provider_mutation_guard,
+        )
     with (provider_mutation_guard or nullcontext)():
         if before_provider_mutation is not None:
             before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
@@ -642,6 +665,16 @@ def run_manual_data_schedule(
         deployment_id=completed_schedule_deployment_key,
         deployment=completed_schedule_deployment,
     )
+    from control_plane.host_package import host_invocation
+
+    invocation = host_invocation(schedule_payload.get("script"))
+    if invocation is not None and (
+        evidence.get(HOST_PACKAGE_VERSION_MARKER) != invocation.package_version
+        or evidence.get(HOST_PROGRAM_VERSION_MARKER) != invocation.program_version
+    ):
+        raise OdooPostDeployReadbackFailure(
+            "Host program package version is unverified.", evidence=evidence
+        )
     return evidence
 
 
@@ -963,6 +996,29 @@ def run_compose_post_deploy_update(
             "appName": schedule_app_name,
         }
     )
+    from control_plane.dokploy.host_package import ensure_schedule_host_package
+
+    ensure_schedule_host_package(
+        host=host,
+        token=token,
+        target_id=schedule_lookup_id,
+        schedule_type=schedule_type,
+        payload={
+            "script": schedule_script,
+            "serverId": schedule_server_id,
+            "userId": schedule_lookup_id if schedule_type == "dokploy-server" else None,
+            "cronExpression": DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+            "shellType": "bash",
+            "scheduleType": schedule_type,
+            "command": "control-plane host package",
+            "timezone": "UTC",
+            "enabled": False,
+        },
+        provider_mutation_guard=provider_mutation_guard,
+    )
+    from control_plane.host_package import host_invocation
+
+    installed_invocation = host_invocation(schedule_script)
     if desired_env_map != current_env_map:
         env_text = api.serialize_dokploy_env_text(
             desired_env_map,
@@ -1060,6 +1116,9 @@ def run_compose_post_deploy_update(
         schedule_name=schedule_name,
         schedule_app_name=schedule_app_name,
         schedule_payload=schedule_payload,
+        installed_host_package_version=(
+            installed_invocation.package_version if installed_invocation is not None else None
+        ),
         resolved_schedule_execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
         before_provider_mutation=before_provider_mutation,
         provider_mutation_guard=provider_mutation_guard,
