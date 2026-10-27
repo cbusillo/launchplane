@@ -480,8 +480,9 @@ private-key input, file, download, application delivery or plaintext readback.
 The key uses cryptography's [OpenSSH serialization](https://cryptography.io/en/stable/hazmat/primitives/asymmetric/serialization/).
 
 Use the catalog's installed bounded `launchplane-write-action.py` helper with
-the helper's existing operator configuration. It calls the deployed service and
-owns configuration, transport, saved review and uncertainty handling:
+the existing private configuration for `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN`.
+It calls the deployed service and owns configuration, transport, saved review
+and uncertainty handling:
 
 ```sh
 uv run /installed/catalog/skills/launchplane/scripts/launchplane-write-action.py \
