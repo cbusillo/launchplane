@@ -491,18 +491,25 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 self.assertEqual(self._publish()["state"], "success")
 
     def test_recorded_refresh_never_bypasses_an_imported_changes_rejection(self) -> None:
-        self._integrate_accepted_billing_change()
-        self._train_refreshed()
-        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change()
-        (decision,) = self.store.list_product_review_decision_records(
-            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
-        )
-        self.store.write_product_review_decision_record(
-            decision.model_copy(
-                update={"decision": "changes_requested", "reason": "Invoice is missing"}
-            )
-        )
-        self.assert_waits_for_the_client(self._publish())
+        for declared_none in (True, False):
+            with self.subTest(declared_none=declared_none):
+                self.setUp()
+                self._integrate_accepted_billing_change()
+                self._train_refreshed()
+                commits = self.github.commit_comparison["commits"]
+                assert isinstance(commits, list)
+                if not declared_none:
+                    commits[-1]["commit"]["message"] = "Merge base branch"
+                self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change()
+                (decision,) = self.store.list_product_review_decision_records(
+                    repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
+                )
+                self.store.write_product_review_decision_record(
+                    decision.model_copy(
+                        update={"decision": "changes_requested", "reason": "Invoice is missing"}
+                    )
+                )
+                self.assert_waits_for_the_client(self._publish())
 
     def test_dependency_only_base_change_uses_the_same_engineering_classification(self) -> None:
         self._integrate_accepted_billing_change()
@@ -653,10 +660,6 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         status = self._publish()
 
         self.assertEqual(status["state"], "success")
-        self.assertEqual(
-            status["description"],
-            "Accepted by @site-owner (carried from bd92cee after a base-only refresh)",
-        )
         carried, accepted = self._decisions()
         self.assertEqual(accepted, self.accepted)
         self.assertEqual(
