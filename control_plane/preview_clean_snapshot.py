@@ -61,7 +61,6 @@ PREVIEW_CLEAN_SNAPSHOT_PROGRAM = (
     + STORAGE_MAINTENANCE_LIBRARY
     + r"""
 import base64
-import shutil
 import tempfile
 import time
 import uuid
@@ -104,16 +103,12 @@ def restore_preview_snapshot(containers, source_lock):
     snapshot = spec['snapshot']
     attempt = preview_restore_attempt(spec['compose_project'], spec['database_name'],
         spec['preview_volumes'], snapshot, clean_snapshot_root(snapshot['snapshot_id']).parent)
-    binding, attempt_path = attempt['binding'], attempt['path']
-    attempt_path.parent.mkdir(mode=0o700, exist_ok=True)
-    previous_attempt, snapshot, witness = (attempt[key] for key in ('previous', 'snapshot', 'witness'))
-    owned_unreleased = previous_attempt is not None and previous_attempt.get('completed') is False
+    snapshot, witness = (attempt[key] for key in ('snapshot', 'witness'))
     database = spec['database_name']
-    custody = preview_restore_database_custody(containers['database'][0], database,
+    present = preview_restore_database_custody(containers['database'][0], database,
         spec['copy_witness_parameter'], attempt)
-    present, restart = custody['present'], custody['restart']
     path = clean_snapshot_root(snapshot['snapshot_id'])
-    if present == '0' or restart:
+    if present == '0':
         path, receipt = verified_clean_snapshot(snapshot['snapshot_id'])
         if any(receipt[key] != snapshot[key] for key in ('database_sha256', 'filestore_sha256')):
             raise RuntimeError('The clean snapshot differs from its service receipt')
@@ -131,11 +126,12 @@ def restore_preview_snapshot(containers, source_lock):
     overlay = inspect_preview_filestore(mounts[0]['Name'], spec['compose_project']) if overlay_mounts else None
     if overlay and overlay[2] != path / 'filestore':
         raise RuntimeError('Preview overlay differs from its retained snapshot')
-    if (present == '0' or restart) and overlay is None:
+    if present == '0' and overlay is None:
         raise RuntimeError('A new snapshot preview requires its overlay filestore')
-    if present == '0' and not owned_unreleased:
+    if present == '0':
+        require_unused_preview_backing(volume)
         require_unused_preview_upper(overlay[3])
-    if (present == '0' or restart) and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
+    if present == '0' and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
         containers, {**snapshot['storage_budget'], 'filestore_bytes': 0},
         runner_staging_bytes=(path / 'database.dump').stat().st_size, host_staging_bytes=0):
         raise RuntimeError('Preview overlay lacks reviewed storage headroom')
@@ -145,26 +141,8 @@ def restore_preview_snapshot(containers, source_lock):
         raise RuntimeError('Preview data volume has another or unknown consumer')
     docker('stop', containers['web'][0])
     docker('exec', '-u', 'root', runner, 'rm', '-f', spec['web_gate_path'])
-    if restart:
-        docker('exec', containers['database'][0], 'sh', '-c', 'dropdb --if-exists --force -U "$POSTGRES_USER" -- "$1"', '_', database)
-        present = '0'
     if present == '0':
-        write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False, 'overlay_filestore': True})
-        if owned_unreleased:
-            docker('stop', runner)
-            try:
-                legacy = Path(volume['Mountpoint']) / 'filestore' / database
-                if legacy.resolve() != legacy.absolute() or legacy.is_mount():
-                    raise RuntimeError('Preview legacy filestore custody is aliased')
-                if legacy.exists():
-                    shutil.rmtree(legacy)
-                _, _, lower, private = overlay
-                for directory in (private / 'upper', private / 'work'):
-                    shutil.rmtree(directory)
-                    directory.mkdir(mode=0o700)
-                    os.chown(directory, lower.stat().st_uid, lower.stat().st_gid)
-            finally:
-                docker('start', runner)
+        write_preview_restore_attempt(attempt, completed=False)
     dump = '/tmp/preview-snapshot-' + uuid.uuid4().hex + '.dump'
     try:
         if present == '0':
@@ -197,7 +175,7 @@ def restore_preview_snapshot(containers, source_lock):
             stdin=spec['readback_program'].encode()).decode()
         if 'integration_readback_ok=true' not in readback.splitlines():
             raise RuntimeError('Snapshot preview connection readback failed')
-        write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': True, 'overlay_filestore': overlay is not None})
+        write_preview_restore_attempt(attempt, completed=True, overlay_filestore=overlay is not None)
         docker(*arguments, runner, 'python3', '-I', '-c',
             "import hashlib,os;from pathlib import Path;Path(" + repr(spec['web_gate_path']) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+chr(10)+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
         docker('start', containers['web'][0])
