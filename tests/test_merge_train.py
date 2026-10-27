@@ -776,58 +776,13 @@ class MergeTrainDryRunTests(unittest.TestCase):
         )
         reader_class.assert_called_once()
 
-    def test_cli_merge_train_run_once_mutates_one_worker_step_when_requested(self) -> None:
-        snapshot_reader = _FakeSnapshotReader(
-            MergeTrainDryRunSnapshot(
-                repository="cbusillo/sellyouroutboard",
-                base_branch="main",
-                pull_requests=(_pull_request(24, required_checks_status="fail"),),
-            )
-        )
-        label_client = _FakeLabelClient()
-
-        class _FakeGitHubClient:
-            def __init__(self, *, transport: object) -> None:
-                self.transport = transport
-
-            def add_pull_request_label(
-                self, *, repository: str, pull_request_number: int, label: str
-            ) -> None:
-                label_client.add_pull_request_label(
-                    repository=repository,
-                    pull_request_number=pull_request_number,
-                    label=label,
-                )
-
-            def update_pull_request_branch(
-                self, *, repository: str, pull_request_number: int, expected_head_sha: str
-            ) -> None:
-                raise AssertionError("block path should not update branches")
-
-            def merge_pull_request(
-                self,
-                *,
-                repository: str,
-                pull_request_number: int,
-                head_sha: str,
-                merge_method: str,
-            ) -> str:
-                raise AssertionError("block path should not merge")
-
+    def test_local_cli_refuses_mutation_before_creating_provider_transport(self) -> None:
         with (
-            TemporaryDirectory() as temp_dir,
-            patch(
-                "control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport",
-                return_value=object(),
-            ),
-            patch(
-                "control_plane.cli_merge_train.GitHubMergeTrainSnapshotReader",
-                return_value=snapshot_reader,
-            ),
-            patch("control_plane.cli_merge_train.GitHubMergeTrainClient", _FakeGitHubClient),
+            TemporaryDirectory() as directory,
+            patch("control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport") as transport,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
-            policy_file = _write_policy_file(Path(temp_dir))
+            policy_file = _write_policy_file(Path(directory))
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
@@ -839,16 +794,8 @@ class MergeTrainDryRunTests(unittest.TestCase):
                     "--mutate",
                 ],
             )
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
-        self.assertEqual(payload["mode"], "mutate")
-        self.assertEqual(payload["status"], "blocked")
-        self.assertEqual(payload["block_result"]["pull_request_number"], 24)
-        self.assertEqual(
-            label_client.applied_labels,
-            [("cbusillo/sellyouroutboard", 24, "merge-blocked")],
-        )
+        self.assertNotEqual(result.exit_code, 0)
+        transport.assert_not_called()
 
     def test_cli_merge_train_run_once_requires_github_token(self) -> None:
         with TemporaryDirectory() as temp_dir, patch.dict("os.environ", {}, clear=True):

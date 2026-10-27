@@ -433,10 +433,28 @@ class LiveMergeAdmissionEvaluator:
             limit=2,
         )
         active_authority = authorities[0] if len(authorities) == 1 else None
+        from control_plane.merge_train_github import requires_full_odoo_build
+
+        check_client = self.technical_check_client
+        if repository_policy.config_authority_events_enabled or requires_full_odoo_build(
+            self.store, repository=landing_plan.repository
+        ):
+            if not isinstance(
+                check_client, (GitHubMergeTrainClient, TenantAdmissionControllerGitHubClient)
+            ):
+                raise MergeAdmissionDeniedError(
+                    "Candidate technical evidence reader is unavailable.",
+                    reason_code="candidate_checks_unavailable",
+                )
+            check_client = GitHubMergeTrainClient(
+                transport=check_client.transport,
+                branch_refresh_store=optional_merge_train_branch_refresh_read_store(self.store),
+                product_profile_store=self.store,
+            )
         check_head_sha = landing_plan.candidate_sha
         if candidate_record.candidate.head_check_reuse is not None:
-            if not isinstance(self.technical_check_client, GitHubMergeTrainClient) or (
-                self.technical_check_client.read_head_check_reuse(
+            if not isinstance(check_client, GitHubMergeTrainClient) or (
+                check_client.read_head_check_reuse(
                     candidate=candidate_record.candidate, repository_policy=repository_policy
                 )
                 is None
@@ -446,19 +464,6 @@ class LiveMergeAdmissionEvaluator:
                     reason_code="head_check_reuse_unavailable",
                 )
             check_head_sha = candidate_record.candidate.head_check_reuse.head_sha
-        check_client = self.technical_check_client
-        if repository_policy.config_authority_events_enabled:
-            if not isinstance(
-                check_client, (GitHubMergeTrainClient, TenantAdmissionControllerGitHubClient)
-            ):
-                raise MergeAdmissionDeniedError(
-                    "Current-comparison source evidence reader is unavailable.",
-                    reason_code="config_authority_unavailable",
-                )
-            check_client = GitHubMergeTrainClient(
-                transport=check_client.transport,
-                branch_refresh_store=optional_merge_train_branch_refresh_read_store(self.store),
-            )
         technical_checks = check_client.read_technical_checks(
             repository=landing_plan.repository,
             base_branch=landing_plan.base_branch,
