@@ -203,9 +203,9 @@ def stamp(spec,containers,database):
 
 
 def snapshot(spec,root,containers,database):
+    if database.endswith('_final_upgrade'):
+        require_passing_business_validation(spec['record'])
     validations=business_validation_history(spec['record'])
-    if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
-        raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     expected=spec['record']['source_odoo_version'] if database.endswith('_source') else spec['versions'][spec['target_image']]
     if version.split('.')[0]!=expected.split('.')[0]:
@@ -224,7 +224,7 @@ def snapshot(spec,root,containers,database):
         'database_sha256':digest(path/'database.dump'),'filestore_sha256':digest(path/'filestore.tar'),
         'source_capture_sha256':digest(root/'capture.json'),
         'sanitized':True,'odoo_version':version,'captured_at':datetime.now(timezone.utc).isoformat()}
-    if database.endswith('_final_upgrade') and validations:
+    if database.endswith('_final_upgrade'):
         receipt['business_validation_sha256']=hashlib.sha256(
             json.dumps(validations,sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()).hexdigest()
     save(path/'receipt.json',receipt)
@@ -525,9 +525,6 @@ def capture(spec,root,containers,database):
     sanitize_capture(spec,containers,database,raw)
     spec['phase_elapsed']['source-sanitization']=time.monotonic()-started
     phase_stamp(spec,'source_sanitized')
-    validations=spec['record'].get('business_validations',[])
-    if database.endswith('_final_upgrade') and validations and validations[-1].get('passed') is not True:
-        raise RuntimeError('Product validation has not passed')
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     if version.split('.')[0] != spec['record']['source_odoo_version'].split('.')[0]:
         raise RuntimeError('Captured source version differs from the selected source version')
@@ -1012,6 +1009,8 @@ def main():
                 validate_snapshots(spec,root,containers,record['copies'])
                 if action=='validate-business':
                     business_validation_precheck(spec,containers)
+                if action=='verify':
+                    require_passing_business_validation(record)
                 if action in {'execute','simulate-final','verify'} and not rehearsal_storage_capacity(
                     spec,root,containers,action):
                     code='rehearsal_storage_capacity_insufficient'

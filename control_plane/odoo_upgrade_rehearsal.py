@@ -19,6 +19,7 @@ from control_plane._odoo_rehearsal_business_validation import (
     business_entrypoint_schedule,
     final_business_database,
     business_validation_history,
+    require_passing_business_validation,
     BUSINESS_ENTRYPOINT_WAIT_TIMEOUT_SECONDS,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -274,15 +275,11 @@ def rehearsal_inputs(
             or previous.intent_sha256 != canonical_json_sha256(request.intent())
         ):
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
-        if request.action == "verify" and (
-            (previous.business_validations and not previous.business_validations[-1].passed)
-            or (
-                previous.abandoned_validations
-                and len(previous.business_validations)
-                <= previous.abandoned_validations[-1].validation_count
-            )
-        ):
-            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+        if request.action == "verify" and request.mode != "readback":
+            try:
+                require_passing_business_validation(previous.model_dump(mode="json"))
+            except ValueError:
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED) from None
         if request.action in {
             "simulate-final",
             "rebuild-final",
@@ -1445,6 +1442,11 @@ class OdooRehearsalAdapter:
     def publish(
         self, record: OdooUpgradeRehearsalRecord, result: dict[str, object]
     ) -> dict[str, object]:
+        if self.request.action == "verify":
+            try:
+                require_passing_business_validation(record.model_dump(mode="json"))
+            except ValueError:
+                raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED) from None
         allowed = {
             "prepare": "prepared",
             "execute": "upgraded",
@@ -1518,7 +1520,7 @@ class OdooRehearsalAdapter:
         if not set(old_copies) <= {copy.database for copy in updated.copies}:
             raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
         history = business_validation_history(record.model_dump(mode="json"))
-        if self.request.action == "verify" and history:
+        if self.request.action == "verify":
             final = next(
                 (copy for copy in updated.copies if copy.database.endswith("_final_upgrade")), None
             )

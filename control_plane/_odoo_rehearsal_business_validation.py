@@ -53,26 +53,46 @@ def checked_business_receipt(value, expected=None):
     if value['passed'] and not value['committed']:
         raise ValueError('Passing validation requires committed writes')
     return value
+
+
+def require_passing_business_validation(record):
+    validations=record.get('business_validations',[])
+    abandoned=record.get('abandoned_validations',[])
+    if (not validations or not validations[-1]['passed']
+            or abandoned and len(validations)<=abandoned[-1]['validation_count']):
+        raise ValueError('A passing business validation is required')
+    expected={'product':record['product'],'rehearsal_id':record['rehearsal_id'],
+        'artifact_id':record['target_artifact']['artifact_id'],
+        'source_commit':record['target_artifact']['source_commit'],
+        'database':record['rehearsal_id'].replace('-','_')+'_final_upgrade'}
+    for validation in business_validation_history(record):
+        checked_business_receipt(validation,expected)
 """
 
 
-def business_validation_history(record: dict[str, object]) -> list[dict[str, object]]:
-    namespace: dict[str, object] = {}
-    exec(BUSINESS_VALIDATION_RECEIPT_LIBRARY, namespace)
-    return namespace["business_validation_history"](record)  # type: ignore[operator, no-any-return]
-
-
-def checked_business_receipt(value: object) -> object:
+def _receipt_library() -> dict[str, object]:
     import json
     import re
 
-    namespace = {
+    namespace: dict[str, object] = {
         "json": json,
         "re": re,
         "BUSINESS_VALIDATION_RECEIPT_MAX_BYTES": BUSINESS_VALIDATION_RECEIPT_MAX_BYTES,
     }
     exec(BUSINESS_VALIDATION_RECEIPT_LIBRARY, namespace)
-    return namespace["checked_business_receipt"](value)  # type: ignore[operator]
+    return namespace
+
+
+def business_validation_history(record: dict[str, object]) -> list[dict[str, object]]:
+    return _receipt_library()["business_validation_history"](record)  # type: ignore[operator, no-any-return]
+
+
+def checked_business_receipt(value: object) -> object:
+    return _receipt_library()["checked_business_receipt"](value)  # type: ignore[operator]
+
+
+def require_passing_business_validation(record: dict[str, object]) -> None:
+    _receipt_library()["require_passing_business_validation"](record)  # type: ignore[operator]
 
 
 BUSINESS_ENTRYPOINT_CHECK_LIBRARY = r"""

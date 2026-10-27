@@ -37,6 +37,31 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 
 
+def with_passing_business_validation(
+    record: OdooUpgradeRehearsalRecord,
+) -> OdooUpgradeRehearsalRecord:
+    from tests.test_odoo_rehearsal_business_validation import identity, receipt
+    from control_plane.contracts.odoo_rehearsal_business_validation import BusinessValidationReceipt
+
+    validation = BusinessValidationReceipt.model_validate(receipt(identity(record)))
+    return record.model_copy(update={"business_validations": (validation,)})
+
+
+def validated_final_copy(
+    record: OdooUpgradeRehearsalRecord, final: RehearsalCopyReceipt
+) -> RehearsalCopyReceipt:
+    from control_plane._odoo_rehearsal_business_validation import business_validation_history
+    from control_plane.contracts.canonical_json import canonical_json_sha256
+
+    return final.model_copy(
+        update={
+            "business_validation_sha256": canonical_json_sha256(
+                business_validation_history(record.model_dump(mode="json"))
+            )
+        }
+    )
+
+
 class RehearsalScenario(unittest.TestCase):
     database_url = ""
 
@@ -1310,6 +1335,8 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(self.authority(), before)
 
     def test_lifecycle_preserves_both_recovery_states_and_all_original_lanes(self) -> None:
+        from tests.test_odoo_rehearsal_business_validation import identity, receipt
+
         before = self.authority()
         copies = []
         creates = iter(
@@ -1346,11 +1373,12 @@ class RehearsalScenario(unittest.TestCase):
             if action == "simulate-final":
                 copies.append(self.copy("final_source"))
             if action == "verify":
-                copies.append(self.copy("final_upgrade"))
+                copies.append(validated_final_copy(record, self.copy("final_upgrade")))
             state = {
                 "prepare": "prepared",
                 "execute": "upgraded",
                 "simulate-final": "switched",
+                "validate-business": "switched",
                 "verify": "verified",
                 "retire": "retired",
             }[action]
@@ -1362,6 +1390,11 @@ class RehearsalScenario(unittest.TestCase):
                 "resources_preserved": True,
                 "public_route": False,
                 "business_host_frozen": False,
+                **(
+                    {"business_validation": receipt(identity(record))}
+                    if action == "validate-business"
+                    else {}
+                ),
             }
 
         with (
@@ -1376,7 +1409,14 @@ class RehearsalScenario(unittest.TestCase):
             patch.object(OdooRehearsalAdapter, "run_script", side_effect=schedule),
             patch.object(OdooRehearsalAdapter, "host", autospec=True, side_effect=host),
         ):
-            for action in ("prepare", "execute", "simulate-final", "verify", "retire"):
+            for action in (
+                "prepare",
+                "execute",
+                "simulate-final",
+                "validate-business",
+                "verify",
+                "retire",
+            ):
                 from control_plane.provider_operations import ProviderOperationLease
 
                 result = self.adapter(action).apply(
@@ -1569,6 +1609,8 @@ class RehearsalScenario(unittest.TestCase):
         ):
             with self.subTest(action=action):
                 record = previous.model_copy(update={"state": initial, "compose_id": "own-compose"})
+                if action == "verify":
+                    record = with_passing_business_validation(record)
                 self.store.compare_and_write_odoo_upgrade_rehearsal(previous, record)
                 adapter = self.adapter(action)
 
@@ -1584,7 +1626,14 @@ class RehearsalScenario(unittest.TestCase):
                         {
                             "completed": True,
                             "state": final,
-                            "copies": [],
+                            "copies": [
+                                copy.model_dump(mode="json")
+                                for copy in (
+                                    (validated_final_copy(record, self.copy("final_upgrade")),)
+                                    if action == "verify"
+                                    else record.copies
+                                )
+                            ],
                             "elapsed_seconds": {action: 1.0},
                         },
                     )
@@ -2299,6 +2348,7 @@ class RehearsalScenario(unittest.TestCase):
                 "copies": (self.copy("source"), self.copy("final_source")),
             }
         )
+        retained = with_passing_business_validation(retained)
         self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, retained)
         adapter = self.adapter("verify")
         refused: dict[str, object] = {
@@ -2308,7 +2358,7 @@ class RehearsalScenario(unittest.TestCase):
         completed: dict[str, object] = {
             "state": "verified",
             "copies": [copy.model_dump(mode="json") for copy in retained.copies]
-            + [self.copy("final_upgrade").model_dump(mode="json")],
+            + [validated_final_copy(retained, self.copy("final_upgrade")).model_dump(mode="json")],
             "elapsed_seconds": {"verify": 0.1},
         }
         with (
@@ -2535,6 +2585,7 @@ class RehearsalScenario(unittest.TestCase):
 
     def test_lost_refusal_response_reconciles_only_the_same_operation_key(self) -> None:
         retained = self.record.model_copy(update={"state": "switched", "compose_id": "own-compose"})
+        retained = with_passing_business_validation(retained)
         self.store.compare_and_write_odoo_upgrade_rehearsal(self.record, retained)
         adapter = self.adapter("verify")
         original = ""
@@ -3816,6 +3867,19 @@ class RehearsalHostSafetyTests(unittest.TestCase):
     def storage_fixture(
         self, budget: dict[str, int]
     ) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+        from tests.test_odoo_rehearsal_business_validation import receipt
+
+        artifact = {"artifact_id": "fixture-candidate", "source_commit": "b" * 40}
+        validation = receipt(
+            {
+                "product": "fixture",
+                "rehearsal_id": self.identifier,
+                "artifact_id": artifact["artifact_id"],
+                "source_commit": artifact["source_commit"],
+                "database": self.identifier.replace("-", "_") + "_final_upgrade",
+                "attempt_sha256": "c" * 64,
+            }
+        )
         root = self.fixture.root / ".local/state/launchplane-rehearsals" / self.identifier
         root.mkdir(parents=True)
         containers = self.inspect()
@@ -3827,6 +3891,8 @@ class RehearsalHostSafetyTests(unittest.TestCase):
             "record": {
                 "rehearsal_id": self.identifier,
                 "product": "fixture",
+                "target_artifact": artifact,
+                "business_validations": [validation],
                 "storage": budget,
                 "state": "switched",
                 "intent_sha256": hashlib.sha256(b"fixture").hexdigest(),
@@ -4073,6 +4139,26 @@ class RehearsalHostSafetyTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "staging backing is unavailable"):
                         self.host["rehearsal_storage_capacity"](spec, root, containers, phase)
                     containers[role][1]["GraphDriver"] = driver
+
+    def test_host_verify_refuses_missing_business_proof_before_stopping_or_snapshotting(
+        self,
+    ) -> None:
+        spec, root, containers = self.storage_fixture(
+            {"database_bytes": 40, "filestore_bytes": 80, "staging_bytes": 20, "reserve_bytes": 10}
+        )
+        spec["record"]["business_validations"] = []
+        self.host["inspection"] = Mock(return_value=containers)
+        self.host["validate_snapshots"] = Mock()
+        self.host["private_health"] = Mock()
+        self.host["snapshot"] = Mock()
+        self.host["docker"] = Mock()
+        result = self.run_host(spec)
+        self.assertFalse(result["completed"])
+        self.assertEqual(result["refusal_code"], "rehearsal_precheck_refused")
+        self.host["private_health"].assert_not_called()
+        self.host["snapshot"].assert_not_called()
+        self.host["docker"].assert_not_called()
+        self.assertFalse((root / "verify.started").exists())
 
     def test_capacity_refusal_is_terminal_per_attempt_and_new_attempt_can_start(self) -> None:
         from types import SimpleNamespace
@@ -4843,6 +4929,7 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 "compose_id": "own-compose",
             }
         )
+        retained = with_passing_business_validation(retained)
         self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.fixture.record, retained)
         self.fixture.store.seed_authz_policy_if_absent(
             LaunchplaneAuthzPolicyRecord(
