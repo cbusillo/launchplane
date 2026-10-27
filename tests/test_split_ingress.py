@@ -36,7 +36,10 @@ from control_plane.lane_runtime_verification import (
     read_lane_runtime_verification,
 )
 from control_plane.product_promotion_http import _promotion_evidence
-from control_plane.contracts.product_environment_read_model import _public_ingress_summary
+from control_plane.contracts.product_environment_read_model import (
+    _public_ingress_summary,
+    _health_monitoring_summary,
+)
 from control_plane.production_delivery_monitor import _resolve_guard_refusal
 from control_plane.outbound_http import (
     PublicHttpResponse,
@@ -311,6 +314,71 @@ class SplitIngressTests(unittest.TestCase):
             now=_NOW,
         )
         self.assertNotEqual(verification.provenance.freshness_status, "verified")
+        promotion = _promotion_evidence(
+            record_store=store,
+            profile=conflicted,
+            lane=conflicted.lanes[0],
+            summary=summary,
+            now=_NOW,
+        )
+        self.assertNotEqual(promotion.health_status, "pass")
+        topology = build_product_environment_topology(
+            record_store=store,
+            profile=conflicted,
+            lane=conflicted.lanes[0],
+            lane_summary=summary,
+            now=_NOW,
+        )
+        self.assertEqual(
+            next(
+                w.severity
+                for w in topology.warnings
+                if w.scope == "observation" and w.domain_name == binding.domains[2].domain_name
+            ),
+            "error",
+        )
+        monitoring = _health_monitoring_summary(
+            record_store=store, profile=conflicted, lane=conflicted.lanes[0]
+        )
+        recovery_name = split_ingress_check_name(binding.domains[2].domain_name)
+        self.assertFalse(next(c.advisory for c in monitoring.checks if c.name == recovery_name))
+        with patch.object(
+            store, "list_route_binding_records", create=True, return_value=(binding,)
+        ):
+            targets = discover_public_ingress_monitor_targets(
+                record_store=cast(Any, store), profiles=(conflicted,)
+            )
+        target = next(t for t in targets if t.check_name == recovery_name)
+        with patch("control_plane.workflows.public_ingress_monitor.request_public_http") as fetch:
+            observation = check_public_ingress_target(
+                target=target,
+                checked_at=_NOW.isoformat(),
+                timeout_seconds=5,
+                http_get=fetch_public_ingress_url,
+                tls_get=fetch_public_tls,
+            )
+            fetch.assert_not_called()
+        self.assertEqual(observation.status, "fail")
+        assert observation.material_fingerprint is not None
+        self.assertEqual(observation.material_fingerprint.severity, "critical")
+        with (
+            patch.object(
+                store, "read_environment_inventory", create=True, return_value=summary.inventory
+            ),
+            patch("control_plane.production_delivery_monitor._observe") as observe,
+        ):
+            with self.assertRaises(ValueError):
+                _resolve_guard_refusal(
+                    cast(Any, store),
+                    incident=_tls_incident(),
+                    profile=conflicted,
+                    lane=conflicted.lanes[0],
+                    now=_NOW,
+                    health_after=_NOW
+                    - timedelta(seconds=health_monitor_freshness_seconds(lane.instance)),
+                    summary="Fresh business checks verified. ",
+                )
+            observe.assert_not_called()
 
     def test_recovery_http_and_tls_failures_have_advisory_material_severity(self) -> None:
         binding = split_binding().model_copy(

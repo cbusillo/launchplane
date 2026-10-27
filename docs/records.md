@@ -966,7 +966,8 @@ an ORM column/table or remains only in the evidence payload.
   Monitoring records warning incidents for failed recovery HTTP/TLS checks, and
   check summaries expose derived `advisory` status. The sidebar stays yellow while
   the business paths are healthy, and turns red when a business path fails.
-  Custody and source-authority conflicts remain blocking.
+  Custody, source-authority and DNS-policy conflicts remain blocking, including
+  on recovery hosts.
 
   Topology and runtime readers share observation applicability: current monitoring
   intent, URLs, deployment identity, profile and relevant authority dates must agree.

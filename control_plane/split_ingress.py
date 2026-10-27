@@ -172,14 +172,21 @@ def split_ingress_recovery_domain(
     )
 
 
-def split_ingress_recovery_check(
-    binding: EnvironmentRouteBindingRecord | None, check: ProductLaneHealthCheck
+def split_ingress_advisory_check(
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    binding: EnvironmentRouteBindingRecord | None,
+    check: ProductLaneHealthCheck,
 ) -> bool:
     host = urlsplit(check.url).hostname or ""
     return (
         check.kind == "public_http"
         and check.name == split_ingress_check_name(host)
         and split_ingress_recovery_domain(binding, host)
+        and binding is not None
+        and not split_ingress_monitoring_policy(
+            profile, lane, tuple(d.domain_name for d in binding.domains), host
+        ).conflict
     )
 
 

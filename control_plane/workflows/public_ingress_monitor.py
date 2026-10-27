@@ -168,6 +168,7 @@ from control_plane.split_ingress import (
     split_ingress_monitoring_lane,
     split_ingress_check_base_url,
     split_ingress_monitoring_policy,
+    split_ingress_advisory_check,
     split_ingress_recovery_domain,
 )
 from control_plane.testing_replacement_recovery import service_testing_operation
@@ -767,9 +768,7 @@ def _health_check_monitor_target(
             instance_name=lane.instance,
         ),
         require_runtime_identity=check.require_runtime_identity,
-        advisory=split_ingress_recovery_domain(binding, urlsplit(health_url).hostname or "")
-        if domain_check
-        else False,
+        advisory=split_ingress_advisory_check(profile, lane, binding, check),
         dependency_expectations=derive_runtime_dependencies(
             profile=profile, lane=lane, record_store=record_store
         )

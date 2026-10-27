@@ -55,10 +55,8 @@ from control_plane.route_binding_reconcile import read_unchanged_route_binding_e
 from control_plane.split_ingress import (
     split_ingress_check_name,
     split_ingress_monitoring_lane,
-    split_ingress_monitoring_policy,
-    split_ingress_recovery_check,
+    split_ingress_advisory_check,
     split_ingress_recovery_domain,
-    read_split_ingress_binding,
 )
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
@@ -411,6 +409,7 @@ def build_product_environment_topology(
         lane=lane,
         lane_summary=lane_summary,
         desired=desired,
+        binding=route_binding,
         provider_recorded=provider_recorded,
         now=evaluated_at,
         runtime_verification=runtime_verification,
@@ -509,10 +508,7 @@ def _split_ingress_warnings(
                 code=code,
                 scope="observation",
                 severity="warning"
-                if split_ingress_recovery_domain(binding, domain.domain_name)
-                and not split_ingress_monitoring_policy(
-                    profile, lane, tuple(d.domain_name for d in binding.domains), domain.domain_name
-                ).conflict
+                if split_ingress_advisory_check(profile, lane, binding, check)
                 else "error",
                 domain_name=domain.domain_name,
                 detail="This split ingress hostname has no current passing strict runtime-identity observation.",
@@ -758,12 +754,13 @@ def _observed_topology(
     lane: ProductLaneProfile,
     lane_summary: LaunchplaneLaneSummary | None,
     desired: ProductDesiredTopology,
+    binding: EnvironmentRouteBindingRecord | None,
     provider_recorded: ProductProviderRecordedTopology,
     now: datetime,
     runtime_verification: LaneRuntimeVerification | None = None,
 ) -> tuple[ProductObservedTopology, tuple[_ObservedTlsEvidence, ...]]:
-    binding = read_split_ingress_binding(record_store, profile, lane)
     ingress_evidence = _observed_ingress(
+        binding=binding,
         record_store=record_store,
         profile=profile,
         lane=lane,
@@ -997,9 +994,9 @@ def select_public_probe_observations(
 ) -> tuple[PublicIngressObservationRecord | None, PublicIngressObservationRecord | None]:
     """Select current effective public evidence, retaining history as a fallback."""
     recovery_names = {
-        check.name
-        for check in lane.health_monitoring.checks
-        if split_ingress_recovery_check(binding, check)
+        split_ingress_check_name(domain.domain_name)
+        for domain in (binding.domains if binding else ())
+        if split_ingress_recovery_domain(binding, domain.domain_name)
     }
     observations = tuple(
         record
@@ -1029,6 +1026,7 @@ def select_public_probe_observations(
 
 def _observed_ingress(
     *,
+    binding: EnvironmentRouteBindingRecord | None,
     record_store: object,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
@@ -1065,7 +1063,6 @@ def _observed_ingress(
         check_kind="public_http",
         limit=50,
     )
-    binding = read_split_ingress_binding(record_store, profile, lane)
     latest, newest_observation = select_public_probe_observations(
         lane=lane, records=records, binding=binding
     )

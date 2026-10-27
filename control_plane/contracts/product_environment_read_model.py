@@ -85,7 +85,7 @@ from control_plane.contracts.public_ingress_monitoring import PublicIngressObser
 from control_plane.split_ingress import (
     read_split_ingress_binding,
     split_ingress_monitoring_lane,
-    split_ingress_recovery_check,
+    split_ingress_advisory_check,
 )
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -2645,7 +2645,7 @@ def _health_monitoring_summary(
                 enabled=check.enabled,
                 probe_effective=probe_effective,
                 incident_eligible=incident_eligible,
-                advisory=split_ingress_recovery_check(binding, check),
+                advisory=split_ingress_advisory_check(profile, lane, binding, check),
                 private_endpoint_configured=bool(check.private_endpoint_key),
                 status=status,
                 failure_code=latest.failure_code or "" if latest is not None else "",

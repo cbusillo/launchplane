@@ -48,7 +48,7 @@ from control_plane.source_control_change import read_branch_revision
 from control_plane.split_ingress import (
     read_split_ingress_binding,
     split_ingress_monitoring_lane,
-    split_ingress_recovery_check,
+    split_ingress_advisory_check,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.delivery_evidence import (
@@ -131,7 +131,7 @@ def _resolve_guard_refusal(
         check
         for check in lane.health_monitoring.checks
         if check.enabled
-        and not split_ingress_recovery_check(binding, check)
+        and not split_ingress_advisory_check(profile, lane, binding, check)
         and product_lane_monitoring_probe_effective(
             monitoring_intent=lane.health_monitoring.monitoring_intent,
             check_kind=check.kind,

@@ -31,7 +31,7 @@ from control_plane.split_ingress import (
     split_ingress_check_name,
     split_ingress_check_base_url,
     split_ingress_monitoring_policy,
-    split_ingress_recovery_check,
+    split_ingress_advisory_check,
 )
 from control_plane.workflows.odoo_verification import resolve_odoo_health_url
 
@@ -133,18 +133,11 @@ def read_lane_runtime_verification(
     )
     if split_binding is not None and lane.health_monitoring.monitoring_intent != "public":
         return missing
-    if split_binding is not None and any(
-        split_ingress_monitoring_policy(
-            profile, lane, tuple(d.domain_name for d in split_binding.domains), domain.domain_name
-        ).conflict
-        for domain in split_binding.domains
-    ):
-        return missing
     checks = tuple(
         check
         for check in lane.health_monitoring.checks
         if check.enabled
-        and not split_ingress_recovery_check(split_binding, check)
+        and not split_ingress_advisory_check(profile, lane, split_binding, check)
         and product_lane_monitoring_probe_effective(
             monitoring_intent=lane.health_monitoring.monitoring_intent,
             check_kind=check.kind,
