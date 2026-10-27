@@ -1838,6 +1838,18 @@ def _hold_preview_destroy(
     return ReconcileOutcome(plan)
 
 
+def _hold_preview_cleanup(plan: dict[str, object], reason: str) -> ReconcileOutcome:
+    if (
+        plan.get("preview_mutation_attempted") is not True
+        and plan.get("preview_operation_status") != "reconcile_required"
+    ):
+        plan.pop("disposal_original_reservation_id", None)
+    plan.pop("last_failed_error_code", None)
+    plan.pop("last_failed_error_summary", None)
+    plan.update(action="wait", held=True, reason=reason)
+    return ReconcileOutcome(plan)
+
+
 def reconcile_preview_target(
     *,
     record_store: ProductReconcileStore,
@@ -2092,8 +2104,7 @@ def reconcile_preview_target(
             and isinstance(error, ProductReconcileError)
             and error.code.startswith("preview_cleanup_")
         ):
-            plan.update(action="wait", held=True, reason=error.code)
-            return ReconcileOutcome(plan)
+            return _hold_preview_cleanup(plan, error.code)
         if plan["action"] != "destroy" or (
             isinstance(error, ProductReconcileError) and error.code == "preview_lease_lost"
         ):
@@ -2107,10 +2118,7 @@ def reconcile_preview_target(
         )
         outcome = _preview_failure(plan, code)
     if plan.get("preview_result_error_code") == PREVIEW_CLEANUP_SAFETY_UNKNOWN:
-        plan.pop("last_failed_error_code", None)
-        plan.pop("last_failed_error_summary", None)
-        plan.update(action="wait", held=True, reason=PREVIEW_CLEANUP_SAFETY_UNKNOWN)
-        return ReconcileOutcome(plan)
+        return _hold_preview_cleanup(plan, PREVIEW_CLEANUP_SAFETY_UNKNOWN)
     if (
         plan["action"] == "destroy"
         and outcome.error

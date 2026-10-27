@@ -522,6 +522,8 @@ The existing expired lease, original schedule quiescence, target ownership and
 resource inspection remain mandatory. An uncertain destroy is observed on its
 original key until provider absence and the destroyed lifecycle are verified.
 Only then does ordinary reconciliation rebuild an open PR on new storage.
+An unattempted disposal refusal releases its selection so the next tick can plan
+from current evidence; it does not retain an uncertain provider effect.
 If the same verified build fails both before and after that reconstruction,
 reconciliation leaves it failed until a new build or CI run attempt. The bound
 issued times and successful service destroy receipt establish this limit; there

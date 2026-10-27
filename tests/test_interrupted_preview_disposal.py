@@ -166,10 +166,16 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         self.assertEqual([item.record_id for item in held], [self.original.record_id])
 
     def test_native_custody_is_rechecked_under_execution_before_disposal(self) -> None:
-        self.native.side_effect = [True, False]
+        self.native.side_effect = [True, False, False]
         self.request("preview", 5)
         result = self.run_once()
         self.assertTrue(result.last_plan["held"])
+        self.assertFalse(self.provider.applied)
+        self.assertNotIn("disposal_original_reservation_id", result.last_plan)
+        self.request("preview", 5)
+        ordinary = self.run_once()
+        self.assertEqual(ordinary.last_plan["action"], "apply")
+        self.assertNotIn("disposal_original_reservation_id", ordinary.last_plan)
         self.assertFalse(self.provider.applied)
 
     def test_missing_original_proof_never_reaches_native_disposal(self) -> None:
