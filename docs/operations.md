@@ -5845,6 +5845,8 @@ joins at `d1a5b7c9d2e4`; that join is empty. Runtime recognizes the preceding
 release and compatibility revisions and these additions; the HTTP service still
 checks its required tables. Explicit approved delivery-drop requests from the
 additive revision use the same join, preserving the existing separate approval.
+Legacy adoption recognizes the future table as belonging to Launchplane and
+refuses to stamp an unversioned database containing it as an older schema.
 
 Before activating this target, deploy the compatibility slice containing these
 same two migration files and recognized revision paths while startup still uses
