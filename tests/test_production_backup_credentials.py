@@ -221,6 +221,13 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
                 readback.json()["result"]["generated_capture_keys"][0]["public_key"], public
             )
             self.assertEqual((await self.post(request, "different-operation")).status_code, 409)
+            changed_pin = self.capture_key_request()["known_hosts"]
+            self.assertEqual(
+                (
+                    await self.post({**request, "known_hosts": changed_pin}, "generate-once")
+                ).status_code,
+                409,
+            )
             self.assertEqual(self.store.list_secret_records(), records)
 
     async def test_capture_key_generation_refuses_changed_authority_and_untrusted_pin(self) -> None:
@@ -345,6 +352,53 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
             set(BACKUP_CREDENTIAL_KEYS),
         )
+
+    async def test_pre_upgrade_original_request_replays_its_retained_receipt(self) -> None:
+        from control_plane.http_routes.mutation_support import (
+            idempotency_scope,
+            request_fingerprint,
+        )
+        from control_plane.http_routes.production_backup_credentials import CREDENTIAL_APPLY_ROUTE
+
+        original_request = await self.reviewed()
+        applied = await self.post(original_request, "pre-upgrade-original")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        receipt = self.store.read_idempotency_record(
+            scope=idempotency_scope(_github_human_identity()),
+            route_path=CREDENTIAL_APPLY_ROUTE,
+            idempotency_key="pre-upgrade-original",
+        )
+        assert receipt is not None
+        self.store.write_idempotency_record(
+            receipt.model_copy(
+                update={
+                    "request_fingerprint": request_fingerprint(
+                        {
+                            "product": _profile().product,
+                            "request": {**original_request, "promotion_action": ""},
+                        }
+                    ),
+                }
+            )
+        )
+        records = self.store.list_secret_records()
+        bindings = self.store.list_secret_bindings()
+        with patch.object(
+            self.store,
+            "compare_and_rebind_worker_credentials",
+            side_effect=AssertionError("Replay must not write"),
+        ):
+            for request in (
+                original_request,
+                {**original_request, "generate_capture_key": False, "known_hosts": ""},
+            ):
+                replay = await self.post(request, "pre-upgrade-original")
+                self.assertEqual(replay.status_code, 202, replay.text)
+                self.assertTrue(replay.json()["replayed"])
+                self.assertEqual(replay.json()["original_trace_id"], applied.json()["trace_id"])
+                self.assertEqual(replay.json()["result"], applied.json()["result"])
+        self.assertEqual(self.store.list_secret_records(), records)
+        self.assertEqual(self.store.list_secret_bindings(), bindings)
 
     async def test_disabled_cross_lane_and_destination_collision_refuse(self) -> None:
         for change in [

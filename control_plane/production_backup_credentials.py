@@ -59,6 +59,12 @@ class BackupCredentialBindingRequest(BaseModel):
             raise ValueError("Binding references and reason must be nonempty.")
         return self
 
+    def fingerprint_payload(self) -> dict[str, Any]:
+        return self.model_dump(
+            mode="json",
+            exclude=set() if self.generate_capture_key else {"generate_capture_key", "known_hosts"},
+        )
+
 
 def credential_metadata(
     store: PostgresRecordStore, *, context: str, instance: str

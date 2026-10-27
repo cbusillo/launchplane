@@ -502,6 +502,8 @@ SHA256 fingerprint, boundary and binding identifiers, and plan metadata. The
 metadata GET supplies `generated_capture_keys` for the currently configured key
 version without decrypting it. A lost response is recovered by readback and
 replay of the unchanged request/digest/key, never by generating another pair.
+Existing rebinding receipts retain their pre-generation request fingerprint, so
+an original-key retry across this service upgrade still replays without writes.
 
 Enroll only that public half through the separately approved host-admin path,
 using a per-guest forced command with restore, shell and forwarding disabled.

@@ -212,7 +212,7 @@ def register_production_backup_credential_routes(
         )
         # Config access already permits creating these exact-lane worker bindings.
         fingerprint = request_fingerprint(
-            {"product": product, "request": body.model_dump(mode="json")}
+            {"product": product, "request": body.fingerprint_payload()}
         )
         scope = idempotency_scope(identity)
         if body.mode == "apply":
