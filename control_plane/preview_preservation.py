@@ -443,7 +443,7 @@ def run_preview_preservation(
             "memory_floor": preview_host_memory_floor(
                 server_id=authority.server_id, record_store=store
             )
-            if mode == "preserve"
+            if mode != "inspect"
             else None,
             "timeout_seconds": timeout_seconds,
         },

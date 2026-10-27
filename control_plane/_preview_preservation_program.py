@@ -117,7 +117,6 @@ def verify_preservation(path: Path) -> dict:
     if receipt.get('empty_overlay_verified') is True:
         if receipt.get('snapshot') != spec.get('snapshot') or receipt.get('artifacts') != {}:
             raise RuntimeError('Preview preservation empty overlay authority differs')
-        require_retained_overlay_snapshot(receipt['snapshot'])
         return receipt
     if receipt.get('database_restore_verified') is not True:
         raise RuntimeError('Preview preservation database verification is unavailable')
@@ -133,6 +132,11 @@ def verify_preservation(path: Path) -> dict:
     return receipt
 
 
+def has_overlay_mount(source: dict, containers: dict) -> bool:
+    return any(mount.get('Name') == source['preview_volumes']['data'] + '-filestore'
+        for service in ('web', 'script-runner') for mount in containers[service]['Mounts'])
+
+
 def preview_containers(source: dict) -> dict:
     selected = {}
     identifiers = docker('ps', '-aq', '--filter',
@@ -143,9 +147,9 @@ def preview_containers(source: dict) -> dict:
         if service in selected:
             raise RuntimeError('Preview preservation service is ambiguous')
         selected[service] = container
-    overlay = 'preview-router' in selected
-    if set(selected) != {'database', 'web', 'script-runner'} | ({'preview-router'} if overlay else set()):
+    if set(selected) not in ({'database', 'web', 'script-runner'}, {'database', 'web', 'script-runner', 'preview-router'}):
         raise RuntimeError('Preview preservation requires its original plain preview')
+    overlay = has_overlay_mount(source, selected)
     for service in ('web', 'script-runner'):
         container = selected[service]
         environment = dict(value.split('=', 1) for value in container['Config'].get('Env', []))
@@ -159,9 +163,10 @@ def preview_containers(source: dict) -> dict:
         'script-runner': {'/volumes/data': 'data', '/volumes/logs': 'logs'},
     }
     volumes = dict(source['preview_volumes'])
+    if 'preview-router' in selected:
+        destinations['preview-router'] = {}
     if overlay:
         volumes['filestore'] = volumes['data'] + '-filestore'
-        destinations['preview-router'] = {}
         for service in ('web', 'script-runner'):
             destinations[service]['/volumes/data/filestore/' + source['database_name']] = 'filestore'
     for service, expected in destinations.items():
@@ -207,21 +212,16 @@ def require_retained_overlay_snapshot(snapshot: dict) -> Path:
     return lower
 
 
-def empty_overlay_custody(source: dict, containers: dict) -> dict:
-    if any(containers[service]['State']['Running'] for service in ('web', 'script-runner')):
+def empty_overlay_custody(source: dict, containers: dict, *, allow_running_runner: bool = False, inspect_only: bool = False) -> dict:
+    if containers['web']['State']['Running'] or not allow_running_runner and containers['script-runner']['State']['Running']:
         raise RuntimeError('Preview preservation empty overlay is in use')
     database = containers['database']
-    if not database['State']['Running']:
-        raise RuntimeError('Preview preservation empty database evidence is unavailable')
     binding = preview_attempt_binding(source['compose_project'], source['database_name'],
         source['preview_volumes'], spec['authority'])
     paths = {role: Path(value['path']) for role, value in binding['volume_backings'].items()}
-    if any(entry.name not in {'filestore', 'addons'} for entry in paths['data'].iterdir()):
-        raise RuntimeError('Preview preservation has additional data custody')
-    for directory in (paths['data'] / 'addons', paths['data'] / 'filestore', paths['logs']):
-        if directory.exists() or directory.is_symlink():
-            if any(not entry.get('directory') for entry in tree_manifest(directory).values()):
-                raise RuntimeError('Preview preservation empty overlay contains private data')
+    for directory in (paths['data'], paths['logs']):
+        if any(not entry.get('directory') for entry in tree_manifest(directory).values()):
+            raise RuntimeError('Preview preservation empty overlay contains private data')
     snapshot = spec['snapshot']
     lower = require_retained_overlay_snapshot(snapshot)
     volume, data, observed_lower, private = inspect_preview_filestore(source['preview_volumes']['data'], source['compose_project'])
@@ -237,15 +237,24 @@ def empty_overlay_custody(source: dict, containers: dict) -> dict:
     require_unused_preview_backing(data)
     if any(not entry.get('directory') for entry in tree_manifest(private / 'work').values()):
         raise RuntimeError('Preview preservation overlay work contains private data')
-    facts = json.loads(database_query(database['Id'], 'postgres', b"BEGIN READ ONLY; SELECT json_build_object('databases', (SELECT json_agg(datname ORDER BY datname) FROM pg_database WHERE NOT datistemplate), 'connections', (SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'), 'relations', (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'), 'prepared', (SELECT count(*) FROM pg_prepared_xacts)); COMMIT;\n"))
-    if facts != {'databases': ['postgres'], 'connections': 0, 'relations': 0, 'prepared': 0}:
-        raise RuntimeError('Preview preservation empty overlay has database custody or use')
-    binding['overlay'] = volume
+    if not inspect_only:
+        floor = spec.get('memory_floor')
+        if floor is not None and observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup')) < floor:
+            raise RuntimeError('Preview preservation lacks reviewed memory headroom')
+        with preservation_database(database):
+            facts = json.loads(database_query(database['Id'], 'postgres', b"BEGIN READ ONLY; SELECT json_build_object('databases', (SELECT json_agg(datname ORDER BY datname) FROM pg_database WHERE NOT datistemplate), 'connections', (SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'), 'relations', (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'), 'prepared', (SELECT count(*) FROM pg_prepared_xacts)); COMMIT;\n"))
+            if facts != {'databases': ['postgres'], 'connections': 0, 'relations': 0, 'prepared': 0}:
+                raise RuntimeError('Preview preservation empty overlay has database custody or use')
+    binding['overlay'] = {key: volume[key] for key in ('Name', 'CreatedAt', 'Mountpoint', 'Options')}
     return binding
 
 
 def preserve_empty_overlay(path: Path, source: dict, containers: dict) -> dict:
-    binding = empty_overlay_custody(source, containers)
+    binding = empty_overlay_custody(source, containers, allow_running_runner=True, inspect_only=True)
+    if containers['script-runner']['State']['Running']:
+        docker('stop', '-t', '30', containers['script-runner']['Id'])
+    if empty_overlay_custody(source, preview_containers(source)) != binding:
+        raise RuntimeError('Preview preservation empty overlay changed during qualification')
     temporary = path.with_name('.pending-' + path.name)
     image = containers['database']['Image']
     if pending_preservation(temporary, source, binding, image):
@@ -268,7 +277,7 @@ def verify_preservation_source(receipt: dict, source: dict) -> None:
         raise RuntimeError('Preview preservation provider source changed')
     containers = preview_containers(source)
     if receipt.get('empty_overlay_verified') is True:
-        if 'preview-router' not in containers or empty_overlay_custody(source, containers) != receipt['volume_binding']:
+        if not has_overlay_mount(source, containers) or empty_overlay_custody(source, containers) != receipt['volume_binding']:
             raise RuntimeError('Preview preservation empty overlay custody changed')
         return
     if any(containers[service]['State']['Running'] for service in ('web', 'script-runner')):
@@ -433,7 +442,7 @@ def preservation_database(database: dict):
 
 def preserve(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
-    if 'preview-router' in containers:
+    if has_overlay_mount(source, containers):
         return preserve_empty_overlay(path, source, containers)
     database = containers['database']
     if database.get('ExecIDs', 'unknown') not in (None, []):
@@ -514,8 +523,8 @@ def preserve(path: Path, source: dict) -> dict:
 
 def inspect_pending_preservation(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
-    if 'preview-router' in containers:
-        binding = empty_overlay_custody(source, containers)
+    if has_overlay_mount(source, containers):
+        binding = empty_overlay_custody(source, containers, allow_running_runner=True, inspect_only=True)
         pending_preservation(path.with_name('.pending-' + path.name), source, binding, containers['database']['Image'])
         return {'source': source, 'volume_binding': binding}
     database = containers['database']

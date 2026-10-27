@@ -81,6 +81,7 @@ class PreviewPreservationProgramTests(unittest.TestCase):
                 "Image": "sha256:fixture-pg",
                 "State": {"Running": True},
                 "ExecIDs": None,
+                "Mounts": [],
             }
             for role in ("database", "web", "script-runner")
         }

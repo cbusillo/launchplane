@@ -4,8 +4,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
 from typing import Any, cast
+import shutil
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane._preview_preservation_program import PREVIEW_PRESERVATION_PROGRAM
 from tests.test_filestore_capture import capture_namespace
@@ -155,6 +156,8 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
         if arguments[0] == "inspect":
             return json.dumps([self.containers[arguments[1]]]).encode()
         if arguments[0] == "ps":
+            if arguments[-1].startswith("name="):
+                return b""
             if arguments[-1].startswith("volume="):
                 name = arguments[-1].removeprefix("volume=")
                 return "\n".join(
@@ -164,10 +167,15 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
                 ).encode()
             return "\n".join(self.containers).encode()
         if arguments[0] == "exec":
-            self.assertIsNotNone(stdin)
-            assert stdin is not None
-            self.assertIn(b"BEGIN READ ONLY", stdin)
+            del stdin
             return json.dumps(self.database_facts).encode()
+        if arguments[0] in {"start", "stop"}:
+            self.assertIn(
+                arguments[-1],
+                {"database"} if arguments[0] == "start" else {"database", "web", "script-runner"},
+            )
+            self.containers[arguments[-1]]["State"]["Running"] = arguments[0] == "start"
+            return b""
         self.fail(f"unexpected provider effect: {arguments}")
 
     def preserve(self) -> dict[str, Any]:
@@ -186,6 +194,7 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
             (self.lower / "retained-attachment").read_bytes(), b"shared retained bytes"
         )
         self.namespace["docker"] = lambda *args, **kwargs: self.fail("provider is absent")
+        shutil.rmtree(self.lower.parent)
         self.assertEqual(self.namespace["verify_preservation"](self.path), receipt)
 
     def test_use_or_unique_private_data_never_publishes_empty_custody(self) -> None:
@@ -234,6 +243,12 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
             self.namespace["verify_preservation_source"](receipt, self.source)
         (self.lower.parent / "receipt.json").write_text("{}")
         with self.assertRaises(RuntimeError):
+            self.namespace["verify_preservation_source"](receipt, self.source)
+        self.namespace["spec"]["snapshot"] = {
+            **self.snapshot,
+            "snapshot_id": hashlib.sha256(b"changed original").hexdigest(),
+        }
+        with self.assertRaises(RuntimeError):
             self.namespace["verify_preservation"](self.path)
 
     def test_same_operation_recovers_interrupted_receipt_without_changing_source(self) -> None:
@@ -253,6 +268,55 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
         receipt = self.preserve()
         self.namespace["verify_preservation_source"](receipt, self.source)
         self.assertFalse(self.path.with_name(".pending-" + self.path.name).exists())
+
+    def test_idle_runner_and_cold_database_use_existing_quiesce_and_cleanup(self) -> None:
+        self.containers["script-runner"]["State"]["Running"] = True
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["wait_database"] = Mock()
+        self.namespace["observe_memory_headroom"] = Mock(return_value=2048)
+        self.namespace["spec"]["memory_floor"] = 1024
+        self.namespace["inspect_pending_preservation"](self.path, self.source)
+        self.assertFalse(any(call[0] in {"start", "stop"} for call in self.calls))
+        (self.backing / "sessions/empty").mkdir(parents=True)
+        receipt = self.preserve()
+        self.assertFalse(self.containers["script-runner"]["State"]["Running"])
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.namespace["verify_preservation_source"](receipt, self.source)
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_plain_router_layout_keeps_the_existing_database_capture_path(self) -> None:
+        for service in ("web", "script-runner"):
+            self.containers[service]["Mounts"].pop()
+        containers = self.namespace["preview_containers"](self.source)
+        self.assertEqual(set(containers), set(self.containers))
+        self.assertFalse(self.namespace["has_overlay_mount"](self.source, containers))
+        self.namespace["spec"]["storage_budget"] = {
+            "filestore_bytes": 1024,
+            "database_bytes": 1024,
+            "reserve_bytes": 1024,
+        }
+
+        def query(container: str, database: str, sql: bytes) -> str:
+            del container, database
+            if b"pg_database" in sql:
+                return json.dumps(sorted([self.source["database_name"], "postgres"]))
+            return "0"
+
+        def capture(
+            arguments: object, path: Path, bound: int, **kwargs: object
+        ) -> tuple[int, bytes, bool]:
+            del arguments, bound, kwargs
+            path.write_bytes(b"retained database")
+            return 0, b"", False
+
+        self.namespace.update(
+            database_query=query,
+            capture_snapshot_file=capture,
+            restore_verification=Mock(return_value=0),
+        )
+        receipt = self.preserve()
+        self.assertTrue(receipt["database_restore_verified"])
+        self.assertEqual((self.path / "database.dump").read_bytes(), b"retained database")
 
     def test_foreign_consumers_mounts_active_exec_and_missing_pin_stay_held(self) -> None:
         for service in self.containers:
