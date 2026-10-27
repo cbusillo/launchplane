@@ -123,6 +123,7 @@ from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
 from control_plane.generic_web_rollback_drill import run_generic_web_rollback_drill
 from control_plane.generic_web_source_qualification import (
     GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
     qualified_generic_web_source_inventory,
 )
 from control_plane.generic_web_promotion_provider_adapter import (
@@ -890,6 +891,37 @@ def _native_release_continuation(
     return operation if record is not None else None
 
 
+def _release_recipient(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+) -> ProductionRecipientRecord | None:
+    from control_plane.production_recipient import custody
+
+    recipient = custody(store, profile.product, _prod_context(profile))
+    if recipient is None or recipient.phase == "retired":
+        return None
+    if (
+        recipient.phase == "published"
+        and decision.checklist.candidate.source_commit != recipient.request.source_commit
+    ):
+        return None
+    return recipient
+
+
+def _recipient_release_refusal(
+    recipient: ProductionRecipientRecord, decision: ReleaseReviewDecisionRecord
+) -> str:
+    if (
+        decision.checklist.candidate.artifact_id,
+        decision.checklist.candidate.source_commit,
+    ) != (recipient.image_reference, recipient.request.source_commit):
+        return "The accepted release targets a different version than the retained production recipient."
+    if not recipient.activation:
+        return "The production recipient is waiting for its cutover to be armed."
+    return ""
+
+
 def _release_run_blocked_reason(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
@@ -948,6 +980,14 @@ def _release_run_blocked_reason(
     if candidate is not None and candidate != decision.checklist.candidate:
         return _TESTING_RELEASE_CHANGED_MESSAGE
     next_step = next(view for view in views if view.status != "pass")
+    if (
+        profile.driver_id == "generic-web"
+        and next_step.kind == "promote"
+        and next_step.status == "not_started"
+        and (recipient := _release_recipient(store, profile, decision)) is not None
+        and (refusal := _recipient_release_refusal(recipient, decision))
+    ):
+        return refusal
     expected_production = (
         decision.checklist.candidate
         if next_step.kind == "rollback"
@@ -1338,29 +1378,17 @@ def _run_generic_web_promotion(
             resolved_deploy_target=target,
         )
 
-    from control_plane.production_recipient import custody
     from control_plane.production_recipient_cutover import RecipientCutoverAdapter
 
-    recipient = custody(store, profile.product, lane.context)
+    recipient = _release_recipient(store, profile, decision)
     original = store.read_idempotency_record(
         scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
         route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
         idempotency_key=_step_key(decision, step),
     )
-    if (
-        recipient is not None
-        and recipient.activation
-        and recipient.phase != "retired"
-        and (
-            recipient.phase != "published"
-            or decision.checklist.candidate.source_commit == recipient.request.source_commit
-        )
-    ):
-        if (
-            decision.checklist.candidate.artifact_id,
-            decision.checklist.candidate.source_commit,
-        ) != (recipient.image_reference, recipient.request.source_commit):
-            raise ClientReleaseNotReady("recipient_release_candidate_changed")
+    if recipient is not None:
+        if refusal := _recipient_release_refusal(recipient, decision):
+            raise ClientReleaseNotReady(refusal)
 
         def validate_recipient_release() -> None:
             if (
@@ -1491,7 +1519,7 @@ def advance_client_releases(
         except (
             ClientReleaseNotReady,
             BusinessHoursHeld,
-            GenericWebPromotionSourceRefused,
+            GenericWebPromotionAdmissionRefused,
         ) as reason:
             _LOGGER.info(
                 "client release not advanced product=%s reason=%s", profile.product, reason

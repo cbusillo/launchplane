@@ -51,6 +51,7 @@ from control_plane.workflows.odoo_prod_rollback import (
 )
 from control_plane.contracts.odoo_prod_promotion_operation import ODOO_PROD_PROMOTION_RUN_ACTION
 from control_plane.operation_status_read import safe_operation_error_code
+from control_plane.lane_movement import LANE_MOVEMENT_REFUSALS
 from control_plane.product_reconcile_read import (
     ProductReconcileRequestReader,
     product_reconcile_request_view,
@@ -434,7 +435,9 @@ def _previous_promotion_step(latest: PromotionRecord | None | Unread) -> PathChe
     if latest.failure is not None:
         # The description comes from the code, never from the stored text.
         code = latest.failure.code
-        description = PROMOTION_FAILURE_DESCRIPTIONS.get(code)
+        description = PROMOTION_FAILURE_DESCRIPTIONS.get(code) or LANE_MOVEMENT_REFUSALS.get(
+            code.removeprefix("lane_movement.")
+        )
         return _step(
             step_id,
             "clear",

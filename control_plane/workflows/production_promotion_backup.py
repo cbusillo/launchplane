@@ -10,7 +10,10 @@ from typing import Protocol, cast
 
 import click
 from control_plane.lane_movement import LaneMovementRefused
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
+)
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -21,7 +24,7 @@ from control_plane.contracts.production_backup_authority import (
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     PromotionRecord,
-    RecordFailure,
+    promotion_failure,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -77,6 +80,20 @@ class ProductionPromotionBackupStore(Protocol):
         statuses: tuple[str, ...] = (),
         limit: int | None = None,
     ) -> tuple[VeriReelProdBackupGateOperationRecord, ...]: ...
+
+
+def promotion_is_temporary_admission_refusal(promotion: PromotionRecord) -> bool:
+    return (
+        promotion.deploy.status == "fail"
+        and promotion.failure is not None
+        and promotion.failure.code
+        in {
+            "lane_movement.source_order_unavailable",
+            GenericWebPromotionSourceRefused.failure_code,
+            GenericWebPromotionAdmissionRefused.failure_code,
+        }
+        and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
+    )
 
 
 def require_production_promotion_backup(
@@ -211,18 +228,7 @@ def require_production_promotion_backup(
     for promotion in promotions:
         if promotion.record_id == active_promotion_record_id:
             continue
-        if (
-            promotion.deploy.status == "fail"
-            and promotion.failure is not None
-            and promotion.failure.code
-            in {
-                "lane_movement.source_order_unavailable",
-                GenericWebPromotionSourceRefused.failure_code,
-            }
-            and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
-        ):
-            # The guard recorded a temporary read refusal before its first
-            # provider checkpoint. This capture has protected no write yet.
+        if promotion_is_temporary_admission_refusal(promotion):
             continue
         if backup_record_id in (
             promotion.backup_gate.evidence.get("backup_record_id"),
@@ -342,11 +348,8 @@ def production_promotion_backup_guard(
                 and not effects_started
             ):
                 failed.failure = error.record_failure()
-            elif isinstance(error, GenericWebPromotionSourceRefused) and not effects_started:
-                failed.failure = RecordFailure(
-                    code=error.failure_code,
-                    description="Testing did not qualify the accepted source before production admission.",
-                )
+            elif isinstance(error, GenericWebPromotionAdmissionRefused) and not effects_started:
+                failed.failure = promotion_failure(error.failure_code)
             failed.backup_gate.evidence.update(protection_evidence)
             record_store.write_promotion_record(failed)
             raise

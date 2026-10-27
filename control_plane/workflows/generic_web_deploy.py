@@ -9,7 +9,7 @@ from typing import Callable, Literal, Protocol, cast
 
 import click
 from control_plane.generic_web_source_qualification import (
-    GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
     GenericWebSourceQualificationStore,
 )
 from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
@@ -509,6 +509,27 @@ def _resolve_deploy_target(
     )
 
 
+def _require_forward_generic_build(
+    *,
+    record_store: GenericWebDeployStore,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    desired: LaneBuild,
+) -> LaneBuild:
+    try:
+        return require_forward_lane_build(
+            record_store=record_store,
+            profile=profile,
+            context=lane.context,
+            instance=lane.instance,
+            desired=desired,
+        )
+    except LaneMovementRefused as error:
+        if lane.instance == "prod" and error.code == "source_order_unavailable":
+            raise GenericWebPromotionAdmissionRefused(str(error)) from error
+        raise
+
+
 def execute_generic_web_deploy(
     *,
     control_plane_root: Path,
@@ -598,11 +619,10 @@ def execute_generic_web_deploy(
             if integration_key_refusal:
                 raise ValueError(integration_key_refusal)
             if not rollback:
-                require_forward_lane_build(
+                _require_forward_generic_build(
                     record_store=record_store,
                     profile=current,
-                    context=current_lane.context,
-                    instance=current_lane.instance,
+                    lane=current_lane,
                     desired=LaneBuild(
                         request.artifact_id,
                         request.source_git_ref,
@@ -985,11 +1005,10 @@ def _execute_generic_web_deploy_unserialized(
             deploy_reference=request.deploy_reference,
         )
         if not rollback:
-            desired_build = require_forward_lane_build(
+            desired_build = _require_forward_generic_build(
                 record_store=record_store,
                 profile=resolved_profile,
-                context=resolved_lane.context,
-                instance=resolved_lane.instance,
+                lane=resolved_lane,
                 desired=desired_build,
             )
             if desired_build.source_build is None:
@@ -1266,7 +1285,7 @@ def _execute_generic_web_deploy_unserialized(
             )
     except (click.ClickException, TestingInputSafetyRefused) as exc:
         if (
-            isinstance(exc, GenericWebPromotionSourceRefused)
+            isinstance(exc, GenericWebPromotionAdmissionRefused)
             and not prior_attempt_exists
             and not provider_effect_attempted
         ):

@@ -4,9 +4,10 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import click
 from control_plane import client_release as releases
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.release_review import (
     ReleaseChecklist,
@@ -34,7 +35,10 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.production_recipient import custody
 from control_plane.production_recipient_cutover import RecipientCutoverAdapter
 from control_plane.workflows.inventory import build_environment_inventory
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
+)
 from control_plane.provider_operations import (
     build_provider_operation_key,
     ProviderObservation,
@@ -46,8 +50,11 @@ from control_plane.integration_allowances import canonical_sha256
 
 
 class RecipientReleaseRecoveryTests(unittest.TestCase):
+    database_url = ""
+
     def setUp(self) -> None:
         self.fixture = fixtures.RecipientCutoverTests()
+        self.fixture.database_url = self.database_url
         payload = _generic_site_profile_payload()
         payload.update(
             production_use="live",
@@ -92,6 +99,768 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         )
         f.store.write_release_review_decision_record(self.decision)
         self.key = releases._step_key(self.decision, releases.ClientReleaseStep("promote", 1))
+
+    def continue_recipient(self, *, source_commit: str = "") -> ProductionRecipientRecord:
+        from control_plane.production_recipient_continuation import RecipientContinuationRequest
+
+        f = self.fixture
+        current = custody(f.store, f.record.product, f.record.context)
+        assert current is not None
+        request = RecipientContinuationRequest(
+            context=current.context,
+            original_key=current.original_key,
+            expected_custody_sha256=canonical_sha256(current.model_dump(mode="json")),
+            replacement=current.request.model_copy(
+                update={
+                    "mode": "dry-run",
+                    "reviewed_plan_sha256": "",
+                    "source_commit": source_commit or current.request.source_commit,
+                }
+            ),
+            reason="Continue the retained preparation before its accepted release starts.",
+        )
+        replacement, _fence = f.continue_preparation(current, request)
+        self.assertFalse(replacement.activation)
+        self.assertNotEqual(replacement.plan_sha256, current.plan_sha256)
+        return replacement
+
+    def test_unarmed_recipient_never_uses_the_ordinary_production_adapter(self) -> None:
+        f = self.fixture
+        profile, _testing = self.qualified_testing_source()
+        self.continue_recipient()
+        with (
+            patch("control_plane.client_release._require_current_release"),
+            patch(
+                "control_plane.client_release.GenericWebProdPromotionProviderMutationAdapter",
+                side_effect=AssertionError("Unarmed recipient reached the ordinary adapter."),
+            ) as ordinary,
+        ):
+            with self.assertRaises(releases.ClientReleaseNotReady):
+                releases._run_generic_web_promotion(
+                    f.store,
+                    f.fixture.root,
+                    profile,
+                    self.decision,
+                    releases.ClientReleaseStep("promote", 1),
+                    f.old_backup,
+                )
+            ordinary.assert_not_called()
+        self.assertEqual(f.actions, [])
+
+    def seed_retained_deployment(self) -> None:
+        f = self.fixture
+        inventory = f.store.read_environment_inventory(
+            context_name=f.record.context, instance_name="prod"
+        )
+        retained = f.record.retained_provider
+        identity = inventory.runtime_identity
+        assert identity is not None
+        artifact = ArtifactIdentityReference(
+            artifact_id=f.record.image_reference.split("@", 1)[0]
+            + "@"
+            + identity.image_reference.split("@", 1)[1]
+        )
+        identity = identity.model_copy(update={"artifact_id": artifact.artifact_id})
+        inventory = inventory.model_copy(
+            update={"artifact_identity": artifact, "runtime_identity": identity}
+        )
+        f.store.write_environment_inventory(inventory)
+        f.store.write_deployment_record(
+            DeploymentRecord(
+                record_id=inventory.deployment_record_id,
+                context=inventory.context,
+                instance=inventory.instance,
+                artifact_identity=artifact,
+                source_git_ref=inventory.source_git_ref,
+                runtime_identity=identity,
+                deploy=inventory.deploy,
+                destination_health=inventory.destination_health,
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="compose",
+                    target_id=retained.target_id,
+                    target_name=retained.display_name,
+                ),
+                deployed_target=retained.to_deployed_target_reference(),
+            )
+        )
+        self.decision = self.decision.model_copy(
+            update={
+                "checklist": self.decision.checklist.model_copy(
+                    update={
+                        "production": self.decision.checklist.production.model_copy(
+                            update={"artifact_id": artifact.artifact_id}
+                        ),
+                    }
+                )
+            }
+        )
+        f.store.write_release_review_decision_record(self.decision)
+
+    def capture_accepted_backup(self, profile: LaunchplaneProductProfileRecord) -> None:
+        f = self.fixture
+        operation_id = releases._queue_backup(
+            f.store,
+            profile,
+            self.decision,
+            releases.ClientReleaseStep("backup", 1),
+            f.record.context,
+            self.decision.decided_at,
+        )
+        operation = f.store.read_verireel_prod_backup_gate_operation_record(operation_id)
+        with patch(
+            "tests.test_production_recipient_cutover.enqueue_production_backup_gate",
+            return_value=operation,
+        ):
+            f.capture(f.publication_case.policy, operation.backup_record_id)
+        f.old_backup = operation.backup_record_id
+
+    def assert_release_waits_for_recipient(self, profile: LaunchplaneProductProfileRecord) -> None:
+        f = self.fixture
+        run = releases.read_client_release_run(
+            store=f.store, profile=profile, decision=self.decision
+        )
+        assert run is not None
+        self.assertEqual(run.state, "waiting")
+        self.assertTrue(run.blocked_reason)
+        with self.assertRaises(releases.ClientReleaseNotReady) as held:
+            releases._run_generic_web_promotion(
+                f.store,
+                f.fixture.root,
+                profile,
+                self.decision,
+                releases.ClientReleaseStep("promote", 1),
+                f.old_backup,
+            )
+        self.assertEqual(str(held.exception), run.blocked_reason)
+        self.assertEqual(f.actions, [])
+        self.assertEqual(f.store.list_held_provider_target_reservations(), ())
+
+    def test_native_release_reports_the_same_unarmed_custody_refusal_as_worker(self) -> None:
+        f = self.fixture
+        profile, _testing = self.qualified_testing_source()
+        self.seed_retained_deployment()
+        self.capture_accepted_backup(profile)
+        before = releases.read_client_release_run(
+            store=f.store, profile=profile, decision=self.decision
+        )
+        assert before is not None
+        self.assertFalse(before.blocked_reason)
+        self.continue_recipient()
+        self.assert_release_waits_for_recipient(profile)
+
+    def test_unarmed_different_candidate_remains_on_recipient_path(self) -> None:
+        profile, _testing = self.qualified_testing_source()
+        self.seed_retained_deployment()
+        self.capture_accepted_backup(profile)
+        self.continue_recipient(source_commit="c" * 40)
+        self.assert_release_waits_for_recipient(profile)
+
+    def test_published_other_version_and_retired_custody_allow_ordinary_selection(self) -> None:
+        f = self.fixture
+        profile, _testing = self.qualified_testing_source()
+        for phase in ("published", "retired"):
+            with (
+                self.subTest(phase=phase),
+                patch(
+                    "control_plane.production_recipient.custody",
+                    return_value=f.record.model_copy(
+                        update={
+                            "phase": phase,
+                            "request": f.record.request.model_copy(
+                                update={"source_commit": "c" * 40}
+                            ),
+                        }
+                    ),
+                ),
+                patch(
+                    "control_plane.client_release.GenericWebProdPromotionProviderMutationAdapter",
+                    side_effect=AssertionError("Ordinary update selected."),
+                ) as ordinary,
+            ):
+                with self.assertRaises(AssertionError):
+                    releases._run_generic_web_promotion(
+                        f.store,
+                        f.fixture.root,
+                        profile,
+                        self.decision,
+                        releases.ClientReleaseStep("promote", 1),
+                        f.old_backup,
+                    )
+                ordinary.assert_called_once()
+        self.assertEqual(f.actions, [])
+
+    def test_superseded_preflight_retry_releases_without_touching_replacement(self) -> None:
+        f = self.fixture
+        with patch.object(
+            f.adapter, "verify_upstreams", side_effect=ValueError("Upstream preflight unavailable")
+        ):
+            with self.assertRaises(ValueError):
+                f.run_release()
+        previous = custody(f.store, f.record.product, f.record.context)
+        assert previous is not None
+        self.assertEqual(previous.phase, "preflight_refused")
+        self.assertTrue(previous.execution)
+        replacement = self.continue_recipient()
+        actions = list(f.actions)
+        with patch.object(f.adapter, "apply", wraps=f.adapter.apply) as apply:
+            with self.assertRaises(GenericWebPromotionAdmissionRefused):
+                f.run_release()
+            apply.assert_called_once()
+            original = apply.call_args.args[1].evidence_reservation()
+        self.assertEqual(custody(f.store, replacement.product, replacement.context), replacement)
+        self.assertEqual(f.actions, actions)
+        self.assertEqual(f.store.list_held_provider_target_reservations(), ())
+        self.assertIsNone(
+            f.store.read_idempotency_record(
+                scope=original.scope,
+                route_path=original.route_path,
+                idempotency_key=original.idempotency_key,
+            )
+        )
+
+    def test_superseded_worker_selection_waits_without_delivery_incident(self) -> None:
+        f = self.fixture
+        profile, _testing = self.qualified_testing_source()
+        self.seed_retained_deployment()
+        self.capture_accepted_backup(profile)
+        initialise = RecipientCutoverAdapter.__init__
+        replacements: list[ProductionRecipientRecord] = []
+
+        def continue_selected(adapter: RecipientCutoverAdapter, *args: Any, **kwargs: Any) -> None:
+            initialise(adapter, *args, **kwargs)
+            if not replacements:
+                replacements.append(self.continue_recipient())
+
+        with (
+            patch("control_plane.client_release._require_current_release"),
+            patch.object(RecipientCutoverAdapter, "__init__", new=continue_selected),
+        ):
+            self.assertEqual(
+                releases.advance_client_releases(store=f.store, control_plane_root=f.fixture.root),
+                (),
+            )
+        self.assertEqual(len(replacements), 1)
+        self.assertEqual(custody(f.store, f.record.product, f.record.context), replacements[0])
+        self.assert_release_waits_for_recipient(profile)
+        self.monitor_delivery()
+        self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
+        self.assertEqual(f.actions, [])
+        self.assertEqual(f.store.list_held_provider_target_reservations(), ())
+        self.assertIsNone(
+            f.store.read_idempotency_record(
+                scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=self.key,
+            )
+        )
+
+    def test_missing_custody_remains_unknown_without_provider_effects(self) -> None:
+        f = self.fixture
+
+        def missing_before_dispatch(*_args: Any, **_kwargs: Any) -> None:
+            self.remove_recipient_custody()
+            raise ValueError("Preflight cannot retain its custody.")
+
+        with patch.object(f.adapter, "verify_upstreams", side_effect=missing_before_dispatch):
+            result = f.run_release()
+        self.assertEqual(result.status, "reconcile_required")
+        assert result.record is not None
+        self.assertFalse(result.record.provider_effect_started_at)
+        self.assertEqual(f.actions, [])
+        self.assertTrue(f.old_running)
+        self.assertFalse(f.new_running)
+        self.assertTrue(f.store.list_held_provider_target_reservations())
+
+    def ordinary_adapter(self) -> tuple[Any, Any]:
+        from control_plane.generic_web_promotion_provider_adapter import (
+            GenericWebProdPromotionProviderMutationAdapter,
+        )
+        from control_plane.generic_web_promotion_http import GenericWebProdPromotionEnvelope
+        from tests.test_generic_web_promotion import _ProductionProvider
+
+        f = self.fixture
+        profile, _testing = self.qualified_testing_source()
+        self.seed_retained_deployment()
+        profile = profile.model_copy(
+            update={
+                "image": profile.image.model_copy(
+                    update={
+                        "repository": f.record.image_reference.split("@", 1)[0],
+                    }
+                )
+            }
+        )
+        f.store.write_product_profile_record(profile)
+        provider = _ProductionProvider()
+        resolve = provider.resolve_deploy_target
+        retained = f.record.retained_provider
+
+        def old_target(**kwargs: Any) -> Any:
+            target = resolve(**kwargs)
+            return target.model_copy(
+                update={
+                    "ship_request": target.ship_request.model_copy(
+                        update={
+                            "target_name": retained.display_name,
+                            "target_type": "compose",
+                            "target_category": "compose",
+                            "provider_target_type": "compose",
+                        }
+                    ),
+                    "resolved_target": ResolvedTargetEvidence(
+                        target_type="compose",
+                        target_id=retained.target_id,
+                        target_name=retained.display_name,
+                    ),
+                    "deployed_target": retained.to_deployed_target_reference(),
+                }
+            )
+
+        self.enterContext(
+            patch(
+                "control_plane.workflows.generic_web_promotion.require_release_approval",
+                return_value=self.decision,
+            )
+        )
+        self.enterContext(patch.object(provider, "resolve_deploy_target", side_effect=old_target))
+        from tests.support.lane_builds import LaneBuildGitHub
+
+        inventory = f.store.read_environment_inventory(
+            context_name=f.record.context, instance_name="prod"
+        )
+        assert inventory.runtime_identity is not None
+        history = LaneBuildGitHub(
+            profile.repository,
+            profile.image.repository,
+            {
+                inventory.runtime_identity.source_git_ref: inventory.runtime_identity.artifact_id.split(
+                    "@", 1
+                )[1],
+                self.decision.checklist.candidate.source_commit: self.decision.checklist.candidate.artifact_id.split(
+                    "@", 1
+                )[1],
+            },
+        )
+        history.run_started_at[2] = (
+            datetime.fromisoformat(inventory.updated_at.replace("Z", "+00:00"))
+            + timedelta(seconds=1)
+        ).isoformat()
+        self.enterContext(
+            patch(
+                "control_plane.product_reconcile.resolve_build_provenance_transport",
+                return_value=history,
+            )
+        )
+        self.enterContext(
+            patch("control_plane.workflows.generic_web_promotion._wait_for_healthcheck")
+        )
+        grant = releases.client_release_grant(
+            decision=self.decision,
+            action="generic_web_prod_promotion.execute",
+            context=f.record.context,
+            authorized_at=datetime.now(UTC).isoformat(),
+        )
+
+        def validate_acceptance() -> None:
+            if not releases._generic_web_release_authority_allows(f.store, grant):
+                raise ValueError("The accepted release is on hold.")
+
+        adapter = GenericWebProdPromotionProviderMutationAdapter(
+            control_plane_root=f.fixture.root,
+            record_store=f.store,
+            promotion_request=GenericWebProdPromotionEnvelope(
+                product=profile.product,
+                promotion=releases.client_release_promotion_request(
+                    profile, self.decision, f.old_backup
+                ),
+            ),
+            profile=profile,
+            lane=next(lane for lane in profile.lanes if lane.instance == "prod"),
+            trace_id="recipient-race",
+            validate_before_checkpoint=validate_acceptance,
+            validate_before_effect=lambda _target: None,
+            deploy_provider=provider,
+            settle_pre_effect_failure=True,
+        )
+        return adapter, provider
+
+    def remove_recipient_custody(self) -> ProductionRecipientRecord:
+        from control_plane.storage.postgres import LaunchplaneProductionRecipientRow
+
+        f = self.fixture
+        saved = custody(f.store, f.record.product, f.record.context)
+        assert saved is not None
+        with f.store._session_factory() as session, session.begin():
+            row = session.get(LaunchplaneProductionRecipientRow, (saved.product, saved.context))
+            assert row is not None
+            session.delete(row)
+        return saved
+
+    def ordinary_custody_after_effect(self, *, fail_candidate: bool) -> None:
+        from control_plane.production_recipient import authority_snapshot
+
+        f = self.fixture
+        adapter, provider = self.ordinary_adapter()
+        saved = self.remove_recipient_custody()
+        candidate = self.decision.checklist.candidate.artifact_id
+        provider.healthy_artifact = (
+            self.decision.checklist.production.artifact_id if fail_candidate else candidate
+        )
+        provider.fail_artifact = candidate if fail_candidate else ""
+        checkpoint = f.store.checkpoint_mutation_provider_effect
+        inserted = False
+
+        def create_after_admission(**kwargs: Any) -> Any:
+            nonlocal inserted
+            admitted = checkpoint(**kwargs)
+            if not inserted:
+                f.store.write_production_recipient(
+                    expected=None,
+                    replacement=saved.model_copy(
+                        update={
+                            "authority_snapshot": authority_snapshot(
+                                f.store, saved.product, saved.context
+                            ),
+                        }
+                    ).model_dump(mode="json"),
+                )
+                inserted = True
+            return admitted
+
+        deploy = provider.execute_artifact_deploy
+
+        def hold_after_candidate(**kwargs: Any) -> None:
+            try:
+                deploy(**kwargs)
+            finally:
+                if fail_candidate and candidate in provider.deployed_artifacts:
+                    profile = f.store.read_product_profile_record(f.record.product)
+                    f.store.write_product_profile_record(
+                        profile.model_copy(update={"release_on_acceptance": "held"})
+                    )
+
+        with (
+            patch.object(
+                f.store, "checkpoint_mutation_provider_effect", side_effect=create_after_admission
+            ),
+            patch.object(provider, "execute_artifact_deploy", side_effect=hold_after_candidate),
+        ):
+            result = self.run_ordinary(adapter)
+        self.assertTrue(inserted)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            provider.deployed_artifacts,
+            [candidate, self.decision.checklist.production.artifact_id]
+            if fail_candidate
+            else [candidate],
+        )
+        self.assertEqual(
+            result.response_payload["result"]["promotion_status"],
+            "fail" if fail_candidate else "pass",
+        )
+        if fail_candidate:
+            self.assertEqual(result.response_payload["result"]["rollback_status"], "pass")
+        self.assertEqual(f.actions, [])
+        self.assertEqual(f.store.list_held_provider_target_reservations(), ())
+
+    def test_admitted_ordinary_promotion_finishes_after_custody_creation(self) -> None:
+        self.ordinary_custody_after_effect(fail_candidate=False)
+
+    def test_ordinary_automatic_rollback_survives_custody_creation(self) -> None:
+        self.ordinary_custody_after_effect(fail_candidate=True)
+
+    def run_ordinary(self, adapter: Any) -> Any:
+        from control_plane.provider_operations import run_durable_provider_operation
+
+        f = self.fixture
+        return run_durable_provider_operation(
+            store=f.store,
+            scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=self.key,
+            request_fingerprint="f" * 64,
+            lease_owner="ordinary-worker",
+            response_trace_id="recipient-race",
+            adapter=adapter,
+        )
+
+    def advance_ordinary_worker(self, provider: Any) -> tuple[str, ...]:
+        f = self.fixture
+        with (
+            patch("control_plane.client_release._require_current_release"),
+            patch(
+                "control_plane.generic_web_promotion_provider_adapter.default_generic_web_deploy_provider",
+                return_value=provider,
+            ),
+        ):
+            return releases.advance_client_releases(
+                store=f.store, control_plane_root=f.fixture.root
+            )
+
+    def monitor_delivery(self) -> None:
+        from control_plane.production_delivery_monitor import monitor_production_delivery_once
+
+        transport = Mock()
+        transport.get_json.return_value = {"sha": self.decision.checklist.candidate.source_commit}
+        monitor_production_delivery_once(
+            self.fixture.store, transport_factory=lambda _store, _profile: transport
+        )
+
+    def worker_checkpoint_race(self, *, target_changed: bool) -> None:
+        from control_plane.production_recipient import authority_snapshot
+        from control_plane.workflows.production_promotion_backup import (
+            require_production_promotion_backup,
+            GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+        )
+
+        f = self.fixture
+        if not target_changed:
+            self.continue_recipient()
+        _adapter, provider = self.ordinary_adapter()
+        profile = f.store.read_product_profile_record(f.record.product)
+        self.capture_accepted_backup(profile)
+        saved = self.remove_recipient_custody()
+        checkpoint = f.store.checkpoint_mutation_provider_effect
+        inserted = False
+
+        if not target_changed:
+            from control_plane.lane_movement import LaneMovementRefused
+
+            with patch(
+                "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+                side_effect=LaneMovementRefused("source_order_unavailable"),
+            ):
+                self.advance_ordinary_worker(provider)
+            self.monitor_delivery()
+            self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
+
+        def change_custody_or_target(**kwargs: Any) -> Any:
+            nonlocal inserted
+            if not inserted:
+                if target_changed:
+                    target = f.store.read_provider_target_record(
+                        context_name=saved.context, instance_name="prod"
+                    )
+                    f.store.write_provider_target_record(
+                        target.model_copy(update={"target_id": "replacement-production-target"})
+                    )
+                else:
+                    f.store.write_production_recipient(
+                        expected=None,
+                        replacement=saved.model_copy(
+                            update={
+                                "authority_snapshot": authority_snapshot(
+                                    f.store, saved.product, saved.context
+                                ),
+                            }
+                        ).model_dump(mode="json"),
+                    )
+                inserted = True
+            return checkpoint(**kwargs)
+
+        with patch.object(
+            f.store, "checkpoint_mutation_provider_effect", side_effect=change_custody_or_target
+        ):
+            self.advance_ordinary_worker(provider)
+        self.assertTrue(inserted)
+        self.assertEqual(provider.deployed_artifacts, [])
+        self.assertEqual(f.actions, [])
+        self.monitor_delivery()
+        reservation = f.store.read_idempotency_record(
+            scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=self.key,
+        )
+        if target_changed:
+            assert reservation is not None
+            self.assertEqual(reservation.state, "completed")
+            self.assertFalse(reservation.provider_effect_started_at)
+            self.assertEqual(reservation.response_payload["result"]["rollback_status"], "skipped")
+            self.assertTrue(f.store.list_public_ingress_incident_records(status="open"))
+            self.assertEqual(self.advance_ordinary_worker(provider), ())
+            run = releases.read_client_release_run(
+                store=f.store, profile=profile, decision=self.decision
+            )
+            assert run is not None
+            self.assertEqual(run.state, "stopped")
+            self.assertEqual(provider.deployed_artifacts, [])
+            with self.assertRaises(click.ClickException):
+                require_production_promotion_backup(
+                    record_store=f.store,
+                    product=saved.product,
+                    context=saved.context,
+                    instance="prod",
+                    promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+                    backup_record_id=f.old_backup,
+                )
+            return
+        self.assertIsNone(reservation)
+        self.assert_release_waits_for_recipient(profile)
+        self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
+        reusable = require_production_promotion_backup(
+            record_store=f.store,
+            product=saved.product,
+            context=saved.context,
+            instance="prod",
+            promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+            backup_record_id=f.old_backup,
+        )
+        self.assertEqual(reusable.status, "pass")
+        self.assertTrue(
+            all(record.deploy.status == "pass" for record in f.store.list_deployment_records())
+        )
+
+    def test_ordinary_promotion_rechecks_new_custody_at_its_atomic_first_effect(self) -> None:
+        self.worker_checkpoint_race(target_changed=False)
+
+    def test_atomic_target_change_stops_the_release_without_retry_or_rollback(self) -> None:
+        self.worker_checkpoint_race(target_changed=True)
+
+    def test_http_temporary_custody_hold_does_not_open_delivery_incident(self) -> None:
+        from types import SimpleNamespace
+        from control_plane.lane_movement import LaneMovementRefused, require_forward_lane_build
+        from control_plane.contracts.authz_policy_record import (
+            LaunchplaneAuthzPolicyRecord,
+            authz_policy_sha256,
+            build_authz_policy_record_id,
+        )
+        from control_plane.contracts.release_review import ReleaseReviewStatus
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from control_plane.workflows.production_promotion_backup import (
+            require_production_promotion_backup,
+            GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+        )
+        from tests.support.auth import StubVerifier, identity
+        from tests.test_service import _invoke_app, create_launchplane_fastapi_test_app
+
+        f = self.fixture
+        _adapter, provider = self.ordinary_adapter()
+        profile = f.store.read_product_profile_record(f.record.product)
+        self.capture_accepted_backup(profile)
+        lane = next(lane for lane in profile.lanes if lane.instance == "prod")
+        accepted = f.store.read_release_review_decision_record(
+            product=profile.product, record_id=self.decision.record_id
+        )
+        review = ReleaseReviewStatus(
+            required=True,
+            approved=True,
+            checklist_complete=True,
+            checklist=accepted.checklist,
+            checklist_digest=accepted.checklist_digest,
+            latest_decision=accepted,
+        )
+        caller = identity(
+            repository=profile.repository,
+            workflow_ref=f"{profile.repository}/.github/workflows/promote-prod.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        previous = f.store.list_authz_policy_records(status="active", limit=1)[0]
+        payload = previous.policy.model_dump(mode="json")
+        payload["github_actions"].append(
+            {
+                "managed_set_id": "fixture.http-promotion",
+                "managed_rule_id": "fixture.http-promotion",
+                "repository": caller.repository,
+                "repository_id": caller.repository_id,
+                "repository_owner_id": caller.repository_owner_id,
+                "workflow_refs": [caller.workflow_ref],
+                "event_names": [caller.event_name],
+                "products": [profile.product],
+                "contexts": [lane.context],
+                "instances": ["testing", "prod"],
+                "actions": [GENERIC_WEB_PROMOTION_BACKUP_ACTION],
+            }
+        )
+        policy = LaunchplaneAuthzPolicy.model_validate(payload)
+        digest = authz_policy_sha256(policy)
+        revision = previous.revision + 1
+        replacement = LaunchplaneAuthzPolicyRecord(
+            revision=revision,
+            record_id=build_authz_policy_record_id(revision=revision, policy_sha256=digest),
+            source="service:test",
+            updated_at=datetime.now(UTC).isoformat(),
+            policy_sha256=digest,
+            policy=policy,
+            audit={
+                "operation": "managed_rule_set_reconcile",
+                "managed_set_id": "fixture.http-promotion",
+                "previous_policy_record_id": previous.record_id,
+                "diff": {"changes": []},
+            },
+        )
+        f.store.compare_and_write_authz_policy_record(
+            expected_record=previous, replacement_record=replacement
+        )
+        app = create_launchplane_fastapi_test_app(
+            local_record_store_for_tests=f.store,
+            state_dir=f.fixture.root / "state",
+            verifier=StubVerifier(caller),
+            authz_policy=policy,
+            control_plane_root_path=f.fixture.root,
+        )
+        for outage in (False, True):
+            with self.subTest(outage=outage):
+                if outage:
+                    self.remove_recipient_custody()
+                with (
+                    patch(
+                        "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+                        side_effect=LaneMovementRefused("source_order_unavailable")
+                        if outage
+                        else None,
+                        wraps=require_forward_lane_build,
+                    ),
+                    self.assertLogs(
+                        "control_plane.http_routes.generic_web", level="ERROR"
+                    ) as refusal_logs,
+                    patch(
+                        "control_plane.http_routes.generic_web.build_product_promotion_status",
+                        return_value=(profile, lane, SimpleNamespace(release_review=review)),
+                    ),
+                    patch(
+                        "control_plane.http_routes.generic_web.default_generic_web_deploy_provider",
+                        return_value=provider,
+                    ),
+                ):
+                    status, response = _invoke_app(
+                        app,
+                        method="POST",
+                        path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                        headers={"Idempotency-Key": "fixture-custody-http-hold"},
+                        payload={
+                            "schema_version": 1,
+                            "product": profile.product,
+                            "promotion": {
+                                "schema_version": 1,
+                                "product": profile.product,
+                                "artifact_id": accepted.checklist.candidate.artifact_id,
+                                "source_git_ref": accepted.checklist.candidate.source_commit,
+                                "backup_record_id": f.old_backup,
+                            },
+                        },
+                    )
+                self.assertEqual(status, 409, response)
+                self.assertTrue(any(response["trace_id"] in entry for entry in refusal_logs.output))
+                self.assertEqual(
+                    response["error"]["code"], GenericWebPromotionAdmissionRefused.failure_code
+                )
+                self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
+                self.monitor_delivery()
+                self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
+                self.assertEqual(provider.deployed_artifacts, [])
+                self.assertEqual(f.actions, [])
+                self.assertEqual(f.store.list_held_provider_target_reservations(), ())
+                self.assertEqual(
+                    require_production_promotion_backup(
+                        record_store=f.store,
+                        product=profile.product,
+                        context=lane.context,
+                        instance="prod",
+                        promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+                        backup_record_id=f.old_backup,
+                    ).status,
+                    "pass",
+                )
 
     def recover(self, request: Any = None, key: str | None = None) -> Any:
         f = self.fixture
@@ -775,23 +1544,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
     def test_native_inverse_is_owed_without_a_passing_historical_deployment(self) -> None:
         f = self.fixture
         profile, _testing = self.qualified_testing_source()
-        operation_id = releases._queue_backup(
-            f.store,
-            profile,
-            self.decision,
-            releases.ClientReleaseStep("backup", 1),
-            f.record.context,
-            self.decision.decided_at,
-        )
-        backup_operation = f.store.read_verireel_prod_backup_gate_operation_record(operation_id)
-        # Reuse the fixture's real backup worker for the already queued Client
-        # operation rather than enqueueing its separate fixture-capture key.
-        with patch(
-            "tests.test_production_recipient_cutover.enqueue_production_backup_gate",
-            return_value=backup_operation,
-        ):
-            f.capture(f.publication_case.policy, backup_operation.backup_record_id)
-        f.old_backup = backup_operation.backup_record_id
+        self.capture_accepted_backup(profile)
         self.started_recipient_with_new_testing(resume=False)
         baseline = f.publication_case.inventory
         current = f.store.read_environment_inventory(

@@ -67,7 +67,7 @@ from control_plane.workflows.production_promotion_backup import (
     require_production_promotion_backup,
 )
 from control_plane.dokploy import api, source
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import GenericWebPromotionAdmissionRefused
 from control_plane.http_error_evidence import log_handled_error_cause
 from control_plane.outbound_http import _ValidatedAddressConnector, resolve_private_http_destination
 
@@ -1393,7 +1393,23 @@ class RecipientCutoverAdapter:
         except Exception as error:
             log_handled_error_cause(error, self.trace_id)
             if (
-                isinstance(error, GenericWebPromotionSourceRefused)
+                not started
+                and isinstance(lease, ProviderEvidenceLease)
+                and not attempt_has_effects()
+            ):
+                committed = custody(self.store, record.product, record.context)
+                if committed is None:
+                    raise ProviderMutationUnknownError(
+                        "Production recipient custody is unavailable."
+                    ) from error
+                if committed.plan_sha256 != record.plan_sha256:
+                    raise ProviderMutationRejectedError(
+                        GenericWebPromotionAdmissionRefused(
+                            "Production recipient custody changed before dispatch."
+                        )
+                    ) from error
+            if (
+                isinstance(error, GenericWebPromotionAdmissionRefused)
                 and not started
                 and isinstance(lease, ProviderEvidenceLease)
                 and not attempt_has_effects()

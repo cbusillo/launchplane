@@ -31,7 +31,9 @@ from control_plane.provider_operations import (
     provider_operation_response_payload as _provider_operation_response_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionAdmissionRefused,
+)
 
 from control_plane.workflows.generic_web_deploy import normalize_generic_web_artifact_id
 from control_plane.workflows.generic_web_deploy_provider import (
@@ -220,6 +222,25 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 if self._validate_before_checkpoint is not None:
                     self._validate_before_checkpoint()
                 if not effects_admitted:
+                    from control_plane.production_recipient import custody
+
+                    if isinstance(self._record_store, PostgresRecordStore):
+                        recipient = custody(
+                            self._record_store, self._profile.product, self._lane.context
+                        )
+                        if (
+                            recipient is not None
+                            and recipient.phase not in {"published", "retired"}
+                            and not recipient.publication
+                        ):
+                            raise GenericWebPromotionAdmissionRefused(
+                                "Unpublished production recipient custody requires its qualified, armed cutover."
+                            )
+                        require_generic_web_promotion_target(
+                            record_store=self._record_store,
+                            lane=self._lane,
+                            resolved_deploy_target=target,
+                        )
                     resolve_generic_web_promotion_inputs(
                         record_store=cast(GenericWebPromotionStore, self._record_store),
                         request=promotion_request.promotion,
@@ -262,13 +283,9 @@ class GenericWebProdPromotionProviderMutationAdapter:
         except StarletteHTTPException as error:
             raise ProviderMutationRejectedError(error) from error
         except (FileNotFoundError, ValueError, click.ClickException) as error:
-            from control_plane.lane_movement import LaneMovementRefused
-
-            if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
-                raise ProviderMutationRejectedError(error) from error
             if provider_effect_attempted:
                 raise ProviderMutationUnknownError(str(error)) from error
-            if isinstance(error, GenericWebPromotionSourceRefused):
+            if isinstance(error, GenericWebPromotionAdmissionRefused):
                 # The shared runner alone releases a reservation, and only when
                 # its authoritative effect checkpoint proves nothing dispatched.
                 raise ProviderMutationRejectedError(error) from error

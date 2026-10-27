@@ -223,6 +223,8 @@ class RecordFailure(BaseModel):
 
 # What each generic-web promotion failure code means, in Launchplane's words.
 PROMOTION_FAILURE_DESCRIPTIONS: dict[str, str] = {
+    "generic_web.admission_refused": "Production admission was refused before provider dispatch.",
+    "generic_web.source_unqualified": "Testing did not qualify the accepted source before production admission.",
     "recipient_cutover_unverified": "Launchplane could not complete the prepared recipient's cutover qualification.",
     "recipient_deploy_unverified": "Launchplane could not verify the recipient deployment or replacement writer resume.",
     "recipient_health_unverified": "The recipient's health, readiness or exact runtime identity did not pass qualification.",

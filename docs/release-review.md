@@ -207,6 +207,13 @@ tracked in [#4236](https://github.com/cbusillo/launchplane/issues/4236).
 The source check does not impose testing qualification on production baselines
 or replace Odoo's release-tuple contract.
 
+An unpublished production recipient keeps its accepted release on the recipient
+path through same-key continuation; native status explains an unarmed or different
+candidate. Temporary custody refusals do not consume a backup or open a delivery
+failure incident. A changed production target still stops the release and needs
+new review and backup; unknown custody remains fenced. Admitted work, protective
+rollback and existing publication recovery keep their original authority.
+
 Checklist reads retry an individual GitHub GET once after a transport failure,
 invalid JSON response, timeout, or HTTP 408/500/502/503/504. Authorization,
 not-found, and rate-limit responses are not retried. Each failed attempt logs
