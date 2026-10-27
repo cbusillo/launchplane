@@ -158,6 +158,7 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             .decode()
         )
         return {
+            "bindings": {},
             "generate_capture_key": True,
             "known_hosts": f"{_source_target().destination.host} {host_key}",
             "promotion_action": _policy().promotion_action,

@@ -53,6 +53,7 @@ def backup_capture_key(
             payload = json.loads(request_file.read_text())
             body = BackupCredentialBindingRequest.model_validate(
                 {
+                    "bindings": {},
                     **payload,
                     "mode": mode,
                     "reviewed_plan_sha256": reviewed_plan_sha256,

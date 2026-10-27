@@ -30,7 +30,7 @@ class BackupCredentialBindingRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["dry-run", "apply"] = "dry-run"
-    bindings: dict[str, str] = Field(default_factory=dict)
+    bindings: dict[str, str]
     generate_capture_key: bool = False
     known_hosts: str = Field(default="", max_length=8192)
     reason: str = Field(min_length=1, max_length=500)

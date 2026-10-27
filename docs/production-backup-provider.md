@@ -492,7 +492,9 @@ uv run launchplane backup-capture-key --product example-product --mode readback
 ```
 
 The public request file contains only `generate_capture_key`, `known_hosts`,
-`promotion_action` and `reason`. Load the existing `LAUNCHPLANE_OPERATOR_URL`
+`promotion_action` and `reason`. The CLI supplies an empty `bindings` map for
+generation, preserving rebinding's required reference-map contract.
+Load the existing `LAUNCHPLANE_OPERATOR_URL`
 and `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` into the caller's environment through the
 private admin configuration; neither is a CLI token argument. The caller refuses
 HTTP origins and redirects. Apply returns only the public key, its OpenSSH
