@@ -1083,6 +1083,13 @@ def product_target_owner_products(
 ) -> frozenset[str]:
     """Owners of a trimmed lane, or every current/historical claim on a context."""
     if not instance:
+        profiles = tuple(profiles)
+        if config_scopes and not any(
+            lane.context.strip().lower() == context.lower()
+            for profile in profiles
+            for lane in profile.lanes
+        ):
+            return frozenset()
         return product_context_owner_map(profiles, config_scopes=config_scopes).get(
             context.lower(), frozenset()
         )
