@@ -425,12 +425,8 @@ notification-policy ownership alone does not settle those effects.
 Starting or replacing this composition immediately attempts due queued work;
 deploying it is activation, not a diagnostic read.
 
-Queued incident deliveries whose incident is already resolved complete without
-a provider call. Their terminal outbox action and durable skipped attempt record
-say `superseded_incident_resolved`. This includes queued recovery messages.
-An existing provider-start marker remains an unknown outcome instead of being
-reported as superseded.
-The first dispatcher claim groups the existing pending email and Discord
+Resolved-incident delivery follows the [incident record contract](records.md#public-ingress-incident-records).
+The first dispatcher claim groups the existing pending email
 incident deliveries by incident, policy and destination in one transaction.
 It includes expired unmarked claims and excludes provider-start markers and
 active leases. Each group retains one summary delivery; the other rows complete
@@ -445,8 +441,6 @@ The selection receipt does not prove delivery. Activation readback must inspect
 all selected incidents for failed deliveries or exhausted retries as well as
 successful and skipped attempts; an unavailable destination or exhausted summary
 leaves a visible failure and does not revive the superseded backlog.
-GitHub issue lifecycle deliveries and marked unknown outcomes are unchanged.
-Resolved GitHub rows also retain unknown outcomes without provider reconciliation.
 
 Historical provider retirement records may retain an empty target list. They
 remain skipped reconciliation evidence with `monitoring_intent_changed`, never
@@ -1672,7 +1666,7 @@ and route `service:health-monitor-scheduler`; testing slot keys are namespaced
 separately. The v2 activation starts a new evidence epoch: older half-hour
 receipts remain in storage but cannot prove the faster schedule.
 Service logs identify completed and missed slots; incident and notification
-records show alert delivery, recovery and superseded resolved-incident deliveries.
+records show alert delivery, recovery and superseded failure alerts.
 Watchdog reporting has its own renewed lease and DB-backed per-slot receipts,
 so replicas and restarts share miss/recovery delivery state.
 
@@ -1908,9 +1902,8 @@ material change clears acknowledgement and is immediately eligible for delivery.
 A bounded silence preserves all observations/events but suppresses material
 updates and reminders until `silenced_until`; after expiry the next unresolved
 failure can emit the current reminder. Resolution remains a durable incident
-event; the outbox supersedes delivery once the incident is resolved. External
-GitHub issues are therefore not automatically closed by durable recovery
-delivery. Public, private, and provider checks use the configured consecutive-pass recovery
+event; delivery follows the [incident record contract](records.md#public-ingress-incident-records).
+Public, private, and provider checks use the configured consecutive-pass recovery
 threshold; only the threshold-crossing pass creates the single recovery event.
 
 Inspect active incident state from Product Ops before following an external
@@ -2200,9 +2193,8 @@ or receipt evidence keeps the incident open. The monitor locks and rechecks the
 proof with the existing provider-source gate before publication. This changes no
 provider resource, replays no executor, invents no nonce and supplies no deployment
 verification; health, identity, TLS and freshness retain their separate gates.
-The outbox worker sends email and Discord as well as GitHub notifications for
-still-open incidents. Recovery does not manufacture another notification to
-resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;
+The outbox worker sends email and Discord as well as GitHub notifications.
+Each delivery keeps the original event and rendered body;
 email/Discord payloads reference the policy destination without copying credentials
 or secret references. The worker resolves that destination from current enabled
 policy and the existing managed-secret resolver at send time.
@@ -2224,8 +2216,7 @@ stable incident marker for issue recovery. Updates and reminders
 search the incident marker when their queued payload predates the committed
 opening attempt record, then comment on the recovered issue rather than
 creating a duplicate. File-backed rehearsals retain synchronous resolution
-delivery and issue closure. Durable deliveries for resolved incidents are
-superseded instead. Do not clear provider markers or outbox rows to force a retry.
+delivery and issue closure. Do not clear provider markers or outbox rows to force a retry.
 GitHub issue notification delivery uses the managed automation token projected
 as `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN`; it does not fall back to active
 local `gh` authentication. Verify the configured actor with a token-scoped
