@@ -13405,6 +13405,18 @@ class RealPostgresRecipientReleaseAdmissionTests(unittest.TestCase):
     def test_automatic_rollback_keeps_its_authority(self) -> None:
         self.fixture.test_ordinary_automatic_rollback_survives_custody_creation()
 
+    def test_native_worker_supersession_is_an_informational_hold(self) -> None:
+        self.fixture.test_superseded_worker_selection_waits_without_delivery_incident()
+
+    def test_atomic_target_change_stays_terminal(self) -> None:
+        self.fixture.test_atomic_target_change_stops_the_release_without_retry_or_rollback()
+
+    def test_http_temporary_hold_does_not_alert(self) -> None:
+        self.fixture.test_http_temporary_custody_hold_does_not_open_delivery_incident()
+
+    def test_missing_custody_is_unknown(self) -> None:
+        self.fixture.test_missing_custody_remains_unknown_without_provider_effects()
+
 
 class RealPostgresRecipientWriterTests(unittest.TestCase):
     def test_repeatable_writer_cycles_use_real_custody(self) -> None:

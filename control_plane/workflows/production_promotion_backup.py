@@ -82,6 +82,20 @@ class ProductionPromotionBackupStore(Protocol):
     ) -> tuple[VeriReelProdBackupGateOperationRecord, ...]: ...
 
 
+def promotion_is_temporary_admission_refusal(promotion: PromotionRecord) -> bool:
+    return (
+        promotion.deploy.status == "fail"
+        and promotion.failure is not None
+        and promotion.failure.code
+        in {
+            "lane_movement.source_order_unavailable",
+            GenericWebPromotionSourceRefused.failure_code,
+            GenericWebPromotionAdmissionRefused.failure_code,
+        }
+        and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
+    )
+
+
 def require_production_promotion_backup(
     *,
     record_store: object,
@@ -214,19 +228,7 @@ def require_production_promotion_backup(
     for promotion in promotions:
         if promotion.record_id == active_promotion_record_id:
             continue
-        if (
-            promotion.deploy.status == "fail"
-            and promotion.failure is not None
-            and promotion.failure.code
-            in {
-                "lane_movement.source_order_unavailable",
-                GenericWebPromotionSourceRefused.failure_code,
-                GenericWebPromotionAdmissionRefused.failure_code,
-            }
-            and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
-        ):
-            # The guard recorded a temporary read refusal before its first
-            # provider checkpoint. This capture has protected no write yet.
+        if promotion_is_temporary_admission_refusal(promotion):
             continue
         if backup_record_id in (
             promotion.backup_gate.evidence.get("backup_record_id"),

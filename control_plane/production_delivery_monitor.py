@@ -27,6 +27,14 @@ from control_plane.contracts.product_profile_record import (
     product_profile_record_sha256,
     product_lane_monitoring_probe_effective,
 )
+from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionAdmissionRefused,
+    GenericWebPromotionSourceRefused,
+)
+from control_plane.workflows.production_promotion_backup import (
+    promotion_is_temporary_admission_refusal,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     PRODUCTION_REQUEST_REFUSED,
@@ -72,6 +80,8 @@ _ROUTE = "service:production-delivery-monitor"
 _LOGGER = logging.getLogger(__name__)
 _NONTERMINAL_CODES = frozenset(
     {
+        GenericWebPromotionAdmissionRefused.failure_code,
+        GenericWebPromotionSourceRefused.failure_code,
         "mutation_in_progress",
         "lane_busy",
         "promotion_already_active",
@@ -741,6 +751,8 @@ def _work_events(
             or store.database_dialect_name != "postgresql"
         ):
             index.reconcile_source(work, record.model_dump(mode="json"))
+        if isinstance(record, PromotionRecord) and promotion_is_temporary_admission_refusal(record):
+            return []
         if record.failure is not None or any(
             status == "fail"
             for status in (

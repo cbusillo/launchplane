@@ -13,6 +13,8 @@ from control_plane.contracts.product_environment_read_model import (
 )
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
+    BackupGateEvidence,
+    RecordFailure,
     DeploymentEvidence,
     HealthcheckEvidence,
     PromotionRecord,
@@ -178,6 +180,62 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.monitor()
         self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
         self.assertEqual(self.store.list_outbox_delivery_records(), ())
+
+    def write_temporary_promotion_hold(self, name: str, *, effects: str = "not_started") -> None:
+        from control_plane.generic_web_source_qualification import (
+            GenericWebPromotionAdmissionRefused,
+        )
+
+        reference = self.store.list_deployment_records()[0]
+        backup = "unused-fixture-backup"
+        self.store.write_promotion_record(
+            PromotionRecord(
+                record_id=name,
+                artifact_identity=ArtifactIdentityReference(artifact_id="image@" + self.head),
+                backup_record_id=backup,
+                context=self.lane.context,
+                from_instance="testing",
+                to_instance="prod",
+                backup_gate=BackupGateEvidence(
+                    status="pass",
+                    evidence={
+                        "backup_record_id": backup,
+                        **({"provider_effects_status": effects} if effects else {}),
+                    },
+                ),
+                deploy=reference.deploy.model_copy(
+                    update={"status": "fail", "finished_at": self.timestamp()}
+                ),
+                failure=RecordFailure(
+                    code=GenericWebPromotionAdmissionRefused.failure_code,
+                    description=GenericWebPromotionAdmissionRefused.failure_description,
+                ),
+            )
+        )
+
+    def test_temporary_promotion_holds_do_not_open_or_resolve_delivery_incidents(self) -> None:
+        self.write_temporary_promotion_hold("initial-hold")
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+        self.reject()
+        original = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.now += timedelta(seconds=1)
+        self.write_temporary_promotion_hold("later-hold")
+        self.monitor()
+        self.assertEqual(
+            {
+                item.incident_id
+                for item in self.store.list_public_ingress_incident_records(status="open")
+            },
+            {original.incident_id},
+        )
+        current = self.store.read_public_ingress_incident_record(original.incident_id)
+        self.assertEqual(current.material_fingerprint, original.material_fingerprint)
+
+    def test_admission_failure_without_no_effect_proof_is_monitored(self) -> None:
+        self.write_temporary_promotion_hold("unproved-refusal", effects="")
+        self.monitor()
+        self.assertTrue(self.store.list_public_ingress_incident_records(status="open"))
 
     def test_guard_refusal_records_evidence_without_delivery_incident(self) -> None:
         deployments = self.store.list_deployment_records()

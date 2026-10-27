@@ -123,6 +123,7 @@ from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
 from control_plane.generic_web_rollback_drill import run_generic_web_rollback_drill
 from control_plane.generic_web_source_qualification import (
     GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
     qualified_generic_web_source_inventory,
 )
 from control_plane.generic_web_promotion_provider_adapter import (
@@ -1518,7 +1519,7 @@ def advance_client_releases(
         except (
             ClientReleaseNotReady,
             BusinessHoursHeld,
-            GenericWebPromotionSourceRefused,
+            GenericWebPromotionAdmissionRefused,
         ) as reason:
             _LOGGER.info(
                 "client release not advanced product=%s reason=%s", profile.product, reason

@@ -11,6 +11,8 @@ from pathlib import Path as FilePath
 from typing import Annotated, Any, Protocol, cast
 
 import click
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from control_plane.generic_web_source_qualification import GenericWebPromotionAdmissionRefused
 from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 from fastapi import Depends, Header, Request
 from fastapi.responses import JSONResponse
@@ -334,6 +336,16 @@ def build_generic_web_write_route_handlers(
                 code="promotion_intent_invalid",
                 message="Product-owned promotion intent does not match current evidence.",
             )
+
+    def promotion_admission_error(
+        error: GenericWebPromotionAdmissionRefused, trace_id: str
+    ) -> StarletteHTTPException:
+        return dependencies.http_error(
+            status_code=409,
+            trace_id=trace_id,
+            code=error.failure_code,
+            message=error.failure_description,
+        )
 
     def require_product_promotion_target_snapshot(
         *,
@@ -1583,6 +1595,8 @@ def build_generic_web_write_route_handlers(
                     code="not_found",
                     message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
                 ) from error
+            except GenericWebPromotionAdmissionRefused as error:
+                raise promotion_admission_error(error, trace_id) from error
             except (ValueError, click.ClickException) as error:
                 _log_masked_promotion_error(error, trace_id=trace_id)
                 raise dependencies.http_error(
@@ -1607,6 +1621,8 @@ def build_generic_web_write_route_handlers(
                 code="not_found",
                 message=f"No Launchplane route for {_GENERIC_WEB_PROD_PROMOTION_ROUTE}.",
             ) from error
+        except GenericWebPromotionAdmissionRefused as error:
+            raise promotion_admission_error(error, trace_id) from error
         except (ValueError, click.ClickException) as error:
             _log_masked_promotion_error(error, trace_id=trace_id)
             raise dependencies.http_error(
