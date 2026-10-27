@@ -249,9 +249,9 @@ def private_ingress_snapshot(
         raise ValueError("The original private testing ingress receipt changed.")
     snapshot = {
         **snapshot,
-        "desired": _host_payload(
-            desired.model_copy(update={"npmplus_location_config": current.npmplus_location_config})
-        ),
+        "desired": desired.model_copy(
+            update={"npmplus_location_config": current.npmplus_location_config}
+        ).model_dump(mode="json"),
     }
     binding = {
         "endpoint_key": endpoint.endpoint_key,

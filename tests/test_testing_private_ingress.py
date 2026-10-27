@@ -375,7 +375,7 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
     def test_disabled_legacy_route_resumes_enable_after_a_lost_update_reply(self) -> None:
         self.assert_legacy_upgrade_adopts_lost_reply(disabled=True)
 
-    def test_legacy_activation_binding_survives_source_delivery(self) -> None:
+    def test_legacy_activation_snapshot_matches_original_private_ingress_snapshot(self) -> None:
         from control_plane.testing_application_private_route import private_ingress_snapshot
 
         self.create_legacy_private_route()
@@ -388,15 +388,13 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
                 update={"npmplus_location_config": ""}
             )
 
+        with patch.object(TestingPrivateIngressAdapter, "_desired", legacy_desired):
+            original, _, _ = self.adapter()._snapshot()
         with patch(
             "control_plane.workflows.ingress_provider.build_npmplus_ingress_client_from_env",
             return_value=self.client,
         ):
-            with patch.object(TestingPrivateIngressAdapter, "_desired", legacy_desired):
-                original = private_ingress_snapshot(
-                    self.root, self.store, product=self.profile.product, context=self.context
-                )
-            current = private_ingress_snapshot(
+            current, _, _ = private_ingress_snapshot(
                 self.root, self.store, product=self.profile.product, context=self.context
             )
         self.assertEqual(current, original)

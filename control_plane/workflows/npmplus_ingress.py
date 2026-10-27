@@ -474,7 +474,9 @@ def _ordered_change_categories(
 def _comparable_payload(
     payload: NpmplusProxyHostPayload,
 ) -> dict[str, object]:
-    comparable = payload.model_dump(mode="json", exclude={"enabled", "id", "meta"})
+    comparable = payload.model_dump(
+        mode="json", exclude={"enabled", "id", "meta", "npmplus_location_config"}
+    )
     locations = comparable.get("locations")
     if isinstance(locations, list):
         comparable["locations"] = [

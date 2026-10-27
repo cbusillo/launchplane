@@ -262,6 +262,19 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
             "npmplus_location_config", write.call_args.kwargs["payload"].to_api_payload()
         )
 
+    def test_generic_route_ignores_unowned_location_configuration_when_unchanged(self) -> None:
+        existing = _proxy_host().model_copy(update={"npmplus_location_config": "return 204;"})
+        for mode in ("dry-run", "apply"):
+            with self.subTest(mode=mode):
+                client = _FakeNpmplusClient((existing,))
+                result = apply_npmplus_ingress_route(client=client, request=_request(mode=mode))
+                self.assertEqual(result.status, "unchanged")
+                self.assertEqual(
+                    tuple(operation.action for operation in result.operations), ("no-op",)
+                )
+                self.assertEqual(client.proxy_hosts, [existing])
+                self.assertEqual(client.calls, ["list"])
+
     def test_explicit_empty_advanced_config_clears_existing_proxy_host_value(self) -> None:
         client = _FakeNpmplusClient((_proxy_host(advanced_config="# odoo config"),))
 
