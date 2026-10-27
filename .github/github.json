@@ -183,8 +183,7 @@
             "frontend/**/*.js",
             "frontend/**/*.jsx",
             "frontend/**/*.mjs",
-            "frontend/**/*.cjs",
-            "frontend/**/*.json"
+            "frontend/**/*.cjs"
           ]
         },
         {
