@@ -577,9 +577,12 @@ def testing_rebuild_hold_allows(
     if hold is None:
         return True
     if not actor and operation.authorization is not None:
-        caller = operation.authorization.caller
-        if caller.identity_type in {"local_operator", "local_admin", "github_human"}:
-            actor = launchplane_identity_actor(launchplane_identity_from_durable_caller(caller))
+        try:
+            actor = launchplane_identity_actor(
+                launchplane_identity_from_durable_caller(operation.authorization.caller)
+            )
+        except TypeError:
+            return False
     return (
         bool(actor)
         and operation.request.data_source_mode == "empty"
@@ -601,9 +604,7 @@ def check_testing_rebuild_protection(
         context_name=operation.context, instance_name="testing"
     )
     if not testing_rebuild_hold_allows(operation, intent, target, actor=actor):
-        raise TestingRebuildRefused(
-            "testing_staff_hold", "This testing lane is held for staff testing."
-        )
+        raise TestingRebuildRefused("testing_staff_hold", "This testing lane has a protected hold.")
     safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
     if safety is not None:
         if safety.data == "only_copy":
@@ -1020,7 +1021,7 @@ class NativeTestingRebuildExecution:
             context_name=self.operation.context, instance_name="testing"
         )
         if not recovery and not testing_rebuild_hold_allows(self.operation, self.intent, target):
-            raise NativeTestingRebuildPending("Staff testing holds this lane.")
+            raise NativeTestingRebuildPending("A protected hold pauses this testing rebuild.")
         provider = (
             self.old_provider()
             if not recovery or not isinstance(self.intent.old, UnavailableTestingPredecessor)
@@ -2351,7 +2352,7 @@ class NativeTestingRebuildExecution:
                         )
                         if not testing_rebuild_hold_allows(parent.operation, parent.intent, target):
                             raise NativeTestingRebuildPending(
-                                "Staff testing holds retirement of the old copy."
+                                "A protected hold pauses retirement of the old copy."
                             )
                     parent.guard(recovery=recovery)
                     lease.assert_current()

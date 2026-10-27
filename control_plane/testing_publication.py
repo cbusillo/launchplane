@@ -69,7 +69,6 @@ def plan_testing_publication(
             "domains": (),
             "public_hosts": (),
             "pending_public_host_effects": (),
-            "policies": before.target.policies.model_copy(update={"staff_testing_hold": None}),
             "updated_at": stamp,
             "source_label": "service:testing-rebuild",
         }

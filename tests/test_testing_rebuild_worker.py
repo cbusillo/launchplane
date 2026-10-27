@@ -2152,13 +2152,17 @@ class NativeTestingWorkerTests(unittest.TestCase):
         )
         return self.current().target.policies.staff_testing_hold
 
-    def test_empty_rebuild_preserves_its_staging_hold_through_completion_and_replay(self) -> None:
+    def admit_staging_hold(self) -> Any:
         from control_plane.contracts.durable_operation_authorization import (
             DurableOperationAuthorization,
             DurableOperationCallerIdentity,
         )
+        from control_plane.durable_operation_authorization import (
+            launchplane_identity_from_durable_caller,
+        )
+        from control_plane.service_auth import launchplane_identity_actor
 
-        self.operation.authorization = DurableOperationAuthorization(
+        authorization = DurableOperationAuthorization(
             action="odoo_target_replacement_apply.execute",
             product=self.operation.product,
             context=self.operation.context,
@@ -2169,14 +2173,24 @@ class NativeTestingWorkerTests(unittest.TestCase):
             ),
             grant="director_testing_rebuild",
         )
+        self.operation = self.operation.model_copy(
+            update={"schema_version": 2, "authorization": authorization}
+        )
+        actor = launchplane_identity_actor(
+            launchplane_identity_from_durable_caller(authorization.caller)
+        )
         hold = self.apply_staff_hold(
             True,
             "Prepare a fresh independent testing foundation",
             purpose="isolation_staging",
-            actor="local-operator:fixture-director",
+            actor=actor,
         )
         self.intent = self.intent.model_copy(update={"before": self.current()})
         self.capture.return_value = self.intent
+        return hold
+
+    def test_empty_rebuild_preserves_its_staging_hold_through_completion_and_replay(self) -> None:
+        hold = self.admit_staging_hold()
         service.check_testing_rebuild_protection(self.root, self.store, self.operation, self.intent)
         result = self.execute()
         self.assertEqual(result.deploy_status, "pass")
@@ -2185,6 +2199,86 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertEqual(self.execute(), result)
         self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
         self.assertEqual(self.effects, ["switch-new", "stop-old"])
+
+    def test_staged_public_failure_reverses_the_route_and_preserves_the_hold(self) -> None:
+        hold = self.admit_staging_hold()
+        self.fail_public = True
+        self.assertEqual(self.execute().deploy_status, "fail")
+        self.assertEqual(self.effects, ["switch-new", "switch-old"])
+        self.assertEqual(self.current(), self.intent.before)
+        self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
+        self.assertFalse(self.retained["stopped"])
+
+    def test_staging_hold_requires_its_original_caller_and_empty_source_before_effects(
+        self,
+    ) -> None:
+        hold = self.admit_staging_hold()
+        original = self.operation
+        assert original.authorization is not None
+        foreign = original.authorization.model_copy(
+            update={
+                "caller": original.authorization.caller.model_copy(
+                    update={"subject": "another-director"}
+                )
+            }
+        )
+        for changes in (
+            {"authorization": None, "schema_version": 1},
+            {"authorization": foreign},
+            {
+                "request": original.request.model_copy(
+                    update={"data_source_mode": "upstream_restore"}
+                )
+            },
+        ):
+            with self.subTest(changes=changes):
+                self.operation = original.model_copy(update=changes)
+                with self.assertRaises(service.TestingRebuildRefused):
+                    service.check_testing_rebuild_protection(
+                        self.root, self.store, self.operation, self.intent
+                    )
+                with self.assertRaises(service.NativeTestingRebuildPending):
+                    self.execute()
+                self.assertEqual(self.effects, [])
+                self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
+
+    def test_a_reset_staging_hold_cannot_be_adopted_by_the_original_rebuild(self) -> None:
+        hold = self.admit_staging_hold()
+        self.apply_staff_hold(
+            False, "End the original interlock", purpose=hold.purpose, actor=hold.recorded_by
+        )
+        replacement = self.apply_staff_hold(
+            True, "A separately reviewed interlock", purpose=hold.purpose, actor=hold.recorded_by
+        )
+        with self.assertRaises(service.NativeTestingRebuildPending):
+            self.execute()
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.current().target.policies.staff_testing_hold, replacement)
+
+    def test_staging_hold_drift_after_cutover_protects_the_old_copy(self) -> None:
+        hold = self.admit_staging_hold()
+        replacement: Any = None
+
+        def changed(plan: Any, backend: str, **kwargs: Any) -> str:
+            nonlocal replacement
+            result = self.switch(plan, backend, **kwargs)
+            if backend == plan.new_backend:
+                replacement = self.apply_staff_hold(
+                    True,
+                    "Changed staging custody",
+                    purpose=hold.purpose,
+                    actor=hold.recorded_by,
+                )
+            return result
+
+        with (
+            patch.object(DokployTestingRouteTransport, "publish", side_effect=changed),
+            self.assertRaises(service.NativeTestingRebuildPending),
+        ):
+            self.execute()
+        self.assertEqual(self.effects, ["switch-new"])
+        self.assertEqual(self.current().target.policies.staff_testing_hold, replacement)
+        self.assertFalse(self.retained["stopped"])
 
     def test_real_hold_set_and_clear_during_preparation_allows_completion(self) -> None:
         original = service.NativeTestingRebuildExecution.prepare
@@ -3849,6 +3943,7 @@ class NativeTestingWorkerTests(unittest.TestCase):
             self.execute()
         self.assertEqual(self.effects, [])
         self.store.write_dokploy_target_record(target)
+        self.admit_staging_hold()
         with (
             patch.object(
                 service,
