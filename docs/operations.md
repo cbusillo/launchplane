@@ -5619,13 +5619,14 @@ window. The source rehearsal seeds every retiring table and checks restored
 rows/columns plus every surviving table's contents. A dump file without a proven
 restore is insufficient.
 
-Only after that proof and the recorded approval, the approved host/image runs:
+After Q777/Q966's approval and the actual restored-backup proof, use the
+[bounded maintenance keeper](#bounded-launchplane-database-maintenance) below.
+It runs the prepared migration on the same connection and transaction as the
+backup locks. Do not run the separate-process migration command against that
+keeper: it would wait for the keeper's own schema and table locks.
 
-```bash
-uv run python -m control_plane.storage.schema_migration --target-revision e7c1d5e9a3b6
-```
-
-The existing serialized migration helper holds the deployment advisory lock.
+The existing serialized migration helper holds the schema-migration advisory lock;
+that lock alone does not stop database writers or deployments.
 The revision takes non-waiting exclusive locks on all existing retiring tables
 before dropping any, uses restrictive drops, and never cascades into an unexpected
 dependent object. A busy table or retained database dependency aborts the
@@ -5642,6 +5643,121 @@ rows. Recovery requires a separately approved restore of the verified full
 pre-migration backup with its matching image and writer quiescence. Images
 before this preparation accept only the old revision and cannot simply restart
 against the contracted database. Keep the Protection App/access decision separate.
+
+### Bounded Launchplane database maintenance
+
+The maintenance path is only for Launchplane's own database and services. It
+adds no admission check to normal requests or transactions. It is source that
+must be reviewed, landed through the train and present in the exact running
+image before use. Q777 and Q966 on #2437 retain full-backup recovery and a full
+writer hold; an online backup alone or selective table recovery does not meet
+that decision. Client-product databases, credentials and resources are excluded.
+
+From the documented Launchplane host, copy `scripts/database-maintenance-host.py`
+from the verified API image into a private host directory and run it with the
+host's Python. Supply the exact current API and PostgreSQL containers:
+
+```bash
+python3 database-maintenance-host.py plan --api-container API_CONTAINER \
+  --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
+python3 database-maintenance-host.py hold --api-container API_CONTAINER \
+  --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
+```
+
+`plan` reads current container/project/image labels, the current DB-backed
+service target, provider queue/history and self-deploy workflows. It creates
+only private local evidence and a temporary, non-serving compose operator.
+That operator uses the provider's existing `.env` in place with no credential
+exports or new grants. Its image is pinned to the API's actual image ID. It
+publishes no ports and disables Traefik discovery. The browser can remain up
+only when it has no database credential; every other own-project service must
+be running on the same consumer-free image. PostgreSQL's system identifier
+must match the configured database connection. Unrecognized state refuses.
+
+`hold` first arms and reads back an independent transient systemd restart
+unit, then installs the expiring provider deployment marker under the existing
+dispatch lock. The target's database, image and source repository are bound to
+the running service, auto-deploy must already be off, and complete deployment
+history, the actual provider queue and self-deploy workflows must be idle.
+Both normal and emergency deploys refuse the marker before their first write.
+The marker update must leave the host credential file and original containers
+unchanged. No workflow is disabled and no access or grant changes.
+
+The API stops first with Docker's non-forcing `stop --timeout -1`, allowing
+admitted requests to finish. A conservative census of running states and live
+lease columns must settle, then the workers stop the same way. A new deployment,
+unexpected container, malformed lease or unfinished operation aborts before
+backup. Docker's default ten-second forced kill and a raw TERM signal are not
+substitutes. The independent release waits out stops before restarting the exact
+original IDs, including the merge train. A busy operation that cannot finish
+within the budget is a failed qualification, never a held-window receipt.
+
+After services exit, the keeper takes the existing schema, dispatch and release
+admission session locks, then exclusive locks on every public application table
+before establishing its repeatable-read snapshot. SELECT remains available to
+`pg_dump`; table writers are excluded. Table-set changes, foreign/materialized
+relations, other application schemas, large objects, prepared transactions,
+unexpected DB clients and remaining running/leased work refuse qualification.
+It observes provider/deploy state and clients throughout the window. Table
+locks and zero clients after process exit are the proof; a zero selected drain
+count alone is not. The selected deploy drain record is never rewritten.
+
+The `held` receipt binds the hold ID, keeper PID/start time, transaction, exported
+snapshot and every table's full-column/schema/row digest plus sequence state.
+Keep it private. A second host connection can stream the exact staged snapshot:
+
+```bash
+python3 database-maintenance-host.py dump --state STATE_JSON
+```
+
+Its stdout is the binary custom-format dump; direct it over the existing
+private transport straight into mode-0600 encrypted private custody. It writes
+no host dump file. Stderr carries the host stream SHA-256; independently hash
+the private file and require agreement. No dump is verified until it restores
+successfully. Record the custodian, encrypted placement, retention minimum and
+Director-reviewed disposal trigger before capture; leave the keyring in place.
+
+Restore with `pg_restore --no-owner --exit-on-error` into a disposable PostgreSQL
+runtime qualified for the server version, with no external network, published
+ports, logs, persistent mounts or keyring. Data and temporary filesystems must
+be RAM-backed with no VM swap, or independently qualified encrypted storage.
+Run only the exact reviewed image's migrator in the restore's isolated loopback
+network; never start its API, workers or schedulers. Mount only the private
+held receipt, not production configuration. With an isolated, local-only DSN:
+
+```bash
+python -m control_plane.database_maintenance_cli rehearse \
+  --before-file HELD_RECEIPT --backup-sha256 VERIFIED_DUMP_SHA256 \
+  --hold-id HOLD_ID --expires-at DEADLINE
+```
+
+The rehearsal compares actual restored schemas, full rows and sequences, applies
+the prepared revision, verifies retained objects and runtime schema invariants,
+and emits a receipt bound to the original hold/snapshot/transaction and dump.
+Save the receipt in private host state and submit it without a terminal line-length
+limit:
+
+```bash
+python3 database-maintenance-host.py submit --state STATE_JSON --receipt-file REHEARSAL_RECEIPT
+```
+
+The private FIFO feeds that exact receipt to the keeper. Only `action: apply` with that exact
+passing proof reaches the live migration; `action: release` exits without DDL.
+EOF, a lost keeper, a deadline or observation mismatch rolls back. The migration
+and revision update remain uncommitted until verification finishes. Read back
+the committed revision and schema before recovery is complete.
+
+Both the normal exit and `release --state STATE_JSON` terminate only the exact
+keeper backend (PID plus start time), restart the original services, check API
+health and worker survival, remove/read back the deployment marker, and disarm/
+read back the timer. The server transaction deadline is a second backstop.
+Observe the unit's actual release and the final service state; a scheduled timer
+is not evidence that release happened. A host reboot removes the transient unit
+and may leave explicitly stopped services down: use the retained receipt's
+supported release after boot, then verify it. Recovery is UNKNOWN until readback.
+Launchplane monitoring is paused during this window, which counts against its
+live-product verification cadence; do not describe that interval as healthy.
+
 
 ### Hostname schema compatibility prelude
 

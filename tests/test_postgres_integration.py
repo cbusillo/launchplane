@@ -16494,3 +16494,164 @@ class RealPostgresCalendarProfileFenceTests(unittest.TestCase):
                             self.assertEqual(receipt.response_payload["result"]["winner"], name)
                 finally:
                     second.close()
+
+
+class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
+    def test_hold_blocks_writes_but_allows_its_exported_backup_snapshot(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer PRIMARY KEY, value text)"))
+                connection.execute(text("INSERT INTO sample VALUES(1,'before')"))
+            with engine.connect() as keeper:
+                with locked_database(
+                    keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
+                ):
+                    snapshot = keeper.scalar(text("SELECT pg_export_snapshot()"))
+                    with engine.connect() as reader:
+                        reader.execute(text("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+                        reader.execute(text(f"SET TRANSACTION SNAPSHOT '{snapshot}'"))
+                        self.assertEqual(reader.scalar(text("SELECT value FROM sample")), "before")
+                    with engine.connect() as writer:
+                        writer.execute(text("SET LOCAL lock_timeout='100ms'"))
+                        with self.assertRaises(OperationalError):
+                            writer.execute(text("UPDATE sample SET value='after'"))
+                with engine.begin() as writer:
+                    writer.execute(text("UPDATE sample SET value='released'"))
+
+    def test_external_migration_is_rolled_back_with_its_keeper_transaction(self) -> None:
+        from control_plane.storage.schema_migration import migrate_schema_on_connection
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as retired,
+        )
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), retired.down_revision)
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.connect() as keeper:
+                transaction = keeper.begin()
+                migrate_schema_on_connection(keeper, target_revision=retired.revision)
+                self.assertTrue(
+                    set(retired.RETIRED_TABLES).isdisjoint(inspect(keeper).get_table_names())
+                )
+                transaction.rollback()
+            with engine.connect() as observer:
+                self.assertTrue(
+                    set(retired.RETIRED_TABLES) <= set(inspect(observer).get_table_names())
+                )
+                self.assertEqual(
+                    observer.scalar(text("SELECT version_num FROM alembic_version")),
+                    retired.down_revision,
+                )
+
+    def test_unexpected_client_refuses_hold_and_all_locks_are_released(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer)"))
+            with engine.connect() as keeper, engine.connect() as unexpected:
+                unexpected.execute(text("SELECT 1"))
+                with self.assertRaisesRegex(RuntimeError, "Another database client"):
+                    with locked_database(
+                        keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
+                    ):
+                        self.fail("Unexpected client must prevent the maintenance window.")
+            with engine.begin() as observer:
+                self.assertTrue(
+                    observer.scalar(
+                        text(
+                            "SELECT pg_try_advisory_xact_lock(hashtextextended('launchplane:schema-migration',0))"
+                        )
+                    )
+                )
+                observer.execute(text("INSERT INTO sample VALUES(1)"))
+
+    def test_snapshot_is_established_after_the_table_locks(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(value text)"))
+                connection.execute(text("INSERT INTO sample VALUES('old')"))
+            with engine.connect() as keeper:
+
+                def commit_before_lock(
+                    connection: Any,
+                    cursor: Any,
+                    statement: str,
+                    parameters: Any,
+                    context: Any,
+                    executemany: bool,
+                ) -> None:
+                    if statement.startswith("LOCK TABLE"):
+                        with engine.begin() as writer:
+                            writer.execute(text("UPDATE sample SET value='committed-before-lock'"))
+
+                event.listen(keeper, "before_cursor_execute", commit_before_lock)
+                with locked_database(
+                    keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
+                ):
+                    self.assertEqual(
+                        keeper.scalar(text("SELECT value FROM sample")), "committed-before-lock"
+                    )
+
+    def test_full_column_digest_detects_nonpayload_and_sequence_changes(self) -> None:
+        from control_plane.database_maintenance import database_snapshot
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE sample(id bigserial PRIMARY KEY, label text, payload jsonb, content bytea, observed timestamptz)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO sample(label,payload,content,observed) VALUES('révision',CAST(:payload AS jsonb),decode('00ff','hex'),'2026-01-01T03:00:00+03:00')"
+                    ),
+                    {"payload": json.dumps({"a": None})},
+                )
+                before = database_snapshot(connection)
+                connection.execute(text("SET LOCAL TIME ZONE 'America/New_York'"))
+                self.assertEqual(database_snapshot(connection), before)
+                connection.execute(text("UPDATE sample SET label='changed'"))
+                self.assertNotEqual(database_snapshot(connection), before)
+                connection.execute(text("UPDATE sample SET label='révision'"))
+                connection.execute(text("SELECT nextval('sample_id_seq')"))
+                self.assertNotEqual(database_snapshot(connection), before)
+
+    def test_server_deadline_releases_an_idle_keeper(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer)"))
+            with engine.connect() as keeper:
+                with self.assertRaises(SQLAlchemyError):
+                    with locked_database(
+                        keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=0.15)
+                    ):
+                        time.sleep(0.3)
+                        keeper.execute(text("SELECT 1"))
+            with engine.begin() as writer:
+                writer.execute(text("SET LOCAL lock_timeout='1s'"))
+                writer.execute(text("INSERT INTO sample VALUES(1)"))
