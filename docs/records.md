@@ -1528,7 +1528,11 @@ Product environment detail and summary reads expose one provider-neutral
 `topology` projection for every driver. The projection keeps three evidence
 states separate:
 
-- `desired` is product-profile URL and public-domain intent.
+- `desired` is product-profile URL and public-domain intent. For published
+  native Odoo testing copies, retained aliases come from the applied original
+  publication and its effective address receipt. The profile's primary host
+  must still match that route. Missing, foreign or unapplied custody supplies
+  no aliases; arbitrary domains in the current binding never become intent.
 - `provider_recorded` is the current environment route-binding authority for
   placement, bound domains, ingress provider/path/termination, and TLS manager and
   terminator.

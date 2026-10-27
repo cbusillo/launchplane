@@ -377,7 +377,9 @@ def build_product_environment_topology(
         instance=lane.instance,
     )
     lane = split_ingress_monitoring_lane(profile, lane, route_binding)
-    desired = _desired_topology(profile=profile, lane=lane)
+    desired = _desired_topology(
+        profile=profile, lane=lane, record_store=record_store, binding=route_binding
+    )
     if route_binding is not None and route_binding.external_ingress:
         declared = tuple(
             ProductTopologyDomain(
@@ -518,9 +520,26 @@ def _split_ingress_warnings(
 
 
 def _desired_topology(
-    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    record_store: object,
+    binding: EnvironmentRouteBindingRecord | None,
 ) -> ProductDesiredTopology:
     domains = product_lane_public_domains(lane)
+    aliases = _published_testing_aliases(record_store, profile, lane, binding)
+    domains += tuple(
+        ProductTopologyDomain(domain_name=name, role="alias", tls_expected=True)
+        for name in aliases
+        if name not in {domain.domain_name for domain in domains}
+    )
+    detail = "Launchplane product-profile public website and URL intent for this environment."
+    if aliases and binding is not None:
+        detail += (
+            " Retained aliases from applied native testing publication "
+            + binding.source.source_versions["testing_publication"]
+            + " and its effective address receipt."
+        )
     trust_state: FreshnessStatus = (
         "recorded"
         if profile.public_website == "none" or lane.base_url or lane.health_url
@@ -538,9 +557,41 @@ def _desired_topology(
             recorded_at=profile.updated_at,
             refreshed_at=profile.updated_at,
             freshness_status=trust_state,
-            detail="Launchplane product-profile public website and URL intent for this environment.",
+            detail=detail,
         ),
     )
+
+
+def _published_testing_aliases(
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    binding: EnvironmentRouteBindingRecord | None,
+) -> tuple[str, ...]:
+    from control_plane.storage.postgres import PostgresRecordStore
+    from control_plane.testing_address_storage import effective_testing_route
+    from control_plane.testing_publication_storage import read_publication
+
+    if (
+        not isinstance(record_store, PostgresRecordStore)
+        or profile.driver_id != "odoo"
+        or lane.instance != "testing"
+        or binding is None
+    ):
+        return ()
+    key = binding.source.source_versions.get("testing_publication")
+    if not key:
+        return ()
+    try:
+        publication = read_publication(record_store, key)
+        if publication is None or publication.state != "applied":
+            return ()
+        route = effective_testing_route(record_store, publication, binding=binding)
+    except (ValueError, FileNotFoundError):
+        return ()
+    if _url_domain(lane.base_url)[0] != route.host:
+        return ()
+    return route.aliases
 
 
 def product_lane_public_domains(lane: ProductLaneProfile) -> tuple[ProductTopologyDomain, ...]:

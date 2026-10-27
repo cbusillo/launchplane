@@ -415,6 +415,59 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         current = fixture.current()
         assert current.binding is not None
         self.assertEqual(current.binding.domains, testing_route_domains(fixture.route))
+        from control_plane.contracts.product_topology_read_model import (
+            ProductEnvironmentTopology,
+            build_product_environment_topology,
+        )
+
+        profile = fixture.store.read_product_profile_record(fixture.candidate.product)
+        lane = next(item for item in profile.lanes if item.instance == "testing")
+
+        def project_topology(test_lane: ProductLaneProfile = lane) -> ProductEnvironmentTopology:
+            return build_product_environment_topology(
+                record_store=fixture.store,
+                profile=profile,
+                lane=test_lane,
+                lane_summary=None,
+                now=self.now,
+            )
+
+        topology = project_topology()
+        self.assertEqual(
+            {(item.domain_name, item.role) for item in topology.desired.domains},
+            {(item.domain_name, item.role) for item in testing_route_domains(fixture.route)},
+        )
+        self.assertNotIn("domain_divergence", {item.code for item in topology.warnings})
+        for receipt in (None, published.model_copy(update={"state": "planned"})):
+            with patch(
+                "control_plane.testing_publication_storage.read_publication", return_value=receipt
+            ):
+                self.assertIn(
+                    "domain_divergence", {item.code for item in project_topology().warnings}
+                )
+        fixture.store.write_route_binding_record(
+            current.binding.model_copy(
+                update={
+                    "domains": (
+                        *current.binding.domains,
+                        current.binding.domains[0].model_copy(
+                            update={"domain_name": "foreign.example.invalid", "role": "alias"}
+                        ),
+                    )
+                }
+            )
+        )
+        self.assertIn("domain_divergence", {item.code for item in project_topology().warnings})
+        fixture.store.write_route_binding_record(current.binding)
+        drifted = project_topology(
+            lane.model_copy(update={"base_url": "https://changed.example.invalid"})
+        )
+        self.assertIn("domain_divergence", {item.code for item in drifted.warnings})
+        self.assertTrue(
+            set(fixture.route.aliases).isdisjoint(
+                item.domain_name for item in drifted.desired.domains
+            )
+        )
         self.assertTrue(serving_snapshot_matches(current, expected, store=fixture.store))
         self.assertTrue(
             testing_binding_matches_retained_publication(
@@ -446,6 +499,7 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "control_plane.testing_publication_storage.read_publication", side_effect=ValueError
         ):
+            self.assertIn("domain_divergence", {item.code for item in project_topology().warnings})
             with self.assertRaises(TestingActivationRefusal):
                 require_retained_route_authority(fixture.store, activation)
         assert current.binding is not None
@@ -462,6 +516,7 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         fixture.store.write_route_binding_record(foreign)
+        self.assertIn("domain_divergence", {item.code for item in project_topology().warnings})
         with self.assertRaises(TestingActivationRefusal):
             require_retained_route_authority(fixture.store, activation)
         fixture.store.write_route_binding_record(current.binding)
