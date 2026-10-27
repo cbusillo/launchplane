@@ -366,6 +366,13 @@ login, guest ID, storage ID, private request, or free-text preparation reason.
 The generic privileged-operation raw-detail and transition routes refuse this
 descriptor; its product card owns review and decisions.
 
+Pending reads recheck the pinned plan against current backup authority and the
+policy and target protection review windows, using the decision's qualification.
+A stale or unavailable plan disables approval and explains why on the card;
+decline and historical records keep their existing rules. Reads write no
+decision, authority or lifecycle event. The decision and worker still recheck
+independently; this adds no proposal-age expiry.
+
 **Approve** and **Decline** send only the proposal ID, decision and stable source
 event to `/v1/production-backup-authority/proposals/{operation_id}/decision`.
 Decisions require a signed-in administrator, CSRF/origin validation, current
