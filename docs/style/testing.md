@@ -91,6 +91,15 @@ full run fails, re-run its failed jobs in that same run; a separate dispatch
 does not supersede the earlier full-gate failure. A rerun of the earlier focused
 PR run keeps its selection; use the manual full run.
 
+The same manual full run supports a canonical train candidate when its push
+execution is missing. Confirm the exact ref and SHA and complete execution
+inventory first. Train dispatch uses the verified protected first-parent
+comparison used by a train push; construction refs remain refused. The candidate
+must contain this workflow support. A repair on main makes an older candidate
+stale; let the controller replace it before dispatching its new exact ref.
+Keep and watch the original dispatched run on uncertainty rather than dispatching
+again. Candidate observation follows [the full-gate policy](../merge-train-policy.md#candidate-validation).
+
 `control_plane.ci_selection` reads only committed comparison and merge trees.
 For a same-repository PR targeting the default branch, it follows Python imports
 through callers and test helpers and selects whole affected test modules,

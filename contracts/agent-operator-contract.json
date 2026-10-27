@@ -75,6 +75,37 @@
       {
         "idempotency": "body",
         "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "integration_attestation",
+        "path": "/v1/product-review/integration-attestation",
+        "purpose": "Record an exact-merge engineering attestation with a confirming independent model review; records no new Client decision and never promotes.",
+        "response_statuses": [
+          "200",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_evidence_sha256",
+          "review"
+        ],
+        "schema_fingerprint_sha256": "fd778b75a5fea19f42cc405fbdfe5fc3dfc8cfdaa8555b91f8a8c50cbab8d0b5",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "body",
+        "identity_dependencies": [
           "read_release_request_mutation_identity"
         ],
         "method": "POST",
@@ -1218,8 +1249,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "a7885497999d7c84cbf5ca3054d1f6c2184ac149"
+    "source_commit_sha": "c35edc29ae690296a3be7ba2f6d1572d7c1e6604"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "437776408352b3ee4c0bcbe77040c1b608e63c73969ae06ba8ab2335a1a280a1"
+  "semantic_digest_sha256": "3731cbd2cddfe5419b062d75106f629755d627a6bfbae9dfb23d1b82360730d8"
 }

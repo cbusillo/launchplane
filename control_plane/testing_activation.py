@@ -15,6 +15,7 @@ from control_plane.build_provenance import GitHubBuildProvenanceTransport
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
     TestingActivationRefusal,
@@ -479,6 +480,10 @@ def target_without_hold(target: Any) -> dict[str, Any]:
     return cast(dict[str, Any], payload)
 
 
+def recipient_target_identity(target: DokployTargetRecord) -> dict[str, Any]:
+    return target.model_dump(mode="json", exclude={"updated_at", "source_label", "policies"})
+
+
 def same_reservation_intent(current: object, original: object) -> bool:
     return current is not None and all(
         getattr(current, key, None) == getattr(original, key)
@@ -914,16 +919,24 @@ class TestingActivationAdapter:
                 "Testing configuration or key policy changed.",
                 code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
             )
-        self.require_recipient_custody(record)
+        target = self.require_recipient_custody(record)
+        if record.published and target_without_hold(target) != target_without_hold(
+            record.published_target
+        ):
+            raise TestingActivationRefusal(
+                "Activated testing authority changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
 
-    def require_recipient_custody(self, record: TestingActivationRecord) -> None:
+    def require_recipient_custody(self, record: TestingActivationRecord) -> DokployTargetRecord:
         _, target, target_id, provider = self.bindings()
         if record.published:
             if (
                 target_id.target_id != record.target_id
                 or provider.target_id != record.target_id
                 or record.published_target is None
-                or target_without_hold(target) != target_without_hold(record.published_target)
+                or recipient_target_identity(target)
+                != recipient_target_identity(record.published_target)
             ):
                 raise TestingActivationRefusal(
                     "Activated testing recipient changed.",
@@ -949,6 +962,7 @@ class TestingActivationAdapter:
                     "The retained original reservation changed.",
                     code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
                 )
+        return cast(DokployTargetRecord, target)
 
     def save(self, record: TestingActivationRecord, **updates: Any) -> TestingActivationRecord:
         replacement = record.model_copy(update=updates)

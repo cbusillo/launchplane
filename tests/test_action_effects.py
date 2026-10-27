@@ -1500,6 +1500,7 @@ class StandingReaderHttpTests(unittest.IsolatedAsyncioTestCase):
                 (
                     _npmplus_proxy_host(
                         advanced_config="proxy_set_header Authorization secret-value;",
+                        npmplus_location_config="proxy_set_header Authorization secret-value;",
                         meta={"password": "secret-value"},
                     ),
                 )

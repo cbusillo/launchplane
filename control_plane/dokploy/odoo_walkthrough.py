@@ -2,6 +2,7 @@
 
 from enum import StrEnum
 
+from control_plane._odoo_website_settings_program import ODOO_STRING_PARAMETERS_PROGRAM
 from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.odoo_connection_isolation import connection_isolation_library
@@ -365,6 +366,7 @@ except Exception:
 
 ACCOUNT_ODOO_PROGRAM = (
     connection_isolation_library()
+    + ODOO_STRING_PARAMETERS_PROGRAM
     + r"""
 import json, logging, os, secrets, time
 logging.disable(logging.CRITICAL)
@@ -372,14 +374,14 @@ if request['instance']!='testing': raise RuntimeError('Not testing')
 env.cr.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+request['binding'],))
 if time.time()>request['dispatch_deadline']: raise RuntimeError('Dispatch deadline expired')
 parameters=env['ir.config_parameter'].sudo()
-if parameters.get_param('__LP_COPY_WITNESS__')!=request['copy_binding']:
+if read_string_parameter(parameters,'__LP_COPY_WITNESS__')!=request['copy_binding']:
     raise RuntimeError('Testing copy witness changed')
 if connection_isolation(env.cr, apply=False):
     raise RuntimeError('Testing connection isolation did not pass')
 users=env['res.users'].sudo().with_context(active_test=False,tracking_disable=True,
     mail_create_nosubscribe=True,no_reset_password=True)
 key=__TASK_MARKER_PREFIX__+request['task_id']
-raw=parameters.get_param(key)
+raw=read_string_parameter(parameters,key)
 marker=json.loads(raw) if raw else None
 login=__TASK_LOGIN_PREFIX__+request['task_id']
 user=users.browse(marker['account_id']).exists() if marker else users.browse([])
@@ -406,14 +408,14 @@ if request['operation']=='provision':
         if any(env.ref(name,raise_if_not_found=False) and user.has_group(name) for name in __FORBIDDEN_GROUPS__):
             raise RuntimeError('Testing task privileges are forbidden')
         marker={'account_id':user.id,'binding':request['binding'],'copy_binding':request['copy_binding'],'state':__TASK_ACTIVE_STATE__,'groups':sorted(request['groups'])}
-        parameters.set_param(key,json.dumps(marker,sort_keys=True))
+        write_string_parameter(parameters,key,json.dumps(marker,sort_keys=True))
 elif request['operation']=='cleanup':
     if marker and marker['state']==__TASK_ACTIVE_STATE__:
         user.write({'active':False,'password':secrets.token_urlsafe(48)})
         if 'res.users.apikeys' in env.registry:
             env['res.users.apikeys'].sudo().search([('user_id','=',user.id)]).unlink()
         marker['state']=__TASK_CLOSED_STATE__
-        parameters.set_param(key,json.dumps(marker,sort_keys=True))
+        write_string_parameter(parameters,key,json.dumps(marker,sort_keys=True))
 else:
     if not marker or marker['state']!=__TASK_ACTIVE_STATE__ or not user.active:
         raise RuntimeError('Task is not active')

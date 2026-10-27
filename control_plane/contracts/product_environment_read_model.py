@@ -82,7 +82,11 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentSeverity,
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
-from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
+from control_plane.split_ingress import (
+    read_split_ingress_binding,
+    split_ingress_monitoring_lane,
+    split_ingress_advisory_check,
+)
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -406,6 +410,11 @@ class ProductHealthMonitoringCheckSummary(BaseModel):
     enabled: bool
     probe_effective: bool
     incident_eligible: bool
+    advisory: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     private_endpoint_configured: bool = False
     status: str = "missing"
     failure_code: str = ""
@@ -2483,9 +2492,8 @@ def _health_monitoring_summary(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductHealthMonitoringSummary:
-    lane = split_ingress_monitoring_lane(
-        profile, lane, read_split_ingress_binding(record_store, profile, lane)
-    )
+    binding = read_split_ingress_binding(record_store, profile, lane)
+    lane = split_ingress_monitoring_lane(profile, lane, binding)
     incidents = sort_open_incidents(
         tuple(
             incident
@@ -2637,6 +2645,7 @@ def _health_monitoring_summary(
                 enabled=check.enabled,
                 probe_effective=probe_effective,
                 incident_eligible=incident_eligible,
+                advisory=split_ingress_advisory_check(profile, lane, binding, check),
                 private_endpoint_configured=bool(check.private_endpoint_key),
                 status=status,
                 failure_code=latest.failure_code or "" if latest is not None else "",
@@ -2702,6 +2711,8 @@ def _public_ingress_summary(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductPublicIngressSummary:
+    binding = read_split_ingress_binding(record_store, profile, lane)
+    lane = split_ingress_monitoring_lane(profile, lane, binding)
     monitoring_intent = lane.health_monitoring.monitoring_intent
     incident_eligible = monitoring_intent == "public"
     if monitoring_intent == "private":
@@ -2723,7 +2734,7 @@ def _public_ingress_summary(
         check_kind="public_http",
         limit=50,
     )
-    latest, _ = select_public_probe_observations(lane=lane, records=records)
+    latest, _ = select_public_probe_observations(lane=lane, records=records, binding=binding)
     if latest is None or not isinstance(latest, PublicIngressObservationRecord):
         return ProductPublicIngressSummary(
             monitoring_intent=monitoring_intent,

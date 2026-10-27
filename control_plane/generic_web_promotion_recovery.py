@@ -377,6 +377,8 @@ def inspect_promotion(
         )
         checked = _verify_health_evidence_with_identity(
             _health_evidence_for_lane(
+                record_store=store,
+                profile=profile,
                 lane=lane,
                 request=promotion_request,
                 health_path=profile.health_path,
@@ -669,6 +671,8 @@ def inspect_rollback_drill(
         )
         checked = _verify_health_evidence_with_identity(
             _health_evidence_for_lane(
+                record_store=store,
+                profile=profile,
                 lane=lane,
                 request=GenericWebProdPromotionRequest(
                     product=product,

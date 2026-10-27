@@ -378,18 +378,49 @@ class ActivationTests(unittest.TestCase):
         from tests.test_service import _invoke_app
         from control_plane.contracts.disposable_lane import DISPOSABLE_LANE_OBSERVATION_ROUTE
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+        from control_plane.integration_allowances import (
+            IntegrationAllowancesApplyRequest,
+            apply_integration_allowances_plan,
+            build_integration_allowances_plan,
+        )
 
         host = self.retained_collection_fixture()
         record = activation_record(self.store, self.product, self.context)
         assert record is not None
-        platform_secret = self.store.read_secret_record("global-platform-password")
-        self.store.write_secret_record(
-            platform_secret.model_copy(update={"name": "RENAMED_GLOBAL_PLATFORM_PASSWORD"})
+        allowance_request = IntegrationAllowancesApplyRequest.model_validate(
+            {
+                "product": self.product,
+                "context": self.context,
+                "instance": "testing",
+                "reason": "Record the current read-only source qualification.",
+                "allowances": [
+                    {
+                        "integration": "fixture_source",
+                        "kind": "read_only_source",
+                        "reason": "The existing source account only reads upstream data.",
+                        "evidence": "Read-only source permissions verified in the fixture.",
+                    }
+                ],
+            }
+        )
+        allowance_plan, _ = build_integration_allowances_plan(
+            record_store=self.store, request=allowance_request, actor=self.actor
+        )
+        apply_integration_allowances_plan(
+            record_store=self.store,
+            request=allowance_request.model_copy(
+                update={"mode": "apply", "reviewed_plan_sha256": allowance_plan.plan_sha256}
+            ),
+            actor=self.actor,
         )
         with self.assertRaises(TestingActivationRefusal) as original_refusal:
             self.adapter.require_unchanged(record)
         self.assertEqual(
             original_refusal.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED
+        )
+        platform_secret = self.store.read_secret_record("global-platform-password")
+        self.store.write_secret_record(
+            platform_secret.model_copy(update={"name": "RENAMED_GLOBAL_PLATFORM_PASSWORD"})
         )
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
@@ -512,10 +543,14 @@ class ActivationTests(unittest.TestCase):
         safety = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
         assert safety is not None
         policy = self.store.list_runtime_key_safety_policy_records(status="active", limit=1)[0]
-        for drift in ("none", "inventory", "evidence", "policy"):
+        target_policy = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        for drift in ("none", "inventory", "evidence", "policy", "target_policy"):
             second.write_environment_inventory(inventory)
             second.write_disposable_lane_safety(safety)
             second.write_runtime_key_safety_policy_record(policy)
+            second.write_dokploy_target_record(target_policy)
             with self.subTest(drift=drift):
                 adapter = self.retained_deploy_adapter()
                 entered, release, renewed = Event(), Event(), Event()
@@ -573,6 +608,20 @@ class ActivationTests(unittest.TestCase):
                                     "rules": tuple(
                                         rule.model_copy(update={"secret_class": "prod_only"})
                                         for rule in policy.rules
+                                    )
+                                }
+                            )
+                        )
+                    elif drift == "target_policy":
+                        second.write_dokploy_target_record(
+                            target_policy.model_copy(
+                                update={
+                                    "policies": target_policy.policies.model_copy(
+                                        update={
+                                            "shopify": target_policy.policies.shopify.model_copy(
+                                                update={"protected_store_keys": ("fixture-store",)}
+                                            )
+                                        }
                                     )
                                 }
                             )

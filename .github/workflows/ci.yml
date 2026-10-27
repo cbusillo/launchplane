@@ -157,8 +157,8 @@ jobs:
             echo "Comment comparison requires the exact event head and complete commit history." >&2
             exit 1
           fi
-          case "$EVENT_NAME" in
-            push)
+          case "$EVENT_NAME:$EVENT_REF" in
+            push:*|workflow_dispatch:refs/heads/launchplane/train/*)
               if [[ "$EVENT_REF" = refs/heads/launchplane/train/* ]]; then
                 repository="$(printf '%s' "${GITHUB_REPOSITORY:-}" | tr '[:upper:]' '[:lower:]')"
                 train_prefix="refs/heads/launchplane/train/${repository}/${DEFAULT_BRANCH//\//-}/"
@@ -185,7 +185,7 @@ jobs:
                 exit 1
               fi
               ;;
-            pull_request)
+            pull_request:*)
               if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ || "$BASE_SHA" =~ ^0+$ ]]; then
                 echo "Pull-request comment comparison requires the event base SHA." >&2
                 exit 1
@@ -194,10 +194,10 @@ jobs:
               git merge-base --is-ancestor "$BASE_SHA" "${HEAD_SHA}^1"
               BASE_SHA="$(git rev-parse --verify "${HEAD_SHA}^1")"
               ;;
-            schedule)
+            schedule:*)
               BASE_SHA="$(git rev-parse --verify "${HEAD_SHA}^1")"
               ;;
-            workflow_dispatch)
+            workflow_dispatch:*)
               if [[ -z "$DEFAULT_BRANCH" || "$EVENT_REF" != refs/heads/* || "$EVENT_REF" = refs/heads/launchplane/* ]]; then
                 echo "Manual full CI requires a source branch and repository default branch." >&2
                 exit 1

@@ -7,6 +7,7 @@ import click
 from pydantic import ValidationError
 
 from control_plane.npmplus import (
+    PRIVATE_BEARER_FORWARDING,
     NpmplusClient,
     NpmplusCredentials,
     NpmplusLocation,
@@ -448,6 +449,25 @@ class NpmplusClientTests(unittest.TestCase):
                 with self.assertRaises(click.ClickException):
                     client.get_proxy_host(78, public_only=True)
                 opener.host_details[field] = original
+
+    def test_private_bearer_forwarder_is_explicit_and_preserves_legacy_payloads(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        legacy = client.get_proxy_host(78, public_only=True)
+        self.assertEqual(
+            legacy.model_dump(mode="json"),
+            legacy.model_dump(mode="json", exclude={"npmplus_location_config"}),
+        )
+        opener.host_details["npmplus_location_config"] = PRIVATE_BEARER_FORWARDING
+        with self.assertRaises(click.ClickException):
+            client.get_proxy_host(78, public_only=True)
+        private = client.get_proxy_host(78, public_only=True, private_bearer_auth=True)
+        self.assertEqual(
+            private.to_api_payload()["npmplus_location_config"], PRIVATE_BEARER_FORWARDING
+        )
+        opener.host_details["npmplus_location_config"] = "return 200;"
+        with self.assertRaises(click.ClickException):
+            client.get_proxy_host(78, public_only=True, private_bearer_auth=True)
 
     def test_other_host_claims_are_read_before_any_proxy_write(self) -> None:
         opener = _Opener()

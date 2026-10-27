@@ -2,6 +2,13 @@
 title: Records
 ---
 
+Reviewed conflict integration records live in `launchplane_integration_attestations`.
+They bind the exact merge, tree and parents to applicable source and imported
+Client acceptance or engineering evidence, with the confirming model review and
+authenticated recorder. Writes are append-only and exact replay returns the
+original. They are separate from Client decisions; carried decisions reference
+their IDs. See [reviewed conflict integrations](owner-acceptance.md#reviewed-conflict-integrations).
+
 ## Storage Policy
 
 - Persist local-dev records as JSON files in a local state directory.
@@ -958,6 +965,21 @@ an ORM column/table or remains only in the evidence payload.
   or conflicting DNS policy block admission and remain no-network configuration
   failures if introduced later. Disabled checks supply no policy.
 
+  The managed hosts in a split binding are recovery paths. Their HTTP and TLS
+  failures, missing observations and stale probes stay advisory. Business-domain
+  checks still gate runtime verification, promotion evidence and production-delivery
+  recovery; a recovery host never supplies their identity evidence. Topology and
+  readiness retain recovery warnings without treating them as blocking errors.
+  Monitoring records warning incidents for failed recovery HTTP/TLS checks, and
+  check summaries expose derived `advisory` status. The sidebar stays yellow while
+  the business paths are healthy, and turns red when a business path fails.
+  Route-binding custody and source-authority divergence and DNS-policy conflicts
+  remain blocking, including on recovery hosts. The bound primary domain is
+  required evidence even when it is managed by Launchplane. Profile URLs may
+  name a recovery alias; they do not replace the binding's primary role. Split
+  release post-deploy and rollback checks use that primary domain with the
+  existing exact runtime-identity verification.
+
   Topology and runtime readers share observation applicability: current monitoring
   intent, URLs, deployment identity, profile and relevant authority dates must agree.
   The server preserves unchanged custody timestamps and stamps changed custody
@@ -1783,14 +1805,6 @@ request is the current decision. The record authorizes nothing.
 
 A record with `carried_from` preserves an earlier acceptance. The authoritative
 rules are in [carried acceptance](owner-acceptance.md#carried-acceptance).
-The evidence names the source `record_id` and `head_sha`, carry `reason`,
-`comparison_base_sha`, PR-side `commits`, and `refresh_record_ids` where used.
-`integrated_changes` holds imported change numbers and exact heads with their
-acceptance record IDs or bounded engineering bases. `batch_record_ids` identifies
-the checked train batches. Older records default the added evidence lists to
-empty. Older train records may omit `comparison_base_sha`; their refresh records
-supply the merged base. `decided_at` records when the carry was saved; `base_branch` preserves
-the base first recorded for the decision.
 
 ## Product Reconcile Request Records
 

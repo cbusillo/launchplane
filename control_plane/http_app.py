@@ -23279,6 +23279,7 @@ def create_launchplane_fastapi_app(
                     "proxy_host": response_ingress_result.proxy_host.model_copy(
                         update={
                             "advanced_config": "",
+                            "npmplus_location_config": "",
                             "meta": {},
                             "locations": (),
                         }
@@ -28527,6 +28528,15 @@ def create_launchplane_fastapi_app(
     )
 
     register_product_review_withdrawal_route(
+        app,
+        dependencies=replace(read_route_dependencies, read_identity=read_browser_mutation_identity),
+        control_plane_root=resolved_control_plane_root,
+    )
+    from control_plane.http_routes.integration_attestation import (
+        register_integration_attestation_route,
+    )
+
+    register_integration_attestation_route(
         app,
         dependencies=replace(read_route_dependencies, read_identity=read_browser_mutation_identity),
         control_plane_root=resolved_control_plane_root,

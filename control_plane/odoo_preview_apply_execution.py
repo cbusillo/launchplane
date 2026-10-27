@@ -867,6 +867,7 @@ def run_odoo_preview_apply_operation(
         odoo_preview_supersession_is_quiescent
     ),
     pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
+    qualify_existing_preview: bool = False,
     allow_mutation: bool = True,
     disposable_cleanup: bool = False,
 ) -> DurableProviderOperationResult:
@@ -890,5 +891,6 @@ def run_odoo_preview_apply_operation(
         observe_apply=observe_apply,
         supersession_is_quiescent=supersession_is_quiescent,
         pre_mutation_guard=pre_mutation_guard,
+        qualify_existing_preview=qualify_existing_preview,
         disposable_cleanup=disposable_cleanup,
     ).run(store, allow_mutation=allow_mutation)
