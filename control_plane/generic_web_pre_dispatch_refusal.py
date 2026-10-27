@@ -128,10 +128,7 @@ def inspect_pre_dispatch_refusal(
         effect = parse_launchplane_mutation_timestamp(
             original.provider_effect_started_at, field_name="provider_effect_started_at"
         )
-        if (
-            started.replace(microsecond=0) != created.replace(microsecond=0)
-            or not started <= finished <= effect
-        ):
+        if not created.replace(microsecond=0) <= started <= finished <= effect:
             return None
         return PreDispatchRefusal(record, bindings, store.read_original_mutation_intent(original))
     except (FileNotFoundError, ValueError, click.ClickException):

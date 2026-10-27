@@ -861,12 +861,12 @@ attempt's expired lease, matching original request and current target bindings,
 and its attributable `lane_movement.ancestor_build` or
 `lane_movement.older_artifact` record. The record must have the unobserved
 deployment sentinel and no runtime identity, bootstrap, post-deploy, dispatch,
-execution, lifecycle or delivered-input evidence. Its start must belong to the
+execution, lifecycle or delivered-input evidence. Its start cannot predate the
 original reservation's creation second. Provider absence and `records_commit`
 alone never qualify it; conflicting provider observation retains the hold.
 Apply takes product and testing execution exclusion, compares the original
 intent and evidence rows transactionally, and preserves the typed failure as
-the original HTTP 409 result. No provider deploy, inventory update or record
+the terminal HTTP 409 result. No provider deploy, inventory update or record
 rewrite occurs. Ordinary pre-effect refusals check lease ownership without
 creating an effect checkpoint; earlier real effects remain fenced.
 

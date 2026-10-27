@@ -4,7 +4,6 @@ import unittest
 from unittest.mock import Mock, patch
 from typing import Any
 from datetime import datetime, timedelta, timezone
-
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
 from control_plane.generic_web_deploy_provider_adapter import (
@@ -13,14 +12,12 @@ from control_plane.generic_web_deploy_provider_adapter import (
 from control_plane.lane_movement import LaneMovementRefused
 from control_plane.contracts.promotion_record import RecordFailure
 from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.provider_operations import (
-    DurableProviderOperationResult,
-    ProviderMutationRejectedError,
-    ProviderMutationUnknownError,
-)
+from control_plane.provider_operations import DurableProviderOperationResult
 from control_plane.provider_operations import ProviderOperationLease, run_durable_provider_operation
 from control_plane.http_app import idempotency_request_fingerprint
 from control_plane.generic_web_deploy_http import execute_generic_web_deploy_result
+from control_plane.lane_movement import LaneBuild
+from click import ClickException
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url
@@ -45,6 +42,23 @@ from control_plane.workflows.generic_web_deploy_provider import (
 
 
 class ComposeRefusalTests(unittest.TestCase):
+    def inspect_original(self) -> tuple[int, dict[str, Any]]:
+        return _invoke_recovery(
+            self.app,
+            original_deploy=_generic_web_recovery_original_deploy(),
+            idempotency_key="original-compose-refusal",
+            reason="Inspect original refusal.",
+        )
+
+    def apply_original(self, digest: str) -> tuple[int, dict[str, Any]]:
+        return _invoke_recovery_apply(
+            self.app,
+            original_deploy=_generic_web_recovery_original_deploy(),
+            idempotency_key="original-compose-refusal",
+            reason="Inspect original refusal.",
+            expected_recovery_digest=digest,
+        )
+
     def database_url(self) -> str:
         return sqlite_database_url(self.root / "state.db")
 
@@ -99,12 +113,19 @@ class ComposeRefusalTests(unittest.TestCase):
             GenericWebProviderDeploymentObservation(outcome="absent")
         )
         self.provider.resolve_deploy_target.return_value = self.target
+        self.app = _create_recovery_app(root=self.root, store=self.store)
+        self.enterContext(
+            patch(
+                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
+                return_value=self.provider,
+            )
+        )
         self.adapter = GenericWebDeployProviderMutationAdapter(
             control_plane_root=self.root,
             record_store=self.store,
             deploy_request=self.request,
             profile=self.profile,
-            lane=next(lane for lane in self.profile.lanes if lane.instance == "testing"),
+            lane=next((lane for lane in self.profile.lanes if lane.instance == "testing")),
             trace_id="compose-refusal",
             deploy_provider=self.provider,
         )
@@ -147,25 +168,42 @@ class ComposeRefusalTests(unittest.TestCase):
         self.provider.execute_artifact_deploy.assert_not_called()
 
     def run_original(
-        self, *, historical_failure_publication: bool = False
+        self,
+        *,
+        historical_failure_publication: bool = False,
+        workflow_delay_seconds: int = 0,
+        refuse_build: bool = True,
     ) -> DurableProviderOperationResult:
+        original = (datetime.now(timezone.utc) - timedelta(minutes=10)).replace(microsecond=0)
+        clock = [original.isoformat()]
+
         def old_failure_publication(**kwargs: Any) -> Any:
+            clock[0] = (original + timedelta(seconds=workflow_delay_seconds + 1)).isoformat()
             if historical_failure_publication:
                 kwargs["before_failure_records_commit"] = kwargs["before_records_commit"]
             return execute_generic_web_deploy_result(**kwargs)
 
-        original_time = (
-            (datetime.now(timezone.utc) - timedelta(minutes=10)).replace(microsecond=0).isoformat()
+        build = LaneBuild(
+            self.request.deploy.artifact_id,
+            self.request.deploy.source_git_ref,
+            self.request.deploy.artifact_id,
         )
         with (
-            patch.object(self.store, "_database_mutation_timestamp", return_value=original_time),
+            patch.object(
+                self.store, "_database_mutation_timestamp", side_effect=lambda _session: clock[0]
+            ),
             patch(
                 "control_plane.workflows.generic_web_deploy.utc_now_timestamp",
-                return_value=original_time,
+                return_value=(original + timedelta(seconds=workflow_delay_seconds)).isoformat(),
             ),
             patch(
                 "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
-                side_effect=LaneMovementRefused("ancestor_build"),
+                side_effect=LaneMovementRefused("ancestor_build") if refuse_build else None,
+                return_value=build,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy._proved_generic_build",
+                return_value=build,
             ),
             patch(
                 "control_plane.generic_web_deploy_provider_adapter.execute_generic_web_deploy_result",
@@ -195,33 +233,15 @@ class ComposeRefusalTests(unittest.TestCase):
     def test_original_refusal_closes_without_retry_or_lane_publication(self) -> None:
         self.hold_original()
         before = self.store.list_deployment_records()
-        app = _create_recovery_app(root=self.root, store=self.store)
-        with (
-            patch(
-                "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
-                return_value=self.provider,
-            ),
-            patch.object(
-                GenericWebDeployProviderMutationAdapter,
-                "apply",
-                side_effect=AssertionError("provider retry"),
-            ),
+        with patch.object(
+            GenericWebDeployProviderMutationAdapter,
+            "apply",
+            side_effect=AssertionError("provider retry"),
         ):
-            status, plan = _invoke_recovery(
-                app,
-                original_deploy=_generic_web_recovery_original_deploy(),
-                idempotency_key="original-compose-refusal",
-                reason="Settle the original proved refusal.",
-            )
+            status, plan = self.inspect_original()
             self.assertEqual(status, 200, plan)
             self.assertEqual(plan["proposed_action"], "close_out_observed")
-            status, applied = _invoke_recovery_apply(
-                app,
-                original_deploy=_generic_web_recovery_original_deploy(),
-                idempotency_key="original-compose-refusal",
-                reason="Settle the original proved refusal.",
-                expected_recovery_digest=plan["recovery_digest"],
-            )
+            status, applied = self.apply_original(plan["recovery_digest"])
         self.assertEqual(status, 202, applied)
         self.assertEqual(applied["reservation_state"], "completed")
         self.assertFalse(applied["retry_safe"])
@@ -239,6 +259,118 @@ class ComposeRefusalTests(unittest.TestCase):
         assert saved is not None
         self.assertEqual(saved.response_status_code, 409)
         self.assertEqual(saved.response_payload["result"]["deploy_status"], "fail")
+        status, replayed = self.apply_original(plan["recovery_digest"])
+        self.assertEqual(status, 202, replayed)
+        self.assertEqual(replayed["recovery_digest"], plan["recovery_digest"])
+        self.assertEqual(self.store.list_deployment_records(), before)
+
+    def test_wait_before_refusal_does_not_look_like_an_earlier_incarnation(self) -> None:
+        result = self.run_original(historical_failure_publication=True, workflow_delay_seconds=2)
+        assert result.record is not None
+        self.assertEqual(result.record.state, "reconcile_required")
+        status, plan = self.inspect_original()
+        self.assertEqual(status, 200, plan)
+        self.assertEqual(plan["proposed_action"], "close_out_observed")
+
+    def test_real_provider_failure_preserves_last_effect_checkpoint(self) -> None:
+
+        def dispatch_then_fail(**kwargs: Any) -> Any:
+            kwargs["before_provider_mutation"]("deploy_trigger")
+            kwargs["effect_started"]()
+            raise ClickException("Provider acknowledgement unavailable.")
+
+        self.provider.execute_artifact_deploy.side_effect = dispatch_then_fail
+        result = self.run_original(refuse_build=False)
+        assert result.record is not None
+        self.assertEqual(result.record.state, "reconcile_required")
+        self.assertEqual(result.record.provider_effect_phase, "deploy_trigger")
+        self.provider.execute_artifact_deploy.assert_called_once()
+
+    def test_cutover_ancestor_refusal_releases_without_entering_cutover(self) -> None:
+        from tests.test_generic_web_cutover import WebCutoverDeploymentTests
+        from control_plane.workflows.generic_web_deploy import GenericWebDeployRequest
+        from control_plane.workflows.generic_web_deploy_provider import (
+            DokployGenericWebDeployProvider,
+        )
+
+        recorded, intent, provider = WebCutoverDeploymentTests.seed(
+            self.root / "cutover", "compose"
+        )
+        profile = recorded.read_product_profile_record("fixture")
+        self.store.write_product_profile_record(profile)
+        for manifest in (intent.production, intent.candidate):
+            self.store.write_artifact_manifest(manifest)
+        for record in recorded.list_deployment_records():
+            self.store.write_deployment_record(record)
+        for inventory in recorded.list_environment_inventory():
+            self.store.write_environment_inventory(inventory)
+        request = GenericWebDeployEnvelope(
+            product="fixture",
+            deploy=GenericWebDeployRequest(
+                product="fixture",
+                instance="prod",
+                artifact_id=intent.candidate.artifact_id,
+                source_git_ref=intent.candidate.source_commit,
+            ),
+        )
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=self.root,
+            record_store=self.store,
+            deploy_request=request,
+            profile=profile,
+            lane=profile.lanes[0],
+            trace_id="cutover-refusal",
+            deploy_provider=DokployGenericWebDeployProvider(
+                cutover_provider_factory=lambda _plan: provider
+            ),
+        )
+        with patch(
+            "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+            side_effect=LaneMovementRefused("ancestor_build"),
+        ):
+            with self.assertRaises(LaneMovementRefused):
+                run_durable_provider_operation(
+                    store=self.store,
+                    scope="cutover-test",
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="cutover-refusal",
+                    request_fingerprint="cutover-request",
+                    lease_owner="cutover-worker",
+                    response_trace_id="cutover-trace",
+                    adapter=adapter,
+                )
+        self.assertEqual(provider.actions, [])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+        self.assertEqual(
+            self.store.list_deployment_records(context_name="fixture"),
+            recorded.list_deployment_records(),
+        )
+
+    def test_busy_execution_or_conflicting_provider_observation_keeps_hold(self) -> None:
+        from contextlib import nullcontext
+
+        self.hold_original()
+        status, plan = self.inspect_original()
+        self.assertEqual(status, 200, plan)
+        with patch.object(
+            self.store, "testing_replacement_execution_lock", return_value=nullcontext(None)
+        ):
+            status, applied = self.apply_original(plan["recovery_digest"])
+        self.assertEqual(status, 409, applied)
+        self.assertEqual(applied["error"]["code"], "execution_lock_busy")
+        record = self.store.list_deployment_records()[0]
+        self.provider.observe_artifact_deploy.return_value = (
+            GenericWebProviderDeploymentObservation(
+                outcome="present",
+                deployment_id="unexpected-dispatch",
+                deployment_status="done",
+                started_at=record.deploy.started_at,
+                finished_at=record.deploy.finished_at,
+            )
+        )
+        status, conflict = self.inspect_original()
+        self.assertEqual(status, 200, conflict)
+        self.assertEqual(conflict["proposed_action"], "hold_unknown")
 
     def test_ambiguous_or_effected_record_keeps_original_fence(self) -> None:
         self.hold_original()
@@ -282,27 +414,16 @@ class ComposeRefusalTests(unittest.TestCase):
                 )
             },
         }
-        app = _create_recovery_app(root=self.root, store=self.store)
-        with patch(
-            "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
-            return_value=self.provider,
-        ):
-            for name, changed in changes.items():
-                with self.subTest(name=name):
-                    self.store.write_deployment_record(record.model_copy(update=changed))
-                    status, plan = _invoke_recovery(
-                        app,
-                        original_deploy=_generic_web_recovery_original_deploy(),
-                        idempotency_key="original-compose-refusal",
-                        reason="Inspect uncertain record.",
-                    )
-                    self.assertEqual(status, 200, plan)
-                    self.assertEqual(plan["proposed_action"], "hold_unknown")
-            self.store.write_deployment_record(record)
+        for name, changed in changes.items():
+            with self.subTest(name=name):
+                self.store.write_deployment_record(record.model_copy(update=changed))
+                status, plan = self.inspect_original()
+                self.assertEqual(status, 200, plan)
+                self.assertEqual(plan["proposed_action"], "hold_unknown")
+        self.store.write_deployment_record(record)
 
     def test_closeout_rejects_deployment_change_at_atomic_adoption(self) -> None:
         self.hold_original()
-        app = _create_recovery_app(root=self.root, store=self.store)
         adopt = self.store.adopt_reconciled_mutation
 
         def change_before_adoption(**kwargs: Any) -> Any:
@@ -312,27 +433,12 @@ class ComposeRefusalTests(unittest.TestCase):
             )
             return adopt(**kwargs)
 
-        with patch(
-            "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
-            return_value=self.provider,
+        status, plan = self.inspect_original()
+        self.assertEqual(status, 200, plan)
+        with patch.object(
+            self.store, "adopt_reconciled_mutation", side_effect=change_before_adoption
         ):
-            status, plan = _invoke_recovery(
-                app,
-                original_deploy=_generic_web_recovery_original_deploy(),
-                idempotency_key="original-compose-refusal",
-                reason="Inspect original refusal.",
-            )
-            self.assertEqual(status, 200, plan)
-            with patch.object(
-                self.store, "adopt_reconciled_mutation", side_effect=change_before_adoption
-            ):
-                status, applied = _invoke_recovery_apply(
-                    app,
-                    original_deploy=_generic_web_recovery_original_deploy(),
-                    idempotency_key="original-compose-refusal",
-                    reason="Inspect original refusal.",
-                    expected_recovery_digest=plan["recovery_digest"],
-                )
+            status, applied = self.apply_original(plan["recovery_digest"])
         self.assertEqual(status, 409, applied)
         self.assertEqual(applied["error"]["code"], "reservation_changed")
         self.provider.execute_artifact_deploy.assert_not_called()
@@ -349,34 +455,22 @@ class ComposeRefusalTests(unittest.TestCase):
         )
         assert lookup.record is not None
         future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
-        app = _create_recovery_app(root=self.root, store=self.store)
-        with patch(
-            "control_plane.generic_web_deploy_provider_adapter.default_generic_web_deploy_provider",
-            return_value=self.provider,
+        for change in (
+            {"attempt": 2},
+            {"provider_effect_phase": "deploy_trigger"},
+            {"lease_expires_at": future},
         ):
-            for change in (
-                {"attempt": 2},
-                {"provider_effect_phase": "deploy_trigger"},
-                {"lease_expires_at": future},
+            with (
+                self.subTest(change=change),
+                patch.object(
+                    self.store,
+                    "lookup_existing_mutation_reservation",
+                    return_value=lookup._replace(record=lookup.record.model_copy(update=change)),
+                ),
             ):
-                with (
-                    self.subTest(change=change),
-                    patch.object(
-                        self.store,
-                        "lookup_existing_mutation_reservation",
-                        return_value=lookup._replace(
-                            record=lookup.record.model_copy(update=change)
-                        ),
-                    ),
-                ):
-                    status, plan = _invoke_recovery(
-                        app,
-                        original_deploy=_generic_web_recovery_original_deploy(),
-                        idempotency_key="original-compose-refusal",
-                        reason="Inspect uncertain original.",
-                    )
-                    self.assertEqual(status, 200, plan)
-                    self.assertEqual(plan["proposed_action"], "hold_unknown")
+                status, plan = self.inspect_original()
+                self.assertEqual(status, 200, plan)
+                self.assertEqual(plan["proposed_action"], "hold_unknown")
 
     def test_lost_lease_cannot_publish_failure(self) -> None:
         lease = Mock(spec=ProviderOperationLease)
@@ -388,26 +482,3 @@ class ComposeRefusalTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.adapter.apply("stale-worker", lease)
         self.assertEqual(self.store.list_deployment_records(), ())
-
-    def test_typed_refusal_before_effect_is_rejected_but_effected_attempt_stays_unknown(
-        self,
-    ) -> None:
-        lease = Mock(spec=ProviderOperationLease)
-        with patch(
-            "control_plane.generic_web_deploy_provider_adapter.execute_generic_web_deploy_result",
-            side_effect=LaneMovementRefused("ancestor_build"),
-        ):
-            with self.assertRaises(ProviderMutationRejectedError):
-                self.adapter.apply("unstarted-cutover", lease)
-
-        def refused_after_checkpoint(**kwargs: Any) -> Any:
-            kwargs["provider_effect_checkpoint"]("deploy_trigger")
-            raise LaneMovementRefused("ancestor_build")
-
-        with patch(
-            "control_plane.generic_web_deploy_provider_adapter.execute_generic_web_deploy_result",
-            side_effect=refused_after_checkpoint,
-        ):
-            with self.assertRaises(ProviderMutationUnknownError):
-                self.adapter.apply("effected-operation", lease)
-        lease.checkpoint_effect.assert_called_once_with("deploy_trigger")

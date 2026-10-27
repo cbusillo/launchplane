@@ -516,7 +516,6 @@ def _apply_pre_dispatch_refusal(
             trace_id=trace_id, records=records, result=result
         )
         payload["recovery"] = _recovery_metadata(inspection)
-        payload["pre_dispatch_refusal"] = current.digest_evidence()
         check()
         adopted = store.adopt_reconciled_mutation(
             reservation=inspection.reservation,
@@ -1179,13 +1178,14 @@ async def _inspect_generic_web_deploy_recovery(
                 )
                 if runtime_close_out_evidence is not None:
                     proposed_action = "close_out_observed"
-            if proposed_action == "hold_unknown":
-                pre_dispatch_refusal = inspect_pre_dispatch_refusal(
-                    record_store, adapter, reservation, provider_operation_key, lookup.observed_at
-                )
-                if pre_dispatch_refusal is not None and provider_outcome == "absent":
+            pre_dispatch_refusal = inspect_pre_dispatch_refusal(
+                record_store, adapter, reservation, provider_operation_key, lookup.observed_at
+            )
+            if pre_dispatch_refusal is not None:
+                if provider_outcome == "absent":
                     proposed_action = "close_out_observed"
                 else:
+                    proposed_action = "hold_unknown"
                     pre_dispatch_refusal = None
             if proposed_action == "hold_unknown":
                 from control_plane.generic_web_testing_abandonment import (
