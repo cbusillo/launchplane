@@ -32949,8 +32949,8 @@ class PostgresRecordStore(HumanSessionStore):
         replacements: tuple[SecretBinding, ...],
         mutation: DbOnlyMutationRequest,
         reason: str,
+        creation: ProductAuthorityBundle | None = None,
     ) -> tuple[str, LaunchplaneIdempotencyRecord]:
-        """Rename worker bindings and receipt atomically; never touch encrypted versions."""
         from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
 
         with self._session_factory() as session:
@@ -33021,6 +33021,14 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
             )
             originals = {binding.binding_id: binding for binding in bindings}
+            if creation is not None:
+                if replacements or guest_capture_credential is None:
+                    raise ValueError("Initial capture credentials cannot replace bindings.")
+                self._write_product_authority_bundle(
+                    creation, write_session=session, commit=False, write_transaction_started=True
+                )
+                records = (*records, *creation.secret_records)
+                bindings = (*bindings, *creation.secret_bindings)
             for binding in replacements:
                 before = originals[binding.binding_id]
                 if (
