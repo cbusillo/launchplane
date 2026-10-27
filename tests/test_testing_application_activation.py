@@ -1343,9 +1343,6 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
         resources, _ = preparation_resources(flow.store, flow.product, flow.request, flow.scope)
         values = flow.adapter.application_values(record)
         specification = flow.specification
-        private = flow.containers[readiness.container_id]["NetworkSettings"]["Networks"][
-            specification.network_name
-        ]["IPAddress"]
         identity = readiness.runtime_identity.model_dump(mode="json")
         cases = [
             ("healthy", 200, {"runtime_identity": identity}, None),
@@ -1428,7 +1425,9 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
                     def actual_http(arguments: list[str], **kwargs: Any) -> Any:
                         if arguments[1:5] != ["exec", "-i", "proxy", "nc"]:
                             return fixture_docker(arguments, **kwargs)
-                        self.assertEqual(arguments[-2:], [private, str(specification.runtime_port)])
+                        self.assertEqual(
+                            arguments[-2:], [record.app_name, str(specification.runtime_port)]
+                        )
                         calls.append(arguments)
                         actual = [*arguments]
                         actual[3], actual[-2], actual[-1] = identifier, "127.0.0.1", port

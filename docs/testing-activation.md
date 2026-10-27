@@ -417,8 +417,21 @@ do not change any capability predicate, custody, retry or qualification rule.
 Public readiness observation and
 publication freshness use the same database clock.
 
-Private HTTP checks send one bounded request through the existing proxy's numeric
-TCP client and parse the complete response without following redirects. The
+New undeployed recipients use the existing testing application's DNSRR endpoint
+setting, with exact persistence checked before the first deployment. Configured
+runtime verification permits only that controlled setting; initial allocation
+and other Swarm options remain strict. Historical null/default records remain
+readable for recovery; existing deployed recipients are never retuned by this step.
+
+Private HTTP checks resolve the published service name from the existing proxy
+and require its complete unique address set to identify the single owned task,
+before and after the request. They connect through that same name and verify
+full runtime identity, then recheck service, task and container continuity.
+A healthy task-IP probe cannot substitute for a failed service backend.
+Unavailable samples return the existing terminal failed frame with bounded
+source-line evidence, allowing the unchanged observation window to retry without
+waiting out a transport timeout. Private error text is never returned.
+The complete HTTP response is parsed without following redirects. The
 selected-image rehearsal in `qualityGate.test.testingRouteReaderRehearsal` runs
 the emitted program against that actual binary for healthy, redirect, HTTP
 failure, malformed, truncated and wrong-identity responses. Set the existing
