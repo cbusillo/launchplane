@@ -9,11 +9,13 @@ import sys
 from typing import Any
 from collections.abc import Callable
 
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from control_plane.database_maintenance import (
     apply_retirement,
+    disconnect_frozen_clients,
+    verify_committed_database,
     database_snapshot,
     database_system_identifier,
     require_isolated_rehearsal,
@@ -22,66 +24,66 @@ from control_plane.database_maintenance import (
     locked_database,
     retained_snapshot,
 )
-from control_plane.deployment_maintenance import DeploymentMaintenance
+from control_plane.deployment_maintenance import DeploymentMaintenance, recovery_marker
+from control_plane.database_maintenance_host import locked_state, save
 from control_plane.storage.postgres import _build_engine
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
 
 
-def in_flight_work(connection: Connection) -> dict[str, int]:
-    from control_plane.storage.postgres import LaunchplaneMergeTrainControllerStateRow
-    from control_plane.storage.migrations.versions import (
-        e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,
+def require_no_active_executors(connection: Connection) -> None:
+    from sqlalchemy import select, func
+    from sqlalchemy.orm import Session
+    from control_plane.service_deploy_drain import _operation_observations
+    from control_plane.storage.postgres import (
+        PostgresRecordStore,
+        LaunchplaneOdooStableBootstrapOperationRow,
+        LaunchplaneOdooProdBackupRestoreOperationRow,
+        LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow,
+        LaunchplanePrivilegedOperationRow,
+        LaunchplaneOutboxDeliveryRow,
+        LaunchplaneMergeTrainControllerStateRow,
     )
 
-    observed: dict[str, int] = {}
-    now = connection.scalar(text("SELECT clock_timestamp()"))
-    inspector = inspect(connection)
-    for table in inspector.get_table_names(schema="public"):
-        if (
-            table in retirement.RETIRED_TABLES
-            or table == LaunchplaneMergeTrainControllerStateRow.__tablename__
-        ):
-            continue
-        columns = inspector.get_columns(table, schema="public")
-        state_columns = [
-            str(column["name"]) for column in columns if column["name"] in {"state", "status"}
-        ]
-        if not state_columns:
-            continue
-        quote = connection.dialect.identifier_preparer.quote
-        active = " OR ".join(
-            quote(name) + "::text IN ('running','executing','dispatching','processing','claimed')"
-            for name in state_columns
-        )
-        for column in columns:
-            name = str(column["name"])
-            if "lease" not in name or not any(
-                part in name for part in ("expires", "deadline", "until")
+    store = PostgresRecordStore(
+        database_url=connection.engine.url.render_as_string(hide_password=False),
+        postgres_connect_timeout_seconds=5,
+        postgres_statement_timeout_milliseconds=10000,
+    )
+    try:
+        with Session(bind=connection) as session:
+            now = str(connection.scalar(text("SELECT clock_timestamp()")))
+            observations = _operation_observations(store, session, now)
+            if any(item["blocks_drain"] for item in observations):
+                raise RuntimeError("An existing provider executor has not been excluded.")
+            for row_type, column, active in (
+                (LaunchplaneOdooStableBootstrapOperationRow, "status", ("running",)),
+                (LaunchplaneOdooProdBackupRestoreOperationRow, "status", ("running",)),
+                (LaunchplaneOdooProdRetainedVolumeBackupImportOperationRow, "status", ("running",)),
+                (LaunchplanePrivilegedOperationRow, "status", ("executing",)),
+                (LaunchplaneOutboxDeliveryRow, "state", ("running",)),
             ):
-                continue
-            count = 0
-            for (value,) in connection.execute(
-                text(
-                    f"SELECT {quote(name)} FROM public.{quote(table)} WHERE ({active}) AND {quote(name)} IS NOT NULL"
+                if session.scalar(
+                    select(func.count())
+                    .select_from(row_type)
+                    .where(getattr(row_type, column).in_(active))
+                ):
+                    raise RuntimeError("An own worker still has admitted execution work.")
+            controllers = session.scalars(
+                select(LaunchplaneMergeTrainControllerStateRow).where(
+                    LaunchplaneMergeTrainControllerStateRow.status != "idle"
                 )
-            ):
-                if value in ("", 0):
-                    continue
-                try:
-                    expiry = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-                    if expiry.tzinfo is None:
-                        raise ValueError("Missing timezone.")
-                except ValueError:
-                    try:
-                        expiry = datetime.fromtimestamp(float(value), timezone.utc)
-                    except (TypeError, ValueError, OverflowError):
-                        raise RuntimeError(
-                            "An operation lease expiry could not be qualified."
-                        ) from None
-                count += expiry > now
-            if count:
-                observed[f"{table}.{name}"] = count
-    return observed
+            )
+            for controller in controllers:
+                if (controller.status, controller.active_action, controller.active_phase) != (
+                    "running",
+                    "merge_train_controller_run_once",
+                    "select_next_action",
+                ):
+                    raise RuntimeError(
+                        "A merge train has not reached a qualified pre-effect observation phase."
+                    )
+    finally:
+        store.close()
 
 
 def emit(event: str, **values: Any) -> None:
@@ -139,9 +141,7 @@ def rehearsal_receipt(
     expires: datetime,
 ) -> dict[str, Any]:
     from control_plane.storage.schema_migration import (
-        SCHEMA_MIGRATION_TARGET_REVISION,
         migrate_schema_on_connection,
-        schema_migration_action,
     )
     from control_plane.storage.migrations.versions import (
         e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,
@@ -161,9 +161,9 @@ def rehearsal_receipt(
         if set(restored) - set(after) != set(retirement.RETIRED_TABLES):
             raise RuntimeError("The isolated rehearsal removed an unexpected table set.")
         require_retired_functions_absent(connection)
-    verify_postgres_schema_invariants(connection.engine)
-    startup_action = schema_migration_action(
-        current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+        verify_postgres_schema_invariants(connection)
+    verify_committed_database(
+        connection, {"system_identifier": identifier, "before": restored, "after": after}
     )
     return {
         **{key: held[key] for key in ("hold_id", "snapshot", "transaction")},
@@ -172,8 +172,6 @@ def rehearsal_receipt(
         "restored": restored,
         "retained": retained_snapshot(after),
         "revision": revision,
-        "startup_action": startup_action,
-        "schema_invariants_verified": True,
         "action": "apply",
     }
 
@@ -210,9 +208,22 @@ def keep_database(
             lambda: deployment.observe(deadline=arguments.expires_at),
             arguments.job_directory,
         )
-        if command.get("action") != "stopped" or (arguments.job_directory / "releasing").exists():
-            raise RuntimeError("The host did not confirm its original services stopped.")
-        with locked_database(connection, expires_at=expires):
+        if command.get("action") != "frozen" or (arguments.job_directory / "releasing").exists():
+            raise RuntimeError("The host did not confirm its complete physical writer hold.")
+        addresses = command.get("addresses")
+        if (
+            not isinstance(addresses, list)
+            or not addresses
+            or any(not isinstance(value, str) for value in addresses)
+        ):
+            raise RuntimeError("Frozen container network identities are missing.")
+        require_no_active_executors(connection)
+        connection.commit()
+        with locked_database(
+            connection,
+            expires_at=expires,
+            disconnect_clients=lambda: disconnect_frozen_clients(connection, set(addresses)),
+        ):
             before = database_snapshot(connection)
             snapshot = str(connection.scalar(text("SELECT pg_export_snapshot()")))
             transaction = str(connection.scalar(text("SELECT txid_current()")))
@@ -243,15 +254,33 @@ def keep_database(
                         "The rehearsal receipt belongs to another maintenance snapshot."
                     )
                 revision = apply_retirement(connection, before=before, rehearsal=receipt)
+                proof = {
+                    "hold_id": arguments.hold_id,
+                    "system_identifier": identifier,
+                    "before": before,
+                    "after": database_snapshot(connection),
+                }
+                with locked_state(arguments.job_directory / "state.json", active=True):
+                    deployment.hold_recovery(arguments.expires_at, arguments.hold_id)
+                    save(arguments.job_directory / "commit-pending.json", proof)
                 emit("verified_before_commit", revision=revision)
             elif receipt.get("action") != "release":
                 raise ValueError("Only an exact rehearsal or release command is accepted.")
-        verify_postgres_schema_invariants(connection.engine)
-        emit(
-            "database_released",
-            revision=str(connection.scalar(text("SELECT version_num FROM alembic_version"))),
+        connection.close()
+        with connection.engine.connect() as verifier:
+            pending = arguments.job_directory / "commit-pending.json"
+            proof = (
+                json.loads(pending.read_text())
+                if pending.exists()
+                else {"system_identifier": identifier, "before": before, "after": before}
+            )
+            revision = verify_committed_database(verifier, proof)
+        save(
+            arguments.job_directory / "database-safe.json",
+            {"revision": revision, "hold_id": arguments.hold_id},
         )
-        while not (arguments.job_directory / "restarted").exists():
+        emit("database_released", revision=revision)
+        while not (arguments.job_directory / "resumed").exists():
             if datetime.now(timezone.utc) >= expires:
                 raise TimeoutError(
                     "Service restart did not complete before the maintenance deadline."
@@ -267,9 +296,11 @@ def interrupted(_signum: int, _frame: object) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Launchplane's bounded stopped-service database keeper."
+        description="Launchplane's bounded full writer-hold database keeper."
     )
-    parser.add_argument("mode", choices=("plan", "unfence", "hold", "rehearse"))
+    parser.add_argument(
+        "mode", choices=("plan", "unfence", "hold", "rehearse", "verify", "revision")
+    )
     parser.add_argument("--before-file", type=Path)
     parser.add_argument("--backup-sha256", default="")
     parser.add_argument("--expires-at", required=True)
@@ -280,7 +311,7 @@ def main() -> int:
     arguments = parser.parse_args()
     expires = datetime.fromisoformat(arguments.expires_at)
     if expires.tzinfo is None or (
-        arguments.mode != "unfence"
+        arguments.mode not in {"unfence", "verify", "revision"}
         and not 0 < (expires - datetime.now(timezone.utc)).total_seconds() <= 3600
     ):
         parser.error("The deadline must be within one hour and include a timezone.")
@@ -294,18 +325,27 @@ def main() -> int:
             image=os.environ.get("DOCKER_IMAGE_REFERENCE", ""),
             root=Path("/app"),
         )
-        if arguments.readback_only:
-            from control_plane.deployment_maintenance import MAINTENANCE_UNTIL_ENV
-            from control_plane.dokploy.api import parse_dokploy_env_text
+        from control_plane.deployment_maintenance import MAINTENANCE_UNTIL_ENV
+        from control_plane.dokploy.api import parse_dokploy_env_text
 
-            if MAINTENANCE_UNTIL_ENV in parse_dokploy_env_text(
-                str(deployment.read_target().get("env") or "")
-            ):
-                raise RuntimeError(
-                    "The original marker removal is not verified; no write was replayed."
-                )
-        else:
-            deployment.marker(arguments.expires_at, remove=True)
+        marker = parse_dokploy_env_text(str(deployment.read_target().get("env") or "")).get(
+            MAINTENANCE_UNTIL_ENV
+        )
+        if (arguments.job_directory / "commit-pending.json").exists() and (
+            not (arguments.job_directory / "database-safe.json").exists()
+            or not (arguments.job_directory / "resumed").exists()
+        ):
+            raise RuntimeError(
+                "Committed-state recovery must be verified before removing the deployment hold."
+            )
+        if marker is not None:
+            if marker not in {arguments.expires_at, recovery_marker(arguments.hold_id)}:
+                raise RuntimeError("The recorded deployment hold no longer owns this marker.")
+            if arguments.readback_only:
+                if marker != arguments.expires_at or expires > datetime.now(timezone.utc):
+                    raise RuntimeError("The recorded deployment hold is still active.")
+            else:
+                deployment.marker(marker, remove=True)
         emit("deployment_released")
         return 0
     engine = _build_engine(
@@ -332,6 +372,24 @@ def main() -> int:
                     ),
                 )
                 return 0
+            if arguments.mode == "verify":
+                proof = json.loads((arguments.job_directory / "commit-pending.json").read_text())
+                if proof["hold_id"] != arguments.hold_id:
+                    raise RuntimeError("The recovery proof belongs to another maintenance attempt.")
+                emit(
+                    "database_verified",
+                    revision=verify_committed_database(connection, proof),
+                    hold_id=arguments.hold_id,
+                )
+                return 0
+            if arguments.mode == "revision":
+                emit(
+                    "revision",
+                    revision=str(
+                        connection.scalar(text("SELECT version_num FROM alembic_version"))
+                    ),
+                )
+                return 0
             row = connection.execute(
                 text(
                     "SELECT payload->>'target_id', payload->>'target_type' FROM launchplane_service_deploy_drains WHERE record_id='service'"
@@ -339,10 +397,6 @@ def main() -> int:
             ).one()
             if row[1] != "compose" or not row[0]:
                 raise ValueError("The current own-service target authority is missing.")
-            if in_flight_work(connection):
-                raise RuntimeError(
-                    "An operation is running or leased; plan a later maintenance window."
-                )
             deployment = DeploymentMaintenance(
                 target_id=str(row[0]),
                 database_url=url,

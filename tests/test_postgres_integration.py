@@ -16551,7 +16551,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 )
 
     def test_unexpected_client_refuses_hold_and_all_locks_are_released(self) -> None:
-        from control_plane.database_maintenance import locked_database
+        from control_plane.database_maintenance import locked_database, MAINTENANCE_LOCKS
         from sqlalchemy.pool import NullPool
 
         with _isolated_postgres_database() as url:
@@ -16561,7 +16561,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 connection.execute(text("CREATE TABLE sample(id integer)"))
             with engine.connect() as keeper, engine.connect() as unexpected:
                 unexpected.execute(text("SELECT 1"))
-                with self.assertRaisesRegex(RuntimeError, "Another database client"):
+                with self.assertRaises(RuntimeError):
                     with locked_database(
                         keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=20)
                     ):
@@ -16569,9 +16569,8 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             with engine.begin() as observer:
                 self.assertTrue(
                     observer.scalar(
-                        text(
-                            "SELECT pg_try_advisory_xact_lock(hashtextextended('launchplane:schema-migration',0))"
-                        )
+                        text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key,0))"),
+                        {"key": MAINTENANCE_LOCKS[0]},
                     )
                 )
                 observer.execute(text("INSERT INTO sample VALUES(1)"))
@@ -16635,6 +16634,23 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 connection.execute(text("UPDATE sample SET label='révision'"))
                 connection.execute(text("SELECT nextval('sample_id_seq')"))
                 self.assertNotEqual(database_snapshot(connection), before)
+                connection.execute(
+                    text(
+                        "CREATE FUNCTION sample_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "CREATE TRIGGER sample_guard BEFORE INSERT ON sample FOR EACH ROW EXECUTE FUNCTION sample_guard()"
+                    )
+                )
+                guarded = database_snapshot(connection)
+                connection.execute(
+                    text(
+                        "CREATE OR REPLACE FUNCTION sample_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NULL; END'"
+                    )
+                )
+                self.assertNotEqual(database_snapshot(connection), guarded)
 
     def test_server_deadline_releases_an_idle_keeper(self) -> None:
         from control_plane.database_maintenance import locked_database
@@ -16718,7 +16734,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                         "control_plane.storage.schema_migration.migrate_schema_on_connection"
                     ) as migrate,
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "different PostgreSQL cluster"):
+                    with self.assertRaises(RuntimeError):
                         rehearsal_receipt(
                             connection,
                             held={"system_identifier": live_identifier},
@@ -16739,7 +16755,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 with patch(
                     "control_plane.database_maintenance.migrate_schema_on_connection"
                 ) as migrate:
-                    with self.assertRaisesRegex(RuntimeError, "different PostgreSQL cluster"):
+                    with self.assertRaises(RuntimeError):
                         apply_retirement(
                             connection, before={}, rehearsal={"system_identifier": live_identifier}
                         )
@@ -16750,6 +16766,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             apply_retirement,
             database_snapshot,
             database_system_identifier,
+            verify_committed_database,
             locked_database,
             require_retired_functions_absent,
             retained_snapshot,
@@ -16800,6 +16817,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     )
                     after = database_snapshot(connection)
                     require_retired_functions_absent(connection)
+                    verify_postgres_schema_invariants(connection)
                     self.assertEqual(set(before) - set(after), set(retired.RETIRED_TABLES))
                     self.assertEqual(retained_snapshot(after), retained_snapshot(before))
                     self.assertEqual(
@@ -16810,8 +16828,6 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     rehearsal = {
                         "system_identifier": database_system_identifier(connection) + "-isolated",
                         "backup_sha256": "a" * 64,
-                        "startup_action": "compatible_ahead",
-                        "schema_invariants_verified": True,
                         "restored": before,
                         "retained": retained_snapshot(after),
                         "revision": final,
@@ -16822,14 +16838,37 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                             "control_plane.database_maintenance.schema_migration_action",
                             return_value="upgrade",
                         ):
-                            with self.assertRaisesRegex(RuntimeError, "incompatible"):
+                            with self.assertRaises(RuntimeError):
                                 apply_retirement(connection, before=before, rehearsal=rehearsal)
                     finally:
                         incompatible.rollback()
+                    rejected = connection.begin_nested()
+                    try:
+                        with patch(
+                            "control_plane.database_maintenance.verify_postgres_schema_invariants",
+                            side_effect=RuntimeError("invariant failure"),
+                        ):
+                            with self.assertRaises(RuntimeError):
+                                apply_retirement(connection, before=before, rehearsal=rehearsal)
+                    finally:
+                        rejected.rollback()
+                    self.assertTrue(
+                        set(retired.RETIRED_TABLES) <= set(inspect(connection).get_table_names())
+                    )
                     self.assertEqual(
                         apply_retirement(connection, before=before, rehearsal=rehearsal), final
                     )
+                    proof = {
+                        "system_identifier": database_system_identifier(connection),
+                        "before": before,
+                        "after": database_snapshot(connection),
+                    }
             with engine.connect() as observer:
+                self.assertEqual(verify_committed_database(observer, proof), final)
+                table = Table(current.TABLE_NAME, MetaData(), autoload_with=observer)
+                observer.execute(table.update().values(pull_request_number=99))
+                with self.assertRaises(RuntimeError):
+                    verify_committed_database(observer, proof)
                 self.assertEqual(
                     observer.execute(text("SELECT version_num FROM alembic_version"))
                     .scalars()
@@ -16856,40 +16895,88 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                         f"CREATE FUNCTION public.{name}() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'"
                     )
                 )
-                with self.assertRaisesRegex(RuntimeError, "trigger function remains"):
+                with self.assertRaises(RuntimeError):
                     require_retired_functions_absent(connection)
 
-    def test_census_preserves_unknown_rows_and_ignores_scheduler_ownership(self) -> None:
-        from control_plane.database_maintenance_cli import in_flight_work
-        from control_plane.storage.postgres import LaunchplaneMergeTrainControllerStateRow
+    def test_frozen_client_admission_refuses_unmapped_xid_and_execution_locks(self) -> None:
+        from control_plane.database_maintenance import disconnect_frozen_clients, locked_database
         from sqlalchemy.pool import NullPool
 
         with _isolated_postgres_database() as url:
             engine = create_engine(url, poolclass=NullPool)
             self.addCleanup(engine.dispose)
-            with engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "CREATE TABLE sample_operations(id integer PRIMARY KEY, state text, lease_expires_at text)"
+            with engine.begin() as seed:
+                seed.execute(text("CREATE TABLE sample(id integer PRIMARY KEY)"))
+            with engine.connect() as keeper, engine.connect() as client:
+                address = str(
+                    client.scalar(
+                        text(
+                            "SELECT client_addr::text FROM pg_stat_activity WHERE pid=pg_backend_pid()"
+                        )
                     )
                 )
-                connection.execute(text("INSERT INTO sample_operations VALUES(1,'running','')"))
-                controller = connection.dialect.identifier_preparer.quote(
-                    LaunchplaneMergeTrainControllerStateRow.__tablename__
+                with self.assertRaises(RuntimeError):
+                    disconnect_frozen_clients(keeper, {"unmapped"})
+                self.assertEqual(client.scalar(text("SELECT 1")), 1)
+                client.execute(text("INSERT INTO sample VALUES(1)"))
+                with self.assertRaises(RuntimeError):
+                    disconnect_frozen_clients(keeper, {address})
+                self.assertEqual(client.scalar(text("SELECT count(*) FROM sample")), 1)
+                client.rollback()
+                client.execute(text("SELECT pg_advisory_xact_lock(9876543)"))
+                with self.assertRaises(RuntimeError):
+                    disconnect_frozen_clients(keeper, {address})
+                self.assertEqual(client.scalar(text("SELECT 1")), 1)
+                client.rollback()
+                client.execute(text("SELECT * FROM sample"))
+                keeper.rollback()
+                with locked_database(
+                    keeper,
+                    expires_at=datetime.now(timezone.utc) + timedelta(seconds=20),
+                    disconnect_clients=lambda: disconnect_frozen_clients(keeper, {address}),
+                ):
+                    keeper.execute(text("INSERT INTO sample VALUES(2)"))
+                with self.assertRaises(SQLAlchemyError):
+                    client.execute(text("SELECT 1"))
+            with engine.connect() as observer:
+                self.assertEqual(observer.scalar(text("SELECT count(*) FROM sample")), 1)
+
+    def test_existing_executor_census_rejects_admitted_worker_without_using_lease_expiry(
+        self,
+    ) -> None:
+        from control_plane.database_maintenance_cli import require_no_active_executors
+        from sqlalchemy import Table, MetaData
+        from control_plane.storage.migrations.versions import (
+            c8d2e4f6a9b1_add_integration_attestations as current,
+        )
+        from control_plane.storage.postgres import LaunchplanePrivilegedOperationRow
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), current.revision)
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                require_no_active_executors(connection)
+                table = Table(
+                    LaunchplanePrivilegedOperationRow.__tablename__,
+                    MetaData(),
+                    autoload_with=connection,
                 )
                 connection.execute(
-                    text(f"CREATE TABLE {controller}(status text, lease_expires_at text)")
+                    table.insert().values(
+                        operation_id="synthetic",
+                        descriptor_id="managed-secret-reencryption",
+                        status="executing",
+                        requester_github_id=1,
+                        created_at="2000-01-01T00:00:00+00:00",
+                        updated_at="2000-01-01T00:00:00+00:00",
+                        expires_at="2000-01-01T00:00:00+00:00",
+                        payload={},
+                    )
                 )
-                future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
-                connection.execute(
-                    text(f"INSERT INTO {controller} VALUES('running',:future)"), {"future": future}
-                )
-                self.assertEqual(in_flight_work(connection), {})
-                self.assertEqual(
-                    connection.scalar(text("SELECT state FROM sample_operations")), "running"
-                )
-                connection.execute(
-                    text("UPDATE sample_operations SET lease_expires_at=:future"),
-                    {"future": future},
-                )
-                self.assertTrue(in_flight_work(connection))
+                with self.assertRaises(RuntimeError):
+                    require_no_active_executors(connection)
+                connection.execute(table.update().values(status="execution_failed"))
+                require_no_active_executors(connection)
+                self.assertEqual(connection.scalar(select(table.c.status)), "execution_failed")

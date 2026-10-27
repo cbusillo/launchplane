@@ -1,4 +1,4 @@
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 import hashlib
@@ -17,6 +17,14 @@ from control_plane.storage.schema_migration import (
     migrate_schema_on_connection,
     schema_migration_action,
     schema_migration_target,
+)
+from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
+
+
+MAINTENANCE_LOCKS = (
+    "launchplane:schema-migration",
+    "launchplane:service-deploy-provider-dispatch",
+    "launchplane:service-deploy-release-admission",
 )
 
 
@@ -38,18 +46,19 @@ def require_no_other_clients(connection: Connection, *, allow_dump: bool = False
 
 
 @contextmanager
-def locked_database(connection: Connection, *, expires_at: datetime) -> Iterator[Connection]:
+def locked_database(
+    connection: Connection,
+    *,
+    expires_at: datetime,
+    disconnect_clients: Callable[[], None] | None = None,
+) -> Iterator[Connection]:
     if connection.dialect.name != "postgresql" or expires_at.tzinfo is None:
         raise ValueError("A PostgreSQL database and timezone-aware deadline are required.")
     if connection.in_transaction():
         raise ValueError("The keeper needs an idle connection before taking its snapshot.")
     acquired = []
     try:
-        for key in (
-            "launchplane:schema-migration",
-            "launchplane:service-deploy-provider-dispatch",
-            "launchplane:service-deploy-release-admission",
-        ):
+        for key in MAINTENANCE_LOCKS:
             if not connection.scalar(
                 text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))"), {"key": key}
             ):
@@ -67,6 +76,8 @@ def locked_database(connection: Connection, *, expires_at: datetime) -> Iterator
             if not names:
                 raise RuntimeError("No application tables were found.")
             connection.execute(text(f"LOCK TABLE {names} IN EXCLUSIVE MODE NOWAIT"))
+            if disconnect_clients is not None:
+                disconnect_clients()
             if tables != sorted(inspect(connection).get_table_names(schema="public")):
                 raise RuntimeError("The table set changed while acquiring the hold.")
             remaining = (
@@ -163,7 +174,8 @@ def database_snapshot(connection: Connection) -> dict[str, Any]:
             ),
             (
                 "triggers",
-                "SELECT pg_get_triggerdef(oid, true) FROM pg_trigger WHERE tgrelid=to_regclass(:name) AND NOT tgisinternal ORDER BY tgname",
+                "SELECT jsonb_build_array(pg_get_triggerdef(oid, true), tgenabled, pg_get_functiondef(tgfoid))::text "
+                "FROM pg_trigger WHERE tgrelid=to_regclass(:name) AND NOT tgisinternal ORDER BY tgname",
             ),
         ):
             metadata[category] = list(
@@ -243,16 +255,7 @@ def apply_retirement(
     connection: Connection, *, before: dict[str, Any], rehearsal: dict[str, Any]
 ) -> str:
     require_no_other_clients(connection)
-    if (
-        not isinstance(rehearsal.get("system_identifier"), str)
-        or not rehearsal["system_identifier"]
-        or rehearsal["system_identifier"] == database_system_identifier(connection)
-    ):
-        raise RuntimeError("The rehearsal did not run in a different PostgreSQL cluster.")
-    if rehearsal.get("startup_action") not in {"current", "compatible_ahead"}:
-        raise RuntimeError("The rehearsal did not prove startup compatibility.")
-    if rehearsal.get("schema_invariants_verified") is not True:
-        raise RuntimeError("The isolated rehearsal lacks passing schema invariants.")
+    require_isolated_rehearsal(connection, rehearsal.get("system_identifier"))
     if rehearsal.get("restored") != before or rehearsal.get("retained") != retained_snapshot(
         before
     ):
@@ -284,4 +287,67 @@ def apply_retirement(
     ) not in {"current", "compatible_ahead"}:
         raise RuntimeError("The migrated schema is incompatible with the running image.")
     require_retired_functions_absent(connection)
+    verify_postgres_schema_invariants(connection)
     return final_revision
+
+
+def verify_committed_database(connection: Connection, proof: dict[str, Any]) -> str:
+    if database_system_identifier(connection) != proof["system_identifier"]:
+        raise RuntimeError("The recovery readback belongs to another database cluster.")
+    require_no_other_clients(connection)
+    observed = database_snapshot(connection)
+    if observed not in (proof["before"], proof["after"]):
+        raise RuntimeError("Committed state disagrees with both verified maintenance states.")
+    verify_postgres_schema_invariants(connection)
+    if observed == proof["after"] and proof["after"] != proof["before"]:
+        require_retired_functions_absent(connection)
+    return str(connection.scalar(text("SELECT version_num FROM alembic_version")))
+
+
+def disconnect_frozen_clients(connection: Connection, addresses: set[str]) -> None:
+    connection.execute(text("SELECT pg_stat_clear_snapshot()"))
+    if connection.scalar(
+        text("SELECT count(*) FROM pg_prepared_xacts WHERE database=current_database()")
+    ):
+        raise RuntimeError("A prepared transaction prevents frozen-client admission.")
+    clients = (
+        connection.execute(
+            text(
+                "SELECT pid,backend_start,client_addr::text AS address,state,backend_xid,usename "
+                "FROM pg_stat_activity WHERE datname=current_database() "
+                "AND backend_type='client backend' AND pid<>pg_backend_pid()"
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if any(
+        row["address"] not in addresses
+        or row["state"] not in {"idle", "idle in transaction"}
+        or row["backend_xid"] is not None
+        or row["usename"] != connection.scalar(text("SELECT current_user"))
+        for row in clients
+    ):
+        raise RuntimeError("A frozen database client has unresolved identity or active work.")
+    if connection.scalar(
+        text(
+            "SELECT count(*) FROM pg_locks WHERE pid=ANY(:pids) AND "
+            "(locktype='advisory' OR (locktype='relation' AND mode<>'AccessShareLock'))"
+        ),
+        {"pids": [int(row["pid"]) for row in clients]},
+    ):
+        raise RuntimeError("A frozen client still owns an execution or write lock.")
+    for row in clients:
+        connection.execute(text("SELECT pg_stat_clear_snapshot()"))
+        terminated = connection.scalar(
+            text(
+                "SELECT pg_terminate_backend(pid,5000) FROM pg_stat_activity "
+                "WHERE pid=:pid AND backend_start=:started AND datname=current_database() "
+                "AND usename=current_user AND client_addr::text=:address "
+                "AND state IN ('idle','idle in transaction') AND backend_xid IS NULL"
+            ),
+            {"pid": row["pid"], "started": row["backend_start"], "address": row["address"]},
+        )
+        if terminated is not True:
+            raise RuntimeError("A frozen client did not settle with exact termination readback.")
+    require_no_other_clients(connection)

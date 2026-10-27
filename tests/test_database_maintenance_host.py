@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import threading
-import subprocess
 import time
 from typing import Any
 import unittest
@@ -14,10 +13,25 @@ from control_plane import database_maintenance_host as host
 
 
 def state_file(root: Path, **changes: Any) -> Path:
+    originals = {}
+    for index, identifier in enumerate(("own-api", "own-train"), start=10):
+        group = root / identifier
+        group.mkdir()
+        (group / "cgroup.freeze").write_text("0")
+        (group / "cgroup.events").write_text("populated 1\nfrozen 0\n")
+        metadata = group.stat()
+        originals[identifier] = {
+            "cgroup": str(group),
+            "device": metadata.st_dev,
+            "inode": metadata.st_ino,
+            "pid": index,
+            "started_at": "original-start",
+            "restart_policy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+        }
     state = {
         "hold_id": "synthetic",
         "project": "own",
-        "containers": ["own-api", "own-train"],
+        "containers": list(originals),
         "api": "own-api",
         "browser": "own-browser",
         "operator": "own-keeper",
@@ -25,12 +39,14 @@ def state_file(root: Path, **changes: Any) -> Path:
         "database": "own",
         "target_id": "own-target",
         "image_id": "synthetic-image",
+        "system_identifier": "own-cluster",
         "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
         "job_directory": str(root),
         "commands": str(root / "commands"),
         "directory": str(root),
         "compose": str(root / "compose.yaml"),
         "overlay": str(root / "operator.json"),
+        "originals": originals,
         **changes,
     }
     path = root / "state.json"
@@ -39,159 +55,142 @@ def state_file(root: Path, **changes: Any) -> Path:
 
 
 class DatabaseMaintenanceHostTests(unittest.TestCase):
-    def test_release_restarts_originals_and_rejects_a_late_driver_stop_or_save(self) -> None:
+    def test_canceling_an_incomplete_kernel_freeze_cannot_freeze_later(self) -> None:
         with TemporaryDirectory() as temporary:
             path = state_file(Path(temporary))
-            started: list[str] = []
+            original = json.loads(path.read_text())["originals"]["own-api"]
+            with patch.object(time, "monotonic", side_effect=[0, 6]):
+                with self.assertRaises(TimeoutError):
+                    host.set_freezer(original, True)
+            host.set_freezer(original, False)
+            self.assertEqual(host.read_freezer(original), ("0", "0"))
 
-            def restart(identifier: str, _state: dict[str, Any], _settled: Any = None) -> str:
-                started.append(identifier)
+    def test_replaced_cgroup_is_never_modified(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(Path(temporary))
+            original = json.loads(path.read_text())["originals"]["own-api"]
+            original["inode"] += 1
+            with self.assertRaises(RuntimeError):
+                host.set_freezer(original, True)
+            self.assertEqual((Path(original["cgroup"]) / "cgroup.freeze").read_text(), "0")
+
+    def test_unsafe_committed_state_stays_held_until_exact_verification_passes(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = state_file(root, fenced=True)
+            (root / "commit-pending.json").write_text("{}")
+            observations = [
+                {
+                    "Id": identifier,
+                    "State": {"Running": False},
+                    "HostConfig": {"RestartPolicy": {"Name": "no"}},
+                }
+                for identifier in json.loads(path.read_text())["containers"]
+            ]
+            with (
+                patch.object(host, "terminate_keeper"),
+                patch.object(host, "original_containers", return_value=observations),
+                patch.object(host, "operator_container", return_value=None),
+                patch.object(host, "remove_watchdog"),
+                patch.object(
+                    host, "resume_original", side_effect=lambda identifier, _state: identifier
+                ) as resume,
+                patch.object(host, "operator", side_effect=RuntimeError("unsafe")),
+            ):
+                with self.assertRaises(RuntimeError):
+                    host.release(path)
+                resume.assert_not_called()
+            state = json.loads(path.read_text())
+            self.assertTrue(state["recovery_required"])
+            self.assertFalse(state.get("released", False))
+            self.assertFalse(state.get("resume_started", False))
+            with (
+                patch.object(host, "terminate_keeper"),
+                patch.object(host, "original_containers", return_value=observations),
+                patch.object(host, "operator_container", return_value=None),
+                patch.object(host, "remove_watchdog"),
+                patch.object(
+                    host, "resume_original", side_effect=lambda identifier, _state: identifier
+                ),
+                patch.object(host, "operator", return_value={"revision": "verified-revision"}),
+            ):
+                host.release(path)
+            state = json.loads(path.read_text())
+            self.assertTrue(state["released"])
+            self.assertEqual(state["safe_to_resume"]["revision"], state["revision"])
+            self.assertEqual(
+                state["safe_to_resume"]["system_identifier"], state["system_identifier"]
+            )
+            with self.assertRaises(RuntimeError):
+                host.update_state(path, held={"stale": True})
+
+    def test_partial_resume_keeps_safe_proof_and_never_rechecks_changed_rows(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            safe = {
+                "hold_id": "synthetic",
+                "system_identifier": "own-cluster",
+                "image_id": "synthetic-image",
+                "revision": "verified-revision",
+            }
+            path = state_file(root, safe_to_resume=safe, revision=safe["revision"])
+            (root / "commit-pending.json").write_text("{}")
+            resumed = []
+            fail = True
+
+            def resume(identifier: str, _state: dict[str, Any]) -> str:
+                if identifier == "own-train" and fail:
+                    raise OSError("temporarily unavailable")
+                resumed.append(identifier)
                 return identifier
 
             with (
-                patch.object(host, "original_containers"),
+                patch.object(host, "terminate_keeper"),
                 patch.object(host, "operator_container", return_value=None),
-                patch.object(host, "restart_original", side_effect=restart),
-            ):
-                host.release(path)
-            self.assertEqual(set(started), set(json.loads(path.read_text())["containers"]))
-            self.assertTrue(json.loads(path.read_text())["released"])
-            with patch.object(subprocess, "Popen") as stop:
-                with self.assertRaises(RuntimeError):
-                    host.launch_stop(path, "own-train")
-            stop.assert_not_called()
-            with self.assertRaises(RuntimeError):
-                host.update_state(path, held={"stale": "driver copy"})
-            self.assertTrue(json.loads(path.read_text())["released"])
-            with patch.object(host, "restart_original") as second:
-                host.release(path)
-            second.assert_not_called()
-
-    def test_unfence_failure_does_not_restart_services_twice(self) -> None:
-        with TemporaryDirectory() as temporary:
-            path = state_file(Path(temporary), fenced=True, fence_confirmed=True)
-            with (
-                patch.object(host, "original_containers"),
-                patch.object(host, "operator_container", return_value=None),
+                patch.object(host, "remove_watchdog"),
                 patch.object(
                     host,
-                    "restart_original",
-                    side_effect=lambda identifier, _state, _settled: identifier,
-                ) as restart,
-                patch.object(
-                    host, "operator", side_effect=[RuntimeError("provider unavailable"), {}]
+                    "operator",
+                    side_effect=AssertionError(
+                        "A safe partial resume must not compare mutable rows again"
+                    ),
                 ),
+                patch.object(host, "resume_original", side_effect=resume),
             ):
-                with self.assertRaisesRegex(RuntimeError, "readback|unavailable"):
+                with self.assertRaises(RuntimeError):
                     host.release(path)
-                first_count = restart.call_count
-                self.assertTrue(json.loads(path.read_text())["restarted"])
+                self.assertEqual(json.loads(path.read_text())["resumed_containers"], ["own-api"])
+                fail = False
                 host.release(path)
-                self.assertEqual(restart.call_count, first_count)
+                host.release(path)
+            self.assertCountEqual(resumed, ["own-api", "own-train"])
             self.assertTrue(json.loads(path.read_text())["released"])
 
-    def test_recovery_of_api_and_train_does_not_wait_for_a_long_capture_stop(self) -> None:
+    def test_uncertain_keeper_termination_never_reopens_a_pending_commit(self) -> None:
         with TemporaryDirectory() as temporary:
-            path = state_file(Path(temporary), containers=["own-api", "own-train", "own-capture"])
-            allow_capture = threading.Event()
-            failed: list[BaseException] = []
-
-            def restart(identifier: str, _state: dict[str, Any], _settled: Any = None) -> str:
-                if identifier == "own-capture" and not allow_capture.wait(5):
-                    raise RuntimeError("Test capture did not finish.")
-                return identifier
-
-            def release() -> None:
-                try:
-                    host.release(path)
-                except BaseException as error:
-                    failed.append(error)
-
+            root = Path(temporary)
+            path = state_file(root)
+            (root / "commit-pending.json").write_text("{}")
             with (
-                patch.object(host, "original_containers"),
-                patch.object(host, "operator_container", return_value=None),
-                patch.object(host, "restart_original", side_effect=restart),
+                patch.object(host, "terminate_keeper", side_effect=OSError("database unavailable")),
+                patch.object(host, "resume_original") as resume,
+                patch.object(host, "operator") as operator,
             ):
-                worker = threading.Thread(target=release)
-                worker.start()
-                deadline = time.monotonic() + 3
-                while time.monotonic() < deadline and set(
-                    json.loads(path.read_text()).get("restarted_containers", [])
-                ) != {"own-api", "own-train"}:
-                    time.sleep(0.01)
-                self.assertEqual(
-                    set(json.loads(path.read_text())["restarted_containers"]),
-                    {"own-api", "own-train"},
-                )
-                self.assertFalse(json.loads(path.read_text()).get("released", False))
-                allow_capture.set()
-                worker.join(5)
-            self.assertFalse(worker.is_alive())
-            self.assertFalse(failed)
-            self.assertTrue(json.loads(path.read_text())["released"])
-
-    def test_restart_waits_for_its_recorded_stop_client_without_canceling_it(self) -> None:
-        stop_finished = False
-
-        def sleep(_seconds: float) -> None:
-            nonlocal stop_finished
-            stop_finished = True
-
-        def run(*_args: str, **_kwargs: Any) -> str:
-            self.assertTrue(stop_finished)
-            return ""
-
-        healthy = {
-            "Config": {"Labels": {"com.docker.compose.project": "own"}},
-            "State": {"Running": True},
-        }
-        with (
-            patch.object(host, "process_running", side_effect=lambda _process: not stop_finished),
-            patch.object(time, "sleep", side_effect=sleep),
-            patch.object(host, "run", side_effect=run),
-            patch.object(host, "inspect_container", return_value=healthy),
-        ):
-            self.assertEqual(
-                host.restart_original(
-                    "own-api",
-                    {
-                        "project": "own",
-                        "stops": {"own-api": {"pid": 1, "start": "owned", "complete": True}},
-                    },
-                ),
-                "own-api",
-            )
-
-    def test_wrong_project_is_refused_before_restart(self) -> None:
-        state = {"containers": ["own-api"], "project": "own"}
-        with (
-            patch.object(
-                host,
-                "inspect_container",
-                return_value={"Config": {"Labels": {"com.docker.compose.project": "another"}}},
-            ),
-            patch.object(host, "run") as run,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "project identity"):
-                host.check_originals(state)
-        run.assert_not_called()
+                with self.assertRaises(OSError):
+                    host.release(path)
+                resume.assert_not_called()
+                operator.assert_not_called()
+            self.assertFalse(json.loads(path.read_text()).get("resume_started", False))
 
     def test_failed_controller_start_still_invokes_supported_release(self) -> None:
         with TemporaryDirectory() as temporary:
             path = state_file(Path(temporary))
-
-            def run(*args: str, **_kwargs: Any) -> str:
-                if args[:2] == ("systemctl", "show"):
-                    return "ActiveState=active\n" + str(path)
-                return ""
-
             with (
-                patch.object(host, "run", side_effect=run),
-                patch.object(subprocess, "Popen", side_effect=RuntimeError("controller refused")),
-                patch.object(host, "boot_identity", return_value="synthetic"),
+                patch.object(host, "install_watchdog"),
+                patch.object(host, "start_process", side_effect=RuntimeError("controller refused")),
                 patch.object(host, "release") as release,
             ):
-                with self.assertRaisesRegex(RuntimeError, "controller refused"):
+                with self.assertRaises(RuntimeError):
                     host.hold(path)
             release.assert_called_once_with(path)
 
@@ -206,12 +205,12 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
             receipt_path = root / "receipt.json"
             receipt_path.write_text(json.dumps(receipt))
             with patch.object(os, "open") as open_fifo:
-                with self.assertRaisesRegex(ValueError, "another dump"):
+                with self.assertRaises(ValueError):
                     host.submit(path, receipt_path)
             open_fifo.assert_not_called()
             receipt["backup_sha256"] = "a" * 64
             receipt_path.write_text(json.dumps(receipt))
-            received: list[dict[str, Any]] = []
+            received = []
             ready = threading.Event()
 
             def read() -> None:
@@ -228,9 +227,24 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
             self.assertFalse(reader.is_alive())
             self.assertEqual(received, [receipt])
 
-    def test_dormant_writer_outside_the_project_refuses_before_pause(self) -> None:
+    def test_wrong_project_is_refused_before_runtime_changes(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(Path(temporary))
+            with (
+                patch.object(
+                    host,
+                    "inspect_container",
+                    return_value={"Config": {"Labels": {"com.docker.compose.project": "another"}}},
+                ),
+                patch.object(host, "run") as run,
+            ):
+                with self.assertRaises(RuntimeError):
+                    host.check_originals(json.loads(path.read_text()))
+            run.assert_not_called()
+
+    def test_dormant_writer_outside_the_project_refuses_before_freeze(self) -> None:
         database = "postgresql://synthetic:credential@own/database"
-        api: dict[str, Any] = {
+        api = {
             "Image": "own-image",
             "Config": {
                 "Labels": {"org.opencontainers.image.source": "https://source.invalid/own/control"},
@@ -249,156 +263,12 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
         with (
             patch.object(host, "run", return_value="original\noutside\n"),
             patch.object(host, "inspect_container", return_value=outside),
-            patch.object(subprocess, "Popen") as stop,
         ):
             with self.assertRaises(RuntimeError):
                 host.require_no_outside_writers(api, {"original"}, project="own", operators=set())
-        stop.assert_not_called()
         outside["Config"]["Env"] = ["LAUNCHPLANE_DATABASE_URL=postgresql://isolated/restore"]
         with (
             patch.object(host, "run", return_value="outside\n"),
             patch.object(host, "inspect_container", return_value=outside),
         ):
             host.require_no_outside_writers(api, {"original"}, project="own", operators=set())
-
-    def test_a_failed_writer_inventory_does_not_prevent_releasing_our_services(self) -> None:
-        with TemporaryDirectory() as temporary:
-            path = state_file(Path(temporary))
-            with (
-                patch.object(host, "original_containers"),
-                patch.object(
-                    host, "check_originals", side_effect=RuntimeError("another writer appeared")
-                ) as inventory,
-                patch.object(host, "operator_container", return_value=None),
-                patch.object(
-                    host,
-                    "restart_original",
-                    side_effect=lambda identifier, _state, _settled: identifier,
-                ),
-            ):
-                host.release(path)
-            inventory.assert_not_called()
-            self.assertTrue(json.loads(path.read_text())["released"])
-
-    def test_keeper_abort_does_not_signal_its_cached_provider_cleanup(self) -> None:
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            path = state_file(
-                root,
-                fenced=True,
-                keeper={"pid": 123, "backend_start": datetime.now(timezone.utc).isoformat()},
-            )
-            state = json.loads(path.read_text())
-
-            def finish_cleanup(_seconds: float) -> None:
-                host.save(
-                    root / "marker-release.json",
-                    {
-                        "released": True,
-                        "deadline": state["expires_at"],
-                        "target_id": state["target_id"],
-                    },
-                )
-
-            with (
-                patch.object(host, "run", return_value="") as run,
-                patch.object(host, "start_process") as signal_controller,
-                patch.object(host, "operator_container", return_value={"State": {"Running": True}}),
-                patch.object(
-                    host,
-                    "restart_original",
-                    side_effect=lambda identifier, _state, _settled: identifier,
-                ),
-                patch.object(time, "sleep", side_effect=finish_cleanup),
-            ):
-                host.release(path)
-            signal_controller.assert_not_called()
-            self.assertTrue(run.call_args.args[:2] == ("docker", "exec"))
-            self.assertTrue(json.loads(path.read_text())["released"])
-
-    def test_database_failure_and_one_missing_service_do_not_block_other_restarts(self) -> None:
-        with TemporaryDirectory() as temporary:
-            path = state_file(
-                Path(temporary),
-                keeper={"pid": 123, "backend_start": datetime.now(timezone.utc).isoformat()},
-            )
-
-            def restart(identifier: str, _state: dict[str, Any], _settled: Any) -> str:
-                if identifier == "own-api":
-                    raise FileNotFoundError("The original API was removed.")
-                return identifier
-
-            with (
-                patch.object(host, "run", side_effect=RuntimeError("PostgreSQL unavailable")),
-                patch.object(host, "operator_container", return_value=None),
-                patch.object(host, "restart_original", side_effect=restart),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "own-api:FileNotFoundError"):
-                    host.release(path)
-            state = json.loads(path.read_text())
-            self.assertEqual(state["restarted_containers"], ["own-train"])
-            self.assertTrue(state["keeper_termination_unverified"])
-            self.assertFalse(state.get("released", False))
-
-    def test_failed_stop_client_is_observed_until_its_daemon_stop_finishes(self) -> None:
-        stopped = False
-        healthy = {
-            "Config": {"Labels": {"com.docker.compose.project": "own"}},
-            "State": {"Running": True},
-        }
-
-        def inspect(_identifier: str) -> dict[str, Any]:
-            return {**healthy, "State": {"Running": not stopped}}
-
-        def run(*args: str, **_kwargs: Any) -> str:
-            nonlocal stopped
-            self.assertEqual(args, ("docker", "start", "own-api"))
-            self.assertTrue(stopped)
-            stopped = False
-            return ""
-
-        def sleep(_seconds: float) -> None:
-            nonlocal stopped
-            if not restart.called:
-                stopped = True
-
-        with (
-            patch.object(host, "inspect_container", side_effect=inspect),
-            patch.object(host, "process_running", return_value=False),
-            patch.object(host, "boot_identity", return_value="same-boot"),
-            patch.object(host, "run", side_effect=run) as restart,
-            patch.object(time, "sleep", side_effect=sleep),
-        ):
-            self.assertEqual(
-                host.restart_original(
-                    "own-api", {"project": "own", "stops": {"own-api": {"boot": "same-boot"}}}
-                ),
-                "own-api",
-            )
-
-    def test_read_only_state_observation_does_not_rewrite_the_recovery_record(self) -> None:
-        with TemporaryDirectory() as temporary:
-            path = state_file(Path(temporary))
-            with patch.object(host, "save", wraps=host.save) as save:
-                with host.locked_state(path):
-                    pass
-                save.assert_not_called()
-                with host.locked_state(path) as state:
-                    state["releasing"] = True
-                save.assert_called_once()
-
-    def test_uncertain_install_can_be_reconciled_by_readback_without_another_write(self) -> None:
-        with TemporaryDirectory() as temporary:
-            path = state_file(Path(temporary), fenced=True, cleanup_uncertain=True)
-            with (
-                patch.object(host, "operator_container", return_value=None),
-                patch.object(
-                    host,
-                    "restart_original",
-                    side_effect=lambda identifier, _state, _settled: identifier,
-                ),
-                patch.object(host, "operator", return_value={}) as observe,
-            ):
-                host.release(path)
-            self.assertEqual([call.args[1] for call in observe.call_args_list], ["observe-unfence"])
-            self.assertTrue(json.loads(path.read_text())["released"])

@@ -11,10 +11,16 @@ from control_plane.dokploy import api
 MAINTENANCE_UNTIL_ENV = "LAUNCHPLANE_DATABASE_MAINTENANCE_UNTIL"
 
 
+def recovery_marker(hold_id: str) -> str:
+    return "recovery-required:" + hold_id
+
+
 def require_deployment_available(environment: Mapping[str, str]) -> None:
     raw = environment.get(MAINTENANCE_UNTIL_ENV, "").strip()
     if not raw:
         return
+    if raw.startswith("recovery-required:"):
+        raise ValueError("Launchplane database recovery must be verified before deployment.")
     try:
         expires = datetime.fromisoformat(raw)
         if expires.tzinfo is None:
@@ -136,6 +142,7 @@ class DeploymentMaintenance:
         installed = False
         released = False
         try:
+            self.owned_marker = deadline
             self.marker(deadline)
             installed = True
             self.require_idle_workflows()
@@ -144,19 +151,27 @@ class DeploymentMaintenance:
         finally:
             try:
                 if installed:
-                    self.marker(deadline, remove=True)
-                    released = True
+                    pending = release_receipt.parent / "commit-pending.json"
+                    safe = release_receipt.parent / "database-safe.json"
+                    if (release_receipt.parent / "resumed").exists() and (
+                        not pending.exists() or safe.exists()
+                    ):
+                        self.marker(self.owned_marker, remove=True)
+                        released = True
             finally:
                 receipt = {"released": released, "deadline": deadline, "target_id": self.target_id}
                 if not released:
-                    receipt["uncertain"] = True
-                    receipt["phase"] = "release" if installed else "install"
+                    if installed:
+                        receipt["retained_for_recovery"] = True
+                    else:
+                        receipt["uncertain"] = True
+                        receipt["phase"] = "release" if installed else "install"
                 temporary = release_receipt.with_suffix(".new")
                 temporary.write_text(json.dumps(receipt))
                 temporary.chmod(0o600)
                 temporary.replace(release_receipt)
 
-    def marker(self, deadline: str, *, remove: bool = False) -> None:
+    def marker(self, deadline: str, *, remove: bool = False, replace: str | None = None) -> None:
         from control_plane.dokploy import api
 
         target = self.read_target()
@@ -165,8 +180,12 @@ class DeploymentMaintenance:
             return
         if remove and environment.get(MAINTENANCE_UNTIL_ENV) != deadline:
             raise ValueError("Maintenance marker custody changed; release will not overwrite it.")
-        if not remove:
+        if replace is not None and environment.get(MAINTENANCE_UNTIL_ENV) != replace:
+            raise ValueError("The owned maintenance marker changed before recovery fencing.")
+        if not remove and replace is None:
             require_deployment_available(environment)
+        if not remove:
+            self.owned_marker = deadline
         rendered = api.render_dokploy_env_text_with_overrides(
             str(target.get("env") or ""),
             updates={} if remove else {MAINTENANCE_UNTIL_ENV: deadline},
@@ -188,3 +207,6 @@ class DeploymentMaintenance:
             else (observed.get(MAINTENANCE_UNTIL_ENV) != deadline)
         ):
             raise ValueError("The deployment marker readback disagrees.")
+
+    def hold_recovery(self, deadline: str, hold_id: str) -> None:
+        self.marker(recovery_marker(hold_id), replace=deadline)

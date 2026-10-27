@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 import re
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any, Protocol
 from alembic.script import ScriptDirectory
 
 from sqlalchemy import inspect, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.storage.migrations.versions import (
@@ -1688,8 +1689,8 @@ CRITICAL_PRIMARY_KEYS: tuple[CriticalPrimaryKey, ...] = (
 )
 
 
-def verify_postgres_schema_invariants(engine: Engine) -> None:
-    backend_name = engine.url.get_backend_name()
+def verify_postgres_schema_invariants(engine: Engine | Connection) -> None:
+    backend_name = engine.dialect.name
     if backend_name != "postgresql":
         raise RuntimeError(
             "Launchplane shared storage requires PostgreSQL for hosted service startup; "
@@ -1904,9 +1905,13 @@ def critical_index_errors(
     return errors
 
 
-def _verify_alembic_head(engine: Engine) -> str:
+def _verify_alembic_head(engine: Engine | Connection) -> str:
     try:
-        with engine.connect() as connection:
+        with (
+            nullcontext(engine)
+            if isinstance(engine, Connection)
+            else engine.connect() as connection
+        ):
             version_rows = connection.execute(
                 text("select version_num from alembic_version")
             ).fetchall()
@@ -1927,7 +1932,7 @@ def _verify_alembic_head(engine: Engine) -> str:
     return version_numbers[0]
 
 
-def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
+def authz_policy_write_fence_errors(engine: Engine | Connection) -> list[str]:
     return _postgres_write_fence_errors(
         engine=engine,
         table_name=_AUTHZ_POLICY_TABLE,
@@ -1943,7 +1948,7 @@ def authz_policy_write_fence_errors(engine: Engine) -> list[str]:
     )
 
 
-def merge_train_policy_write_fence_errors(engine: Engine) -> list[str]:
+def merge_train_policy_write_fence_errors(engine: Engine | Connection) -> list[str]:
     return _postgres_write_fence_errors(
         engine=engine,
         table_name=_MERGE_TRAIN_POLICY_TABLE,
@@ -1960,7 +1965,7 @@ def merge_train_policy_write_fence_errors(engine: Engine) -> list[str]:
     )
 
 
-def ordinary_effect_write_fence_errors(engine: Engine) -> list[str]:
+def ordinary_effect_write_fence_errors(engine: Engine | Connection) -> list[str]:
     errors = _postgres_write_fence_errors(
         engine=engine,
         table_name="launchplane_ordinary_agent_effects",
@@ -1990,14 +1995,14 @@ def ordinary_effect_write_fence_errors(engine: Engine) -> list[str]:
 
 def _postgres_write_fence_errors(
     *,
-    engine: Engine,
+    engine: Engine | Connection,
     table_name: str,
     trigger_name: str,
     function_name: str,
     trigger_fragments: tuple[str, ...],
     function_fragments: tuple[str, ...],
 ) -> list[str]:
-    with engine.connect() as connection:
+    with nullcontext(engine) if isinstance(engine, Connection) else engine.connect() as connection:
         trigger_row = (
             connection.execute(
                 text(
@@ -2059,8 +2064,8 @@ def _postgres_write_fence_errors(
     return errors
 
 
-def postgres_index_definitions(engine: Engine) -> dict[tuple[str, str], str]:
-    with engine.connect() as connection:
+def postgres_index_definitions(engine: Engine | Connection) -> dict[tuple[str, str], str]:
+    with nullcontext(engine) if isinstance(engine, Connection) else engine.connect() as connection:
         rows = connection.execute(
             text(
                 "select tablename, indexname, indexdef "

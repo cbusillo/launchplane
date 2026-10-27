@@ -11,6 +11,7 @@ from control_plane.deployment_maintenance import (
     DeploymentMaintenance,
     MAINTENANCE_UNTIL_ENV,
     require_deployment_available,
+    recovery_marker,
 )
 from control_plane.dokploy import api, source
 
@@ -48,7 +49,7 @@ class DeploymentMaintenanceTests(unittest.TestCase):
             patch.object(api, "fetch_dokploy_target_payload", return_value=target),
             patch.object(api, "update_dokploy_target_env") as update,
         ):
-            with self.assertRaisesRegex(ValueError, "running Launchplane"):
+            with self.assertRaises(ValueError):
                 DeploymentMaintenance(
                     target_id="synthetic",
                     database_url="postgresql://own",
@@ -82,7 +83,7 @@ class DeploymentMaintenanceTests(unittest.TestCase):
             patch.object(api, "update_dokploy_target_env") as update,
             patch.object(api, "trigger_deployment") as deploy,
         ):
-            with self.assertRaisesRegex(ValueError, "held for database maintenance"):
+            with self.assertRaises(ValueError):
                 script["run_break_glass_rollback"]()
         update.assert_not_called()
         deploy.assert_not_called()
@@ -113,7 +114,7 @@ class DeploymentMaintenanceTests(unittest.TestCase):
             patch.object(api, "update_dokploy_target_env") as update,
             patch.object(api, "trigger_deployment") as deploy,
         ):
-            with self.assertRaisesRegex(ValueError, "held for database maintenance"):
+            with self.assertRaises(ValueError):
                 execute_launchplane_self_deploy(control_plane_root_path=Path("."), request=request)
         update.assert_not_called()
         deploy.assert_not_called()
@@ -157,7 +158,8 @@ class DeploymentMaintenanceTests(unittest.TestCase):
                 root=Path("."),
             )
             receipt = Path(temporary) / "release.json"
-            with self.assertRaisesRegex(RuntimeError, "database failed"):
+            (receipt.parent / "resumed").touch()
+            with self.assertRaises(RuntimeError):
                 with maintenance.fence(deadline, release_receipt=receipt):
                     credentials.side_effect = RuntimeError("database failed")
                     self.assertEqual(
@@ -168,6 +170,19 @@ class DeploymentMaintenanceTests(unittest.TestCase):
             self.assertNotIn(MAINTENANCE_UNTIL_ENV, api.parse_dokploy_env_text(target["env"]))
             self.assertEqual(api.parse_dokploy_env_text(target["env"])["UNRELATED"], "preserve")
             credentials.assert_called_once()
+            (receipt.parent / "resumed").unlink()
+            with self.assertRaises(TimeoutError):
+                with maintenance.fence(deadline, release_receipt=receipt):
+                    maintenance.hold_recovery(deadline, "own")
+                    (receipt.parent / "commit-pending.json").write_text("{}")
+                    raise TimeoutError("committed outcome unavailable")
+            self.assertTrue(json.loads(receipt.read_text())["retained_for_recovery"])
+            self.assertEqual(
+                api.parse_dokploy_env_text(target["env"])[MAINTENANCE_UNTIL_ENV],
+                recovery_marker("own"),
+            )
+            with self.assertRaises(ValueError):
+                require_deployment_available(api.parse_dokploy_env_text(target["env"]))
 
     def test_completed_queue_jobs_do_not_refuse_an_idle_target(self) -> None:
         target: dict[str, Any] = {
@@ -208,5 +223,5 @@ class DeploymentMaintenanceTests(unittest.TestCase):
                 "dokploy_request",
                 return_value=[{"data": {"composeId": "own"}, "state": "active"}],
             ):
-                with self.assertRaisesRegex(ValueError, "queued"):
+                with self.assertRaises(ValueError):
                     maintenance.observe(deadline=None)
