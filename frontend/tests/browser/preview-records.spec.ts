@@ -108,6 +108,7 @@ test("provider previews expose sleep gaps and discard expired sleep evidence", {
   await page.clock.fastForward(60_001);
   await expect(sleep).not.toContainText("Asleep");
   await expect(sleep).not.toContainText("Awake");
+  await expect(sleep).toContainText("Sleep status unknown");
   expect(fixture.mutations).toEqual([]);
 });
 

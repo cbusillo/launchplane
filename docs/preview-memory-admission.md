@@ -21,7 +21,10 @@ The collector includes previews without a successful lifecycle record and
 drivers without idle support. It reads gateway status without visiting the
 application or requesting a wake. The lock-free poll never takes the host's
 preview operation lock. Provider reads and polls use bounded timeouts and an
-aggregate per-product budget, with shutdown checked between previews. Read
+aggregate per-product budget derived from the inventory cadence, with shutdown
+checked between previews. The existing scheduler slot rotates the first preview
+on consecutive scans so overflow does not always exclude the same tail; no
+cursor is stored. Read
 failures and exhausted budgets report unknown without provider exception text.
 Missing or expired evidence cannot establish a sleep state. Individual observations require the
 same `preview.read` authorization as individual preview identities.

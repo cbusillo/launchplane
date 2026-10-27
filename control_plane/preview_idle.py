@@ -10,6 +10,7 @@ import uuid
 
 import yaml
 
+from control_plane._odoo_copy_runtime_guard import preview_has_source_connection
 from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
     LaunchplaneIdempotencyRecord,
@@ -426,8 +427,6 @@ def require_preview_idle_binding(
         raise PreviewCannotSleep(
             "The provider runtime identity differs from the serving generation."
         )
-    from control_plane._odoo_copy_runtime_guard import preview_has_source_connection
-
     if preview_has_source_connection(env):
         raise PreviewCannotSleep("Upstream or SSH connection settings remain on this preview.")
     budget = next(

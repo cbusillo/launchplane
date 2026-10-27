@@ -12,6 +12,7 @@ from control_plane.contracts.preview_inventory_scan_record import (
 )
 
 PREVIEW_INVENTORY_STALE_AFTER = timedelta(minutes=30)
+PREVIEW_INVENTORY_INTERVAL_SECONDS = int(PREVIEW_INVENTORY_STALE_AFTER.total_seconds() / 3)
 PREVIEW_INVENTORY_SCAN_READ_LIMIT = 100
 
 

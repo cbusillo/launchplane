@@ -561,6 +561,91 @@ class PreviewIdleOperationTests(unittest.TestCase):
         self.run_preview()
         self.assertEqual(self.effects[-1]["action"], "awake")
 
+    def test_inventory_budget_covers_slower_polls_and_rotates_overflow_after_restart(self) -> None:
+        from control_plane.preview_lifecycle_scheduler import PreviewInventoryScheduler
+        from control_plane.preview_sleep_evidence import PREVIEW_SLEEP_READ_BUDGET_SECONDS
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        inventory = tuple(
+            ("env", f"compose-{number}", f"fixture-pr-{number}") for number in range(1, 4)
+        )
+        for number in range(2, 4):
+            self.store.write_preview_record(
+                self.preview.model_copy(
+                    update={"preview_id": f"preview-{number}", "anchor_pr_number": number}
+                )
+            )
+        clock = [0.0]
+        poll_seconds = 6.0
+        cost = [poll_seconds]
+        failed = [False]
+        attempted: list[str] = []
+
+        def binding(
+            _store: Any, _profile: Any, preview_id: str, *_args: Any, **kwargs: Any
+        ) -> dict[str, Any]:
+            return {
+                "server_id": "shared-host",
+                "spec": {"preview_id": preview_id},
+                "context": self.profile.preview.context,
+                "compose_name": kwargs["payload"]["name"],
+            }
+
+        def provider(**kwargs: Any) -> dict[str, Any]:
+            number = kwargs["query"]["composeId"].removeprefix("compose-")
+            return {"name": f"fixture-pr-{number}", "composeFile": "services: {preview-router: {}}"}
+
+        def remote(**kwargs: Any) -> None:
+            preview_id = kwargs["payload"]["preview_id"]
+            attempted.append(preview_id)
+            clock[0] += cost[0]
+            if (
+                failed[0]
+                and preview_id == self.preview.preview_id
+                or kwargs["timeout_seconds"] < min(cost[0], poll_seconds)
+            ):
+                raise NativeSourceUnavailable("fixture read failure")
+            kwargs["receive"]({"type": "complete", "result": observation()})
+
+        with (
+            patch(
+                "control_plane.preview_inventory_collection._complete_preview_compose_inventory",
+                return_value=inventory,
+            ),
+            patch("control_plane.preview_sleep_evidence.monotonic", side_effect=lambda: clock[0]),
+            patch(
+                "control_plane.preview_sleep_evidence.require_preview_idle_binding",
+                side_effect=binding,
+            ),
+            patch("control_plane.preview_sleep_evidence.api.dokploy_request", side_effect=provider),
+            patch("control_plane.preview_sleep_evidence._read_remote", side_effect=remote),
+        ):
+
+            def scan(slot: int) -> Any:
+                clock[0] = 0
+                scheduler = PreviewInventoryScheduler(
+                    self.store,
+                    control_plane_root=self.root,
+                    clock=lambda: slot * PreviewInventoryScheduler.interval,
+                )
+                scheduler._run_sweep()
+                return self.store.list_preview_inventory_scan_records()[0].sleep_observations
+
+            self.assertTrue(all(item.state == "awake" for item in scan(0)))
+            failed[0] = True
+            states = {item.slug: item.state for item in scan(0)}
+            self.assertEqual(states["pr-1"], "unknown")
+            self.assertEqual(states["pr-2"], "awake")
+            self.assertEqual(states["pr-3"], "awake")
+            failed[0] = False
+            cost[0] = PREVIEW_SLEEP_READ_BUDGET_SECONDS + 1
+            attempted.clear()
+            for slot in range(len(inventory)):
+                states = scan(slot)
+                self.assertEqual(sum(item.state == "awake" for item in states), 1)
+            self.assertEqual(set(attempted), {self.preview.preview_id, "preview-2", "preview-3"})
+        self.assertFalse(self.effects)
+
     def test_unrecognized_sleep_cursor_cannot_authorize_a_start(self) -> None:
         self.value["gateway"].update(mode="asleep", requested=True, sleep_record_id="foreign")
         self.run_preview()

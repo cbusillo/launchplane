@@ -42,6 +42,7 @@ def collect_preview_inventory(
     control_plane_root: Path,
     record_store: PreviewInventoryCollectionStore,
     should_stop: Callable[[], bool] = lambda: False,
+    scan_slot: int = 0,
 ) -> dict[str, object]:
     entries: list[dict[str, object]] = []
     for profile in record_store.list_product_profile_records():
@@ -99,6 +100,7 @@ def collect_preview_inventory(
                     inventory=inventory,
                     prefix=effective_preview_app_name_prefix(profile=profile),
                     should_stop=should_stop,
+                    scan_slot=scan_slot,
                 )
             else:
                 sleep_observations = tuple(

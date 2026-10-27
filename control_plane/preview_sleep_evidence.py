@@ -13,13 +13,14 @@ from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceU
 from control_plane.preview_gateway import PREVIEW_GATEWAY_SERVICE
 from control_plane.preview_idle import PreviewCannotSleep, require_preview_idle_binding
 from control_plane.preview_idle_runtime import PREVIEW_IDLE_RUNTIME_PROGRAM
+from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_INTERVAL_SECONDS
 from control_plane.preview_lifecycle_cleanup_routes import PreviewLifecycleSweepCancelled
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_preview import preview_slug_from_application_name
 
 _LOGGER = logging.getLogger(__name__)
-PREVIEW_SLEEP_READ_BUDGET_SECONDS = 15
-PREVIEW_SLEEP_POLL_TIMEOUT_SECONDS = 5
+PREVIEW_SLEEP_READ_BUDGET_SECONDS = PREVIEW_INVENTORY_INTERVAL_SECONDS // 5
+PREVIEW_SLEEP_POLL_TIMEOUT_SECONDS = PREVIEW_SLEEP_READ_BUDGET_SECONDS // 4
 
 
 def poll_preview_sleep(
@@ -51,6 +52,7 @@ def collect_preview_sleep_observations(
     inventory: tuple[tuple[str, str, str], ...],
     prefix: str,
     should_stop: Callable[[], bool] = lambda: False,
+    scan_slot: int = 0,
 ) -> tuple[PreviewSleepObservation, ...]:
     deadline = monotonic() + PREVIEW_SLEEP_READ_BUDGET_SECONDS
     records_available = True
@@ -61,16 +63,21 @@ def collect_preview_sleep_observations(
         previews = ()
         records_available = False
     observations: list[PreviewSleepObservation] = []
-    for _, compose_id, name in inventory:
+    candidates = tuple(
+        (compose_id, slug)
+        for _, compose_id, name in inventory
+        if (
+            slug := preview_slug_from_application_name(
+                app_name_suffix=profile.preview.app_name_suffix,
+                app_name_prefix=prefix,
+                application_name=name,
+            )
+        )
+    )
+    offset = scan_slot % len(candidates) if candidates else 0
+    for compose_id, slug in candidates[offset:] + candidates[:offset]:
         if should_stop():
             raise PreviewLifecycleSweepCancelled()
-        slug = preview_slug_from_application_name(
-            app_name_suffix=profile.preview.app_name_suffix,
-            app_name_prefix=prefix,
-            application_name=name,
-        )
-        if not slug:
-            continue
         state = PreviewSleepObservation(
             slug=slug,
             state="unknown",
