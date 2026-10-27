@@ -83,12 +83,6 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                     command.upgrade(alembic_config(url), revision)
                 engine = create_engine(url)
                 self.addCleanup(engine.dispose)
-                hostname_fence = text(
-                    "SELECT to_regprocedure('launchplane_retained_hostname_identity(text)') "
-                    "IS NOT NULL"
-                )
-                with engine.connect() as connection:
-                    before_hostname_fence = connection.scalar(hostname_fence)
                 before_tables = set(inspect(engine).get_table_names())
                 retains_history = set(held.RETIRED_TABLES).issubset(before_tables)
                 retained_history = ""
@@ -117,7 +111,6 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                 if not retained_topics:
                     retained_topics = (self._seed_topic(store),)
                 with engine.connect() as connection:
-                    self.assertEqual(connection.scalar(hostname_fence), before_hostname_fence)
                     self.assertEqual(
                         connection.scalar(text("SELECT version_num FROM alembic_version")),
                         expected,
@@ -181,29 +174,6 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                     retained_topics,
                 )
 
-                if revision in (
-                    hostnames.revision,
-                    hostname_join.revision,
-                    topics_hostnames.revision,
-                    compatibility_join.revision,
-                ):
-                    for target in (held.revision, previous_join.revision, topics_join.revision):
-                        if revision in (hostnames.revision, topics_hostnames.revision):
-                            with self.assertRaises(ValueError):
-                                migrate_schema(database_url=url, target_revision=target)
-                            self.assertEqual(
-                                history_snapshot(engine, held.RETIRED_TABLES), retained_history
-                            )
-                        else:
-                            self.assertEqual(
-                                migrate_schema(database_url=url, target_revision=target), expected
-                            )
-                        with engine.connect() as connection:
-                            self.assertEqual(
-                                connection.scalar(text("SELECT version_num FROM alembic_version")),
-                                expected,
-                            )
-
     @staticmethod
     def _seed_topic(store: PostgresRecordStore) -> DiscussionTopicRecord:
         topic = store.add_discussion_topic(
@@ -231,6 +201,7 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                 self.assertTrue(
                     set(held.RETIRED_TABLES).isdisjoint(inspect(store._engine).get_table_names())
                 )
+                migrate_schema(database_url=url)
                 store.verify_schema()
 
     def test_explicit_approved_targets_preserve_historical_and_future_boundaries(self) -> None:

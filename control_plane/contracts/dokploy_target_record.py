@@ -2,7 +2,7 @@ import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from control_plane.contracts.public_hosts import normalize_public_hosts
+from control_plane.contracts.public_hosts import normalize_public_hosts, retained_hostname_identity
 
 DokployTargetType = Literal["compose", "application"]
 DEFAULT_DOKPLOY_HEALTHCHECK_PATH = "/web/health"
@@ -176,6 +176,17 @@ class DokployTargetRecord(BaseModel):
     policies: DokployTargetPolicies = Field(default_factory=DokployTargetPolicies)
     updated_at: str
     source_label: str = ""
+
+    @property
+    def hostname_claims(self) -> frozenset[str]:
+        return frozenset(
+            retained_hostname_identity(host)
+            for host in (
+                *self.domains,
+                *self.public_hosts,
+                *(effect.host for effect in self.pending_public_host_effects),
+            )
+        )
 
     @field_validator("public_hosts", mode="before")
     @classmethod

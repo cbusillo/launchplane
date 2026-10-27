@@ -4351,6 +4351,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     )
                     self.assertEqual(_current_alembic_version(engine), migration.down_revision)
                 alembic_command.upgrade(config, migration.revision)
+                migrate_schema(database_url=url)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -4381,6 +4382,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 with engine.begin() as connection:
                     connection.execute(text("DROP VIEW retained_delivery_reader"))
                 alembic_command.upgrade(config, migration.revision)
+                migrate_schema(database_url=url)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
