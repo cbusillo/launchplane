@@ -19,6 +19,69 @@ from tests.test_generic_web_promotion import _ProductionProvider, _profile
 
 
 class GenericWebReleaseSettingsTests(unittest.TestCase):
+    def test_existing_malformed_production_snapshot_is_unavailable(self) -> None:
+        from control_plane.generic_web_release_settings import RELEASE_SETTINGS_KEY
+        from control_plane.release_review import (
+            ReleaseReviewStore,
+            ReleaseEvidenceUnavailable,
+            release_version,
+        )
+        from tests.test_generic_web_promotion import _store_with_production
+
+        store = _store_with_production()
+        previous = next(
+            record for record in store.deployments.values() if record.instance == "prod"
+        )
+        store.write_deployment_record(
+            previous.model_copy(
+                update={
+                    "runtime_source": {
+                        **previous.runtime_source,
+                        RELEASE_SETTINGS_KEY: "not a settings snapshot",
+                    }
+                }
+            )
+        )
+        with self.assertRaises(ReleaseEvidenceUnavailable) as raised:
+            release_version(
+                store=cast(ReleaseReviewStore, store), profile=store.profile, instance="prod"
+            )
+        self.assertEqual(raised.exception.code, "production_settings_unavailable")
+
+    def test_settings_delivery_requires_the_exact_predecessor_record(self) -> None:
+        from control_plane.generic_web_release_settings import prepare_release_settings
+        from tests.test_generic_web_promotion import _store_with_production
+
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            seed = _store_with_production()
+            lane = seed.profile.lanes[1]
+            store.write_environment_inventory(
+                seed.read_environment_inventory(context_name=lane.context, instance_name="prod")
+            )
+            provider = _ProductionProvider()
+            target = provider.resolve_deploy_target(
+                lane=lane,
+                normalized_artifact_id="next-artifact",
+                request_source_git_ref="a" * 40,
+                request_timeout_seconds=30,
+            )
+            with patch.object(
+                provider, "read_release_settings", wraps=provider.read_release_settings
+            ) as readback:
+                with self.assertRaises(FileNotFoundError):
+                    prepare_release_settings(
+                        store=store,
+                        provider=provider,
+                        control_plane_root=Path(directory),
+                        target=target,
+                        context=lane.context,
+                        settings=GenericWebReleaseSettings(values={"APP_CHANNEL": "new"}),
+                        evidence={},
+                    )
+                readback.assert_not_called()
+            self.assertEqual(provider.deployed_artifacts, [])
+
     def test_invalid_settings_are_bounded_release_evidence_errors(self) -> None:
         from control_plane.release_review import (
             ReleaseReviewStore,

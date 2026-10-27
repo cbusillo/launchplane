@@ -31,6 +31,9 @@ That also returns drift from a direct runtime sync to the reviewed values.
 Keys now owned by effective managed secret bindings stay on the secret delivery
 path during deploy, rollback and recovery. Historical release evidence stays
 unchanged; this settings path neither reads secret versions nor activates them.
+Legacy production inventories can still identify their artifact without a linked
+deployment record. Their settings remain unrecorded; a settings-bearing forward
+deployment still requires its exact predecessor and rollback evidence before effects.
 Two-slot lanes keep their separate qualified slot-settings contract and do not
 enter this conventional-target settings path.
 

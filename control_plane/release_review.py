@@ -408,13 +408,16 @@ def _generic_web_inventory_release_version(
     ):
         raise _identity_missing(instance)
     try:
-        settings = (
-            desired_release_settings(store, profile)
-            if instance == "testing"
-            else recorded_release_settings(
-                store.read_deployment_record(inventory.deployment_record_id)
-            )
-        )
+        settings = None
+        if instance == "testing":
+            settings = desired_release_settings(store, profile)
+        else:
+            try:
+                deployment = store.read_deployment_record(inventory.deployment_record_id)
+            except FileNotFoundError:
+                pass
+            else:
+                settings = recorded_release_settings(deployment)
     except (FileNotFoundError, ValueError, click.ClickException) as error:
         raise ReleaseEvidenceUnavailable("production_settings_unavailable") from error
     return ReleaseVersion(
