@@ -35,6 +35,13 @@ from control_plane.lane_runtime_verification import (
     read_check_runtime_verification,
     read_lane_runtime_verification,
 )
+from control_plane.workflows.generic_web_promotion import (
+    GenericWebProdPromotionRequest,
+    _health_evidence_for_lane,
+    _verify_health_evidence_with_identity,
+)
+import click
+
 from control_plane.product_promotion_http import _promotion_evidence
 from control_plane.contracts.product_environment_read_model import (
     _public_ingress_summary,
@@ -199,6 +206,25 @@ class SplitIngressTests(unittest.TestCase):
         healthy = tuple(split_observation(binding, profile, d.domain_name) for d in binding.domains)
         tls = tuple(split_tls_observation(binding, d.domain_name) for d in binding.domains)
         store = _TopologyStore(route_binding=binding)
+        assert summary.inventory is not None
+        release_health = _health_evidence_for_lane(
+            record_store=cast(Any, store),
+            profile=profile,
+            lane=lane,
+            request=GenericWebProdPromotionRequest(product=profile.product),
+            health_path=profile.health_path,
+            status="pending",
+        )
+        self.assertEqual(urlsplit(release_health.urls[0]).hostname, binding.domains[0].domain_name)
+        with patch(
+            "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
+            side_effect=click.ClickException("Business primary failed"),
+        ) as healthcheck:
+            with self.assertRaises(click.ClickException):
+                _verify_health_evidence_with_identity(
+                    release_health, expected_runtime_identity=summary.inventory.runtime_identity
+                )
+            healthcheck.assert_called_once()
         for index in (0, 2):
             domain = binding.domains[index].domain_name
             for state in ("missing", "mismatch", "stale"):

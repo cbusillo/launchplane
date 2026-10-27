@@ -969,7 +969,9 @@ an ORM column/table or remains only in the evidence payload.
   Route-binding custody and source-authority divergence and DNS-policy conflicts
   remain blocking, including on recovery hosts. The bound primary domain is
   required evidence even when it is managed by Launchplane. Profile URLs may
-  name a recovery alias; they do not replace the binding's primary role.
+  name a recovery alias; they do not replace the binding's primary role. Split
+  release post-deploy and rollback checks use that primary domain with the
+  existing exact runtime-identity verification.
 
   Topology and runtime readers share observation applicability: current monitoring
   intent, URLs, deployment identity, profile and relevant authority dates must agree.

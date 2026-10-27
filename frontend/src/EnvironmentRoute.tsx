@@ -575,12 +575,10 @@ function EnvironmentOverview({
           label="Monitoring"
           timestamp={evidenceTimestamp(detail.public_ingress.provenance)}
           tone={
-            openIncidentSeverity === "critical"
+            openIncidentSeverity === "critical" || actionableMonitoringFailure
               ? "danger"
               : openIncidentSeverity === "warning"
                 ? "warning"
-                : actionableMonitoringFailure
-                  ? "danger"
               : readinessMonitoringFailure
                 ? "warning"
                 : conditionTone(

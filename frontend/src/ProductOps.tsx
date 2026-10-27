@@ -1312,7 +1312,6 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
-    if (operationalWarningReasons(environment).length) return "Review warning";
     return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {
