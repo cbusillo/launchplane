@@ -5846,6 +5846,8 @@ rollback target. The later release uses these two migration files byte-for-byte
 unchanged. This image can start against that additive schema without migrating
 backward; older images cannot recognize its revision. The held delivery drop
 retains its separate approved application path.
+Legacy adoption recognizes the future table as belonging to Launchplane and
+refuses to stamp an unversioned database containing it as an older schema.
 
 Compatibility also reads populated restoration and attestation evidence on
 carried Client decisions. Both additive fields are omitted when empty, so its
