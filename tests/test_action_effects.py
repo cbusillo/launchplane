@@ -84,6 +84,7 @@ class ActionEffectTests(unittest.TestCase):
                 ("product_config.apply", False),
                 ("dokploy_target.repair_domain_authority", False),
                 ("route_binding.apply", False),
+                ("route_binding.odoo_testing_refresh.apply", True),
                 ("authz_policy.manage", False),
             ):
                 with self.subTest(transport=transport, action=action):

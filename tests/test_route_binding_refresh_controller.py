@@ -30,7 +30,7 @@ from control_plane.http_app import (
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.http_app_test_support import _asgi_get, _asgi_request
+from tests.http_app_test_support import _asgi_get, _asgi_request, _local_operator_bearer_config
 from tests.support.auth import _StubVerifier, _identity
 from tests.test_route_binding_record import (
     _RouteBindingReconcileFakeStore,
@@ -373,6 +373,39 @@ def _write_refresh_fixture(
 
 
 class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_director_native_refresh_preserves_legacy_and_production_authority(self) -> None:
+        directory = self.enterContext(TemporaryDirectory())
+        store = PostgresRecordStore(
+            database_url=_sqlite_database_url(Path(directory) / "launchplane.sqlite3")
+        )
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        _write_refresh_fixture(store)
+        before = store.list_route_binding_records()
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=LaunchplaneAuthzPolicy(schema_version=2),
+            bearer_identity_config=_local_operator_bearer_config(),
+            record_store_factory=lambda: store,
+        )
+        for controller, confirmation in (
+            ("odoo-testing", "APPLY ODOO TESTING ROUTE BINDING REFRESH"),
+            ("odoo-stable", "APPLY ODOO STABLE ROUTE BINDING REFRESH"),
+        ):
+            with self.subTest(controller=controller):
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    f"/v1/route-bindings/{controller}/controller/run-once",
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": controller,
+                    },
+                    payload={**_refresh_payload(mode="apply"), "confirmation": confirmation},
+                )
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(store.list_route_binding_records(), before)
+
     async def test_dry_run_discovers_only_testing_records_and_does_not_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

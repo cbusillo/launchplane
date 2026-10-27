@@ -252,7 +252,9 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "route_binding.apply": ActionDeclaration("write"),
         "route_binding.external.apply": ActionDeclaration("write"),
         "route_binding.external.plan": ActionDeclaration("plan"),
-        "route_binding.odoo_testing_refresh.apply": ActionDeclaration("write"),
+        "route_binding.odoo_testing_refresh.apply": ActionDeclaration(
+            "write", director_agent_write=True
+        ),
         "route_binding.odoo_testing_refresh.plan": ActionDeclaration("plan"),
         "route_binding.read": ActionDeclaration("read"),
         "runner_host_hygiene_audit.read": ActionDeclaration("read"),
