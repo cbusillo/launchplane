@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 from control_plane._odoo_website_settings_program import (
+    ODOO_STRING_PARAMETERS_PROGRAM,
     WEBSITE_SETTINGS_PROGRAM,
     WEBSITE_SETTINGS_SOURCE_REVISION,
     WEBSITE_INDEXING_PARAMETER,
@@ -169,6 +170,9 @@ class GeneratedWebsiteConsumerTests(unittest.TestCase):
             namespace["WEBSITE_SETTINGS_SOURCE_REVISION"], WEBSITE_SETTINGS_SOURCE_REVISION
         )
         self.assertEqual(namespace["WEBSITE_INDEXING_PARAMETER"], WEBSITE_INDEXING_PARAMETER)
+        self.assertEqual(
+            namespace["ODOO_STRING_PARAMETERS_PROGRAM"], ODOO_STRING_PARAMETERS_PROGRAM
+        )
 
     def test_old_runtime_without_consumer_applies_and_commits_the_typed_payload(self) -> None:
         env = NativeEnvironment()
