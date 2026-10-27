@@ -30,7 +30,7 @@ import { ProductReleaseReviewLink } from "./ProductReleaseReviewLink";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, environmentReleaseHealthy, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -455,7 +455,7 @@ function ProductWorkspace({
     environments.some(
       (environment) =>
         ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)) &&
-        !operationalWarningReasons(environment).length,
+        !environmentReleaseHealthy(environment),
     );
 
   useEffect(() => {
@@ -542,7 +542,7 @@ function ProductWorkspace({
           label="Production"
           state={production?.trust_state ?? "missing"}
           value={signalHeadline(production)}
-          detail={operationalWarningReasons(production).length ? "Current release is healthy" : undefined}
+          detail={environmentReleaseHealthy(production) ? "Current release is healthy" : undefined}
         />
         <SignalTile
           label="Previews"
@@ -1312,7 +1312,6 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
-    if (operationalWarningReasons(environment).length) return "Delivery warning";
     return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {

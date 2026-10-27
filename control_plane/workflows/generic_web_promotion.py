@@ -23,6 +23,7 @@ from control_plane.workflows.production_promotion_backup import (
     production_promotion_backup_guard,
     require_production_promotion_backup,
 )
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_health_url
 from control_plane.contracts.deploy_target import DeployTargetCategory
 from control_plane.contracts.deploy_reference import (
     is_non_floating_tag_reference,
@@ -328,12 +329,16 @@ def _execute_generic_web_prod_promotion_unserialized(
         to_instance_name=destination_lane.instance,
     )
     source_health = _health_evidence_for_lane(
+        record_store=record_store,
+        profile=profile,
         lane=source_lane,
         request=request,
         health_path=profile.health_path,
         status="pending" if request.verify_health else "skipped",
     )
     destination_health = _health_evidence_for_lane(
+        record_store=record_store,
+        profile=profile,
         lane=destination_lane,
         request=request,
         health_path=profile.health_path,
@@ -851,6 +856,8 @@ def _roll_back_production(
         deployment_record_id=deploy_result.deployment_record_id,
     )
     rollback_health = _health_evidence_for_lane(
+        record_store=record_store,
+        profile=profile,
         lane=lane,
         request=request,
         health_path=profile.health_path,
@@ -1002,6 +1009,8 @@ def _health_url_for_lane(*, lane: ProductLaneProfile, health_path: str) -> str:
 
 def _health_evidence_for_lane(
     *,
+    record_store: GenericWebPromotionStore,
+    profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     request: GenericWebProdPromotionRequest,
     health_path: str,
@@ -1009,7 +1018,14 @@ def _health_evidence_for_lane(
 ) -> HealthcheckEvidence:
     if not request.verify_health:
         return HealthcheckEvidence(status="skipped")
-    health_url = _health_url_for_lane(lane=lane, health_path=health_path)
+    binding = read_split_ingress_binding(record_store, profile, lane)
+    health_url = (
+        split_ingress_health_url(
+            profile, lane, next(d.domain_name for d in binding.domains if d.role == "primary")
+        )
+        if binding is not None
+        else _health_url_for_lane(lane=lane, health_path=health_path)
+    )
     if not health_url:
         return HealthcheckEvidence(status="skipped")
     return HealthcheckEvidence(
