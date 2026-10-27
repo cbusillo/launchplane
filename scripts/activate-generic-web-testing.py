@@ -55,7 +55,9 @@ def external_refusal(raw: bytes) -> DiscordIdentityResult | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "apply", "readback", "receipt", "inspect"))
+    parser.add_argument(
+        "mode", choices=("dry-run", "apply", "refuse", "readback", "receipt", "inspect")
+    )
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--product", required=True)
     parser.add_argument("--request-file", type=Path, required=True)
@@ -87,7 +89,7 @@ def main() -> int:
             raise ValueError("The request file must be the original planning request.")
         body = draft.model_dump(mode="json")
         path = ROUTE.format(product=args.product)
-        if args.mode == "apply":
+        if args.mode in {"apply", "refuse"}:
             if not args.idempotency_key.strip() or not args.reviewed_dry_run:
                 raise ValueError("Apply requires saved review and the original stable key.")
             evidence = json.loads(args.evidence_file.read_text())
@@ -108,7 +110,7 @@ def main() -> int:
         ):
             raise ValueError("Preserve the saved evidence; choose a fresh evidence path.")
         body["mode"] = args.mode
-        submitted = args.mode == "apply"
+        submitted = args.mode in {"apply", "refuse"}
         response = transport["request_launchplane"](
             service_url=settings["service_url"],
             path=path,
