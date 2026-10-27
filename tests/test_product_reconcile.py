@@ -20,7 +20,7 @@ from contextlib import closing, contextmanager, nullcontext
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event, current_thread, main_thread
+from threading import Event, Thread, current_thread, main_thread
 from typing import Any, Literal, cast
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -9372,9 +9372,21 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
 
     def test_worker_loop_sweeps_at_most_every_thirty_minutes(self) -> None:
         clock = [0.0]
+        interval = 1800
+        swept = Event()
+        sweep_threads: list[Thread] = []
+
+        def discover(*_args: object, **_kwargs: object) -> None:
+            sweep_threads.append(current_thread())
+            swept.set()
 
         def advance(_result: OdooStableOperationWorkerResult) -> None:
-            clock[0] += 900
+            if clock[0] % interval == 0:
+                self.assertTrue(swept.wait(10))
+                sweep_threads[-1].join(10)
+                self.assertFalse(sweep_threads[-1].is_alive())
+                swept.clear()
+            clock[0] += interval / 2
 
         with (
             patch(
@@ -9382,7 +9394,8 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
                 return_value=OdooStableOperationWorkerResult(status="worked"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep"
+                "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep",
+                side_effect=discover,
             ) as sweep,
         ):
             run_odoo_stable_operation_worker_loop(
@@ -9390,6 +9403,7 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
                 control_plane_root_path=Path("."),
                 lease_owner="worker-a",
                 max_iterations=4,
+                reconcile_sweep_seconds=interval,
                 iteration_callback=advance,
                 monotonic=lambda: clock[0],
             )

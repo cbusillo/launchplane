@@ -257,13 +257,13 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
 
             def sweep(*_args: object, **_kwargs: object) -> None:
                 sweep_started.set()
-                polls_finished.wait(2)
+                polls_finished.wait(10)
                 sweep_finished.set()
 
             def poll(**_kwargs: object) -> OdooStableOperationWorkerResult:
-                self.assertTrue(sweep_started.wait(2))
+                self.assertTrue(sweep_started.wait(10))
                 polls_during_sweep.append(not sweep_finished.is_set())
-                clock[0] += 1800
+                clock[0] += 1
                 if len(polls_during_sweep) == 3:
                     polls_finished.set()
                 return OdooStableOperationWorkerResult(status="worked")
@@ -291,6 +291,7 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
                     control_plane_root_path=Path(directory),
                     lease_owner="worker",
                     max_iterations=3,
+                    reconcile_sweep_seconds=1,
                     monotonic=lambda: clock[0],
                 )
 
