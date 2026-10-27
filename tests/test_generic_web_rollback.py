@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackBlocker
 from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
@@ -48,6 +49,21 @@ from tests.support.auth import _StubVerifier, _identity
 
 
 class _GenericWebRollbackStore:
+    def list_secret_records(self, **_kwargs: object) -> tuple[()]:
+        return ()
+
+    def list_secret_bindings(self, **_kwargs: object) -> tuple[()]:
+        return ()
+
+    def list_runtime_environment_records(self, **_kwargs: object) -> tuple[()]:
+        return ()
+
+    def read_dokploy_target_record(self, **_kwargs: object) -> DokployTargetRecord:
+        raise FileNotFoundError("No target environment")
+
+    def read_environment_inventory(self, **_kwargs: object) -> EnvironmentInventory:
+        raise FileNotFoundError("No inventory")
+
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
         self.deployments: dict[str, DeploymentRecord] = {}
