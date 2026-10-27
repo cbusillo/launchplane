@@ -6,7 +6,7 @@ import hashlib
 import json
 import unittest
 import click
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from threading import Event, Thread, current_thread
 from typing import Any
 from unittest.mock import patch
@@ -106,6 +106,29 @@ class PromotionRecoveryTests(unittest.TestCase):
         self.case.advance()
         self.case.capture()
         self.path = f"/v1/admin/generic-web/promotion-recovery/{self.case.profile.product}/{self.decision.record_id}"
+
+    def test_recovery_requires_the_recorded_settings_as_well_as_the_artifact(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.case.context,
+                instance="prod",
+                env={"APP_CHANNEL": "accepted"},
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+        )
+        self.decision = self.case.accept(suffix="-settings")
+        self.path = f"/v1/admin/generic-web/promotion-recovery/{self.case.profile.product}/{self.decision.record_id}"
+        self.case.advance()
+        self.case.capture()
+        self.interrupt_completion()
+        self.assertEqual(self.dry_run()["proposed_action"], "adopt_promotion")
+        self.provider.settings["APP_CHANNEL"] = "drift"
+        self.assertEqual(self.dry_run()["proposed_action"], "hold_unknown")
+        self.provider.settings["APP_CHANNEL"] = "accepted"
+        self.assertEqual(self.dry_run()["proposed_action"], "adopt_promotion")
 
     def observe_runtime(self, **kwargs: object) -> GenericWebRuntimeArtifactObservation:
         del kwargs

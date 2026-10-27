@@ -308,14 +308,25 @@ def _execute_generic_web_prod_promotion_unserialized(
         request=request,
         source_lane=source_lane,
     )
+    release_decision = None
     if not request.dry_run:
-        require_release_approval(
+        release_decision = require_release_approval(
             control_plane_root=control_plane_root,
             record_store=record_store,
             product=profile.product,
             artifact_id=request.artifact_id,
             source_commit=request.source_git_ref,
         )
+    from control_plane.generic_web_release_settings import desired_release_settings
+
+    try:
+        release_settings = (
+            release_decision.checklist.candidate.runtime_settings
+            if not request.dry_run and release_decision is not None
+            else desired_release_settings(record_store, profile)
+        )
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        raise click.ClickException("Production release settings could not be verified.") from error
     if request.release_tag:
         _preflight_github_release(
             control_plane_root=control_plane_root,
@@ -461,6 +472,10 @@ def _execute_generic_web_prod_promotion_unserialized(
             # Admit this accepted artifact after health/backup waits. Once its
             # production attempt starts, testing may advance to another build.
             if not source_admitted:
+                if desired_release_settings(record_store, profile) != release_settings:
+                    raise click.ClickException(
+                        "Production settings changed after release acceptance."
+                    )
                 try:
                     _resolve_source_inventory_inputs(
                         record_store=record_store,
@@ -500,6 +515,7 @@ def _execute_generic_web_prod_promotion_unserialized(
                 deployment_record_id=deployment_record_id,
                 provider_effect_checkpoint=promotion_checkpoint,
                 before_deployment_records=admit_source,
+                release_settings=release_settings,
             )
         except (ValueError, TimeoutError, click.ClickException) as error:
             if destination_lane.generic_web_cutover is None or not deployment_record_id:
@@ -592,10 +608,13 @@ def _execute_generic_web_prod_promotion_unserialized(
             request=request,
             rollback_target=rollback_target,
             production_changed=deploy_result.deploy_status == "pass"
-            or deploy_result.image_effect_attempted,
+            or deploy_result.image_effect_attempted
+            or release_settings is not None
+            and deploy_result.provider_effect_attempted,
             deploy_provider=deploy_provider,
             provider_operation_title=provider_operation_title,
             deployment_record_id=deploy_result.deployment_record_id,
+            source_deployment_record_id=deploy_result.deployment_record_id,
             provider_effect_checkpoint=provider_effect_checkpoint,
         )
     deployment_record = _write_deployment_health(
@@ -777,6 +796,7 @@ def _roll_back_production(
     deployment_record_id: str,
     provider_effect_checkpoint: Callable[[str], None] | None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    source_deployment_record_id: str = "",
 ) -> _RollbackOutcome:
     target_id = rollback_target.deployment_record_id
     planned_deploy = rollback_target.planned_deploy
@@ -819,7 +839,7 @@ def _roll_back_production(
             deployment_record_id=f"{deployment_record_id}-rollback",
             recorded_artifact=True,
             rollback=True,
-            rollback_source_deployment_record_id=deployment_record_id,
+            rollback_source_deployment_record_id=source_deployment_record_id,
             rollback_target_deployment_record_id=target_id,
             provider_effect_checkpoint=_rollback_phase_checkpoint(provider_effect_checkpoint),
         )

@@ -1113,7 +1113,8 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                     patch.object(provider, "drain", side_effect=drain),
                     patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
                     patch(
-                        "control_plane.workflows.generic_web_promotion.require_release_approval"
+                        "control_plane.workflows.generic_web_promotion.require_release_approval",
+                        return_value=None,
                     ) as approval,
                 ):
                     result = execute_generic_web_prod_promotion(
@@ -1199,7 +1200,10 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
 
                 with (
                     patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
-                    patch("control_plane.workflows.generic_web_promotion.require_release_approval"),
+                    patch(
+                        "control_plane.workflows.generic_web_promotion.require_release_approval",
+                        return_value=None,
+                    ),
                 ):
                     with self.assertRaises(ValueError):
                         execute_generic_web_prod_promotion(
@@ -1253,7 +1257,10 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                 )
                 with (
                     patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
-                    patch("control_plane.workflows.generic_web_promotion.require_release_approval"),
+                    patch(
+                        "control_plane.workflows.generic_web_promotion.require_release_approval",
+                        return_value=None,
+                    ),
                 ):
                     if prior_dispatch:
                         prepare = provider.prepare_candidate

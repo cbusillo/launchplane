@@ -12,6 +12,11 @@ from urllib.parse import quote, unquote
 
 import click
 
+from control_plane.generic_web_release_settings import (
+    desired_release_settings,
+    recorded_release_settings,
+    ReleaseSettingsStore,
+)
 from control_plane.client_test_notes import change_client_review, owner_test_notes
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -53,7 +58,7 @@ from control_plane.workflows.launchplane import (
 )
 
 
-class ReleaseReviewStore(GenericWebSourceQualificationStore, Protocol):
+class ReleaseReviewStore(GenericWebSourceQualificationStore, ReleaseSettingsStore, Protocol):
     def list_preview_records(
         self,
         *,
@@ -119,6 +124,7 @@ RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
     "source_control_access_unavailable": "Launchplane cannot read this product's source control.",
     "production_identity_missing": "Production has no recorded deployed version.",
     "candidate_identity_missing": "Testing has no qualified deployed version.",
+    "production_settings_unavailable": "Production release settings could not be verified.",
     "candidate_operation_unresolved": "Testing has an unresolved operation. Fresh release work waits until it finishes.",
     "release_record_missing": "A release record Launchplane needs is missing.",
     "github_read_failed": "Reading this release's changes from GitHub failed. Reload to try again.",
@@ -364,7 +370,7 @@ def release_version(
     except FileNotFoundError as error:
         raise ReleaseEvidenceUnavailable("release_record_missing") from error
     return _generic_web_inventory_release_version(
-        inventory=inventory, profile=profile, instance=instance, context=lane.context
+        store=store, inventory=inventory, profile=profile, instance=instance, context=lane.context
     )
 
 
@@ -379,12 +385,13 @@ def recorded_generic_web_testing_version(
     except GenericWebSourceUnqualified as error:
         raise _identity_missing("testing") from error
     return _generic_web_inventory_release_version(
-        inventory=inventory, profile=profile, instance="testing", context=lane.context
+        store=store, inventory=inventory, profile=profile, instance="testing", context=lane.context
     )
 
 
 def _generic_web_inventory_release_version(
     *,
+    store: ReleaseReviewStore,
     inventory: EnvironmentInventory,
     profile: LaunchplaneProductProfileRecord,
     instance: str,
@@ -401,11 +408,23 @@ def _generic_web_inventory_release_version(
     ):
         raise _identity_missing(instance)
     try:
-        return ReleaseVersion(
-            artifact_id=identity.artifact_id, source_commit=identity.source_git_ref
-        )
-    except ValueError as error:
-        raise _identity_missing(instance) from error
+        settings = None
+        if instance == "testing":
+            settings = desired_release_settings(store, profile)
+        else:
+            try:
+                deployment = store.read_deployment_record(inventory.deployment_record_id)
+            except FileNotFoundError:
+                pass
+            else:
+                settings = recorded_release_settings(deployment)
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        raise ReleaseEvidenceUnavailable("production_settings_unavailable") from error
+    return ReleaseVersion(
+        artifact_id=identity.artifact_id,
+        source_commit=identity.source_git_ref,
+        runtime_settings=settings,
+    )
 
 
 def build_release_review(

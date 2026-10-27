@@ -515,6 +515,12 @@ preservation or qualified preview destroy. The native start
 is recorded only after verifying the empty database and private upper, with web
 held behind its gate; its writes can be reproduced from the bound snapshot/build.
 
+Those two dispositions are completed inspections, carried in a closed completion
+frame through the native transport and converted to the existing typed refusals.
+They do not report successful preparation or authorize a restore. Generic failed
+frames, incomplete streams and unknown dispositions remain unavailable evidence.
+The missing-start disposition keeps the original reservation fenced.
+
 For that qualified case, the reconciler issues the ordinary destroy plan/apply and
 rechecks native custody under the execution lock. Current usage, needed-copy,
 staff-testing and shared-resource protections are checked at every provider effect.

@@ -662,10 +662,19 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         with self.assertRaises(ReleaseEvidenceUnavailable) as recorded:
             recorded_generic_web_testing_version(store=self.store, profile=self.profile)
         self.assertEqual(recorded.exception.code, fresh.exception.code)
+        read_deployment = self.store.read_deployment_record
         for read_error in (FileNotFoundError(), ValueError()):
+
+            def refuse_testing_record(record_id: str) -> DeploymentRecord:
+                if record_id == inventory.deployment_record_id:
+                    raise read_error
+                return read_deployment(record_id)
+
             with (
                 self.subTest(read_error=type(read_error).__name__),
-                patch.object(self.store, "read_deployment_record", side_effect=read_error),
+                patch.object(
+                    self.store, "read_deployment_record", side_effect=refuse_testing_record
+                ),
             ):
                 with self.assertRaises(ReleaseEvidenceUnavailable) as fresh_read:
                     self.review()
@@ -1149,6 +1158,144 @@ class GenericWebClientReleaseTests(unittest.TestCase):
             self.store.list_release_review_decision_records(product=self.profile.product),
             (accepted,),
         )
+
+    def test_settings_release_drill_restores_baseline_then_reapplies_the_accepted_snapshot(
+        self,
+    ) -> None:
+        self._assert_runtime_settings_drill(same_artifact=False)
+
+    def test_settings_only_release_finishes_the_existing_backup_and_rollback_drill(self) -> None:
+        self._assert_runtime_settings_drill(same_artifact=True)
+
+    def keep_current_artifact_in_testing(self) -> None:
+        production = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="prod"
+        )
+        testing = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        assert production.runtime_identity is not None and testing.runtime_identity is not None
+        self.write_qualified_testing_inventory(
+            testing.model_copy(
+                update={
+                    "runtime_identity": testing.runtime_identity.model_copy(
+                        update={
+                            "artifact_id": production.runtime_identity.artifact_id,
+                            "source_git_ref": production.runtime_identity.source_git_ref,
+                            "image_reference": f"{self.profile.image.repository}:sha-{production.runtime_identity.source_git_ref}",
+                            "image_digest": production.runtime_identity.image_digest,
+                        }
+                    )
+                }
+            )
+        )
+
+    def test_first_settings_only_standing_release_needs_the_existing_explicit_request(self) -> None:
+        self._first_settings_standing_request(same_artifact=True)
+
+    def test_first_code_and_settings_standing_release_needs_the_existing_explicit_request(
+        self,
+    ) -> None:
+        self._first_settings_standing_request(same_artifact=False)
+
+    def _first_settings_standing_request(self, *, same_artifact: bool) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from control_plane.release_request import record_release_request
+
+        if same_artifact:
+            self.keep_current_artifact_in_testing()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.context,
+                instance="prod",
+                env={"APP_CHANNEL": "new"},
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+        )
+        self.switch("director_standing")
+        self.assertEqual(self.advance(), ())
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product=self.profile.product), ()
+        )
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        current = self.store.read_product_profile_record(self.profile.product)
+        record_release_request(
+            store=self.store,
+            profile=current,
+            review=self.review(),
+            source="director_request",
+            reason="Activate the prepared production settings through the gated release",
+            decision_reference="",
+            actor="local:director-agent",
+        )
+        self.assertTrue(self.advance())
+        self.assertEqual(self.provider.deployed_artifacts, [])
+        self.capture()
+        self.assertTrue(self.advance())
+        self.assertEqual(self.provider.settings, {"APP_CHANNEL": "new"})
+
+    def _assert_runtime_settings_drill(self, *, same_artifact: bool) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        if same_artifact:
+            self.keep_current_artifact_in_testing()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.context,
+                instance="prod",
+                env={"APP_CHANNEL": "new", "ADDED_SETTING": "enabled"},
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+        )
+        self.provider.settings = {"APP_CHANNEL": "old"}
+        self.switch("promote_with_rollback_drill")
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        self.assertTrue(self.advance())
+        self.assertEqual(self.provider.settings, {"APP_CHANNEL": "new", "ADDED_SETTING": "enabled"})
+        self.assertTrue(self.advance())
+        self.assertEqual(self.provider.settings, {"APP_CHANNEL": "old"})
+        self.assertEqual(self.review().checklist_digest, accepted.checklist_digest)
+        self.assertTrue(self.advance())
+        self.capture()
+        self.assertTrue(self.advance())
+        run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        self.assertEqual(run.state, "passed", run.model_dump())
+        self.assertTrue(self.review().no_new_release)
+        self.assertEqual(self.provider.settings, {"APP_CHANNEL": "new", "ADDED_SETTING": "enabled"})
+        from control_plane.workflows.generic_web_deploy import (
+            execute_generic_web_deploy,
+            GenericWebDeployRequest,
+        )
+        from control_plane.release_review import release_version
+
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="prod"
+        )
+        predecessor = self.store.read_deployment_record(inventory.deployment_record_id)
+        assert inventory.runtime_identity is not None
+        result = execute_generic_web_deploy(
+            control_plane_root=self.root,
+            record_store=self.store,
+            deploy_provider=self.provider,
+            request=GenericWebDeployRequest(
+                product=self.profile.product,
+                instance="prod",
+                artifact_id=inventory.runtime_identity.artifact_id,
+                source_git_ref=inventory.runtime_identity.source_git_ref,
+                deploy_reference=f"{self.profile.image.repository}:sha-{inventory.runtime_identity.source_git_ref}",
+            ),
+        )
+        self.assertEqual(result.deploy_status, "pass", result.error_message)
+        self.assertEqual(
+            release_version(store=self.store, profile=self.profile, instance="prod"),
+            accepted.checklist.candidate,
+        )
+        self.assertEqual(self.store.read_deployment_record(predecessor.record_id), predecessor)
 
     def test_generic_web_drills_once_with_two_backups_and_the_reviewed_passing_target(self) -> None:
         from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
