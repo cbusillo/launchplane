@@ -452,3 +452,64 @@ neither captures nor approves nor applies the policy. Its response reports the
 proposed policy revision, opaque `credential_binding_id` and
 `capture_started: false`; mismatched or stale
 proposals refuse. Without a proposal ID, the route qualifies active authority.
+
+## Initial capture key generation
+
+When a separately approved guest has no capture credential, the existing
+backup-worker-bindings `/apply` route accepts `generate_capture_key: true`
+instead of binding references. It uses the same scoped `product_config.plan`
+and `product_config.apply` authority, and still refuses terminal read identities.
+Creating live-site credentials remains a Director stop boundary; an authorized
+API caller is not evidence of that decision.
+
+Supply a concrete reason, the lane's promotion action, and `known_hosts` with
+one public host key independently verified through existing administrator
+access. The host field must name only the active approved target's exact host;
+wildcards, aliases, additional lines and key options are refused. No host is
+contacted by generation. Policy and target records must be active and current.
+The dry run generates no key and binds its digest to the profile, worker
+metadata, guest enrollments, policy/target revisions and exact public request.
+
+After review, apply with that digest and an original idempotency key. Launchplane
+generates an ED25519 key in server memory and encrypts its private half directly
+into `launchplane_worker`, `context_instance` custody for the product's recorded
+production lane. The host pin, both generic worker bindings, complete guest pin
+and public-only success receipt commit together. Existing credentials cannot be
+replaced, and an already enrolled guest must reuse its pinned pair. There is no
+private-key input, file, download, application delivery or plaintext readback.
+The key uses cryptography's [OpenSSH serialization](https://cryptography.io/en/stable/hazmat/primitives/asymmetric/serialization/).
+
+The supported terminal caller uses the deployed HTTPS service, never a local
+record store:
+
+```sh
+uv run launchplane backup-capture-key --product example-product --mode dry-run \
+  --request-file /private/public-capture-request.json
+uv run launchplane backup-capture-key --product example-product --mode apply \
+  --request-file /private/public-capture-request.json \
+  --reviewed-plan-sha256 REVIEWED_DIGEST --idempotency-key ORIGINAL_KEY
+uv run launchplane backup-capture-key --product example-product --mode readback
+```
+
+The public request file contains only `generate_capture_key`, `known_hosts`,
+`promotion_action` and `reason`. The CLI supplies an empty `bindings` map for
+generation, preserving rebinding's required reference-map contract.
+Load the existing `LAUNCHPLANE_OPERATOR_URL`
+and `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` into the caller's environment through the
+private admin configuration; neither is a CLI token argument. The caller refuses
+HTTP origins and redirects. Apply returns only the public key, its OpenSSH
+SHA256 fingerprint, boundary and binding identifiers, and plan metadata. The
+metadata GET supplies `generated_capture_keys` for the currently configured key
+version without decrypting it. A lost response is recovered by readback and
+replay of the unchanged request/digest/key, never by generating another pair.
+Existing rebinding receipts retain their pre-generation request fingerprint, so
+an original-key retry across this service upgrade still replays without writes.
+
+Enroll only that public half through the separately approved host-admin path,
+using a per-guest forced command with restore, shell and forwarding disabled.
+Record custody locations and purpose in the private credentials index. Then
+review/apply/read back the existing binding control and run capture-free
+preflight. Generation and binding never prove host restrictions or active PBS;
+require `match_capture_only`, `active_pbs` and `capture_started=false` from the
+preflight before claiming qualification. No capture, restore, deploy or
+promotion is started by any setup mode.

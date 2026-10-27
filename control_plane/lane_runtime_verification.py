@@ -31,6 +31,7 @@ from control_plane.split_ingress import (
     split_ingress_check_name,
     split_ingress_check_base_url,
     split_ingress_monitoring_policy,
+    split_ingress_advisory_check,
 )
 from control_plane.workflows.odoo_verification import resolve_odoo_health_url
 
@@ -136,6 +137,7 @@ def read_lane_runtime_verification(
         check
         for check in lane.health_monitoring.checks
         if check.enabled
+        and not split_ingress_advisory_check(profile, lane, split_binding, check)
         and product_lane_monitoring_probe_effective(
             monitoring_intent=lane.health_monitoring.monitoring_intent,
             check_kind=check.kind,
@@ -157,7 +159,6 @@ def read_lane_runtime_verification(
         for check in checks
     ]
     results = [result if result.observation is not None else missing for result in results]
-    # Every effective check must pass; never pick an older success over a failure.
     provenance = min(
         results,
         key=lambda result: (

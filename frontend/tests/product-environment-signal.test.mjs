@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, operationalWarningReasons, publicObservationGap } from "../src/product-environment-signal.ts";
+import { environmentReleaseHealthy, environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, operationalWarningReasons, publicObservationGap } from "../src/product-environment-signal.ts";
 import { sidebarStatus } from "../src/sidebar-status.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -35,6 +35,78 @@ function environment() {
 
 test("a fresh identity and health verification makes a monitored lane green", () =>
   assert.equal(environmentOperationalTone(environment()), "verified"));
+
+test("recovery failures stay yellow while business failures stay red", () => {
+  const lane = environment();
+  lane.environment = "prod";
+  lane.health_monitoring.open_incidents = [];
+  const business = lane.topology.provider_recorded.domains[0].domain_name;
+  const recoveryHost = "recovery.example.test";
+  lane.topology.provider_recorded.external_ingress = { domains: [business], custodian: "Office", evidence_url: "https://example.test/evidence" };
+  lane.topology.provider_recorded.domains.push({ domain_name: recoveryHost, role: "alias", tls_expected: true });
+  const recovery = { ...structuredClone(lane.health_monitoring.checks[0]), name: "Recovery path", advisory: true };
+  lane.health_monitoring.checks.push(recovery);
+  for (const state of ["fail", "missing", "stale"]) {
+    Object.assign(recovery, { status: state === "stale" ? "pass" : state, trust_state: state === "stale" ? "stale" : "verified" });
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.equal(sidebarStatus(lane, "Production").tone, "warning");
+    assert.equal(operationalAttentionReasons(lane).length, 0);
+    assert.ok(operationalWarningReasons(lane).length);
+  }
+  Object.assign(recovery, { status: "pass", trust_state: "verified" });
+  const tls = { ...structuredClone(lane.topology.observed.tls_domains[0]), domain_name: recoveryHost, advisory: true, status: "expired" };
+  lane.topology.observed.tls_domains.push(tls);
+  assert.equal(environmentOperationalTone(lane), "warning");
+  Object.assign(tls, { status: "valid", trust_state: "stale", provenance: { ...tls.provenance, stale_after: new Date(0).toISOString() } });
+  assert.equal(sidebarStatus(lane, "Production").tone, "warning");
+  assert.equal(expireEnvironmentEvidence(lane).provenance.freshness_status, "verified");
+  tls.status = "expired";
+  tls.domain_name = business;
+  tls.advisory = false;
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.topology.observed.tls_domains.pop();
+  lane.health_monitoring.checks[0].status = "fail";
+  assert.equal(environmentOperationalTone(lane), "danger");
+  assert.equal(sidebarStatus(lane, "Production").tone, "danger");
+});
+
+test("recovery and delivery warnings stay yellow together", () => {
+  const lane = environment();
+  lane.environment = "prod";
+  const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+  Object.assign(incident, { severity: "warning", check_kind: "provider", check_name: "production-delivery-example", failure_layer: "provider" });
+  lane.health_monitoring.open_incidents = [incident];
+  const recovery = { ...structuredClone(lane.topology.observed.tls_domains[0]), domain_name: "recovery.example.test", advisory: true };
+  lane.topology.observed.tls_domains.push(recovery);
+  lane.topology.warnings = [{ code: "public_ingress_failure", severity: "warning", scope: "observation", domain_name: recovery.domain_name, detail: "Recovery route unavailable" }];
+  for (const status of ["expired", "unknown", "valid"]) {
+    recovery.status = status;
+    recovery.trust_state = status === "valid" ? "stale" : "verified";
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.equal(sidebarStatus(lane, "Production").tone, "warning");
+    assert.deepEqual(operationalAttentionReasons(lane), []);
+    assert.equal(environmentReleaseHealthy(lane), true);
+  }
+  const noPublicCheck = structuredClone(lane);
+  noPublicCheck.health_monitoring.checks[0].kind = "private_http";
+  noPublicCheck.topology.warnings.push({ code: "public_website_check_missing", severity: "warning", scope: "observation", domain_name: "", detail: "Public probe missing" });
+  assert.equal(environmentReleaseHealthy(noPublicCheck), false);
+  const businessTls = lane.topology.observed.tls_domains[0];
+  businessTls.provenance.stale_after = new Date(0).toISOString();
+  assert.equal(environmentReleaseHealthy(lane), false);
+  businessTls.provenance.stale_after = lane.provenance.stale_after;
+  lane.topology.observed.trust_state = "missing";
+  lane.topology.observed.tls_domains.shift();
+  assert.equal(environmentReleaseHealthy(lane), false);
+  lane.health_monitoring.checks[0].status = "fail";
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.environment = "testing";
+  lane.health_monitoring.checks = [];
+  lane.health_monitoring.open_incidents = [];
+  lane.provenance.freshness_status = "missing";
+  recovery.status = "expired";
+  assert.equal(environmentOperationalTone(lane), "missing");
+});
 
 test("monitored production cannot hide unknown runtime behind an empty incident list", () => {
   const updates = [

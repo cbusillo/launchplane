@@ -19,10 +19,10 @@ export function sidebarStatus(environment: ProductEnvironmentSummary | null, lab
   const tone = environmentOperationalTone(environment);
   const evidenceStale = environment && (environment.provenance.freshness_status === "stale" ||
     environment.topology.observed.placement.trust_state === "stale" ||
-    environment.health_monitoring.checks.some(check => check.probe_effective && check.trust_state === "stale") ||
+    environment.health_monitoring.checks.some(check => check.probe_effective && !check.advisory && check.trust_state === "stale") ||
     environment.topology.desired.public_website !== "none" && (
       environment.topology.observed.ingress.trust_state === "stale" ||
-      environment.topology.observed.tls_domains.some(domain => domain.trust_state === "stale")));
+      environment.topology.observed.tls_domains.some(domain => !domain.advisory && domain.trust_state === "stale")));
   if (tone === "stale" || tone === "warning" && evidenceStale) {
     return { tone: "stale" as const, description: `${label}: Stale evidence; awaiting current observations` };
   }

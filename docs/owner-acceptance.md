@@ -4,6 +4,70 @@ title: Client Review and Retired Acceptance History
 
 ## Current Client review
 
+### Reviewed conflict integrations
+
+An admin or the Director's authenticated agent can attest that one exact conflict
+integration adds no new Client-visible work. This classifies an immutable merge;
+it records no new Client acceptance, never merges or promotes, grants no access,
+and preserves the truthful visible commit marker. Other visible merges still
+require their ordinary qualification.
+
+`POST /v1/product-review/integration-attestation` supports `dry-run`, `apply`,
+and `readback`. Dry-run resolves the open PR's exact head and base, current
+Client, applicable source acceptance, merge SHA, tree and ordered parents. The
+first parent must be the accepted head. The second parent must be on the base
+branch. Every imported commit must belong to that parent and have qualified
+merged-change evidence, including accepted Client changes, engineering-only
+changes and recorded train batches. The merge must belong to the current PR's
+history. Incomplete history, rejected imports and undelivered requested feedback
+refuse the proof.
+
+Apply repeats that proof and requires its exact `reviewed_evidence_sha256`, an
+engineering statement and a confirming model review bound to the same digest.
+The caller attests the review's provider, model, conclusion and complete report;
+its provider must differ from the author's. The authenticated engineering caller
+is responsible for truthful provenance and weighing the review. Historical
+advisory engineering decisions do not become authority. Scoped agents and
+Clients cannot write this evidence. No new credential or grant is needed.
+
+The record is immutable and identified by its evidence digest. Exact replay
+returns the original; a different statement or review cannot replace it.
+Readback uses the original digest and target identifiers and remains available
+after acceptance advances. Read back lost apply responses before any retry;
+replaying a saved attestation does not prove that current acceptance carries.
+On a carried decision, `decided_at` is when Launchplane saved that carry, while
+`base_branch` is the base first bound to the original decision. Empty additive
+carry-evidence fields are omitted on writes so the preceding image can still
+read ordinary carries. Populated evidence requires the compatibility image.
+
+Carry rereads applicable Client decisions and imported-change evidence, matches
+the exact merge, tree, parents, product, Client, PR, base and source decision,
+and saves the attestation ID with its proof. Exact-tree restoration can remove
+a subsequent zero-net single-parent suffix. Residual visible work, different
+merges, changed Clients or bases and Client rejections retain their gates. The
+existing open-PR sweep publishes the resulting carry independently of preview
+delivery; the attestation endpoint publishes no acceptance itself.
+
+The bounded repository client uses the installed admin helper's existing private
+transport. Request and response files contain review prose and belong in private
+task evidence, with no secrets:
+
+```sh
+uv run python scripts/attest-integration.py dry-run \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --request-file /private/request.json --response-file /private/plan.json
+uv run python scripts/attest-integration.py apply \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --request-file /private/reviewed-request.json --evidence-file /private/plan.json \
+  --response-file /private/applied.json
+uv run python scripts/attest-integration.py readback \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --request-file /private/reviewed-request.json --evidence-file /private/plan.json \
+  --response-file /private/readback.json
+```
+
+### Client and preview decisions
+
 Setting a product's Client resolves the login through the repository-scoped
 Delivery App credential. A `github_credentials_unavailable` response identifies
 the failed stage: `request`, `identity`, `repository_inventory`, or `token_mint`.
@@ -219,6 +283,15 @@ of such commits mixed with qualified base merges can carry without another
 Client decision. Release acceptance remains the check of how the combined
 changes work together.
 
+Within a base integration, a sequence of single-parent commits that restores
+an earlier first-parent commit's exact Git tree contributes no remaining work.
+Launchplane records `restored_trees`: both commit heads, their identical tree SHA
+and every removed commit. It then qualifies the earlier commit normally,
+including its impact declaration. This proof covers file content, paths, modes
+and submodules, even when intermediate commits declared visible changes. It
+never skips a merge or qualifies the restored ancestor by itself. Missing tree
+evidence or any residual visible change leaves the PR waiting.
+
 A linear invisible follow-up records reason `client_impact_none`. A chain made
 only of exact recorded train refreshes retains `merge_train_base_refresh` after
 the same imported-change checks. Other base integration records
@@ -231,6 +304,8 @@ whose exact members were checked. These persisted facts explain the carry even
 if a PR's notes or labels later change. Imported base commits are checked
 against their own changes rather than treated as new PR-side work. The recorded
 Client, original acceptance and delivered feedback remain the source.
+Older records default added evidence lists to empty. Legacy train carries may
+omit `comparison_base_sha`; their refresh records supply the merged base.
 To integrate overlapping accepted changes, merge the recorded base into the PR
 with the reviewed Client-impact declaration. Rewritten history, such as a rebase,
 continues to use the strict unchanged-patch proof instead of descendant history.
