@@ -1,68 +1,68 @@
 # Preview runtime settings
 
-Odoo previews inherit their configured template lane's settings, then apply the
-product profile's `preview.override_env`. Keep preview-specific values in that
-layer rather than changing the template or shared context.
+Every product with previews enabled has a configuration target named `preview`,
+in its configured preview context. It is a settings scope, not a stable lane or
+an individual PR's runtime identity. Use the existing product-config UI and
+`product-config-dry-run` / `product-config-apply` helpers with top-level
+`instance: preview`. Plain settings use an `instance` runtime-environment record;
+managed runtime secrets use `context_instance`, also with instance `preview`.
+The product workspace's **Preview settings** link opens the same runtime-setting
+and managed-secret forms used for stable environments. Expected secret bindings
+can be declared for this context and instance through the existing expected-config
+operation.
 
-From this repository, use `scripts/set-preview-override.py` with the installed
-Launchplane write-action helper and its existing private configuration. The
-service-authenticated Director agent can conditionally set one nonsecret key
-on an existing enabled Odoo preview. Deletion and edits to other profile
-fields still require full product-profile authority, apart from the existing
-verified-image scan activation, the one-way [clean-snapshot opt-in](clean-testing-snapshots.md#product-transition-and-custody)
-and separate [testing storage requirements](service-boundary.md#testing-storage-requirements).
-Snapshot opt-in can hold new copies before the testing budget is qualified;
-capture and snapshot use still require that budget. It does not use the runtime-key helper below. The helper preserves
-every other profile field and prints no supplied value. It creates no scope
-or grant and starts no deployment.
+Preview refreshes retain their template baseline, then overlay only the exact
+preview instance's settings and secrets. Global and context-shared secrets are
+excluded. The existing runtime key-safety policy must permit a preview secret
+before it is decrypted; production-only and testing-only classes cannot be
+copied into this scope. `copy_from` supports the preview target through the same
+product ownership, source-read authorization, version and sharing-evidence checks
+as other product configuration. Preview settings never participate in testing
+or production resolution. Changes take effect on the next preview refresh.
 
-Write the string value to a mode-0600 file outside Git checkouts. The helper
-trims surrounding whitespace. The evidence file must also be outside the
-checkout and must not already exist for a new dry run.
+The release migration moves existing `preview.override_env` values into the
+managed preview record and adds their preview-specific expected-key declarations.
+It removes the values from the profile. Conflicting managed values, retired keys
+or ambiguous product ownership abort the transaction, preserving both sources for
+review. Product-profile writes reject nonempty `preview.override_env`; use the
+managed product-config path for all subsequent changes. Historical profile
+snapshots remain readable. The old one-key profile editor is retired.
 
-```sh
-uv run python scripts/set-preview-override.py dry-run \
-  --operator-helper /path/to/installed/launchplane-write-action.py \
-  --product example-site --key ODOO_PROXY_MODE \
-  --value-file /private/preview-value.txt \
-  --evidence-file /private/preview-review.json --reason 'Configure previews'
+For a plain setting, save a private product-config payload outside the checkout:
+
+```json
+{
+  "product": "example-site",
+  "context": "example-site",
+  "instance": "preview",
+  "reason": "Configure previews",
+  "runtime_env": {"scope": "instance", "env": {"ODOO_PROXY_MODE": "True"}}
+}
 ```
 
-Inspect the private evidence, then use `apply` instead of `dry-run`, adding
-`--reviewed-dry-run --idempotency-key <new-key-for-this-review>`. Keep that key
-for this review's retries; a new review needs a new key. Use `readback` with the same
-files to verify an uncertain outcome without writing. Preserve the files and
-original key after an uncertain apply. A denial stops the operation.
-
-The profile GET supplies a strong `ETag`; the helper preserves this opaque
-revision and submits it as `If-Match` to the existing profile POST. The service rejects a stale
-revision before saving and retains atomic compare-and-write protection.
-Same-key idempotent replay precedes the revision precondition. The helper
-refuses services without revision support, changed input, concurrent profile
-edits, or evidence changing anything beyond the selected preview key.
-The service reconstructs the one-key change from its stored profile and
-compares the entire replacement before its atomic save. Recognized credential
-keys, managed-secret destinations and credential payloads are refused on this
-Director-agent path. Encoded addon payloads must contain only literal
-nonsecret addon settings for the preview. Plain override transports and
-business-integration keys are refused; those use their managed settings
-routes. An existing encoded payload must meet the same restrictions before
-replacement. A save records intent; runtime delivery and login verification
-remain separate.
-
-Refusals include a fixed `reason` code without input values. For
-`profile_changed_since_review`, read the changed profile and create a new dry
-run. `conditional_save_unsupported` means the read supplied no single strong revision.
-`private_file_permissions` requires mode-0600 file permissions. An
-`outcome_unknown` or `accepted_unverified` result requires readback with the
-original files and idempotency key; do not start another write.
-Readback does not require revision support or a matching local profile model.
+Use the installed write-action helper's `product-config-dry-run --payload-file`
+and inspect its redacted result before `product-config-apply --payload-file`
+with the same payload and a new idempotency key for that review. Keep private
+inputs and the original key after an uncertain apply; reconcile the original
+operation before another write. A denial stops that operation. Names-only reads
+use `instance-runtime-settings-read` and `instance-secrets-read`, with the
+product's preview context and `--instance preview`.
 
 For Authentik, use `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64`: base64-encoded UTF-8
 JSON in the existing `OdooPostDeployPayload` format, with literal addon settings
 for `authentik_sso.client_id`, `base_url`, and `provider_name`. Keep the Odoo
 provider name `Authentik`. This implicit consumer has no client-secret input.
-Website-bootstrap and import-source composition must preserve these addon
-settings before runtime delivery; see [PR #4585](https://github.com/cbusillo/launchplane/pull/4585).
-Set `ODOO_PROXY_MODE` and `LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED` with separate
-one-key reviews when needed. The artifact must support the runtime setting.
+Website-bootstrap and import-source composition preserve explicitly managed
+preview addon settings; template addon settings remain excluded. The artifact
+must support the runtime setting.
+
+This payload is an addon-settings manifest only: it must match the preview
+context, instance `preview`, and deploy intent. Config parameters, website
+settings and website bootstrap belong to the generated runtime payload and are
+not accepted here. Store the manifest as a plain setting, with canonical managed
+secret references for credential-valued addon settings; do not store the whole
+encoded payload as a secret. Plain integration endpoints such as `SMTP_HOST`
+are accepted, but credentials, including password-bearing connection strings,
+require managed bindings. Integration credentials still need a matching existing
+runtime key-safety rule that permits preview use. A rule cannot override a
+binding declared production-only or testing-only.

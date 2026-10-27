@@ -714,6 +714,7 @@ from control_plane.workflows.odoo_preview_runtime import (
 )
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
+    product_config_target,
     LaunchplaneProductProfileRecord,
     ProductProfileChangedError,
     ProductExpectedConfigProfile,
@@ -768,7 +769,6 @@ from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTa
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.preview_override_authorization import (
-    director_preview_override_allowed,
     director_preview_snapshot_allowed,
 )
 from control_plane.product_testing_restore_policy import director_testing_storage_allowed
@@ -821,7 +821,6 @@ from control_plane.runtime_key_safety_http import (
     apply_runtime_key_safety_policy_route,
 )
 from control_plane.runtime_key_safety import (
-    RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
     runtime_key_safety_environment_class,
@@ -1358,7 +1357,7 @@ def _local_operator_product_config_scope_refusal(
     context = product_config_request.context
     if context:
         try:
-            owners = product_context_owners(record_store)
+            owners = product_context_owners(record_store, config_scopes=True)
         except TypeError:
             return "Product profile records are unavailable to confirm the context's product."
         if not is_exclusive_product_lane_context(
@@ -12591,28 +12590,16 @@ def create_launchplane_fastapi_app(
         if director_conditional_write and not (
             scan_activation or snapshot_activation or storage_update or health_url_correction
         ):
-            try:
-                integration_key_markers = latest_active_runtime_key_safety_policy(
-                    cast(RuntimeKeySafetyPolicyReadStore, record_store)
-                ).integration_key_markers
-            except (AttributeError, ValueError):
-                integration_key_markers = ()
-            list_bindings = getattr(record_store, "list_secret_bindings", None)
-            if not callable(list_bindings) or not director_preview_override_allowed(
-                existing=existing_profile,
-                replacement=profile,
-                secret_bindings=tuple(list_bindings(limit=None)),
-                integration_key_markers=integration_key_markers,
-            ):
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message=(
-                        "Director agents may conditionally change only bounded preview settings "
-                        "or testing storage requirements and health fallback corrections."
-                    ),
-                )
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Director agents may conditionally change only scan activation, preview "
+                    "snapshot policy, testing storage requirements or health fallback corrections. "
+                    "Use product-config for preview settings."
+                ),
+            )
         if profile.release_request != (
             existing_profile.release_request if existing_profile is not None else None
         ):
@@ -16413,7 +16400,7 @@ def create_launchplane_fastapi_app(
             and config_profile.production_use == "live"
             # The profile's live status describes production, not its owned
             # testing lane. Target ownership and instance scope are checked above.
-            and product_config_request.instance != TESTING_INSTANCE
+            and product_config_request.instance not in {TESTING_INSTANCE, "preview"}
             and product_config_request.odoo_business_hours is None
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
@@ -16927,12 +16914,8 @@ def create_launchplane_fastapi_app(
         )
         try:
             profile = database_store.read_product_profile_record(product.strip())
-            lane = next(
-                candidate
-                for candidate in profile.lanes
-                if candidate.instance == environment.strip()
-            )
-        except (FileNotFoundError, StopIteration) as error:
+            lane = product_config_target(profile, environment)
+        except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,
                 trace_id=trace_id,

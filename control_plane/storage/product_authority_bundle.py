@@ -362,15 +362,17 @@ def require_bundle_context_owner(
     if not required_owners and bundle.required_product_config_target is None:
         return
     profiles = tuple(profiles)
-    owners = product_context_owner_map(profiles)
+    owners = product_context_owner_map(
+        profiles, config_scopes=bundle.required_product_config_target is not None
+    )
     for product, context in required_owners:
         if not is_exclusive_product_context(context=context, product=product, owners=owners):
             raise ProductContextOwnershipError("The context must belong to the named product only.")
     if bundle.required_product_config_target is not None:
         product, context, instance = bundle.required_product_config_target
-        if product_target_owner_products(profiles, context=context, instance=instance) != frozenset(
-            (product,)
-        ):
+        if product_target_owner_products(
+            profiles, context=context, instance=instance, config_scopes=True
+        ) != frozenset((product,)):
             # Service-only preview identities live in the product's preview
             # context, individually named for their exact runtime instance.
             # This does not authorize runtime configuration or another purpose.

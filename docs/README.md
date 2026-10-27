@@ -136,7 +136,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — standing public-source posture,
   image and secret boundary, and ongoing public hygiene.
-- [preview-settings.md](preview-settings.md) — reviewed private-file saves of one preview runtime override.
+- [preview-settings.md](preview-settings.md) — managed preview settings, secrets, precedence and migration.
 - [copy-aggregates.md](copy-aggregates.md) — read-only counts from frozen sanitized snapshots with source provenance.
 - [clean-testing-snapshots.md](clean-testing-snapshots.md) — independent sanitized testing snapshots, preview copies and transition prerequisites.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,

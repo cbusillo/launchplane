@@ -633,16 +633,14 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
             }
             profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
             if preview_payload:
-                profile = profile.model_copy(
-                    update={
-                        "preview": profile.preview.model_copy(
-                            update={
-                                "override_env": {
-                                    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: preview_payload
-                                }
-                            }
-                        )
-                    }
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context=profile.preview.context,
+                        instance="preview",
+                        env={ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: preview_payload},
+                        updated_at="2026-10-26T00:00:00Z",
+                    )
                 )
             if snapshot_enabled:
                 profile.preview.clean_testing_snapshot = True
@@ -748,6 +746,11 @@ class OdooPreviewServiceEnvironmentOdooVersionTests(unittest.TestCase):
             self._service_environment(manifest_odoo_version="")
 
         self.assertEqual(refusal.exception.missing_keys, ("ODOO_VERSION",))
+
+    def test_template_addon_settings_do_not_enter_generated_preview_bootstrap(self) -> None:
+        values = self._service_environment(manifest_odoo_version="19.0", website_bootstrap=True)
+        decoded = json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
+        self.assertEqual(decoded["addon_settings"], [])
 
     def test_preview_addon_settings_survive_website_bootstrap(self) -> None:
         settings = [
