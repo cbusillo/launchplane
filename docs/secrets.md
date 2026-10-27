@@ -875,8 +875,75 @@ prove absence outside that access. Binding metadata is a record like the rest of
 a product environment, and reading is never a stop, so the Director's agents
 read it through the same standing environment read across products
 (cbusillo/repairshopr_api#103). Preview
-and removed-lane bindings and contexts shared ambiguously between products are
-excluded.
+configuration scopes are included; removed-lane bindings and contexts shared
+ambiguously between products are excluded.
+
+### Read coverage and binding selection
+
+The existing product catalog (`GET /v1/product-profiles`) and binding response
+include `coverage`: `population`, `source`, `authorization`, `status` and explicit
+`exclusions`. Catalog coverage is for active products within the requested
+`driver_id`; an empty driver filter includes all drivers. A product-scoped catalog
+reports `scoped` even when its returned subset is empty. It never reveals hidden
+product identities or counts.
+
+Binding `coverage` describes the copy metadata population above. `complete`
+means unbounded source enumeration and authorized records within that stated
+population, not every effective secret or every historical lane. The coverage
+proof includes every configuration target, including the managed preview scope;
+stable-lane authority alone cannot certify complete copy metadata coverage.
+The storage adapter's `collection_read_coverage` attests unbounded profile, secret-record and
+binding enumeration; a limited, unsupported or unknown collection keeps that
+limitation in the response. Adapters without the capability report `unknown`.
+These are current read observations, not an atomic snapshot or runtime proof.
+
+For names-only selection evidence on the same binding endpoint, request
+`include_resolution=true`. `integration` defaults to `runtime_environment` and
+can explicitly select another existing integration without discovering hidden
+integration names. Repeated `scopes` parameters select `global`, `context` and/or
+`context_instance`; omitting them selects all three. For example,
+`?include_resolution=true&integration=launchplane_worker&scopes=context_instance`
+asks the shared selector the same scope question as the exact-lane worker
+resolver. `lane_binding_resolution` states these inputs and reports each stable
+lane declared in the product profile, its selected binding metadata and coverage.
+The managed preview configuration scope is explicitly excluded from this
+selection population, even though copy metadata can include it. Selection reads
+no versions or values.
+
+Selection uses the existing secret resolver's precedence before authorization.
+Each lane's qualification view returns selected rows only when authority covers
+every requested scope; otherwise the whole selection is withheld with `scoped`
+coverage. A hidden higher-precedence source cannot make a readable shadow appear
+or disappear in that view. The ordinary copy `bindings` remain available under
+their existing eligibility and authorization. A context-only reader may request
+only `scopes=context` for a complete answer to that narrower question; that does
+not claim coverage of instance or global delivery sources. Coverage
+depends on authority over every requested scope, even when no binding exists,
+so it cannot reveal whether a hidden source exists. Complete global coverage
+needs the existing Director-agent standing or policy-named administrator authority;
+an allow on the empty context alone cannot prove every global source readable.
+Other selection scopes require that standing or explicit `secret.list` to prove
+complete scope coverage. Environment metadata access still returns authorized
+copy names, but selection stays `scoped` without that proof. Metadata enumeration
+still uses the shared resolver even when selection rows are withheld. Hidden
+context-ownership records cannot change the qualification projection or its
+coverage through inherited product-read rules.
+Existing copy eligibility and grants are unchanged.
+
+All-scope selection is not a delivery claim: site delivery may exclude global
+or context sources, and worker delivery selects exact-instance sources. Declare
+the appropriate scopes when qualifying one of those paths. Historical and
+undeclared lanes and other integrations remain outside the stated population;
+runtime delivery, value validity and health need their own evidence.
+The binding endpoint also accepts inactive products; active-fleet qualification
+starts from the active catalog. `integration` and `scopes` affect only the opt-in
+resolution view and do not filter or broaden copy `bindings` when that view is
+not requested.
+
+Consumers must preserve server coverage and requested selection evidence. Missing
+coverage from an older server or projection is `unknown`; zero client omissions
+does not prove server completeness. A bounded client projection must retain its
+own bound separately and cannot turn partial rows into a complete inventory.
 
 A product-config secret entry can use `copy_from` instead of `value`:
 

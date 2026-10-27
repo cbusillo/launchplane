@@ -32876,6 +32876,13 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def collection_read_coverage(self, collection: str) -> str:
+        return (
+            "complete"
+            if collection in {"product_profiles", "secret_records", "secret_bindings"}
+            else "unsupported"
+        )
+
     def compare_and_rebind_worker_credentials(
         self,
         *,

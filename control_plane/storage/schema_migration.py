@@ -35,6 +35,8 @@ from control_plane.storage.migrations.versions import (
     b1b3d5f7a9e2_join_idle_retirement as idle_retirement_join,
     b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
     f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
+    c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
+    d1a5b7c9d2e4_join_attestations_compatibility as attestations_compatibility_join,
 )
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
@@ -56,6 +58,7 @@ SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     idle_retirement.revision,
     idle_hostnames_join.revision,
     idle_compatibility_join.revision,
+    integration_attestations.revision,
 )
 _RECOGNIZED_SOURCE_REVISIONS = (
     *SCHEMA_MIGRATION_SUPPORTED_REVISIONS,
@@ -72,6 +75,7 @@ _RECOGNIZED_SOURCE_REVISIONS = (
     idle_retirement_join.revision,
     idle_hostnames_join.revision,
     idle_compatibility_join.revision,
+    attestations_compatibility_join.revision,
 )
 _ARCHIVE_JOIN_BY_SOURCE = {
     retired_delivery.revision: archive_retirement_join.revision,
@@ -126,6 +130,13 @@ def schema_migration_action(
 
 
 def schema_migration_target(*, current_revision: str, target_revision: str) -> str:
+    if target_revision == integration_attestations.revision:
+        if current_revision in _RECOGNIZED_SOURCE_REVISIONS and (
+            current_revision == retired_delivery.revision
+            or retired_delivery.revision in _alembic_predecessor_revisions(current_revision)
+        ):
+            return attestations_compatibility_join.revision
+        return target_revision
     if target_revision == idle_hostnames_join.revision:
         if current_revision in _RECOGNIZED_SOURCE_REVISIONS and (
             current_revision == retired_delivery.revision
@@ -139,8 +150,13 @@ def schema_migration_target(*, current_revision: str, target_revision: str) -> s
         archive_hostnames_join.revision,
         preview_hostnames_join.revision,
         idle_hostnames_join.revision,
+        integration_attestations.revision,
     }:
-        return idle_compatibility_join.revision
+        return (
+            attestations_compatibility_join.revision
+            if current_revision == integration_attestations.revision
+            else idle_compatibility_join.revision
+        )
     if target_revision == idle_retirement.revision and current_revision in _IDLE_JOIN_BY_SOURCE:
         return _IDLE_JOIN_BY_SOURCE[current_revision]
     if current_revision == idle_retirement.revision and target_revision in _HELD_DELIVERY_TARGETS:

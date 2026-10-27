@@ -5834,3 +5834,23 @@ before this revision must pass the validator in the selected image; later
 validation changes may therefore refuse older values transactionally at startup.
 Preflight that backup's preview settings against the selected image before
 release rather than weakening validation to admit them.
+
+### Integration-attestation compatibility image
+
+This image carries the additive attestation migration and empty compatibility
+join and recognizes their revision paths. Normal startup still targets the
+preceding hostname/idle-retirement release. It does not add the attestation
+runtime or require its table. Deploy and qualify this image before activating
+the table in the subsequent release. Retain it as activation's previous-image
+rollback target. The later release uses these two migration files byte-for-byte
+unchanged. This image can start against that additive schema without migrating
+backward; older images cannot recognize its revision. The held delivery drop
+retains its separate approved application path.
+Legacy adoption recognizes the future table as belonging to Launchplane and
+refuses to stamp an unversioned database containing it as an older schema.
+
+Compatibility also reads populated restoration and attestation evidence on
+carried Client decisions. Both additive fields are omitted when empty, so its
+ordinary carries remain readable by the preceding image. Activation uses the
+same read contract unchanged. Do not roll activation back past this compatible
+image after any populated carry has been saved.

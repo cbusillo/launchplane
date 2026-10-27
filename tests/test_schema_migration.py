@@ -34,6 +34,7 @@ from control_plane.storage.migrations.versions import (
     c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
     b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
     f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
+    c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -61,6 +62,28 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
+    def test_preceding_target_reads_additive_schema_without_downgrading_it(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
+            command.upgrade(alembic_config(url), integration_attestations.down_revision)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            before = set(inspect(engine).get_table_names())
+            self.assertTrue(set(retired_delivery.RETIRED_TABLES) & before)
+            self.assertNotIn("launchplane_integration_attestations", before)
+            command.upgrade(alembic_config(url), integration_attestations.revision)
+            self.assertEqual(
+                schema_migration_action(
+                    current_revision=integration_attestations.revision,
+                    target_revision=integration_attestations.down_revision,
+                ),
+                "compatible_ahead",
+            )
+            self.assertTrue(before <= set(inspect(engine).get_table_names()))
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            store.verify_schema()
+
     def test_migration_preserves_existing_application_loggers(self) -> None:
         application_logger = logging.getLogger("control_plane.merge_train_controller_run_once")
         original_disabled = application_logger.disabled
