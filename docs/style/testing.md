@@ -63,6 +63,10 @@ configuration. `qualityGate.test.local` is the focused command template;
 or metadata change with no affected code, record why behavior tests or IDE inspection do not apply; do not add tests that
 assert instruction wording or config text.
 
+Use `qualityGate.inspection.lanes` for native JetBrains routing and inspect
+each product's files separately. TypeScript compiler validation remains in
+`qualityGate.build.frontend`; headless WebStorm does not report compiler errors.
+
 For frontend changes, use `qualityGate.build.frontend` for frontend unit, type,
 and build validation, with browser smoke for UI changes as described below.
 

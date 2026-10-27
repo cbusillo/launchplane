@@ -73,10 +73,14 @@ deployment has no service dry-run mode; preparation is not execution proof.
 Retained generic-web Compose testing lanes use the same `inspect` and reviewed
 `collect` path. Collection requires the current recipient's published, qualified
 activation and its original completed allocation. It reuses the activation's
-configuration, retained-reservation, safe-input and provider-render checks, with
-the artifact from current deployment inventory. The provider's pending runtime
-identity must agree with the completed inventory apart from its completion time;
+recipient-custody, retained-reservation, safe-input and provider-render checks, with
+the artifact from current deployment inventory. Current qualification binds
+current managed configuration across inspection; the frozen activation
+configuration remains a guard on the original operation. The provider's pending
+runtime identity must agree with the completed inventory apart from its completion time;
 provider image inputs retain the Compose deploy writer's artifact value.
+Changed delivered inputs must match their supported runtime sync before collection;
+current qualification never delivers values itself.
 It then reads the registered host through the existing private transport. The
 fixed program checks every extant container, including stopped containers, and
 current/previous Swarm service declarations even without tasks. Read-only
@@ -3697,8 +3701,12 @@ key and new evidence file:
    upgrade nor seals a snapshot.
 4. `verify` probes health identity and the login page inside the private
    network, stops the disposable web writer, and preserves the final upgraded
-   database/filestore tuple. Product business validation remains part of the
-   consuming rehearsal; health/login proof is not Client acceptance.
+   database/filestore tuple. Admission, host execution and publication require
+   a passing committed post-switch business receipt for this exact product,
+   rehearsal, artifact, source commit and final database. An empty journal,
+   a failing latest receipt or abandonment without a subsequent validation
+   refuses verification. The final snapshot seals the complete business history.
+   Historical readback stays available; health/login proof is not Client acceptance.
 5. Without a consumer confirmation, `retire` stops web, runner and database and preserves all recovery custody.
    It requires both final source and upgraded tuples. It does not delete
    volumes, provider placement, snapshots or keys. Keep their recorded custody;

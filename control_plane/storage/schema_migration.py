@@ -42,7 +42,7 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-SCHEMA_MIGRATION_TARGET_REVISION = idle_retirement.revision
+SCHEMA_MIGRATION_TARGET_REVISION = idle_hostnames_join.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
@@ -54,6 +54,8 @@ SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     profile_archive.revision,
     preview_settings.revision,
     idle_retirement.revision,
+    idle_hostnames_join.revision,
+    idle_compatibility_join.revision,
 )
 _RECOGNIZED_SOURCE_REVISIONS = (
     *SCHEMA_MIGRATION_SUPPORTED_REVISIONS,
@@ -110,20 +112,35 @@ def schema_migration_action(
     target_revision: str = SCHEMA_MIGRATION_TARGET_REVISION,
 ) -> SchemaMigrationAction:
     _require_supported_target(target_revision)
-    if current_revision == target_revision:
-        return "current"
-    if current_revision in _RECOGNIZED_SOURCE_REVISIONS:
-        if target_revision in _alembic_predecessor_revisions(current_revision):
-            return "compatible_ahead"
     effective_target = schema_migration_target(
         current_revision=current_revision, target_revision=target_revision
     )
+    if current_revision == effective_target:
+        return "current"
+    if current_revision in _RECOGNIZED_SOURCE_REVISIONS:
+        if effective_target in _alembic_predecessor_revisions(current_revision):
+            return "compatible_ahead"
     if current_revision in _alembic_predecessor_revisions(effective_target):
         return "upgrade"
     raise ValueError(f"Unsupported Launchplane database revision {current_revision!r}.")
 
 
 def schema_migration_target(*, current_revision: str, target_revision: str) -> str:
+    if target_revision == idle_hostnames_join.revision:
+        if current_revision in _RECOGNIZED_SOURCE_REVISIONS and (
+            current_revision == retired_delivery.revision
+            or retired_delivery.revision in _alembic_predecessor_revisions(current_revision)
+        ):
+            return idle_compatibility_join.revision
+        return target_revision
+    if target_revision in _HELD_DELIVERY_TARGETS and current_revision in {
+        public_host_fences.revision,
+        topics_hostnames.revision,
+        archive_hostnames_join.revision,
+        preview_hostnames_join.revision,
+        idle_hostnames_join.revision,
+    }:
+        return idle_compatibility_join.revision
     if target_revision == idle_retirement.revision and current_revision in _IDLE_JOIN_BY_SOURCE:
         return _IDLE_JOIN_BY_SOURCE[current_revision]
     if current_revision == idle_retirement.revision and target_revision in _HELD_DELIVERY_TARGETS:
