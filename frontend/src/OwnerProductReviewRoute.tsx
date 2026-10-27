@@ -399,6 +399,8 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
         <p data-carry-reason={decision.carried_from.reason}>
           Carried from version {decision.carried_from.head_sha.slice(0, 7)}: {decision.carried_from.reason === "client_impact_none"
             ? "later commits were marked as having no Client-visible changes."
+            : decision.carried_from.reason === "accepted_base_integration"
+              ? "accepted or engineering-only base changes were integrated, with no new Client-visible change."
             : "the base was updated, and the change itself was identical."}
         </p>
       ) : null}

@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 import hashlib
 import os
-import re
 from pathlib import Path
 from typing import Any, cast
 from collections.abc import Callable
@@ -36,16 +35,6 @@ from control_plane.testing_local_credentials import prepare_rehearsal_local_cred
 from tests import test_testing_replacement_resources as resources
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
-
-
-def python_heredoc(script: str) -> str:
-    match = re.search(r"python3\s+-\s*<<'(?P<delimiter>\w+)'\s*\n", script)
-    if match is None:
-        raise AssertionError("Host delivery must put its Python program on stdin")
-    body, delimiter, _ = script[match.end() :].partition("\n" + match["delimiter"] + "\n")
-    if not delimiter:
-        raise AssertionError("Host Python heredoc is unterminated")
-    return body
 
 
 class RehearsalScenario(unittest.TestCase):
@@ -1113,7 +1102,6 @@ class RehearsalScenario(unittest.TestCase):
         def scheduler(
             record: OdooUpgradeRehearsalRecord, script: str, check: Callable[[], None]
         ) -> dict[str, str]:
-            program = python_heredoc(script)
             output = io.StringIO()
             with (
                 patch.object(sys, "argv", ["host"]),
@@ -1127,7 +1115,9 @@ class RehearsalScenario(unittest.TestCase):
                 ),
                 redirect_stdout(output),
             ):
-                exec(compile(program, "<actual-host>", "exec"), {})
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(script)
             # This is the parser used by run_manual_data_schedule, including
             # its value lowercasing and allowlist.
             return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
@@ -1198,7 +1188,6 @@ class RehearsalScenario(unittest.TestCase):
             validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
             encoded = base64.b64encode(script.encode()).decode()
             materialized = base64.b64decode(encoded, validate=True).decode()
-            body = python_heredoc(materialized)
             output = io.StringIO()
             with (
                 patch.object(sys, "argv", ["host"]),
@@ -1210,7 +1199,9 @@ class RehearsalScenario(unittest.TestCase):
                 ),
                 redirect_stdout(output),
             ):
-                exec(compile(body, "<provider-host>", "exec"), {})
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(materialized)
             return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
 
         with patch.object(adapter, "run_script", side_effect=scheduler):
@@ -1221,7 +1212,6 @@ class RehearsalScenario(unittest.TestCase):
         prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
         apply_script = adapter.host_script(record, "apply", operation_key="fixture-operation")
         validate_dokploy_schedule_script({"script": apply_script, "appName": record.rehearsal_id})
-        compile(python_heredoc(apply_script), "<apply-transport>", "exec")
 
     def test_oversize_host_script_is_refused_before_dispatch_checks(self) -> None:
         import click
@@ -1515,29 +1505,18 @@ class RehearsalScenario(unittest.TestCase):
         self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), prepared)
 
     def test_capture_inspection_preserves_the_reviewed_action(self) -> None:
-        import io
-        import json
-        import sys
-        from contextlib import redirect_stdout
+        from control_plane.host_package import host_invocation
 
         adapter = self.adapter("validate-business")
-        program = (
-            "import base64, json, sys\nprint(json.dumps(json.loads(base64.b64decode(sys.argv[1]))))"
+        script = adapter.host_script(
+            self.record.model_copy(update={"compose_id": "own-compose"}),
+            "observe",
+            inspect_capture=True,
         )
-        output = io.StringIO()
-        with patch(
-            "control_plane.odoo_upgrade_rehearsal.rehearsal_host_program", return_value=program
-        ):
-            script = adapter.host_script(
-                self.record.model_copy(update={"compose_id": "own-compose"}),
-                "observe",
-                inspect_capture=True,
-            )
-        with redirect_stdout(output), patch.object(sys, "argv", []):
-            exec(compile(python_heredoc(script), "<transport>", "exec"), {})
-        spec = json.loads(output.getvalue())
-        self.assertEqual(spec["action"], adapter.request.action)
-        self.assertTrue(spec["inspect_capture"])
+        invocation = host_invocation(script)
+        assert invocation is not None
+        self.assertEqual(invocation.spec["action"], adapter.request.action)
+        self.assertTrue(invocation.spec["inspect_capture"])
 
     def test_failure_events_include_nested_host_frames(self) -> None:
         from control_plane.dokploy import api
