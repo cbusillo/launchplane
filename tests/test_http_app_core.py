@@ -264,7 +264,10 @@ class FastApiConstructionMetadataTests(unittest.TestCase):
         )
 
     def test_canonical_openapi_export_is_deterministic_and_scrubbed(self) -> None:
+        from importlib.metadata import version
+
         first_payload = canonical_openapi_document()
+        self.assertEqual(first_payload["info"]["version"], version("launchplane"))
         second_payload = canonical_openapi_document()
 
         self.assertEqual(first_payload, second_payload)

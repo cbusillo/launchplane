@@ -53,7 +53,7 @@ class TestingBootstrapClientTests(unittest.TestCase):
         return {
             "status": "accepted",
             "trace_id": "fixture-trace",
-            "result": plan.model_dump(mode="json"),
+            "result": {**plan.model_dump(mode="json"), "future_receipt_field": {"new": True}},
             "private_debug": "private-value",
         }
 

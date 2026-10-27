@@ -73,3 +73,55 @@ class FreshRestoreScheduleTests(unittest.TestCase):
                 self.assertEqual(native.called, delivered)
                 upsert.assert_not_called()
                 update.assert_not_called()
+
+    def test_package_installation_refusal_precedes_environment_and_native_effects(self) -> None:
+        from control_plane.dokploy import host_package as packages
+
+        record = generation().model_copy(
+            update={"source_mode": "container-export", "source_binding_sha256": "e" * 64}
+        )
+        target = DokployTargetDefinition(
+            context=record.context, instance="testing", target_id=record.target_id
+        )
+        environment = {
+            "ODOO_DB_NAME": "fixture",
+            "ODOO_INSTALL_MODULES": "website",
+            "DOCKER_IMAGE_REFERENCE": "registry.invalid/odoo@sha256:" + "f" * 64,
+        }
+        native = Mock()
+        checkpoint = Mock()
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={
+                    "env": api.serialize_dokploy_env_text(environment),
+                    "appName": record.namespace,
+                    "serverId": "registered-server",
+                },
+            ),
+            patch.object(api, "find_matching_dokploy_schedule", return_value=None),
+            patch.object(
+                packages,
+                "ensure_schedule_host_package",
+                side_effect=ValueError("installation refused"),
+            ) as install,
+            patch.object(api, "update_dokploy_target_env") as update,
+            patch.object(api, "trigger_deployment") as deploy,
+            self.assertRaises(ValueError),
+        ):
+            post_deploy.run_compose_post_deploy_update(
+                host="https://provider.invalid",
+                token="fixture",
+                target_definition=target,
+                env_file=None,
+                run_destructive_restore=True,
+                fresh_testing_generation=record,
+                prepare_native_source=native,
+                before_provider_mutation=checkpoint,
+            )
+        self.assertTrue(install.called)
+        update.assert_not_called()
+        deploy.assert_not_called()
+        native.assert_not_called()
+        checkpoint.assert_not_called()

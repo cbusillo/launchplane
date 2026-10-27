@@ -14,10 +14,11 @@ test("a carried acceptance explains invisible follow-ups and can be replaced", {
   await expect(carryNote).toHaveCount(0);
 });
 
-test("a saved base-update carry can be replaced by a new decision", async ({ page }, testInfo) => {
-  await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=carried-decision");
+for (const scenario of ["carried-decision", "carried-base-integration"]) {
+test(`a saved base-update carry can be replaced by a new decision: ${scenario}`, { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto(`/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=${scenario}`);
   const decision = page.getByLabel("Recorded decision");
-  await expect(decision.locator('[data-carry-reason="unchanged_patch_base_update"]')).toBeVisible();
+  await expect(decision.locator('[data-carry-reason]')).toBeVisible();
   await expect(decision.locator(":scope > p").filter({ hasText: /still applies|applies to preview version/i })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("owner-acceptance-carried.png"), fullPage: true });
@@ -27,6 +28,7 @@ test("a saved base-update carry can be replaced by a new decision", async ({ pag
   await expect(decision.locator("[data-carry-reason]")).toHaveCount(0);
   await expect(decision.locator("blockquote")).toHaveText("Please change this feature again.");
 });
+}
 
 for (const scenario of ["former-client-carried-decision", "earlier-carried-decision", "carried-without-preview"]) {
   test(`saved carry history does not claim current acceptance: ${scenario}`, { tag: "@responsive" }, async ({ page }, testInfo) => {

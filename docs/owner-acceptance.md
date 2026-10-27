@@ -187,76 +187,79 @@ The form explains that new decisions and feedback are shared on the pull request
 
 ## Carried acceptance
 
-Per-change Client acceptance remains required. Release acceptance is a separate
-final check; it does not replace the decision about each change.
+Per-change Client acceptance remains required. Release acceptance checks how
+accepted changes work together. Every carry requires the newest applicable
+decision to be an acceptance by the current Client, with its feedback delivered,
+and the PR to keep the base branch recorded on that decision. A decision without
+a recorded base does not carry. Retargeting the PR invalidates a carry even
+without a new commit.
 
-For a later descendant head, acceptance carries only when every intervening
-commit has one `Client-impact: none` git trailer in its final trailer paragraph.
-`Client-impact: visible`, missing or ambiguous trailers need a new decision,
-even when the final patch happens to match. Agents declare the impact and the
-second-model review checks it against the actual changes. A test-only follow-up
-can therefore carry without asking the Client to accept the same feature twice.
-Launchplane requires a complete, ordered single-parent history from the accepted
-head to the new head (at most 250 commits); incomplete history never carries.
-A merge trailer alone cannot prove it was conflict-free, so unproven merges,
-including conflict-resolving merges, need a new decision. The existing clean
-merge-train refresh proof below continues to apply.
-If recorded train refreshes and invisible commits are mixed between status
-publishes, neither proof covers the whole history and a new decision is needed.
+For a later descendant head, acceptance carries when every PR-side commit has
+one `Client-impact: none` git trailer in its final trailer paragraph. A merge
+from the recorded base branch may resolve conflicts between accepted changes:
+the Client does not have to accept either change again. The merge's `none`
+trailer declares that its resolution only combines those changes, without new
+Client-visible behavior on the PR's side. Agents declare the impact and the
+second-model review checks it against the actual changes. A new Client-visible
+change requires `Client-impact: visible` and the Client's decision.
 
-This carry records reason `client_impact_none` and every commit SHA with its
-`client_impact` trailer value in `carried_from.commits`, in order. The recorded
-Client, original acceptance and delivered feedback remain the source, rather
-than inventing a new decision.
-The same-current-Client, delivered-feedback and unchanged-base checks below apply.
+Launchplane requires the complete descendant history (at most 250 commits),
+walks the PR's first-parent path back to its accepted head, and pins the recorded
+base branch's current commit. Every merge's other parent and every imported
+commit must belong to that immutable base. Each imported change must be merged
+onto the same base and either have valid engineering-only notes or a delivered
+acceptance by the same current Client for its exact merged head. For a recorded
+train batch, the recorded member heads receive that check individually. Missing,
+ambiguous or incomplete evidence, a foreign parent, or a visible or missing
+PR-side trailer leaves acceptance waiting, unless that merge exactly matches a
+recorded train refresh's result and both parents. Recorded refreshes need no
+trailer and can appear before or after declared invisible commits or conflict
+merges. A test-only follow-up or a sequence
+of such commits mixed with qualified base merges can carry without another
+Client decision. Release acceptance remains the check of how the combined
+changes work together.
 
-The Client accepts a feature, seen on its preview. A base update or rebase may
-change its commit without changing the feature. Launchplane carries the
-acceptance across a recorded train refresh or rewritten history (such as a
-rebase) instead of asking again. This existing unchanged-patch proof carries only
-when all of these hold:
+A linear invisible follow-up records reason `client_impact_none`. A chain made
+only of exact recorded train refreshes retains `merge_train_base_refresh` after
+the same imported-change checks. Other base integration records
+`accepted_base_integration`, the pinned `comparison_base_sha`, each
+PR-side `none` commit in order, and any recorded train refresh IDs. It also
+saves `integrated_changes`: each imported change's number, exact head and
+acceptance record ID or its engineering basis (the parsed notes snapshot bounded
+to the decision-reason limit, or the shared verified-dependency explanation). `batch_record_ids` names the train batches
+whose exact members were checked. These persisted facts explain the carry even
+if a PR's notes or labels later change. Imported base commits are checked
+against their own changes rather than treated as new PR-side work. The recorded
+Client, original acceptance and delivered feedback remain the source.
+To integrate overlapping accepted changes, merge the recorded base into the PR
+with the reviewed Client-impact declaration. Rewritten history, such as a rebase,
+continues to use the strict unchanged-patch proof instead of descendant history.
+It carries only when:
 
-- The pull request still targets the base branch the acceptance was given on.
-  A decision keeps the pull
-  request's base branch from the first time Launchplane shows it on the pull
-  request; a decision without one does not carry.
-- The pull request's change against its base is the same at both heads: every
-  changed file has the same name, status, and added and removed lines, in order,
-  in source-control comparisons from the same immutable base commit. A recorded
-  train refresh supplies its merged base commit after branch membership is
-  verified; otherwise Launchplane pins the current base branch's commit before
-  comparing either head. Hunk positions are ignored. Outside a recorded train
-  refresh, surrounding context, hunk boundaries and section names must also
-  match: moving identical added lines into a different function needs a fresh
-  Accept. Complete source-control tree evidence must also show the same file
-  modes, so changing an executable bit or symlink does not carry. Train-recorded
-  refreshes can incorporate base context changes without
-  asking again. Any difference in a line the feature adds or removes prevents
-  either kind of carry. A file without a patch
-  (binary or too large) or a list of 300 files or more cannot be compared and
-  does not carry.
-- The newest decision is that acceptance, made by the product's current Client,
-  with its feedback delivered.
-- Outside the train, hunk positions must move only by the base's own line shifts.
-  Both merge bases and their complete comparison must be readable. Overlapping
-  base edits or relocating a hunk to an identical-looking XML block needs a new
-  Accept. Tree modes are read only after the text and position proofs match.
+- Launchplane pins the recorded base branch's current immutable commit before
+  comparing either head. Every changed file has the same name, status, added
+  and removed lines, surrounding context, hunk boundaries, section names and
+  file mode at both heads. Hunk line numbers may change only by the base's own
+  line shifts. Moving a hunk into another function or an identical-looking
+  block needs a new Accept.
+- Both merge bases and their complete comparison are readable. Overlapping
+  base edits, changed feature patches, a patchless binary or oversized file,
+  or a list of 300 files or more leaves acceptance waiting. Tree modes are read
+  only after the text and position proofs match.
 
-Changed feature patches, including conflict resolutions that change added or
-removed lines, require a new Accept. Missing base evidence or incomplete
-comparisons leave the new head waiting for the Client. A carried acceptance
-also stops applying if the pull request is later retargeted to another base, even
-without a new commit. The carry is saved
-as a new decision record with `carried_from` naming the decision and head it came
-from, the reason, the immutable comparison base, and any train refresh records,
-so it reads as carried, not
-re-decided. The `launchplane/owner-review` check on the new head says
-which earlier acceptance was carried and whether it was a train refresh or an
-unchanged-feature base update;
-the review page shows which version it was carried from, and the ready preview
-comment says the change is accepted rather than asking the Client again. The
-carry is checked when the status is next written: on the ready preview comment
-from the feedback route or the reconciler, and after a decision.
+Every descendant history, including a recorded train refresh, uses the qualified
+history admission above. A failed history proof never falls back to the
+unchanged-patch proof. Conflict-resolving descendant integrations can therefore
+combine separately accepted patches even when the remaining PR diff changes or
+becomes empty.
+
+The carry is saved as a new decision record with `carried_from` naming its
+original decision and head, reason and evidence. It reads as carried, not
+re-decided. The `launchplane/owner-review` check, review page and ready-preview
+comment explain the carry rather than asking the Client again. It is checked
+when status is next published: on the ready-preview feedback or reconciliation
+route, and after a decision. Missing base evidence or incomplete comparisons
+leave the current head waiting.
 
 The review page's Recorded decision card preserves saved history, including a
 former Client's decision or an older preview version. Its carry explanation

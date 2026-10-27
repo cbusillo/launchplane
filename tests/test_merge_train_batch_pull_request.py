@@ -413,6 +413,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         provider_request.start()
         self.addCleanup(provider_request.stop)
         profile = SimpleNamespace(
+            driver_id="generic-web",
             product="site",
             release_on_acceptance="held",
             is_active=True,
@@ -560,6 +561,7 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             for entry in provider.candidate.entries
         }
         profile = SimpleNamespace(
+            driver_id="generic-web",
             release_on_acceptance="held",
             is_active=True,
             repository=provider.repository_name,

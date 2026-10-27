@@ -285,10 +285,7 @@ def list_deployments_for_target(
                 raise click.ClickException("Dokploy deployment history is incomplete.")
             assert isinstance(deployments_payload, list)
             deployments = _collect_object_items(deployments_payload)
-            ids = [deployment_key(item) for item in deployments]
-            if not all(ids) or len(set(ids)) != len(ids):
-                raise click.ClickException("Dokploy deployment history is ambiguous.")
-            return deployments
+            return require_unique_deployment_ids(deployments)
         if not isinstance(deployments_payload, list):
             return []
         return _collect_object_items(deployments_payload)
@@ -300,9 +297,21 @@ def list_deployments_for_target(
             path="/api/deployment.all",
             query={"applicationId": target_id},
         )
-        return extract_deployments(payload)
+        deployments = extract_deployments(payload)
+        if require_complete:
+            if parse_deployment_history(payload).state == "unknown":
+                raise click.ClickException("Dokploy deployment history is incomplete.")
+            return require_unique_deployment_ids(deployments)
+        return deployments
 
     raise click.ClickException(f"Unsupported Dokploy target type: {target_type}")
+
+
+def require_unique_deployment_ids(deployments: list[JsonObject]) -> list[JsonObject]:
+    ids = [deployment_key(item) for item in deployments]
+    if not all(ids) or len(set(ids)) != len(ids):
+        raise click.ClickException("Dokploy deployment history is ambiguous.")
+    return deployments
 
 
 def deployment_for_target_by_title(
@@ -1973,6 +1982,9 @@ def validate_dokploy_schedule_script(schedule_payload: JsonObject) -> int:
         from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 
         raise ScheduleMaterializationTooLarge()
+    from control_plane.dokploy.host_package import validate_bootstrap_scripts
+
+    validate_bootstrap_scripts(schedule_payload)
     return materialization_bytes
 
 

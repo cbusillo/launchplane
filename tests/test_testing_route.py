@@ -241,15 +241,32 @@ class TestingRouteTests(unittest.TestCase):
                     )
                 applied[section][name + "@file"] = {**observed, "status": "enabled"}
 
-        def plan() -> TestingLaneRoute:
+        def plan(previous: TestingLaneRoute | None = None) -> TestingLaneRoute:
             self.raw = applied
             return self.plan(
                 application_document=document,
                 application_file_name="old-app.yml",
                 application_file_sha256=hashlib.sha256(json.dumps(document).encode()).hexdigest(),
+                **(
+                    {
+                        "recorded_template": previous.template,
+                        "recorded_application_route": previous,
+                        "owned_document": route_document(previous, self.old),
+                    }
+                    if previous is not None
+                    else {}
+                ),
             )
 
-        self.assertEqual(plan().legacy_backend, self.old_address)
+        recorded = plan()
+        self.assertEqual(recorded.legacy_backend, self.old_address)
+        physical_applied = deepcopy(applied)
+        applied = self.apply(recorded, self.old)
+        self.assertEqual(plan(recorded).legacy_routers, recorded.legacy_routers)
+        applied["routers"]["added-alias@docker"] = deepcopy(applied["routers"]["old-http@file"])
+        with self.assertRaises(ValueError):
+            plan(recorded)
+        applied = physical_applied
         document["http"]["routers"]["old-http"]["priority"] = 123
         applied["routers"]["old-http@file"]["priority"] = 123
         self.assertEqual(plan().legacy_backend, self.old_address)

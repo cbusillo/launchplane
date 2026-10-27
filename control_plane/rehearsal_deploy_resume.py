@@ -295,7 +295,7 @@ def observe_checkpoint(
         )
         if record != original and not published:
             return "recovery_required"
-        adapter.operation_readback(original, reservation.idempotency_key)
+        adapter.operation_readback(record, reservation.idempotency_key)
         check()
     job_status = remote_job_status(root, checkpoint)
     if job_status == "missing":

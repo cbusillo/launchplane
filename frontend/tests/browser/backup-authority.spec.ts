@@ -1,5 +1,5 @@
 import { waitForState, expect, test } from "./state";
-for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain", "uncertain-stale", "stale", "read-only", "other-lane"]) {
+for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain", "uncertain-stale", "stale", "stale-read", "read-only", "other-lane"]) {
   test(`server-held backup policy handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -12,7 +12,8 @@ for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain"
       effective_at: "2026-10-01T00:00:00Z", review_after: "2027-01-01T00:00:00Z", plan_digest: "c".repeat(64), result_status: "ok" };
     let status = "planned";
     const requests: Array<{ body: unknown }> = [];
-    const proposal = () => ({ operation_id: operationId, status, protection: outcome === "other-lane" ? { ...protection, context: "another-context" } : protection, can_approve: status === "planned", can_decline: status === "planned" });
+    const unavailableReason = outcome === "stale-read" ? "Approval is unavailable because backup protection changed or could not be checked. Refresh, or ask an agent for a new proposal." : null;
+    const proposal = () => ({ operation_id: operationId, status, protection: outcome === "other-lane" ? { ...protection, context: "another-context" } : protection, can_approve: status === "planned" && !unavailableReason, can_decline: status === "planned", approval_unavailable_reason: status === "planned" ? unavailableReason : null });
     const context = page.context();
     await context.route("**/v1/auth/session", r => r.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "fixture-csrf", identity: { ...fixtures.identity, role: outcome === "read-only" ? "read_only" : "admin" } } }));
     await context.route("**/v1/products", r => r.fulfill({ json: { status: "ok", trace_id: "products", products: fixtures.products } }));
@@ -42,6 +43,18 @@ for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain"
     await expect(panel.getByText(protection.plan_digest, { exact: true })).toHaveCount(0);
     const approve = panel.getByRole("button", { name: "Approve", exact: true });
     if (outcome === "read-only") { await expect(approve).toBeDisabled(); expect(requests).toHaveLength(0); return; }
+    if (unavailableReason) {
+      await expect(approve).toBeDisabled();
+      await expect(panel.getByText(unavailableReason, { exact: true })).toBeVisible();
+      expect(requests).toHaveLength(0);
+      await expect(panel.getByRole("button", { name: "Decline", exact: true })).toBeEnabled();
+      await panel.scrollIntoViewIfNeeded();
+      await panel.screenshot({ path: testInfo.outputPath(`backup-authority-${outcome}.png`) });
+      await panel.getByRole("button", { name: "Decline", exact: true }).click();
+      await expect(panel.getByText("Backup policy proposal declined.", { exact: true })).toBeVisible();
+      expect(requests).toHaveLength(1);
+      return;
+    }
     await expect(approve).toBeEnabled();
     if (outcome === "approve") {
       await panel.scrollIntoViewIfNeeded();

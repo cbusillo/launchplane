@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from control_plane.contracts.record_failures import record_failure_summary
 
 from datetime import timedelta
@@ -1051,7 +1053,7 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             cause = ValueError("synthetic-private-provider-payload")
             error = ProviderMutationUnknownError("synthetic-private-wrapper")
             error.__cause__ = cause
-            with self.assertLogs("control_plane.provider_operations", level="WARNING") as logs:
+            with self.assertLogs("control_plane", level="WARNING") as logs:
                 result = fixture.run(_FakeAdapter(apply_error=error))
             assert result.record is not None
             recorded = "\n".join(logs.output)
@@ -1060,6 +1062,19 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             self.assertNotIn(str(cause), recorded)
             self.assertNotIn(str(error), recorded)
             self.assertEqual(result.record.state, "reconcile_required")
+            events = [
+                json.loads(entry.getMessage())
+                for entry in logs.records
+                if entry.name == "control_plane.http_error_evidence"
+            ]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["operation_id"], result.record.record_id)
+            self.assertTrue(
+                any(
+                    site["module"] == run_durable_provider_operation.__module__ and site["line"] > 0
+                    for site in events[0]["sites"]
+                )
+            )
 
     def test_cancellation_leaves_running_reservation_intact(self) -> None:
         with TemporaryDirectory() as directory:

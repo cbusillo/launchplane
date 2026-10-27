@@ -4097,6 +4097,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             }
 
         with (
+            patch("control_plane.dokploy.host_package.ensure_schedule_host_package"),
             patch(
                 "control_plane.dokploy.post_deploy.run_manual_data_schedule",
                 side_effect=run_schedule,

@@ -30,6 +30,8 @@ from tests.test_tenant_admission_status import (
     _classification_only_store,
     _eligible_status,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from tests.support.profiles import _odoo_preview_profile_payload
 
 
 BASE_SHA = "b" * 40
@@ -37,6 +39,29 @@ MERGE_COMMIT_SHA = "c" * 40
 
 
 class TenantAdmissionControllerTests(unittest.TestCase):
+    def test_odoo_direct_admission_requires_candidate_controller(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            payload = _odoo_preview_profile_payload("example-odoo")
+            payload["repository"] = _candidate().repository
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(payload)
+            )
+            transport = _TenantControllerTransport()
+            with patch(
+                "control_plane.tenant_admission_controller.get_tenant_admission_status",
+                return_value=_eligible_status(),
+            ):
+                result = execute_tenant_admission_controller_run_once(
+                    request=_request(mutate=True),
+                    store=store,
+                    token="token",
+                    trace_id="odoo-controller-required",
+                    transport_factory=lambda _token: transport,
+                )
+            self.assertEqual(result.outcome, "blocked")
+            self.assertFalse(transport.merge_called)
+
     def test_classification_only_store_cannot_establish_merge_readiness(self) -> None:
         transport = _TenantControllerTransport()
         with self.assertRaises(ValueError):

@@ -301,12 +301,41 @@ Guards and the current-lease effect checkpoint precede the durable may-dispatch
 phase and actual dispatch. An admitted unanswered create, mount or deploy remains
 unknown even when a later readonly inspection changes the latest checkpoint.
 Absolute configuration writes can replay only against the positively owned,
-unused recipient. Unsettled create, mount or host-program outcomes remain unknown. A stable
+unused recipient. Unsettled create, mount or host-program outcomes remain unknown
+under ordinary forward continuation. A stable
 original task/container with the expected image, environment and state may prove
 a failed task, HTTP error or health-identity mismatch. Empty task inventory,
 startup pending, transport failures and unreadable responses prove no failure.
 Missing, foreign, duplicate or running deployment evidence keeps the negative
 receipt pending.
+
+An original caller can explicitly abandon an unanswered conventional-application
+volume mount with `scripts/activate-generic-web-testing.py refuse`, using the
+identical request file, saved review, `--reviewed-dry-run` and original
+`--idempotency-key`. This is a receipt-only continuation of that original apply;
+it cannot reserve another key or enter Compose, answered-mount, image-deploy or
+published work. It uses the apply request fingerprint, original intent and
+reviewed plan. A live original lease or retained executor still blocks it.
+
+Under the reacquired original lease and retained executor lock, the service first
+records the existing recovery-only private-refusal decision. Every later apply
+and storage write is fenced against resuming forward work, including after a
+lost reply. The candidate must remain idle and private with complete empty
+deployment history and no configured source. A missing volume mount or exactly
+the original preparation's application-bound mount is allowed; foreign,
+duplicate or changed mounts retain the reservation. Automatic deployment must
+be disabled or the empty GitHub/Git source must have no branch. The fixed
+retained-capability programs are read-only; no program, mount, configuration,
+deployment or route mutation runs during refusal. A delayed volume-mount insert
+can only land on this preserved application and its original storage namespace.
+
+The result is the existing negative `publication_refused` receipt, with no
+deployment, separation or delivery credit. Recipients, staged credentials,
+preparation volumes, schedules and the staging hold remain in custody. A new
+generation requires its own reviewed preparation and activation keys; the old
+key only replays its negative result. Source-level provider qualification must
+cover the mount handler and automatic-deploy entry points; native use also
+requires checking the deployed provider contract and exact original recipient.
 
 If addressed routing changed before canonical publication refused, apply first
 records its restoration decision, settles the original forward writer, and uses
@@ -348,6 +377,35 @@ underlying exception. Preserve the original receipt and choose a fresh evidence
 path for each inspection or readback. The caller rejects an already-used output
 path before making the service read; `--evidence-file` may name a fresh path for
 either read while retaining the original request and key.
+When route custody exists, inspection also projects the original forward and
+inverse child receipts and their exact physical writer receipts from stored
+records. It reports bound, unbound or missing custody, state, attempt, coarse
+checkpoint and closed writer outcomes. Recorded private and public health appear
+once at activation level. Unknown outcome
+text is withheld. A missing child or writer is not physical absence. These reads
+make no provider call, settle no writer and grant no continuation authority;
+they expose no route URL, script, credential or private intent. The original
+apply remains the supported route for an evidenced original-child reconciliation.
+For an original in route restoration, private refusal or completed refusal,
+inspection also reads that original candidate's placement, domains shape and
+complete deployment history. Closed fields distinguish missing/malformed domains,
+non-singular history, an absent stored deployment, mismatched original ID/title
+and nonterminal status. Unknown history exposes no count or sole-row verdict.
+Application history uses the same complete-response and unique-ID requirements
+as Compose history; permissive historical readers retain their existing behavior.
+When original runtime admission exists, the existing fixed private runtime reader
+also reports current HTTP status, identity classification and task failure, without
+updating saved admission or the failed edge result. Managed values remain inside
+the service; the fixed reader receives only their comparison digests. No values,
+URLs, names, IDs, titles or raw health payload leave this projection. These provider
+reads settle nothing and give no qualification or retry credit. Changed original
+records discard the candidate observation. Use the qualified current checkout.
+
+After an applied physical route write, activation waits for the file provider's
+readback under the current lease and recovery guards. Only a pending reload is
+polled; foreign authority or other failures still refuse immediately. Expiry keeps
+the original operation unresolved. This wait sends no second writer and applies
+equally to the original forward and inverse directions.
 New retained-capability failures also emit bounded numeric locations in the
 generated Python program. Inspection exposes those locations and that recognized
 Python body's SHA-256 only for a matching, disabled, terminal capability run with
@@ -409,6 +467,13 @@ unresolved activations remain unchanged; an unpublished activation retaining
 this exact recipient keeps its own interlock, even with no retained target
 reservations. This continuation never settles that operation. Independent
 original recipients and their custody remain preserved.
+Original deployment receipts use the provider deployment ID. Reads also recognize
+an exact historical successful wait receipt from that same operation; malformed
+receipts remain unproved. Recognition changes no stored bytes and supplies no
+custody by itself: complete singular history, original title, terminal status,
+placement, unchanged hold and original-operation guards still apply. Image
+evidence and candidate inspection use the same deployment-ID interpretation.
+
 A refusal or failure flag alone does not prove original effects settled. That
 proof belongs to the original operation's supported custody continuation.
 After a qualified lift, resume the original blocked operation through its own

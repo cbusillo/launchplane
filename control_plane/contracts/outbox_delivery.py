@@ -22,6 +22,7 @@ OutboxDeliveryState = Literal[
     "failed",
     "reconcile_required",
 ]
+RETIRED_DISCORD_SUMMARY_AGGREGATE_TYPE = "public_ingress_discord_summary"
 PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY = "backlog_summary_delivery_id"
 
 
