@@ -35,6 +35,34 @@ function environment() {
 test("a fresh identity and health verification makes a monitored lane green", () =>
   assert.equal(environmentOperationalTone(environment()), "verified"));
 
+test("monitored production cannot hide unknown runtime behind an empty incident list", () => {
+  const updates = [
+    lane => { lane.topology.observed.placement.runtime_identity_status = "unchecked"; },
+    lane => { lane.topology.observed.placement.trust_state = "missing"; },
+    lane => { lane.health_monitoring.checks = []; },
+    lane => { lane.health_monitoring.checks[0].probe_effective = false; },
+    lane => { lane.health_monitoring.checks[0].status = "missing"; },
+    lane => { lane.health_monitoring.checks[0].provenance.stale_after = new Date(0).toISOString(); },
+    lane => { lane.provenance.freshness_status = "missing"; },
+  ];
+  for (const update of updates) {
+    const lane = environment();
+    lane.environment = "prod";
+    lane.health_monitoring.monitoring_intent = "public";
+    lane.health_monitoring.open_incidents = [];
+    update(lane);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.ok(operationalAttentionReasons(lane).length);
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    lane.health_monitoring.monitoring_intent = "prelaunch";
+    assert.notEqual(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.monitoring_intent = "private";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.environment = "testing";
+    assert.notEqual(environmentOperationalTone(lane), "danger");
+  }
+});
+
 test("failed production delivery warns only while the running release is verified", () => {
   for (const failure_code of ["production_delivery_failed", "deploy_fence_held"]) {
     const lane = environment();
