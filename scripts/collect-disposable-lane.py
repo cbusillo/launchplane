@@ -212,7 +212,7 @@ def main() -> int:
         if args.application_resources:
             application_resources["application_resources"] = (
                 ApplicationResourceObservation.model_validate(
-                    result.get("application_resources")
+                    result.get("application_resources"), extra="ignore"
                 ).model_dump(mode="json")
             )
         print(

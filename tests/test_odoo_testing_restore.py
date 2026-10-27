@@ -590,10 +590,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     validate_dokploy_schedule_script(
                         {"script": script, "appName": self.gen.namespace}
                     )
-                    program = script.partition("<<'LP_FRESH_COPY'\n")[2].rsplit(
-                        "\nLP_FRESH_COPY", 1
-                    )[0]
-                    exec(compile(program, "<fresh-copy-stdin>", "exec"), {})
+                    from tests.support.host_package import execute_host_schedule
+
+                    execute_host_schedule(script)
             except SystemExit as error:
                 status = int(error.code or 0)
         return status, output.getvalue()

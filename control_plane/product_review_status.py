@@ -131,6 +131,8 @@ def owner_review_status(
                 if decision.carried_from.reason == "merge_train_base_refresh"
                 else "no Client-visible changes"
                 if decision.carried_from.reason == "client_impact_none"
+                else "integrating base changes"
+                if decision.carried_from.reason == "accepted_base_integration"
                 else "an unchanged-feature base update"
             )
             description += f" (carried from {decision.carried_from.head_sha[:7]} after {update})"

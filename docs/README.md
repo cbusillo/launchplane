@@ -164,3 +164,5 @@ not describe runtime authority until it is implemented, deployed, and activated.
   code-quality guardrails.
 - [codex-lab-workers.md](codex-lab-workers.md) — historical worker compatibility
   and retained engineering-review transport.
+
+- [host-program-package.md](host-program-package.md) — versioned host programs, installation and readback.

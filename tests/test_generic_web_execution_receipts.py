@@ -90,6 +90,7 @@ from control_plane.workflows.generic_web_execution import (
     evidence_digest,
     execution_receipt,
     observe_execution,
+    require_receipt_extension,
 )
 from control_plane.workflows.generic_web_application_snapshot import (
     ApplicationLifecycleSnapshot,
@@ -113,6 +114,34 @@ from control_plane.generic_web_testing_settlement import settle_testing_pre_imag
 
 
 class OriginalExecutionTests(unittest.TestCase):
+    def test_recorded_execution_proof_cannot_be_rewritten(self) -> None:
+        entry = ExecutionEntry(
+            kind="schedule_run",
+            name="maintenance",
+            target_id="schedule-1",
+            payload_digest=evidence_digest({}),
+            acknowledgement="identified",
+            deployment_id="job-1",
+            status="running",
+            terminal="done",
+        )
+        recorded = ExecutionReceipt(entries=(entry,))
+        require_receipt_extension(recorded, recorded)
+        require_receipt_extension(
+            ExecutionReceipt(entries=(entry.model_copy(update={"terminal": ""}),)), recorded
+        )
+        for field, replacement in (
+            ("acknowledgement", "rejected"),
+            ("deployment_id", "job-2"),
+            ("status", "done"),
+            ("terminal", ""),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                require_receipt_extension(
+                    recorded,
+                    ExecutionReceipt(entries=(entry.model_copy(update={field: replacement}),)),
+                )
+
     def test_real_unresolved_application_effects_keep_current_source_unqualified(self) -> None:
         for failure in ("product_transport", "product_server", "canary_server", "quiesce_lost"):
             with (
@@ -2041,7 +2070,7 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 self.assertEqual(completed.response_payload["result"]["deploy_status"], "fail")
 
     def test_legacy_missing_record_with_required_executor_is_not_image_only(self) -> None:
-        self.profile = _profile()
+        self.profile = _profile(driver_id="odoo")
         self.store.write_product_profile_record(self.profile)
         reservation = _write_generic_web_recovery_reservation(
             self.store,
@@ -2069,12 +2098,8 @@ class ExecutionRecoveryTests(unittest.TestCase):
                 return_value=self.provider,
             ),
             patch(
-                "control_plane.generic_web_deploy_provider_adapter.generic_web_post_deploy_executor_for_profile",
-                return_value=executor,
-            ),
-            patch(
-                "control_plane.generic_web_testing_abandonment.generic_web_post_deploy_executor_for_profile",
-                return_value=executor,
+                "control_plane.workflows.odoo_generic_web_post_deploy.execute_odoo_generic_web_post_deploy",
+                new=executor,
             ),
         ):
             status, result = _invoke_recovery(

@@ -206,6 +206,34 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
             )
         self.assertTrue(self.artifact_scanner.called)
 
+    def test_hold_placed_after_review_refuses_commit(self) -> None:
+        body = self.reviewed()
+        original = self.store.commit_testing_retry_rearm
+
+        def race(**kwargs: Any) -> Any:
+            self.hold_testing()
+            return original(**kwargs)
+
+        with patch.object(self.store, "commit_testing_retry_rearm", side_effect=race):
+            refused = self.post(body, "raced-hold")
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "testing_retry_held")
+        self.assertIsNone(self.store.read_testing_retry_rearm("site"))
+
+    def test_operation_started_after_review_refuses_commit(self) -> None:
+        body = self.reviewed()
+        original = self.store.commit_testing_retry_rearm
+
+        def race(**kwargs: Any) -> Any:
+            self.add_active_operation()
+            return original(**kwargs)
+
+        with patch.object(self.store, "commit_testing_retry_rearm", side_effect=race):
+            refused = self.post(body, "raced-active")
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "testing_retry_busy")
+        self.assertIsNone(self.store.read_testing_retry_rearm("site"))
+
     def test_same_key_replays_after_progress_and_desired_build_drift(self) -> None:
         body = self.reviewed()
         applied = self.post(body, "retry-original")
@@ -286,8 +314,7 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         self.assertEqual(refused.state, "failed")
         self.assertNotIn("queued_operation_id", refused.last_plan)
 
-    def test_existing_active_operation_and_unprivileged_caller_refused(self) -> None:
-        body = self.reviewed()
+    def add_active_operation(self) -> None:
         operation = self.store.list_odoo_stable_target_replacement_operation_records()[-1]
         from control_plane.contracts.odoo_stable_target_replacement_operation import (
             build_odoo_stable_target_replacement_operation_id,
@@ -314,6 +341,10 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
             }
         )
         self.store.write_odoo_stable_target_replacement_operation_record(held)
+
+    def test_existing_active_operation_and_unprivileged_caller_refused(self) -> None:
+        body = self.reviewed()
+        self.add_active_operation()
         refused = self.post(body, "active-attempt")
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "failed")

@@ -431,6 +431,11 @@ def build_merge_train_dry_run_result(
             for pr in snapshot.pull_requests
             if _targets_merge_train_base(pull_request=pr, base_branch=snapshot.base_branch)
         }
+        dependency_numbers = {
+            pr.number
+            for pr in snapshot.pull_requests
+            if pr.actor_id in repository_policy.enqueue.dependency_identity_ids
+        }
         group_areas = new_candidate and not any(
             entry.owner_review_required for entry in eligible_entries
         )
@@ -439,6 +444,11 @@ def build_merge_train_dry_run_result(
         for entry in eligible_entries:
             if batch_size is not None and len(batch_entries) == batch_size:
                 deferred_reason = "waiting for the next candidate: maximum batch size reached"
+                break
+            if entry.number in dependency_numbers:
+                if not batch_entries:
+                    batch_entries.append(entry)
+                deferred_reason = "waiting for the next candidate: dependency update isolation"
                 break
             if entry.requires_individual_landing:
                 if not batch_entries:

@@ -1,6 +1,5 @@
 """Activate only new testing resources; retain the old recipient and unknown effects."""
 
-import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 import hmac
@@ -334,6 +333,14 @@ def preparation_resources(
     return resources, row.record_id
 
 
+def shared_read_only_binding(binding: SecretBinding) -> bool:
+    return bool(
+        binding.declared_secret_class == "shared_safe"
+        and binding.sharing_reason
+        and binding.sharing_reason.kind == "read_only_source"
+    )
+
+
 def runtime_values(
     store: PostgresRecordStore,
     root: Path,
@@ -391,11 +398,7 @@ def runtime_values(
             "testing",
         ):
             raise TestingActivationRefusal("Testing credentials must have lane-specific bindings.")
-        if (
-            binding.declared_secret_class == "shared_safe"
-            and binding.sharing_reason
-            and binding.sharing_reason.kind == "read_only_source"
-        ):
+        if shared_read_only_binding(binding):
             shared.add(key)
         elif binding.declared_secret_class not in {"testing", "non_prod"}:
             raise TestingActivationRefusal("A carried key can reach a live writable system.")
@@ -801,14 +804,10 @@ def inspect_new_resources(
         compose_name=resources.context,
         target_payload=payload,
     )
-    encoded = base64.b64encode(json.dumps(sorted(ports)).encode()).decode()
-    program = (
-        resources.script("readback")
-        + "\npython3 - "
-        + encoded
-        + " <<'LP_PORTS'\n"
-        + PORT_INSPECTION_PROGRAM
-        + "\nLP_PORTS\n"
+    from control_plane.host_package import host_schedule
+
+    program = host_schedule(
+        "activation", {"resources": resources.host_spec("readback"), "ports": sorted(ports)}
     )
     evidence = post_deploy.run_manual_data_schedule(
         host=host,
@@ -956,8 +955,14 @@ class TestingActivationAdapter:
         return replacement
 
     def verify_provider(self, record: TestingActivationRecord) -> None:
+        self.verify_compose_provider(record)
+
+    def verify_compose_provider(
+        self, record: TestingActivationRecord, *, values: dict[str, str] | None = None
+    ) -> None:
         resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
-        values = runtime_values(self.store, self.root, record, resources)
+        if values is None:
+            values = runtime_values(self.store, self.root, record, resources)
         expected = json.loads(record.compose_source)
         for volume in expected["volumes"].values():
             volume["external"] = True

@@ -55,6 +55,7 @@
     "storedRecordPreflight": "docs/stored-record-preflight.md",
     "laneServiceRestart": "docs/lane-service-restart.md",
     "records": "docs/records.md",
+    "hostProgramsPackage": "docs/host-program-package.md",
     "secrets": "docs/secrets.md",
     "testingLocalConsumer": "docs/testing-local-consumer.md",
     "testingLocalCredentials": "docs/testing-local-credentials.md",

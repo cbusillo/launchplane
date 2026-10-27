@@ -447,6 +447,16 @@ class GenericWebTestingInputsTests(unittest.TestCase):
             with self.assertRaisesRegex(TestingInputSafetyRefused, "policy is unavailable"):
                 self.execute(self.resolve(store))
 
+    def test_provider_rebinding_after_resolution_refuses_before_effects(self) -> None:
+        store = self.store()
+        target = self.resolve(store)
+        store.provider_target = store.provider_target.model_copy(
+            update={"provider_id": "other-provider"}
+        )
+        with self.assertRaises(ValueError):
+            self.execute(target)
+        self.assertTrue({"env", "image", "deploy"}.isdisjoint(self.events))
+
     def test_authority_change_after_resolution_refuses_before_effects(self) -> None:
         store = self.store()
         target = self.resolve(store)

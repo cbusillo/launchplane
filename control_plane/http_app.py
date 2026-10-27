@@ -31,6 +31,7 @@ import secrets
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import cache
+from importlib.metadata import version as distribution_version
 from urllib.parse import unquote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, MutableMapping
 from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
@@ -770,6 +771,7 @@ from control_plane.preview_override_authorization import (
     director_preview_snapshot_allowed,
 )
 from control_plane.product_testing_restore_policy import director_testing_storage_allowed
+from control_plane.testing_address_storage import testing_health_url_correction_allowed
 from control_plane import artifact_scan as control_plane_artifact_scan
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
@@ -4290,7 +4292,9 @@ def create_launchplane_fastapi_app(
             if isinstance(shared_record_store, PostgresRecordStore):
                 shared_record_store.close()
 
-    app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
+    app = _LaunchplaneFastAPI(
+        title="Launchplane API", version=distribution_version("launchplane"), lifespan=lifespan
+    )
     app.state.authz_policy_runtime = resolved_authz_policy_runtime
     app.add_middleware(BoundedRequestBodyMiddleware)
     enforce_human_policy_revalidation = False
@@ -12435,6 +12439,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        dry_run: bool = False,
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
         try:
@@ -12574,14 +12579,21 @@ def create_launchplane_fastapi_app(
         storage_update = director_conditional_write and director_testing_storage_allowed(
             existing_profile, profile
         )
+        health_url_correction = (director_conditional_write or dry_run) and (
+            testing_health_url_correction_allowed(existing_profile, profile)
+        )
         if director_conditional_write and not (
-            scan_activation or snapshot_activation or storage_update
+            scan_activation or snapshot_activation or storage_update or health_url_correction
         ):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
-                message="Director agents may conditionally change only scan activation, preview snapshot policy or testing storage requirements. Use product-config for preview settings.",
+                message=(
+                    "Director agents may conditionally change only scan activation, preview "
+                    "snapshot policy, testing storage requirements or health fallback corrections. "
+                    "Use product-config for preview settings."
+                ),
             )
         if profile.release_request != (
             existing_profile.release_request if existing_profile is not None else None
@@ -12679,6 +12691,25 @@ def create_launchplane_fastapi_app(
                         "the reviewed prelaunch-rebuild apply endpoint."
                     ),
                 )
+        if dry_run:
+            if not health_url_correction:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="testing_health_url_correction_required",
+                    message="Profile dry run supports only a testing health fallback correction.",
+                )
+            assert existing_profile is not None
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={"product_profile": profile.product},
+                result={
+                    "dry_run": True,
+                    "testing_health_url_correction": True,
+                    "profile_sha256": product_profile_record_sha256(existing_profile),
+                    "replacement_sha256": product_profile_record_sha256(profile),
+                },
+            )
         if scan_activation:
             try:
                 scan = await run_in_threadpool(
@@ -23253,6 +23284,7 @@ def create_launchplane_fastapi_app(
             action="preview_lifecycle.plan",
             product=plan_request.product,
             context=plan_request.context,
+            inherit_agent_read_role=director_agent_identity(identity),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -23369,6 +23401,16 @@ def create_launchplane_fastapi_app(
             action="preview_lifecycle.cleanup",
             product=cleanup_request.product,
             context=cleanup_request.context,
+            inherit_agent_read_role=False,
+        ) and (
+            cleanup_request.apply
+            or not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="preview_lifecycle.plan",
+                product=cleanup_request.product,
+                context=cleanup_request.context,
+                inherit_agent_read_role=director_agent_identity(identity),
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -23508,13 +23550,18 @@ def create_launchplane_fastapi_app(
         denied_actions_by_product: dict[str, str] = {}
         denied_profile: LaunchplaneProductProfileRecord | None = None
         denied_action = ""
+        required_actions = ("preview_lifecycle.plan",) + (
+            ("preview_lifecycle.cleanup",) if sweep_request.apply else ()
+        )
         for profile in requested_sweep_profiles:
-            for action in ("preview_lifecycle.plan", "preview_lifecycle.cleanup"):
+            for action in required_actions:
                 if not resolved_authz_policy_runtime.allows(
                     identity=identity,
                     action=action,
                     product=profile.product,
                     context=profile.preview.context,
+                    inherit_agent_read_role=director_agent_identity(identity)
+                    and not sweep_request.apply,
                 ):
                     denied_actions_by_product[profile.product] = action
                     if denied_profile is None:
@@ -23769,7 +23816,7 @@ def create_launchplane_fastapi_app(
                 )
                 resource_facts: dict[str, str] | None = None
                 if (
-                    profile.driver_id == "odoo"
+                    profile.driver_id in {"odoo", "generic-web"}
                     and observation.instance == "testing"
                     and facts.production_resources != "shared"
                 ):
@@ -23780,6 +23827,7 @@ def create_launchplane_fastapi_app(
                             product=profile.product,
                             context=observation.context,
                             now=store.disposable_lane_observation_time(),
+                            root=resolved_control_plane_root,
                         )
                     except NativeSourceAuthorizationDenied:
                         raise _launchplane_http_error(
@@ -25189,6 +25237,7 @@ def create_launchplane_fastapi_app(
             action="preview_desired_state.discover",
             product=desired_state_request.product,
             context=desired_state_request.context,
+            inherit_agent_read_role=director_agent_identity(identity),
         ):
             raise _launchplane_http_error(
                 status_code=403,

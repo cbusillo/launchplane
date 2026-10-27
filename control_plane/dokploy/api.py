@@ -1973,6 +1973,9 @@ def validate_dokploy_schedule_script(schedule_payload: JsonObject) -> int:
         from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 
         raise ScheduleMaterializationTooLarge()
+    from control_plane.dokploy.host_package import validate_bootstrap_scripts
+
+    validate_bootstrap_scripts(schedule_payload)
     return materialization_bytes
 
 

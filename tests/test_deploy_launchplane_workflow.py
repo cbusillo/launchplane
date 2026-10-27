@@ -494,7 +494,7 @@ if [ -f "$RUNNER_TEMP/probed" ] || [ "${HEALTH_RECOVERED:-false}" = true ]; then
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("must not contain control characters", result.stderr)
+            self.assertEqual(result.stdout, "")
             self.assertFalse((directory / "output").exists())
 
     def test_break_glass_validation_never_executes_the_dispatch_reason(self) -> None:

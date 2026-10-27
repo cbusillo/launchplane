@@ -749,6 +749,11 @@ def build_product_site_overview(
     warnings = tuple(warning for warning in (descriptor_warning,) if warning)
     if profile.preview.enabled:
         warnings += _preview_refresh_warnings(record_store, profile)
+    if preview_summary.untracked_observed_slugs:
+        warnings += (
+            f"{len(preview_summary.untracked_observed_slugs)} previews are present without a "
+            "current status. Check preview cleanup.",
+        )
     trust_state = _combine_trust_states(
         (summary.trust_state for summary in environment_summaries),
         fallback="recorded",

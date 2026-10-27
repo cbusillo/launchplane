@@ -216,9 +216,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         return result
 
     def execute_script(self, script: str) -> str:
-        program = script.partition("<<'LP_PREVIEW_SNAPSHOT'\n")[2].rsplit(
-            "\nLP_PREVIEW_SNAPSHOT", 1
-        )[0]
         output = io.StringIO()
         with (
             patch("pathlib.Path.home", return_value=self.root),
@@ -226,7 +223,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             patch("time.sleep"),
             redirect_stdout(output),
         ):
-            exec(compile(program, "<preview-snapshot-fixture>", "exec"), {})
+            from tests.support.host_package import execute_host_schedule
+
+            execute_host_schedule(script)
         return output.getvalue()
 
     def command(self, arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
@@ -839,6 +838,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             }
 
         with (
+            patch("control_plane.dokploy.host_package.ensure_schedule_host_package"),
             patch.object(
                 api,
                 "fetch_dokploy_target_payload",

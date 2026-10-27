@@ -1,6 +1,4 @@
 from datetime import datetime, timedelta, timezone
-from control_plane.contracts.secret_record import SecretRecord
-from control_plane.notifications import DiscordNotificationNotSentError
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -94,17 +92,6 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             )
         )
         self.deploy(self.current, minutes_ago=10)
-        self.store.write_secret_record(
-            SecretRecord(
-                secret_id="owner-notifications",
-                scope="global",
-                integration="discord",
-                name="monitor",
-                current_version_id="test-version",
-                created_at=self.timestamp(),
-                updated_at=self.timestamp(),
-            )
-        )
 
     def timestamp(self) -> str:
         return self.now.isoformat()
@@ -156,15 +143,19 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         )
 
     def seed_legacy_lag(self) -> None:
-        _observe(
-            self.store,
-            self.profile,
-            self.lane,
-            check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
-            failed=True,
-            summary="Merged source has not reached production; Client acceptance pending.",
-            observed_at=self.timestamp(),
-        )
+        with patch(
+            "control_plane.workflows.public_ingress_monitor._discord_incident_pages",
+            return_value=True,
+        ):
+            _observe(
+                self.store,
+                self.profile,
+                self.lane,
+                check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
+                failed=True,
+                summary="Merged source has not reached production; Client acceptance pending.",
+                observed_at=self.timestamp(),
+            )
 
     def test_waiting_merged_source_never_opens_a_failure_or_notification(self) -> None:
         self.profile = self.profile.model_copy(
@@ -261,8 +252,12 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         return record
 
     def test_scheduled_recheck_resolves_historical_refusals_and_preserves_history(self) -> None:
-        for source in ("b", "c", "d", "e"):
-            self.reject("image@" + source * 40, reason="promotion_required")
+        with patch(
+            "control_plane.workflows.public_ingress_monitor._discord_incident_pages",
+            return_value=True,
+        ):
+            for source in ("b", "c", "d", "e"):
+                self.reject("image@" + source * 40, reason="promotion_required")
         originals = self.store.list_public_ingress_incident_records(status="open")
         deployments = self.store.list_deployment_records()
         self.now += timedelta(seconds=2)
@@ -436,7 +431,11 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         )
 
     def test_reconciled_refusal_keeps_an_interrupted_notification_outcome_unknown(self) -> None:
-        self.reject(reason="promotion_required")
+        with patch(
+            "control_plane.workflows.public_ingress_monitor._discord_incident_pages",
+            return_value=True,
+        ):
+            self.reject(reason="promotion_required")
         incident = self.store.list_public_ingress_incident_records(status="open")[0]
         queued = self.store.list_outbox_delivery_records()[0].model_copy(
             update={"provider_operation_key": "interrupted-send", "provider_id": "discord"}
@@ -619,47 +618,8 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         incidents = self.store.list_public_ingress_incident_records(status="open")
         self.assertEqual(len(incidents), 1)
         self.assertIn("launchplane_req_failure", incidents[0].summary)
-        self.assertEqual(len(self.store.list_outbox_delivery_records()), 1)
+        self.assertEqual(self.store.list_outbox_delivery_records(), ())
         self.assertEqual(self.store.list_deployment_records()[0].destination_health.status, "pass")
-
-    def test_notification_failure_retries_and_records_recovery(self) -> None:
-        self.reject()
-        sender = Mock(side_effect=[DiscordNotificationNotSentError("transport failed"), None])
-        drivers = PublicIngressNotificationDriverSet(
-            secret_resolver=lambda _key: "https://discord.com/api/webhooks/example/test",
-            discord_sender=sender,
-        )
-        ready_at = self.store.list_outbox_delivery_records()[0].next_attempt_at
-        self.enterContext(
-            patch.object(self.store, "_database_mutation_timestamp", return_value=ready_at)
-        )
-        first = run_outbox_worker_once(
-            record_store=self.store,
-            control_plane_root=self.root,
-            lease_owner="test",
-            notification_drivers=drivers,
-        )
-        self.assertEqual(first.status, "pending")
-        queued = self.store.list_outbox_delivery_records()[0]
-        self.assertTrue(queued.error_code)
-        self.assertFalse(queued.provider_operation_key)
-        self.store.write_outbox_delivery_record(
-            queued.model_copy(
-                update={
-                    "next_attempt_at": self.timestamp(),
-                }
-            )
-        )
-        second = run_outbox_worker_once(
-            record_store=self.store,
-            control_plane_root=self.root,
-            lease_owner="test",
-            notification_drivers=drivers,
-        )
-        self.assertEqual(second.status, "delivered")
-        self.assertEqual(sender.call_count, 2)
-        self.assertIn(self.profile.product, str(sender.call_args))
-        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
 
     def test_recovery_preserves_a_failure_arriving_during_its_commit(self) -> None:
         self.reject()

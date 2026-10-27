@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.contracts.secret_record import SecretRecord
-from control_plane.discord_incident_summary import SUMMARY_AGGREGATE_TYPE
 from control_plane.notifications import DiscordNotificationError, DISCORD_CRITICAL_ALERT_COLOR
 from control_plane.outbox_worker import (
     OutboxWorkerStepResult,
@@ -64,14 +63,14 @@ class DirectNotificationOutboxTests(unittest.TestCase):
             self._work(store, drivers, "2026-05-29T12:00:04Z")
             self.assertEqual(len(sent), 2)
 
-    def test_startup_keeps_critical_alert_and_deduplicates_unchanged_reminder_summary(self) -> None:
+    def test_startup_keeps_critical_alert_without_unchanged_reminders(self) -> None:
         store = self._backlog_store()
         self._probe(store, 503, "2026-05-29T12:00:00Z")
         self._probe(store, 503, "2026-05-29T18:01:00Z")
         self._probe(store, 503, "2026-05-30T00:02:00Z")
         self._probe(store, 503, "2026-05-30T00:03:00Z")
         queued = store.list_outbox_delivery_records(states=("pending",))
-        self.assertGreater(len(queued), 1)
+        self.assertEqual(len(queued), 1)
         store.write_outbox_delivery_record(
             queued[0].model_copy(
                 update={
@@ -93,18 +92,17 @@ class DirectNotificationOutboxTests(unittest.TestCase):
 
         self._drain_loop(store, drivers, "2026-05-30T00:10:00Z")
 
-        self.assertEqual(len(sent), 2)
+        self.assertEqual(len(sent), 1)
         self.assertIn(incident.incident_id, str(sent[0]))
         self.assertTrue(_is_red(sent[0]))
         attempts = store.list_public_ingress_notification_attempt_records()
         self.assertEqual(sum(attempt.delivery_status == "delivered" for attempt in attempts), 1)
-        self.assertFalse(_is_red(sent[1]))
         self._probe(store, 503, "2026-05-30T06:03:00Z")
         self._probe(store, 503, "2026-05-30T12:04:00Z")
         new_deliveries = store.list_outbox_delivery_records(states=("pending",))
         self._drain_loop(store, drivers, "2026-05-30T12:05:00Z")
-        self.assertTrue(new_deliveries)
-        self.assertEqual(len(sent), 2)
+        self.assertFalse(new_deliveries)
+        self.assertEqual(len(sent), 1)
 
     def test_startup_keeps_each_incident_and_destination_separate(self) -> None:
         store = self._backlog_store()
@@ -142,7 +140,7 @@ class DirectNotificationOutboxTests(unittest.TestCase):
         urgent = [payload for payload in sent if _is_red(payload)]
         quiet = [payload for payload in sent if not _is_red(payload)]
         self.assertEqual(len(urgent), len(incidents) * len(destinations))
-        self.assertEqual(len(quiet), len(incidents) * len(destinations))
+        self.assertFalse(quiet)
         for incident in incidents:
             self.assertEqual(
                 sum(incident.incident_id in str(payload) for payload in urgent), len(destinations)
@@ -161,7 +159,7 @@ class DirectNotificationOutboxTests(unittest.TestCase):
 
         self.assertEqual(len(sent), len(queued))
         self.assertEqual(sum(_is_red(payload) for payload in sent), 1)
-        self.assertEqual(sum(not _is_red(payload) for payload in sent), 1)
+        self.assertFalse(any(not _is_red(payload) for payload in sent))
 
     def test_startup_never_sends_resolved_incident_backlog(self) -> None:
         store = self._backlog_store()
@@ -180,10 +178,7 @@ class DirectNotificationOutboxTests(unittest.TestCase):
             self.assertEqual(completed.state, "delivered")
             self.assertFalse(completed.provider_operation_key)
         attempts = store.list_public_ingress_notification_attempt_records()
-        self.assertEqual(
-            len(attempts),
-            sum(delivery.aggregate_type != SUMMARY_AGGREGATE_TYPE for delivery in queued),
-        )
+        self.assertEqual(len(attempts), len(queued))
         self.assertTrue(all(attempt.delivery_status == "skipped" for attempt in attempts))
 
     def _backlog_store(self) -> PostgresRecordStore:
