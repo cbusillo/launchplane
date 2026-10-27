@@ -30,7 +30,6 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.workflows.product_onboarding import (
     apply_product_onboarding_manifest,
     build_product_profile_record,
-    plan_product_onboarding_authority_bundle,
 )
 from tests.support.workflows import load_workflow
 
@@ -281,29 +280,6 @@ def _assert_odoo_stable_lane_runtime_contract(
 
 
 class ProductOnboardingTests(unittest.TestCase):
-    def test_reapply_cannot_drop_unmigrated_preview_values(self) -> None:
-        manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
-        with TemporaryDirectory() as directory:
-            store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(directory) / "records.db")
-            )
-            self.addCleanup(store.close)
-            store.ensure_schema()
-            profile = build_product_profile_record(
-                manifest=manifest, updated_at=manifest.updated_at
-            )
-            profile.preview.override_env = {"COLOR": "preserved"}
-            store.write_product_profile_record(profile)
-            for operation in (
-                plan_product_onboarding_authority_bundle,
-                apply_product_onboarding_manifest,
-            ):
-                with self.subTest(operation=operation.__name__), self.assertRaises(ValueError):
-                    operation(record_store=store, manifest=manifest)
-                self.assertEqual(store.read_product_profile_record(profile.product), profile)
-                self.assertEqual(store.list_runtime_environment_records(), ())
-                self.assertEqual(store.list_secret_bindings(), ())
-
     def test_onboarding_refuses_preview_credentials_at_the_manifest_boundary(self) -> None:
         payload = _manifest_payload()
         preview = payload["preview"]

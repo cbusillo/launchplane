@@ -135,17 +135,6 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(product=product):
                 await self._request_config(product=product, refused=True)
 
-    async def test_preview_writes_wait_for_legacy_settings_migration(self) -> None:
-        for mode in ("dry-run", "apply"):
-            with self.subTest(mode=mode):
-                await self._request_config(
-                    mode=mode,
-                    target=("own-site", "preview"),
-                    legacy_preview=True,
-                    config_error="preview_settings_migration_pending",
-                )
-                await self._request_config(mode=mode, target=("own-site", "preview"))
-
     async def test_own_lane_and_context_work_for_both_drivers(self) -> None:
         for driver in ("generic-web", "odoo"):
             for mode in ("dry-run", "apply"):
@@ -262,7 +251,6 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
         add_foreign_claim_on_commit: bool = False,
         stored_lane: tuple[str, str] = ("own-site", "testing"),
         foreign_lane: tuple[str, str] = ("own-site", "testing"),
-        legacy_preview: bool = False,
     ) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(
@@ -276,8 +264,6 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
             )
             profile_payload["lanes"] = [{"context": stored_lane[0], "instance": stored_lane[1]}]
             profile = LaunchplaneProductProfileRecord.model_validate(profile_payload)
-            if legacy_preview:
-                profile.preview.override_env = {"SITE_MODE": "legacy"}
             store.write_product_profile_record(profile)
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(
@@ -374,9 +360,7 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
                         app, payload, idempotency_key="ownership-test"
                     )
                     if config_error:
-                        self.assertEqual(
-                            response.status_code, 409 if legacy_preview else 400, response.text
-                        )
+                        self.assertEqual(response.status_code, 400, response.text)
                         error_payload = response.json()
                         self.assertEqual(error_payload["error"]["code"], config_error)
                         self.assertIsInstance(error_payload["trace_id"], str)

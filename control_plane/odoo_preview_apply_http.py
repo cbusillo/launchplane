@@ -1298,7 +1298,6 @@ def _odoo_preview_service_environment(
             ),
             context_name=preview_profile.context,
             template_values=template_values,
-            legacy_values=preview_profile.override_env,
         )
     )
     environment_values = dict(preview_environment.values)

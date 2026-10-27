@@ -151,20 +151,15 @@ production-database, empty-fixture or coverage fallback.
 
 ## Activation order and recovery
 
-The managed-preview migration needs this structured exporter deployed first.
-The compatibility release retains the profile-archive startup target and reads
-existing legacy preview values below managed preview settings, with the same
-render validator. It restores no legacy writer. After a fresh exported snapshot
-passes the guarded migration, the activation release advances the startup target
-and removes that transitional reader. The migration's validation, ownership,
-conflict and atomicity guards remain unchanged in both releases.
-While legacy entries remain, the existing profile-write guard stays enforced
-and new preview configuration writes report `preview_settings_migration_pending`.
-The normal activation deployment clears those entries and enables the writes.
-Reapplying onboarding also waits for activation so it cannot replace the legacy
-values with manifest defaults. Idle-reservation retirement waits for the same
-activation; a held retired reservation can keep its disposable preview waiting
-in the meantime. Inspect those holds read-only and never remove them by hand.
+The managed-preview migration requires the structured exporter to be serving
+before activation. Its producer-first release retains the profile-archive
+startup target. After a fresh export passes the unchanged guarded migration,
+normal deployment advances to the idle-retirement target and removes the
+temporary legacy reader and write refusals. Preview settings then come from
+managed records; onboarding and configuration use their ordinary write paths.
+Migration validation, ownership, conflicts and atomicity remain enforced.
+Production-shaped PostgreSQL fixtures start before the migration, export both
+formats, restore them and check the migrated records and service startup.
 
 The exporter and candidate module must land and deploy first through the
 existing path. The Supervisor then dispatches this same deploy workflow on the
