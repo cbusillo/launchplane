@@ -506,7 +506,56 @@ def _build_product_incident_scope(
     trace_id: str,
     product: str,
     environment: str,
+    historical_context: str = "",
 ) -> ProductIncidentEnvironmentScope:
+    if historical_context:
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="product_environment.read",
+            product=product,
+            context=historical_context,
+            target=AuthorizationTarget(scope="instance", instances=(environment,)),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read this product's historical lane evidence.",
+            )
+        _require_database_read_store_methods(
+            record_store,
+            dependencies=dependencies,
+            trace_id=trace_id,
+            method_names=("read_product_profile_record",),
+            message="Historical lane evidence requires retained product profile reads.",
+        )
+        try:
+            profile = require_product_profile_read_store(record_store).read_product_profile_record(
+                product
+            )
+        except FileNotFoundError as error:
+            raise dependencies.http_error(
+                status_code=404, trace_id=trace_id, code="not_found", message=str(error)
+            ) from error
+        if (
+            not profile.is_active
+            or historical_context not in profile.historical_contexts
+            or environment not in {"testing", "prod"}
+        ):
+            raise dependencies.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Product has no retained historical context for this read.",
+            )
+        return ProductIncidentEnvironmentScope(
+            product=profile.product,
+            display_name=profile.display_name,
+            environment=environment,
+            context=historical_context,
+            instance=environment,
+            recorded_at=profile.updated_at,
+        )
     try:
         preview_scope = preview_fence_incident_scope(
             record_store=record_store, product=product, environment=environment
@@ -1294,6 +1343,7 @@ def register_product_environment_read_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
         limit: Annotated[int, Query(ge=1, le=500)] = 200,
         cursor: Annotated[str | None, Query(max_length=4096)] = None,
+        historical_context: Annotated[str, Query(max_length=200)] = "",
     ) -> LaneHealthHistoryResponse:
         trace_id = common.next_trace_id()
         scope = _build_product_incident_scope(
@@ -1303,6 +1353,7 @@ def register_product_environment_read_routes(
             trace_id=trace_id,
             product=product,
             environment=environment,
+            historical_context=historical_context,
         )
         _require_database_read_store_methods(
             record_store,
@@ -1340,6 +1391,7 @@ def register_product_environment_read_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
         status: Annotated[ProductIncidentStatusFilter, Query()] = "all",
         limit: Annotated[int, Query(ge=1, le=50)] = 20,
+        historical_context: Annotated[str, Query(max_length=200)] = "",
     ) -> ProductEnvironmentIncidentsResponse:
         trace_id = common.next_trace_id()
         incident_scope = _build_product_incident_scope(
@@ -1349,6 +1401,7 @@ def register_product_environment_read_routes(
             trace_id=trace_id,
             product=product,
             environment=environment,
+            historical_context=historical_context,
         )
         try:
             incident_store = require_product_incident_read_store(record_store)
@@ -1393,6 +1446,7 @@ def register_product_environment_read_routes(
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         observation_limit: Annotated[int, Query(ge=1, le=200)] = 100,
+        historical_context: Annotated[str, Query(max_length=200)] = "",
     ) -> ProductEnvironmentIncidentResponse:
         trace_id = common.next_trace_id()
         incident_scope = _build_product_incident_scope(
@@ -1402,6 +1456,7 @@ def register_product_environment_read_routes(
             trace_id=trace_id,
             product=product,
             environment=environment,
+            historical_context=historical_context,
         )
         try:
             incident_store = require_product_incident_read_store(record_store)
