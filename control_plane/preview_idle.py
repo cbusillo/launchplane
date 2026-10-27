@@ -10,6 +10,7 @@ import uuid
 
 import yaml
 
+from control_plane._odoo_copy_runtime_guard import preview_has_source_connection
 from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
     LaunchplaneIdempotencyRecord,
@@ -324,6 +325,151 @@ class PreviewIdleAdapter:
         )
 
 
+class PreviewCannotSleep(ValueError):
+    pass
+
+
+def require_preview_idle_binding(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    preview_id: str,
+    host: str,
+    token: str,
+    *,
+    inventory: tuple[tuple[str, str, str], ...] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if (
+        not profile.is_active
+        or not profile.preview.enabled
+        or not product_profile_uses_odoo_driver(profile)
+    ):
+        raise PreviewCannotSleep("Idle sleep is not enabled for this product.")
+    preview = store.read_preview_record(preview_id)
+    if preview.context != profile.preview.context or preview.anchor_repo not in {
+        profile.repository,
+        profile.repository.partition("/")[2],
+    }:
+        raise PreviewCannotSleep("Preview ownership does not match the product.")
+    generation_id = preview.serving_generation_id
+    if (
+        preview.state != "active"
+        or not generation_id
+        or preview.active_generation_id != generation_id
+    ):
+        raise PreviewCannotSleep("No current serving preview generation is recorded.")
+    generation = store.read_preview_generation_record(generation_id)
+    identity = generation.runtime_identity
+    if (
+        generation.state != "ready"
+        or generation.verify_status != "pass"
+        or identity is None
+        or identity.environment_kind != "preview"
+        or identity.product != profile.product
+        or identity.context != profile.preview.context
+        or identity.preview_id != preview_id
+        or identity.preview_generation_id != generation_id
+    ):
+        raise PreviewCannotSleep("The serving generation has not passed identity verification.")
+    slug = resolve_generic_web_preview_slug(
+        profile=profile,
+        preview_slug="",
+        anchor_pr_number=preview.anchor_pr_number,
+        label="Preview idle",
+    )
+    name = preview_application_name(
+        app_name_prefix=effective_preview_app_name_prefix(profile=profile), preview_slug=slug
+    )
+    matches = [
+        entry[1]
+        for entry in (
+            inventory
+            if inventory is not None
+            else complete_preview_compose_inventory(host=host, token=token)
+        )
+        if entry[2] == name
+    ]
+    if len(matches) != 1 or identity.instance != name:
+        raise PreviewCannotSleep("The preview target cannot be uniquely bound to its generation.")
+    authority_binding = require_disposable_lane(
+        store,
+        product=profile.product,
+        context=profile.preview.context,
+        instance=slug,
+        preview=preview,
+        preview_operation="refresh",
+    )
+    compose_id = matches[0]
+    for registered in store.list_dokploy_target_id_records():
+        if registered.target_id == compose_id:
+            if (registered.context, registered.instance) != (profile.preview.context, slug):
+                raise PreviewCannotSleep("The provider target is registered to another lane.")
+            target = store.read_dokploy_target_record(
+                context_name=registered.context, instance_name=registered.instance
+            )
+            if target.policies.staff_testing_hold is not None:
+                raise PreviewCannotSleep("Staff testing is holding this preview awake.")
+    if payload is None:
+        payload = api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=compose_id
+        )
+    declaration = yaml.safe_load(str(payload.get("composeFile") or ""))
+    if (
+        payload.get("name") != name
+        or payload.get("sourceType") != "raw"
+        or not isinstance(declaration, dict)
+        or PREVIEW_GATEWAY_SERVICE not in declaration.get("services", {})
+    ):
+        raise PreviewCannotSleep("The idle gateway is missing; an ordinary rebuild installs it.")
+    env = api.parse_dokploy_env_text(str(payload.get("env") or ""))
+    raw_identity = runtime_identity_env(identity)["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"]
+    if env.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON") != raw_identity:
+        raise PreviewCannotSleep(
+            "The provider runtime identity differs from the serving generation."
+        )
+    if preview_has_source_connection(env):
+        raise PreviewCannotSleep("Upstream or SSH connection settings remain on this preview.")
+    budget = next(
+        (
+            lane.odoo_testing_drill_storage
+            for lane in profile.lanes
+            if lane.context == profile.preview.context and lane.instance == "testing"
+        ),
+        None,
+    )
+    return {
+        "context": profile.preview.context,
+        "compose_name": name,
+        "compose_id": compose_id,
+        "server_id": str(payload.get("serverId") or ""),
+        "slug": slug,
+        "authority_binding": authority_binding,
+        "spec": {
+            "generation": {
+                "instance": "preview",
+                "namespace": str(payload.get("appName") or ""),
+            },
+            "compose_project": str(payload.get("appName") or ""),
+            "database_name": env.get("ODOO_DB_NAME", ""),
+            "health_path": DEFAULT_ODOO_RUNTIME_HEALTH_PATH,
+            "image_reference": identity.image_reference,
+            "preview_volumes": {
+                "data": env.get("ODOO_DATA_VOLUME", ""),
+                "database": env.get("ODOO_DB_VOLUME", ""),
+                "logs": env.get("ODOO_LOG_VOLUME", ""),
+            },
+            "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
+            "identity": raw_identity,
+            "usage_only": True,
+            "memory_floor": preview_host_memory_floor(
+                server_id=str(payload.get("serverId") or ""),
+                record_store=store,
+            ),
+            "disk_reserve": budget.reserve_bytes if budget else 0,
+        },
+    }
+
+
 class PreviewIdleScheduler:
     def __init__(self, store: PostgresRecordStore, *, control_plane_root: Path) -> None:
         self.store, self.control_plane_root = store, control_plane_root
@@ -355,131 +501,10 @@ class PreviewIdleScheduler:
     def _bind(
         self, profile: LaunchplaneProductProfileRecord, preview_id: str, host: str, token: str
     ) -> dict[str, Any] | None:
-        if (
-            not profile.is_active
-            or not profile.preview.enabled
-            or not product_profile_uses_odoo_driver(profile)
-        ):
+        try:
+            return require_preview_idle_binding(self.store, profile, preview_id, host, token)
+        except PreviewCannotSleep:
             return None
-        preview = self.store.read_preview_record(preview_id)
-        if preview.context != profile.preview.context or preview.anchor_repo not in {
-            profile.repository,
-            profile.repository.partition("/")[2],
-        }:
-            return None
-        generation_id = preview.serving_generation_id
-        if (
-            preview.state != "active"
-            or not generation_id
-            or preview.active_generation_id != generation_id
-        ):
-            return None
-        generation = self.store.read_preview_generation_record(generation_id)
-        identity = generation.runtime_identity
-        if (
-            generation.state != "ready"
-            or generation.verify_status != "pass"
-            or identity is None
-            or identity.environment_kind != "preview"
-            or identity.product != profile.product
-            or identity.context != profile.preview.context
-            or identity.preview_id != preview_id
-            or identity.preview_generation_id != generation_id
-        ):
-            return None
-        slug = resolve_generic_web_preview_slug(
-            profile=profile,
-            preview_slug="",
-            anchor_pr_number=preview.anchor_pr_number,
-            label="Preview idle",
-        )
-        name = preview_application_name(
-            app_name_prefix=effective_preview_app_name_prefix(profile=profile), preview_slug=slug
-        )
-        matches = [
-            entry[1]
-            for entry in complete_preview_compose_inventory(host=host, token=token)
-            if entry[2] == name
-        ]
-        if len(matches) != 1 or identity.instance != name:
-            return None
-        authority_binding = require_disposable_lane(
-            self.store,
-            product=profile.product,
-            context=profile.preview.context,
-            instance=slug,
-            preview=preview,
-            preview_operation="refresh",
-        )
-        compose_id = matches[0]
-        for registered in self.store.list_dokploy_target_id_records():
-            if registered.target_id == compose_id:
-                if (registered.context, registered.instance) != (profile.preview.context, slug):
-                    return None
-                target = self.store.read_dokploy_target_record(
-                    context_name=registered.context, instance_name=registered.instance
-                )
-                if target.policies.staff_testing_hold is not None:
-                    return None
-        payload = api.fetch_dokploy_target_payload(
-            host=host, token=token, target_type="compose", target_id=compose_id
-        )
-        declaration = yaml.safe_load(str(payload.get("composeFile") or ""))
-        if (
-            payload.get("name") != name
-            or payload.get("sourceType") != "raw"
-            or not isinstance(declaration, dict)
-            or PREVIEW_GATEWAY_SERVICE not in declaration.get("services", {})
-        ):
-            return None
-        env = api.parse_dokploy_env_text(str(payload.get("env") or ""))
-        raw_identity = runtime_identity_env(identity)["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"]
-        if env.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON") != raw_identity:
-            return None
-        if any(
-            value and key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
-            for key, value in env.items()
-        ):
-            return None
-        budget = next(
-            (
-                lane.odoo_testing_drill_storage
-                for lane in profile.lanes
-                if lane.context == profile.preview.context and lane.instance == "testing"
-            ),
-            None,
-        )
-        return {
-            "context": profile.preview.context,
-            "compose_name": name,
-            "compose_id": compose_id,
-            "server_id": str(payload.get("serverId") or ""),
-            "slug": slug,
-            "authority_binding": authority_binding,
-            "spec": {
-                "generation": {
-                    "instance": "preview",
-                    "namespace": str(payload.get("appName") or ""),
-                },
-                "compose_project": str(payload.get("appName") or ""),
-                "database_name": env.get("ODOO_DB_NAME", ""),
-                "health_path": DEFAULT_ODOO_RUNTIME_HEALTH_PATH,
-                "image_reference": identity.image_reference,
-                "preview_volumes": {
-                    "data": env.get("ODOO_DATA_VOLUME", ""),
-                    "database": env.get("ODOO_DB_VOLUME", ""),
-                    "logs": env.get("ODOO_LOG_VOLUME", ""),
-                },
-                "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
-                "identity": raw_identity,
-                "usage_only": True,
-                "memory_floor": preview_host_memory_floor(
-                    server_id=str(payload.get("serverId") or ""),
-                    record_store=self.store,
-                ),
-                "disk_reserve": budget.reserve_bytes if budget else 0,
-            },
-        }
 
     def run_once(self) -> None:
         host, token = source.read_dokploy_config(control_plane_root=self.control_plane_root)

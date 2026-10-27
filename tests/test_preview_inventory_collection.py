@@ -70,6 +70,8 @@ class PreviewInventoryCollectionTests(unittest.TestCase):
         self.assertEqual(second.preview_slugs, ("pr-7",))
         self.assertEqual(second.product, self.profile.product)
         self.assertEqual(second.repository, self.profile.repository)
+        self.assertEqual(second.sleep_observations[0].slug, second.preview_slugs[0])
+        self.assertEqual(second.sleep_observations[0].state, "cannot_sleep")
         third = self.collect([{"environments": [{}]}])[0]
         self.assertEqual(third.status, "fail")
         self.assertNotEqual(third.scan_id, second.scan_id)
@@ -138,10 +140,18 @@ class PreviewInventoryCollectionTests(unittest.TestCase):
                 "control_plane.preview_inventory_collection._complete_preview_compose_inventory",
                 return_value=(("env", "compose", f"{prefix}-pr-9"),),
             ),
+            patch(
+                "control_plane.preview_sleep_evidence.api.dokploy_request",
+                return_value={"composeFile": "services: {web: {}}"},
+            ),
         ):
             collect_preview_inventory(control_plane_root=self.root, record_store=self.store)
         self.assertEqual(
             self.store.list_preview_inventory_scan_records()[0].preview_slugs, ("pr-9",)
+        )
+        self.assertEqual(
+            self.store.list_preview_inventory_scan_records()[0].sleep_observations[0].state,
+            "cannot_sleep",
         )
 
     def test_shutdown_does_not_write_a_scan(self) -> None:
