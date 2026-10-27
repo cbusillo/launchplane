@@ -5746,27 +5746,49 @@ Downgrade refuses. Images from before this revision reject it, so an image
 rollback across it needs this image or a later one; the hostname compatibility
 image above is no longer a rollback target once the archive has run.
 
+
+### Preview idle reservation retirement
+
+Release revision `b0a2c4e6f8d1` follows the managed preview-settings migration. It
+removes only the retired preview-idle scope's stop/start reservations and
+original-intent records. A matching database constraint refuses an overlapping
+old scheduler's late reservation writes before effects. Other operations, target
+fences and preview data are unchanged. The gateway's persisted receipt and
+current lane observation recover sleep and wake under the existing executor lock; see
+[preview idle behavior](clean-testing-snapshots.md).
+
+Normal migration selects `b1b3d5f7a9e2` for an already-applied delivery-drop
+branch, `b2c4e6a8f0d3` for an already-applied hostname-only branch, and
+`f87c72d690ab` for their already-applied compatibility joins. These empty joins
+retain each branch's existing approval boundary. They never activate the
+prepared delivery drop or hostname transition on an unapproved database.
+An explicit approved delivery-drop request from `b0a2c4e6f8d1` joins at
+`b1b3d5f7a9e2`; hostname-only histories continue to refuse that request.
+Downgrade cannot reconstruct deleted idle intents. An image rollback to code
+that still requires them cannot recover a sleeping preview from its gateway
+receipt alone; use this image or a later one.
+
 ### Managed preview settings migration
 
-The release migration target is now `b8f2c4d6e0a7`, immediately after the
+The managed preview-settings revision is `b8f2c4d6e0a7`, immediately after the
 non-runtime profile archive. It moves profile preview overrides into each
 product's existing runtime-environment records at instance `preview`, and removes
 the old profile values atomically. Existing testing and production records stay
 unchanged. See [shared preview settings](preview-settings.md) for
 configuration and conflict handling.
 
-The held delivery-table drop remains held. Release migration joins only branches
-already applied: `b9a3d5e7f1b8` for retirement, `c0b4e6f8a2c9` for hostnames,
-and `c1c5f7a9b3d0` for their compatibility join. The default route from the archive
-revision never applies either unrelated branch. Explicitly requesting the held
-drop from the preview-settings revision still uses its separately approved path,
-joining at `b9a3d5e7f1b8`; a hostname-only source still refuses that request.
+An explicit `b8f2c4d6e0a7` migration target retains its historical joins:
+`b9a3d5e7f1b8` for retirement, `c0b4e6f8a2c9` for hostnames, and
+`c1c5f7a9b3d0` for their compatibility join. Its route from the archive never
+applies either unrelated branch. An approved delivery-drop request from this
+revision joins at `b9a3d5e7f1b8`; hostname-only histories still refuse it.
+Current release routing continues through idle retirement as described above.
 
 Downgrade retains the migrated values. An older image that does not recognize
 these revisions or still renders profile overrides is not a rollback target for
 this change; retain a compatible image or the pre-migration backup and matching
-image. Schema initialization's head fence now names the preview compatibility
-join and continues rejecting unreviewed successors.
+image. Schema initialization's head fence continues rejecting unreviewed
+successors after the idle-retirement transition above.
 
 This data migration uses the shared preview validator. A restored database from
 before this revision must pass the validator in the selected image; later

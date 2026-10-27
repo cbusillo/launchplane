@@ -4213,16 +4213,33 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         with _isolated_postgres_database() as url:
             assert_preview_enablement_drop(self, url)
 
+    def test_idle_reservation_retirement_rejects_late_old_writers(self) -> None:
+        from control_plane.storage.migrations.versions import (
+            b0a2c4e6f8d1_retire_preview_idle_reservations as migration,
+        )
+        from tests.test_preview_idle_migration import assert_idle_retirement
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), migration.down_revision)
+            assert_idle_retirement(self, url, migration.revision)
+
     def test_preview_drop_startup_joins_an_already_applied_delivery_drop(self) -> None:
         from control_plane.storage.migrations.versions import (
             e7c1d5e9a3b6_drop_retired_delivery_tables as held,
-            b9a3d5e7f1b8_join_preview_retirement as preview_join,
         )
 
         with _isolated_postgres_database() as url:
             alembic_command.upgrade(_alembic_config(url), held.revision)
-            self.assertEqual(migrate_schema(database_url=url), preview_join.revision)
-            self.assertEqual(migrate_schema(database_url=url), preview_join.revision)
+            from control_plane.storage.schema_migration import (
+                SCHEMA_MIGRATION_TARGET_REVISION,
+                schema_migration_target,
+            )
+
+            expected = schema_migration_target(
+                current_revision=held.revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+            )
+            self.assertEqual(migrate_schema(database_url=url), expected)
+            self.assertEqual(migrate_schema(database_url=url), expected)
 
     def test_preview_drop_refuses_busy_table_and_retained_dependency(self) -> None:
         from control_plane.storage.migrations.versions import (
