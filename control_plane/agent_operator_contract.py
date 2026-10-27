@@ -107,7 +107,7 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
-        "POST",
+        "GET",
         "/v1/products/{product}/environments/{environment}/aggregate-counts",
         "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
         ("service_api",),

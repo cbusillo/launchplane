@@ -2,7 +2,7 @@
 title: Read-only counts on disposable Odoo snapshots
 ---
 
-`POST /v1/products/{product}/environments/testing/aggregate-counts` returns
+`GET /v1/products/{product}/environments/testing/aggregate-counts` returns
 four integers from the lane's frozen [Q788 clean snapshot](clean-testing-snapshots.md).
 It accepts only `table`, `key`, optional `partition`, and `active` (default
 `active`) column identifiers. It accepts no SQL, filters, database, host or

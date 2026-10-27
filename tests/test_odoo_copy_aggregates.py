@@ -8,6 +8,7 @@ import sys
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 import unittest
+from urllib.parse import urlencode
 from unittest.mock import Mock, patch
 
 from fastapi import FastAPI, HTTPException
@@ -281,6 +282,7 @@ class AggregateRouteTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         path = reader.ROUTE.format(product=fixture.profile.product, environment="testing")
+        path += "?" + urlencode(QUERY.model_dump(exclude_none=True))
         evidence = reader.AggregateEvidence(
             product=fixture.profile.product,
             context=fixture.context,
@@ -296,32 +298,29 @@ class AggregateRouteTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         with patch.object(reader, "read_aggregates", return_value=evidence) as read:
-            response = await request(app, "POST", path, payload=QUERY.model_dump())
+            response = await request(app, "GET", path)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
             self.assertEqual(allowed.call_args.kwargs["target"].instances, ("testing",))
             read.reset_mock()
-            for invalid in (path.replace("/testing/", "/prod/"), path + "?host=prod"):
-                self.assertEqual(
-                    (await request(app, "POST", invalid, payload=QUERY.model_dump())).status_code,
-                    400,
-                )
+            self.assertEqual(
+                (await request(app, "GET", path.replace("/testing/", "/prod/"))).status_code,
+                400,
+            )
+            self.assertEqual((await request(app, "GET", path + "&host=prod")).status_code, 422)
             self.assertEqual(
                 (
                     await request(
                         app,
-                        "POST",
-                        path,
-                        payload={**QUERY.model_dump(), "sql": "SELECT * FROM res_users"},
+                        "GET",
+                        path + "&" + urlencode({"sql": "SELECT * FROM res_users"}),
                     )
                 ).status_code,
                 422,
             )
             allowed.return_value = False
-            self.assertEqual(
-                (await request(app, "POST", path, payload=QUERY.model_dump())).status_code, 403
-            )
+            self.assertEqual((await request(app, "GET", path)).status_code, 403)
             read.assert_not_called()
             allowed.return_value = True
             without_testing = fixture.profile.model_copy(
@@ -333,14 +332,12 @@ class AggregateRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             store.read_product_profile_record.return_value = without_testing
             store.list_product_profile_records.return_value = (without_testing,)
-            self.assertEqual(
-                (await request(app, "POST", path, payload=QUERY.model_dump())).status_code, 400
-            )
+            self.assertEqual((await request(app, "GET", path)).status_code, 400)
             read.assert_not_called()
             store.read_product_profile_record.return_value = fixture.profile
             store.list_product_profile_records.return_value = (fixture.profile,)
             read.side_effect = ValueError("private database credentials")
-            response = await request(app, "POST", path, payload=QUERY.model_dump())
+            response = await request(app, "GET", path)
             self.assertEqual(response.status_code, 503)
             self.assertNotIn("private", response.text)
 
@@ -385,7 +382,7 @@ class AggregateClientTests(unittest.TestCase):
                         }
                     ),
                     "validate_service_url": Mock(),
-                    "request_launchplane": Mock(side_effect=failure),
+                    "request_launchplane_read": Mock(side_effect=failure),
                     "public_trace_id": lambda value: value,
                 }
                 output = StringIO()

@@ -35,11 +35,11 @@ def main() -> int:
         transport["validate_service_url"](settings["service_url"])
         if not settings["token"]:
             parser.error("The existing operator credential is not configured.")
-        raw = transport["request_launchplane"](
+        raw = transport["request_launchplane_read"](
             service_url=settings["service_url"],
             path=ROUTE.format(product=quote(args.product, safe=""), environment="testing"),
             settings=settings,
-            body=query.model_dump(mode="json"),
+            query=query.model_dump(mode="json", exclude_none=True),
             timeout=180,
         )
         response = AggregateCountsResponse.model_validate(raw)

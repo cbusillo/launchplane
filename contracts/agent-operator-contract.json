@@ -50,7 +50,7 @@
         "identity_dependencies": [
           "read_identity"
         ],
-        "method": "POST",
+        "method": "GET",
         "modes": [
           "read"
         ],
@@ -67,7 +67,7 @@
           "503"
         ],
         "reviewed_evidence": [],
-        "schema_fingerprint_sha256": "7df0e2e0cae3b0cbcd7f95be9f8db97598ff3057fdef085880c528b27b949b92",
+        "schema_fingerprint_sha256": "e64b3445dbb164f7f3ea85f4c6f98dac50de39d247bd3b679a4add451e4416bf",
         "supported_surfaces": [
           "service_api"
         ]
@@ -1218,8 +1218,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "5e366881ca599af871a396548e84c70903141dff"
+    "source_commit_sha": "831af09b00e890cc86b8008cf1cc6ff98fc8f308"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "ff2576f6f026ede52f687c1ff98ef79577bdb699095c9c70ba8d7b806ac073a9"
+  "semantic_digest_sha256": "1b6d8598a079a31cd67cbe9b2d8214575a68bca72a2af983175be2864166ccd8"
 }

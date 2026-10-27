@@ -529,15 +529,14 @@ def register_odoo_runtime_read_routes(
     def read_aggregate_counts(
         product: str,
         environment: str,
-        query: aggregates.AggregateQuery,
-        request: Request,
+        query: Annotated[aggregates.AggregateQuery, Query()],
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         response: Response,
     ) -> AggregateCountsResponse:
         trace_id = common.next_trace_id()
         response.headers["Cache-Control"] = "no-store"
-        if environment != "testing" or request.query_params:
+        if environment != "testing":
             raise common.http_error(
                 status_code=400,
                 trace_id=trace_id,
@@ -583,7 +582,7 @@ def register_odoo_runtime_read_routes(
     app.add_api_route(
         aggregates.ROUTE,
         read_aggregate_counts,
-        methods=["POST"],
+        methods=["GET"],
         response_model=AggregateCountsResponse,
         operation_id="read_odoo_copy_aggregates",
         summary="Read bounded counts from a qualified sanitized testing copy without data writes",
