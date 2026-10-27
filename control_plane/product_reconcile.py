@@ -10,7 +10,6 @@ the plan on its request.
 
 from __future__ import annotations
 
-from control_plane.database_maintenance import maintenance_operation
 from control_plane.workflows.preview_resource_destroy import PREVIEW_CLEANUP_SAFETY_UNKNOWN
 from control_plane.workflows.generic_web_post_deploy import declares_verireel_testing_extension
 
@@ -3217,7 +3216,6 @@ def reconcile_reservation_scope(product: str) -> str:
     return f"{RECONCILE_SOURCE}:{product.strip()}"
 
 
-@maintenance_operation
 def request_product_reconcile_sweep(
     record_store: ProductReconcileStore,
     now: str,

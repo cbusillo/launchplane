@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from control_plane.database_maintenance import maintenance_operation
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,7 +62,6 @@ class OutboxWorkerStepResult:
     error_code: str = ""
 
 
-@maintenance_operation
 def run_outbox_worker_once(
     *,
     record_store: OutboxWorkerStore,

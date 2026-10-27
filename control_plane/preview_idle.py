@@ -1,4 +1,3 @@
-from control_plane.database_maintenance import maintenance_operation
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 import logging
@@ -292,7 +291,6 @@ class PreviewIdleScheduler:
         except PreviewCannotSleep:
             return None
 
-    @maintenance_operation
     def run_once(self) -> None:
         host, token = source.read_dokploy_config(control_plane_root=self.control_plane_root)
         for profile in self.store.list_product_profile_records():

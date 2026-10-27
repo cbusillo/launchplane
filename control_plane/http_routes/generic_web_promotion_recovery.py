@@ -1,6 +1,6 @@
 """Scoped admin recovery with separate inspection and reviewed apply."""
 
-from control_plane.database_maintenance import maintenance_thread
+import asyncio
 from collections.abc import Callable
 from typing import Annotated
 from typing import Literal
@@ -97,7 +97,7 @@ def register_promotion_recovery_routes(
         inspect_provider: bool = True,
     ) -> PromotionInspection:
         try:
-            return await maintenance_thread(
+            return await asyncio.to_thread(
                 inspect_promotion if step == "promote" else inspect_rollback_drill,
                 store=store,
                 root=dependencies.control_plane_root,
@@ -199,7 +199,7 @@ def register_promotion_recovery_routes(
             "reason_digest": reason_digest,
             "action": inspection.action,
         }
-        adoption = await maintenance_thread(
+        adoption = await asyncio.to_thread(
             adopt_inspected_promotion,
             store=store,
             inspection=inspection,

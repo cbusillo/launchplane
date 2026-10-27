@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from control_plane.database_maintenance import maintenance_operation
-
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -508,7 +506,6 @@ class OdooTestingDrillScheduler:
                 _LOGGER.exception("Odoo testing drill schedule pass unavailable")
             self.stop_event.wait(DRILL_POLL_SECONDS)
 
-    @maintenance_operation
     def run_once(self) -> None:
         now = self.clock()
         for profile in self.store.list_product_profile_records(driver_id="odoo"):

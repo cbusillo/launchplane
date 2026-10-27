@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from control_plane.database_maintenance import maintenance_operation
-
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -168,7 +166,6 @@ class _PreviewScheduler:
             reservation, _failure = heartbeat.stop()
             self.store.release_mutation_reservation(reservation=reservation)
 
-    @maintenance_operation
     def run_once(self) -> bool:
         key = str(self.slot())
         if self._read(key) is not None:

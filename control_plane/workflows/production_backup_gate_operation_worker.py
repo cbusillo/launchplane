@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from control_plane.database_maintenance import maintenance_operation
-
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
@@ -159,7 +157,6 @@ class ProductionBackupGateOperationReconcileResult:
     reconciled_operation_ids: tuple[str, ...]
 
 
-@maintenance_operation
 def run_production_backup_gate_operation_worker_once(
     *,
     record_store: ProductionBackupGateOperationWorkerStore,
@@ -217,7 +214,6 @@ def run_production_backup_gate_operation_worker_once(
     )
 
 
-@maintenance_operation
 def reconcile_stale_production_backup_gate_operation_records(
     *,
     record_store: ProductionBackupGateOperationWorkerStore,

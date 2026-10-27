@@ -1,4 +1,3 @@
-from control_plane.database_maintenance import maintenance_thread
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
     PromotionTargetChanged,
@@ -1015,7 +1014,7 @@ def build_generic_web_write_route_handlers(
             cancellation: asyncio.CancelledError | None = None
             try:
                 refresh_task = asyncio.create_task(
-                    maintenance_thread(
+                    asyncio.to_thread(
                         apply_generic_web_preview_refresh_result,
                         control_plane_root=dependencies.control_plane_root,
                         record_store=record_store,
@@ -1153,7 +1152,7 @@ def build_generic_web_write_route_handlers(
             cancellation: asyncio.CancelledError | None = None
             try:
                 destroy_task = asyncio.create_task(
-                    maintenance_thread(
+                    asyncio.to_thread(
                         apply_generic_web_preview_destroy_result,
                         control_plane_root=dependencies.control_plane_root,
                         record_store=record_store,
@@ -1960,7 +1959,7 @@ def build_generic_web_write_route_handlers(
             return response
 
         try:
-            return await asyncio.shield(maintenance_thread(complete_verification))
+            return await asyncio.shield(asyncio.to_thread(complete_verification))
         except (ValueError, click.ClickException) as error:
             raise dependencies.http_error(
                 status_code=400,

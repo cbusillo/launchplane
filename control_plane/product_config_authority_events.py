@@ -6,7 +6,6 @@ product build, workflow, checkout, or caller-supplied configuration is executed.
 
 from __future__ import annotations
 
-from control_plane.database_maintenance import maintenance_operation
 import base64
 import binascii
 import hashlib
@@ -520,7 +519,6 @@ class ConfigAuthorityEventStore(Protocol):
     ) -> tuple[RepositoryInventoryRecord, ...]: ...
 
 
-@maintenance_operation
 def run_product_config_authority_once(
     record_store: ConfigAuthorityEventStore,
     lease_owner: str,

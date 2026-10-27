@@ -5625,7 +5625,7 @@ Only after that proof and the recorded approval, the approved host/image runs:
 uv run python -m control_plane.storage.schema_migration --target-revision e7c1d5e9a3b6
 ```
 
-The existing serialized migration helper holds the schema-migration advisory lock.
+The existing serialized migration helper holds the deployment advisory lock.
 The revision takes non-waiting exclusive locks on all existing retiring tables
 before dropping any, uses restrictive drops, and never cascades into an unexpected
 dependent object. A busy table or retained database dependency aborts the
@@ -5854,72 +5854,3 @@ carried Client decisions. Both additive fields are omitted when empty, so its
 ordinary carries remain readable by the preceding image. Activation uses the
 same read contract unchanged. Do not roll activation back past this compatible
 image after any populated carry has been saved.
-
-### Bounded database maintenance barrier
-
-The self-deploy release drain is not a database maintenance barrier. It covers
-selected provider operations. Its zero blockers do not prove zero writers.
-`control_plane.database_maintenance` adds a separate bounded barrier for
-Launchplane's own PostgreSQL database. It does not run a backup or a migration.
-Q777's backup, actual isolated restore, complete comparison, rehearsal and
-exact-image checks remain required before the held retirement is applied.
-
-Every PostgreSQL record-store transaction takes the shared maintenance lock.
-HTTP requests, background provider threads, worker turns and scheduler turns
-also retain shared operation locks across their transactions and provider
-calls. Draining refuses new operation scopes while admitted work settles.
-The controller obtains the exclusive lock only after those scopes and
-transactions finish, then holds the schema-migration and self-deploy dispatch
-locks. Transaction admission refuses immediately during the hold; it does not
-leave lease holders waiting for their leases to expire. PostgreSQL's
-`transaction_timeout` ends the keeper session at the absolute deadline, even
-if its Python controller stops making progress. This requires PostgreSQL 17
-or newer. The current supported server is PostgreSQL 18.
-
-The deployment barrier adds an expiring marker to Launchplane's own provider
-environment. Normal self-deploy, its repair path and direct emergency rollback
-refuse that marker before their first provider write. The controller requires
-`autoDeploy` already disabled, complete deployment history with no queued or
-running deployment, and no active self-deploy workflow. This derived marker
-lets emergency rollback see the hold while the service is unavailable; it is
-not product configuration or a credential. Release removes only its own exact
-marker and preserves other environment settings.
-
-After this source is deployed on every API and worker replica, an admitted
-operator can run the following inside the verified Launchplane API image on
-its approved host. The database URL and provider credentials stay in their
-existing stores. Supply the actual target and source repository from current
-service/provider records, never from a checked-in example:
-
-```bash
-uv run python -m control_plane.database_maintenance_cli plan \
-  --target-id '<verified-own-compose-target>' \
-  --repository '<verified-own-source-repository>' \
-  --duration-seconds 900 --drain-seconds 60 --reason '<approved-maintenance-reason>'
-
-uv run python -m control_plane.database_maintenance_cli hold \
-  --target-id '<verified-own-compose-target>' \
-  --repository '<verified-own-source-repository>' \
-  --duration-seconds 900 --drain-seconds 60 --reason '<approved-maintenance-reason>'
-```
-
-The held receipt includes the unique hold id, keeper backend and deadline.
-Use another process in that same verified image for bounded observations and
-release:
-
-```bash
-uv run python -m control_plane.database_maintenance_cli status
-uv run python -m control_plane.database_maintenance_cli release --hold-id '<exact-hold-id>'
-uv run python -m control_plane.database_maintenance_cli status
-```
-
-A release request is not completed release. Require the final record to say
-`released`, `exclusive_gate_observed` to be false, the provider marker to be
-absent, and normal service and worker readback to pass. The deadline is an
-abort boundary, not permission to continue a backup, restore rehearsal or
-migration after the hold expires. Do not apply the held migration with this
-barrier alone: its existing standalone helper's separate store seeding and
-connection lifetime still need the coordinated migration/verification path.
-The full writer census, observation of all installed replicas, backup custody,
-isolated placement and restored-data proof remain independent qualification
-requirements on #2437. No Client business database belongs to this command.

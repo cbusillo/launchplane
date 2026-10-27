@@ -5,7 +5,6 @@ unknown trigger outcomes keep their existing original-key recovery protocol.
 The continuation observes; it never replays capture, upgrade or retirement.
 """
 
-from control_plane.database_maintenance import maintenance_operation
 import logging
 from collections.abc import Callable
 from pathlib import Path
@@ -176,7 +175,6 @@ def remote_job_status(
     )
 
 
-@maintenance_operation
 def resume_rehearsals(
     store: PostgresRecordStore, root: Path, *, stop_event: Event | None = None
 ) -> tuple[str, ...]:

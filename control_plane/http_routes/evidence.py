@@ -1,10 +1,10 @@
-from control_plane.database_maintenance import maintenance_thread
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Protocol, cast
 
+import asyncio
 import click
 from fastapi import Depends, Header, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -701,7 +701,7 @@ def register_evidence_write_routes(
             records = {
                 str(key): str(value)
                 for key, value in (
-                    await maintenance_thread(
+                    await asyncio.to_thread(
                         _write_active_product_preview_evidence,
                         record_store=evidence_store,
                         product=preview_generation_request.product,
@@ -814,7 +814,7 @@ def register_evidence_write_routes(
             records = {
                 str(key): str(value)
                 for key, value in (
-                    await maintenance_thread(
+                    await asyncio.to_thread(
                         _write_active_product_preview_evidence,
                         record_store=evidence_store,
                         product=preview_destroyed_request.product,

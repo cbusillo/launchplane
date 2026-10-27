@@ -1,6 +1,5 @@
 """Ask the Client to review a release when there is something new to check."""
 
-from control_plane.database_maintenance import maintenance_operation
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import argparse
@@ -69,7 +68,6 @@ def _client_release_requests_enabled(profile: LaunchplaneProductProfileRecord) -
     )
 
 
-@maintenance_operation
 def advance_release_invitations(
     *,
     store: object,
