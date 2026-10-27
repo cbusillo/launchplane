@@ -19,6 +19,10 @@ from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from control_plane.database_maintenance import require_no_other_clients
 from control_plane.database_maintenance_host import dump_application_name
 from control_plane.database_maintenance_host import RecoveryRequired
+from control_plane.database_maintenance_host import (
+    DATABASE_UNSAFE_EVENT,
+    DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
+)
 from control_plane import database_maintenance
 from sqlalchemy.exc import OperationalError
 from tempfile import TemporaryDirectory
@@ -41,8 +45,8 @@ class DatabaseMaintenanceIsolationTests(unittest.TestCase):
                 str(root),
             ]
             for mode, event in (
-                ("verify", "database_unsafe"),
-                ("unfence", "deployment_recovery_required"),
+                ("verify", DATABASE_UNSAFE_EVENT),
+                ("unfence", DEPLOYMENT_RECOVERY_REQUIRED_EVENT),
             ):
                 output = io.StringIO()
                 arguments = list(base)

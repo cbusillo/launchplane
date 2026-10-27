@@ -1,4 +1,6 @@
 from tests.support.auth import scoped_agent_test
+import asyncio
+import threading
 import base64
 import hashlib
 import json
@@ -17,6 +19,8 @@ from urllib.parse import (
 )
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool
+from anyio.to_thread import current_default_thread_limiter
 from fastapi.responses import PlainTextResponse
 from fastapi.routing import APIRoute
 
@@ -297,6 +301,34 @@ class FastApiConstructionMetadataTests(unittest.TestCase):
 
 
 class FastApiHealthContractTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_does_not_wait_for_saturated_request_workers(self) -> None:
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_product_environment_read_policy(context="example-site"),
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        async with lifespan_client(app) as client:
+            started = asyncio.Event()
+            unblock = threading.Event()
+            loop = asyncio.get_running_loop()
+            limiter = current_default_thread_limiter()
+            original_capacity = limiter.total_tokens
+            limiter.total_tokens = 1
+
+            def occupy_worker() -> None:
+                loop.call_soon_threadsafe(started.set)
+                unblock.wait()
+
+            occupied = asyncio.create_task(run_in_threadpool(occupy_worker))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=5)
+                response = await asyncio.wait_for(client.get("/v1/health"), timeout=5)
+                self.assertEqual(response.status_code, 200)
+            finally:
+                unblock.set()
+                await occupied
+                limiter.total_tokens = original_capacity
+
     async def test_health_returns_typed_public_safe_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             record_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

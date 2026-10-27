@@ -17,6 +17,7 @@ from collections.abc import Callable
 from sqlalchemy import text
 from sqlalchemy import inspect
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import DBAPIError
 
 from control_plane.database_maintenance import (
     apply_retirement,
@@ -36,6 +37,8 @@ from control_plane.database_maintenance_host import (
     save,
     RecoveryRequired,
     dump_application_name,
+    DATABASE_UNSAFE_EVENT,
+    DEPLOYMENT_RECOVERY_REQUIRED_EVENT,
 )
 from control_plane.storage.postgres import _build_engine
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
@@ -269,11 +272,6 @@ def rehearsal_receipt(
 
 def verify_application_reads(connection: Connection) -> None:
     from control_plane.storage.factory import build_privileged_operation_worker_store
-    from control_plane.privileged_operation_worker import (
-        OrdinaryAgentDeliveryCleanupState,
-        run_ordinary_agent_delivery_cleanup_once,
-    )
-    import time
 
     options = " ".join(connection.engine.url.normalized_query.get("options", ()))
     url = connection.engine.url.update_query_dict(
@@ -288,14 +286,15 @@ def verify_application_reads(connection: Connection) -> None:
                 if reader.scalar(text("SHOW transaction_read_only")) != "on":
                     raise RecoveryRequired("The actual runtime probe is not enforced read-only.")
         store.verify_schema()
-        cleanup = run_ordinary_agent_delivery_cleanup_once(
-            record_store=store,
-            limit=100,
-            state=OrdinaryAgentDeliveryCleanupState(),
-            now_monotonic=time.monotonic(),
-            error_backoff_seconds=15,
-        )
-        if cleanup.status != "succeeded" or cleanup.expired_deliveries:
+        try:
+            expired = store.expire_ordinary_agent_deliveries(limit=100)
+        except DBAPIError as error:
+            if getattr(error.orig, "sqlstate", None) == "25006":
+                raise RecoveryRequired(
+                    "The existing expiry callback would change credentials."
+                ) from error
+            raise
+        if expired:
             raise RecoveryRequired(
                 "The existing expiry callback did not pass without credential changes."
             )
@@ -474,7 +473,7 @@ def main() -> int:
         try:
             release_deployment(arguments, url)
         except RecoveryRequired:
-            emit("deployment_recovery_required", hold_id=arguments.hold_id)
+            emit(DEPLOYMENT_RECOVERY_REQUIRED_EVENT, hold_id=arguments.hold_id)
         return 0
     engine = _build_engine(
         url,
@@ -508,7 +507,7 @@ def main() -> int:
                     revision = verify_committed_database(connection, proof)
                     verify_application_reads(connection)
                 except RecoveryRequired:
-                    emit("database_unsafe", hold_id=arguments.hold_id)
+                    emit(DATABASE_UNSAFE_EVENT, hold_id=arguments.hold_id)
                     return 0
                 from control_plane.storage.migrations.versions import (
                     e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,

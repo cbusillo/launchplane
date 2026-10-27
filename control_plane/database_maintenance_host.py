@@ -26,15 +26,28 @@ RECOVERY_REQUIRED_EXIT = 75
 HEALTH_PROBE_SECONDS = 30
 HEALTH_REFREEZE_SECONDS = 45
 API_EGRESS_PRIORITY = 300
+VERIFICATION_ATTEMPTS = 3
+DATABASE_UNSAFE_EVENT = "database_unsafe"
+DEPLOYMENT_RECOVERY_REQUIRED_EVENT = "deployment_recovery_required"
 
 
 class RecoveryRequired(RuntimeError):
     pass
 
 
-def run(*arguments: str, timeout: float | None = 30, input_text: str | None = None) -> str:
+def run(
+    *arguments: str,
+    timeout: float | None = 30,
+    input_text: str | None = None,
+    pass_fds: tuple[int, ...] = (),
+) -> str:
     result = subprocess.run(
-        arguments, input=input_text, text=True, capture_output=True, timeout=timeout
+        arguments,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        pass_fds=pass_fds,
     )
     if result.returncode:
         raise RuntimeError(f"{arguments[0]} {arguments[1]} failed with exit {result.returncode}.")
@@ -213,7 +226,7 @@ def operator(state: dict[str, Any], mode: str) -> dict[str, Any]:
                 ) from error
         raise
     settle_operator(state)
-    if result.get("event") in {"database_unsafe", "deployment_recovery_required"}:
+    if result.get("event") in {DATABASE_UNSAFE_EVENT, DEPLOYMENT_RECOVERY_REQUIRED_EVENT}:
         raise RecoveryRequired("The original maintenance operation requires exact reconciliation.")
     return result
 
@@ -593,7 +606,9 @@ def remove_watchdog(state: dict[str, Any], *, health: bool = False) -> None:
     unit = "lp-maint-" + state["hold_id"] + ("-health" if health else "")
     state_path = Path(state["job_directory"]) / "state.json"
     if not progress.get("watchdog_disabled"):
-        run("systemctl", "disable", "--now", unit + ".timer")
+        timer = run("systemctl", "show", unit + ".timer", "--property=LoadState")
+        if "LoadState=not-found" not in timer:
+            run("systemctl", "disable", "--now", unit + ".timer")
         if "ActiveState=active" in run(
             "systemctl", "show", unit + ".timer", "--property=ActiveState"
         ):
@@ -620,6 +635,7 @@ def remove_watchdog(state: dict[str, Any], *, health: bool = False) -> None:
         save(state_path, state)
     for suffix in (".timer", ".service"):
         (Path("/etc/systemd/system") / (unit + suffix)).unlink(missing_ok=True)
+    (Path("/etc/systemd/system/timers.target.wants") / (unit + ".timer")).unlink(missing_ok=True)
     sync_path(Path("/etc/systemd/system"))
     run("systemctl", "daemon-reload")
     progress["watchdog_removed"] = True
@@ -631,9 +647,21 @@ def api_namespace_command(
 ) -> str:
     phase = state["verification_phase"]
     path = Path(f"/proc/{state['originals'][state['api']]['pid']}/ns/net")
-    if os.readlink(path) != phase["namespace"]:
-        raise RecoveryRequired("The API network namespace changed during verification.")
-    return run("nsenter", "--net=" + str(path), *arguments, input_text=input_text, timeout=10)
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        target = f"/proc/self/fd/{descriptor}"
+        if os.readlink(target) != phase["namespace"]:
+            raise RecoveryRequired("The API network namespace changed during verification.")
+        return run(
+            "nsenter",
+            "--net=" + target,
+            *arguments,
+            input_text=input_text,
+            timeout=10,
+            pass_fds=(descriptor,),
+        )
+    finally:
+        os.close(descriptor)
 
 
 def read_database(state: dict[str, Any], query: str) -> str:
@@ -662,7 +690,7 @@ def require_no_api_database_clients(state: dict[str, Any]) -> None:
         )
         != "0"
     ):
-        raise RecoveryRequired("Another database client exists during the physical API fence.")
+        raise RuntimeError("Another database client exists during the physical API fence.")
 
 
 def require_database_cluster(state: dict[str, Any]) -> None:
@@ -838,28 +866,33 @@ def cleanup_api_probe(state: dict[str, Any], *, phase_id: str | None = None) -> 
 
 
 def verify_api_health(state_path: Path) -> None:
-    with locked_state(state_path) as state:
-        receipt_path = state_path.parent / "verification-complete.json"
-        if receipt_path.exists():
-            receipt = json.loads(receipt_path.read_text())
-            if all(
-                receipt.get(key) == state[key]
-                for key in ("hold_id", "system_identifier", "image_id", "revision")
-            ) and receipt.get("health_passed"):
-                return
-            raise RecoveryRequired("The existing API verification receipt has different custody.")
-        cleanup_api_probe(state)
-        if state.get("verification_phase"):
-            remove_watchdog(state, health=True)
-        phase = qualify_api_namespace(state)
-        phase["deadline"] = (
-            datetime.now(timezone.utc) + timedelta(seconds=HEALTH_REFREEZE_SECONDS)
-        ).isoformat()
-        state["verification_phase"] = phase
-        save(state_path, state)
+    phase_id = None
     process = None
     try:
         with locked_state(state_path) as state:
+            receipt_path = state_path.parent / "verification-complete.json"
+            if receipt_path.exists():
+                receipt = json.loads(receipt_path.read_text())
+                if all(
+                    receipt.get(key) == state[key]
+                    for key in ("hold_id", "system_identifier", "image_id", "revision")
+                ) and receipt.get("health_passed"):
+                    return
+                raise RecoveryRequired(
+                    "The existing API verification receipt has different custody."
+                )
+            if state.get("released") or state.get("resume_started"):
+                raise RecoveryRequired("Original service recovery already began.")
+            cleanup_api_probe(state)
+            if state.get("verification_phase"):
+                remove_watchdog(state, health=True)
+            phase = qualify_api_namespace(state)
+            phase_id = phase["phase_id"]
+            phase["deadline"] = (
+                datetime.now(timezone.utc) + timedelta(seconds=HEALTH_REFREEZE_SECONDS)
+            ).isoformat()
+            state["verification_phase"] = phase
+            save(state_path, state)
             require_no_api_database_clients(state)
             if api_namespace_command(state, "ss", "-Hlx").strip():
                 raise RecoveryRequired("An API Unix listener could bypass the network fence.")
@@ -881,11 +914,15 @@ def verify_api_health(state_path: Path) -> None:
             api_namespace_command(state, "nft", "-f", "-", input_text=rules)
             require_api_egress_fence(state)
             install_watchdog(state_path, state, health=True)
+            api_namespace_command(state, "ss", "-Knt", "state", "connected")
+            connected = api_namespace_command(state, "ss", "-Hnt", "state", "connected")
+            if any(line.split()[0] != "TIME-WAIT" for line in connected.splitlines()):
+                raise RuntimeError("Inbound API connections remain before controlled thaw.")
             if (
                 datetime.fromisoformat(state["verification_phase"]["deadline"])
                 - datetime.now(timezone.utc)
             ).total_seconds() < HEALTH_PROBE_SECONDS:
-                raise RecoveryRequired(
+                raise RuntimeError(
                     "The independent API refreeze deadline has insufficient headroom."
                 )
             set_freezer(state["originals"][state["api"]], False)
@@ -907,14 +944,16 @@ def verify_api_health(state_path: Path) -> None:
         while time.monotonic() < deadline:
             with locked_state(state_path) as state:
                 phase = state["verification_phase"]
+                if phase["phase_id"] != phase_id:
+                    raise RecoveryRequired("Another API phase owns health verification.")
                 if not phase["active"]:
-                    raise RecoveryRequired("The controlled API thaw ended before health readback.")
+                    raise RuntimeError("The controlled API thaw ended before health readback.")
                 require_verification_cpu_hold(state, api_thawed=True)
                 require_api_egress_fence(state)
                 require_no_api_database_clients(state)
             if process.poll() is not None:
                 if process.returncode:
-                    raise RecoveryRequired("The original API health command failed.")
+                    raise RuntimeError("The original API health command failed.")
                 run(
                     "docker",
                     "exec",
@@ -929,10 +968,10 @@ def verify_api_health(state_path: Path) -> None:
                 )
                 with locked_state(state_path) as state:
                     phase = state["verification_phase"]
+                    if phase["phase_id"] != phase_id:
+                        raise RecoveryRequired("Another API phase owns blocked-egress readback.")
                     if not phase["active"]:
-                        raise RecoveryRequired(
-                            "The API phase ended before blocked-egress readback."
-                        )
+                        raise RuntimeError("The API phase ended before blocked-egress readback.")
                     require_api_egress_fence(state)
                     require_no_api_database_clients(state)
                     document = json.loads(
@@ -954,11 +993,13 @@ def verify_api_health(state_path: Path) -> None:
                 break
             time.sleep(0.1)
         else:
-            raise RecoveryRequired("The controlled API health check exceeded its deadline.")
+            raise RuntimeError("The controlled API health check exceeded its deadline.")
     finally:
-        with locked_state(state_path) as state:
-            cleanup_api_probe(state, phase_id=phase["phase_id"])
-            remove_watchdog(state, health=True)
+        if phase_id is not None:
+            with locked_state(state_path) as state:
+                cleanup_api_probe(state, phase_id=phase_id)
+                if state.get("verification_phase", {}).get("phase_id") == phase_id:
+                    remove_watchdog(state, health=True)
         if process is not None:
             if process.poll() is None:
                 process.terminate()
@@ -973,7 +1014,12 @@ def verify_api_health(state_path: Path) -> None:
                 process.stdin.close()
     with locked_state(state_path) as state:
         phase = state["verification_phase"]
-        if not phase["health_passed"] or not phase["cleaned"] or phase["active"]:
+        if (
+            phase["phase_id"] != phase_id
+            or not phase["health_passed"]
+            or not phase["cleaned"]
+            or phase["active"]
+        ):
             raise RecoveryRequired("The actual API verification did not complete under its fence.")
         save(
             state_path.parent / "verification-complete.json",
@@ -988,31 +1034,42 @@ def verify_api_health(state_path: Path) -> None:
         )
 
 
-def verify_services(state_path: Path) -> None:
+def complete_service_verification(state_path: Path) -> None:
     with locked_state(state_path) as state:
-        cleanup_api_probe(state)
         if state.get("released") or state.get("safe_to_resume"):
-            proof = {"outcome": "before"}
-        else:
-            if not (state_path.parent / "commit-pending.json").exists():
-                raise ValueError("There is no committed maintenance outcome to verify.")
-            terminate_keeper(state)
-            controller = operator_container(state)
-            if controller is not None:
-                run("docker", "rm", "-f", controller["Id"])
-                if operator_container(state) is not None:
-                    raise RecoveryRequired(
-                        "The original keeper has not exited before verification."
-                    )
-            proof = operator(state, "verify")
-            state["revision"] = proof["revision"]
-            save(state_path, state)
+            return
+        if not (state_path.parent / "commit-pending.json").exists():
+            return
+        state["releasing"] = True
+        (state_path.parent / "releasing").touch(mode=0o600)
+        attempts = state.get("verification_attempts", 0)
+        if attempts >= VERIFICATION_ATTEMPTS:
+            raise RecoveryRequired("Bounded committed-state verification needs recovery review.")
+        state["verification_attempts"] = attempts + 1
+        save(state_path, state)
+        cleanup_api_probe(state)
+        terminate_keeper(state)
+        for observed in original_containers(state):
+            if observed["HostConfig"]["RestartPolicy"]["Name"] != "no":
+                raise RecoveryRequired("An unverified service regained automatic restart.")
+            if observed["State"]["Running"] and read_freezer(
+                state["originals"][observed["Id"]]
+            ) != ("1", "1"):
+                raise RecoveryRequired("An unverified service is no longer frozen.")
+        proof = operator(state, "verify")
+        state["revision"] = proof["revision"]
+        save(state_path, state)
     if proof.get("outcome") != "before":
         verify_api_health(state_path)
-    release(state_path)
 
 
 def release(state_path: Path) -> None:
+    try:
+        complete_service_verification(state_path)
+    except Exception as error:
+        with locked_state(state_path) as state:
+            record_recovery_required(state, error, writers_held=None)
+        raise
     with locked_state(state_path) as state:
         if state.get("released"):
             remove_watchdog(state)
@@ -1070,19 +1127,7 @@ def release(state_path: Path) -> None:
                 save(state_path.parent / "database-safe.json", state["safe_to_resume"])
         except Exception as error:
             if pending:
-                state["recovery_required"] = type(error).__name__
-                save(state_path, state)
-                print(
-                    json.dumps(
-                        {
-                            "event": "recovery_required",
-                            "hold_id": state["hold_id"],
-                            "writers_held": writers_held,
-                            "revision": state.get("revision"),
-                        }
-                    ),
-                    flush=True,
-                )
+                record_recovery_required(state, error, writers_held=writers_held)
                 raise
             state["keeper_termination_unverified"] = type(error).__name__
             save(state_path, state)
@@ -1132,6 +1177,24 @@ def release(state_path: Path) -> None:
         save(state_path, state)
         remove_watchdog(state)
         emit_release(state)
+
+
+def record_recovery_required(
+    state: dict[str, Any], error: Exception, *, writers_held: bool | None
+) -> None:
+    state["recovery_required"] = type(error).__name__
+    save(Path(state["job_directory"]) / "state.json", state)
+    print(
+        json.dumps(
+            {
+                "event": "recovery_required",
+                "hold_id": state["hold_id"],
+                "writers_held": writers_held,
+                "revision": state.get("revision"),
+            }
+        ),
+        flush=True,
+    )
 
 
 def emit_release(state: dict[str, Any]) -> None:
@@ -1361,8 +1424,6 @@ def hold(state_path: Path) -> None:
                             update_state(
                                 state_path, database_released=True, revision=event["revision"]
                             )
-                            if (state_path.parent / "commit-pending.json").exists():
-                                verify_api_health(state_path)
                             release(state_path)
                             print(line.decode(), flush=True)
                             return
@@ -1491,7 +1552,7 @@ def main() -> int:
                     with locked_state(state_path) as state:
                         cleanup_api_probe(state, phase_id=arguments.phase_id)
                 elif arguments.mode == "verify":
-                    verify_services(state_path)
+                    release(state_path)
                 else:
                     release(state_path)
             except RecoveryRequired:

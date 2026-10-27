@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
+from collections.abc import Iterator
 import json
 import os
 import subprocess
@@ -212,13 +214,15 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 host.verify_api_health(path)
             self.assertEqual(len(requests), 1)
             self.assertEqual(changes, [(state["api"], False), (state["api"], True)])
-            self.assertLess(actions.index("freeze"), actions.index("destroy"))
-            self.assertLess(actions.index("destroy"), actions.index("unfence"))
+            self.assertLess(actions.index("destroy"), actions.index("thaw"))
+            final_destroy = len(actions) - 1 - actions[::-1].index("destroy")
+            self.assertLess(actions.index("freeze"), final_destroy)
+            self.assertLess(final_destroy, actions.index("unfence"))
             self.assertTrue(
                 json.loads((root / "verification-complete.json").read_text())["health_passed"]
             )
 
-    def test_pending_health_cleanup_precedes_keeper_termination_and_missing_health_blocks_resume(
+    def test_release_retries_transient_health_and_verifies_before_any_original_resumes(
         self,
     ) -> None:
         with TemporaryDirectory() as temporary:
@@ -226,25 +230,176 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
             path = state_file(root, verification_phase={"phase_id": "own", "active": True})
             (root / "commit-pending.json").write_text("{}")
             events = []
+            fail_health = True
+
+            def health(path: Path) -> None:
+                nonlocal fail_health
+                events.append("health")
+                if fail_health:
+                    fail_health = False
+                    raise RuntimeError("Transient health transport failure")
+                state = json.loads(path.read_text())
+                state["verification_phase"]["active"] = False
+                host.save(path, state)
+                host.save(
+                    root / "verification-complete.json",
+                    {
+                        **{
+                            key: state[key]
+                            for key in ("hold_id", "system_identifier", "image_id", "revision")
+                        },
+                        "health_passed": True,
+                    },
+                )
+
+            def resume_original(identifier: str, _state: dict[str, Any]) -> str:
+                events.append("resume")
+                return identifier
+
             with (
                 patch.object(
                     host,
                     "cleanup_api_probe",
                     side_effect=lambda _state: events.append("cleanup"),
-                    create=True,
                 ),
                 patch.object(
                     host, "terminate_keeper", side_effect=lambda _state: events.append("terminate")
                 ),
                 patch.object(host, "original_containers", return_value=[]),
                 patch.object(host, "operator", return_value={"revision": "verified"}),
-                patch.object(host, "resume_original") as resume,
+                patch.object(host, "verify_api_health", side_effect=health),
+                patch.object(
+                    host,
+                    "resume_original",
+                    side_effect=resume_original,
+                ) as resume,
+                patch.object(host, "operator_container", return_value=None),
                 patch.object(host, "remove_watchdog"),
             ):
-                with self.assertRaises(host.RecoveryRequired):
+                with self.assertRaises(RuntimeError):
                     host.release(path)
                 resume.assert_not_called()
+                host.release(path)
             self.assertEqual(events[:2], ["cleanup", "terminate"])
+            self.assertLess(events.index("health"), events.index("resume"))
+            self.assertTrue(json.loads(path.read_text())["released"])
+
+    def test_release_cannot_finish_between_health_intent_and_native_fence_install(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(Path(temporary), revision="verified")
+            original_lock = host.locked_state
+            entries = 0
+            mutations_after_release = []
+
+            @contextmanager
+            def interleaved(path: Path, **values: Any) -> Iterator[dict[str, Any]]:
+                nonlocal entries
+                entries += 1
+                first = entries == 1
+                with original_lock(path, **values) as state:
+                    yield state
+                if first:
+                    with original_lock(path) as state:
+                        state["released"] = True
+                        state["verification_phase"]["active"] = False
+
+            def network(state: dict[str, Any], *arguments: str, **_values: Any) -> str:
+                if arguments[:3] == ("nft", "-f", "-"):
+                    mutations_after_release.append(state.get("released", False))
+                    raise RuntimeError("Fixture aborts before native mutation")
+                return ""
+
+            def cleanup(state: dict[str, Any], **_values: Any) -> None:
+                if state.get("verification_phase"):
+                    state["verification_phase"]["active"] = False
+
+            phase = {"phase_id": "a" * 32, "table": "lpmaint_" + "a" * 32, "active": True}
+            with (
+                patch.object(host, "locked_state", side_effect=interleaved),
+                patch.object(host, "qualify_api_namespace", return_value=phase),
+                patch.object(host, "require_no_api_database_clients"),
+                patch.object(host, "api_namespace_command", side_effect=network),
+                patch.object(host, "cleanup_api_probe", side_effect=cleanup),
+                patch.object(host, "remove_watchdog"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    host.verify_api_health(path)
+            self.assertFalse(any(mutations_after_release))
+
+    def test_old_health_controller_cannot_complete_or_clean_a_replacement_phase(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(Path(temporary), revision="verified")
+            phase = {"phase_id": "a" * 32, "table": "lpmaint_" + "a" * 32, "active": True}
+
+            def replace(_command: list[str]) -> Mock:
+                with host.locked_state(path) as state:
+                    state["verification_phase"]["phase_id"] = "b" * 32
+                return Mock(poll=Mock(return_value=0), stdout=None, stdin=None, returncode=0)
+
+            with (
+                patch.object(host, "qualify_api_namespace", return_value=phase),
+                patch.object(host, "require_no_api_database_clients"),
+                patch.object(host, "api_namespace_command", return_value=""),
+                patch.object(host, "require_api_egress_fence"),
+                patch.object(host, "install_watchdog"),
+                patch.object(host, "remove_watchdog") as remove,
+                patch.object(host, "set_freezer"),
+                patch.object(host, "start_process", side_effect=replace),
+            ):
+                with self.assertRaises(host.RecoveryRequired):
+                    host.verify_api_health(path)
+                remove.assert_not_called()
+            self.assertTrue(json.loads(path.read_text())["verification_phase"]["active"])
+            self.assertFalse((path.parent / "verification-complete.json").exists())
+
+    def test_failed_committed_verification_has_a_durable_retry_bound_without_resuming(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = state_file(root)
+            (root / "commit-pending.json").write_text("{}")
+            with (
+                patch.object(host, "terminate_keeper"),
+                patch.object(host, "original_containers", return_value=[]),
+                patch.object(host, "operator", side_effect=RuntimeError("Transient read")) as read,
+                patch.object(host, "resume_original") as resume,
+            ):
+                for _ in range(host.VERIFICATION_ATTEMPTS):
+                    with self.assertRaisesRegex(RuntimeError, "Transient read"):
+                        host.release(path)
+                with self.assertRaises(host.RecoveryRequired):
+                    host.release(path)
+                self.assertEqual(read.call_count, host.VERIFICATION_ATTEMPTS)
+                resume.assert_not_called()
+            self.assertFalse(json.loads(path.read_text()).get("released", False))
+
+    def test_namespace_command_uses_and_closes_the_opened_handle(self) -> None:
+        with TemporaryDirectory() as temporary:
+            namespace = Path(temporary) / "namespace"
+            namespace.touch()
+            descriptor = os.open(namespace, os.O_RDONLY)
+            metadata = os.fstat(descriptor)
+            state = {
+                "api": "own-api",
+                "originals": {"own-api": {"pid": 100}},
+                "verification_phase": {"namespace": "owned-namespace"},
+            }
+
+            def run(*arguments: str, **values: Any) -> str:
+                inherited = values["pass_fds"]
+                self.assertEqual(os.fstat(inherited[0]).st_ino, metadata.st_ino)
+                self.assertEqual(arguments[1], "--net=/proc/self/fd/" + str(inherited[0]))
+                return "observed"
+
+            with (
+                patch.object(os, "open", return_value=descriptor),
+                patch.object(os, "readlink", return_value="owned-namespace"),
+                patch.object(host, "run", side_effect=run),
+            ):
+                self.assertEqual(
+                    host.api_namespace_command(state, "nft", "list", "tables"), "observed"
+                )
+            with self.assertRaises(OSError):
+                os.fstat(descriptor)
 
     def test_a_late_health_timer_cannot_touch_an_inactive_or_different_phase(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -261,7 +416,7 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
     def test_source_terminal_result_reaches_the_watchdog_without_an_exception_heuristic(
         self,
     ) -> None:
-        for event in ("database_unsafe", "deployment_recovery_required"):
+        for event in (host.DATABASE_UNSAFE_EVENT, host.DEPLOYMENT_RECOVERY_REQUIRED_EVENT):
             with self.subTest(event=event), TemporaryDirectory() as temporary:
                 state = json.loads(state_file(Path(temporary)).read_text())
                 with (
@@ -311,12 +466,21 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 resets = []
 
                 def path(value: Any) -> Path:
-                    return units if str(value) == "/etc/systemd/system" else Path(value)
+                    original = Path(value)
+                    return (
+                        units / original.relative_to("/etc/systemd/system")
+                        if original.is_relative_to("/etc/systemd/system")
+                        else original
+                    )
 
                 def run(*arguments: str, **_values: Any) -> str:
                     if arguments[:2] == ("systemctl", "show"):
                         if arguments[2].endswith(".timer"):
-                            return "ActiveState=inactive\n"
+                            return (
+                                "LoadState="
+                                + ("not-found" if active == "not-found" else "loaded")
+                                + "\nActiveState=inactive\n"
+                            )
                         if "--value" in arguments:
                             return "0"
                         return (
@@ -329,6 +493,8 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                         if active != "failed":
                             raise RuntimeError("Unit not loaded")
                         resets.append(arguments)
+                    if arguments[:2] == ("systemctl", "disable") and active == "not-found":
+                        raise RuntimeError("The timer was never installed")
                     return ""
 
                 with (

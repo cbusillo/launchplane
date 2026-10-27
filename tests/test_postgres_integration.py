@@ -17037,6 +17037,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
         )
         from control_plane.storage.postgres import PostgresRecordStore
         from sqlalchemy.pool import NullPool
+        from sqlalchemy.exc import OperationalError
 
         with _isolated_postgres_database() as url:
             alembic_command.upgrade(_alembic_config(url), current.revision)
@@ -17046,6 +17047,14 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 before = database_snapshot(connection)
                 verify_application_reads(connection)
                 self.assertEqual(database_snapshot(connection), before)
+                transient = OperationalError("expiry read", {}, ConnectionResetError())
+                with patch.object(
+                    PostgresRecordStore,
+                    "expire_ordinary_agent_deliveries",
+                    side_effect=transient,
+                ):
+                    with self.assertRaises(OperationalError):
+                        verify_application_reads(connection)
                 for attribute in ("_engine", "_preview_lock_engine"):
 
                     def attempt_write(store: PostgresRecordStore, *, limit: int) -> int:

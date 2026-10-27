@@ -5824,14 +5824,20 @@ hold through the phase. A second persistent, phase-bound timer performs cleanup
 independently at the short health deadline. It consumes the existing root
 capabilities; the API itself cannot alter the fence.
 
-Only the API CPU thaws. A fresh actual loopback HTTP GET to `/v1/health` must
-return HTTP 200 and the service's success payload. An unauthenticated TCP probe
+Before thaw, connected TCP sockets and the kernel's queued inbound connections
+are destroyed under the network fence, preserving listeners. Only the API CPU
+thaws. A fresh actual loopback HTTP GET to `/v1/health` must
+return HTTP 200 and the service's success payload.
+The health route reads its backend identity captured during successful startup
+without borrowing a request-worker slot or querying the held database.
+An unauthenticated TCP probe
 to its in-place database endpoint must fail, with a kernel packet drop observed.
 No database credential is transmitted by that probe. Before removing its own
 network table, the driver physically refreezes the API, destroys connected TCP
 sockets while preserving listeners, requires only inert TIME-WAIT sockets and
 zero DB clients, then verifies fence removal while the API remains frozen.
-Buffered requests cannot escape during final resume. Health completion is saved
+No buffered TCP packet escapes before final CPU resume. Requests already parsed
+into userspace can continue after release. Health completion is saved
 only after these readbacks. Both the normal release and deadline watchdog do
 this refreeze/socket-settlement/owned-unfence cleanup before terminating a keeper.
 
@@ -5844,8 +5850,14 @@ replacement of another phase's rules.
 
 An after-state requires the completed runtime and health receipt before release
 fsyncs its resume proof bound to hold, cluster, revision and image. A proved
-before-state abort can reopen unchanged. A running frozen original can repeat
-missing verification through `database_maintenance_host.py verify --state STATE_JSON`.
+before-state abort can reopen unchanged. A running frozen original automatically
+completes missing verification through the same
+`database_maintenance_host.py release --state STATE_JSON` path used by EOF cleanup
+and the persistent deadline watchdog. The `verify` alias uses that same path.
+Committed-state attempts are durably bounded; transient database reads, census
+collisions and health transport failures remain retryable after exact phase
+cleanup. Exhaustion preserves the holds for recovery review. A transport failure
+does not classify the database as unsafe or authorize a production restore.
 If the API is stopped after reboot and the after-state lacks health proof, the
 driver cannot start it with full network before a namespace fence exists. It
 keeps writers stopped and reports recovery required; bring the Director the
