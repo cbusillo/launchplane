@@ -1551,7 +1551,6 @@ def _execute_generic_web_preview_refresh_unserialized(
                 ),
                 context_name=resolved_profile.preview.context,
                 template_values={},
-                legacy_values=resolved_profile.preview.override_env,
             )
         )
         _enforce_preview_copied_runtime_key_safety(

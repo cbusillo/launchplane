@@ -320,7 +320,6 @@ def resolve_preview_runtime_environment_from_store(
     record_store: SiteRuntimeEnvironmentStore,
     context_name: str,
     template_values: dict[str, str],
-    legacy_values: dict[str, str] | None = None,
 ) -> SiteRuntimeEnvironment:
     bindings = control_plane_secrets.resolve_effective_secret_bindings_from_store(
         record_store=record_store,
@@ -329,7 +328,7 @@ def resolve_preview_runtime_environment_from_store(
         instance_name="preview",
         scopes=site_secret_scopes("preview"),
     )
-    managed_values = {
+    instance_values = {
         key: value
         for record in record_store.list_runtime_environment_records(
             context_name=context_name, instance_name="preview"
@@ -339,7 +338,6 @@ def resolve_preview_runtime_environment_from_store(
         and record.instance == "preview"
         for key, value in record.env.items()
     }
-    instance_values: dict[str, ScalarValue] = {**(legacy_values or {}), **managed_values}
     try:
         validate_preview_scope(
             instance_values, context=context_name, secret_keys=frozenset(bindings)
@@ -370,12 +368,9 @@ def resolve_preview_runtime_environment_from_store(
         target_environment={},
     )
     overrides = {
-        **(legacy_values or {}),
-        **{
-            key: value
-            for key, value in preview.values.items()
-            if key in managed_values or key in preview.secret_keys
-        },
+        key: value
+        for key, value in preview.values.items()
+        if key in instance_values or key in preview.secret_keys
     }
     return SiteRuntimeEnvironment(
         values={
