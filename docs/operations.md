@@ -5846,3 +5846,9 @@ rollback target. The later release uses these two migration files byte-for-byte
 unchanged. This image can start against that additive schema without migrating
 backward; older images cannot recognize its revision. The held delivery drop
 retains its separate approved application path.
+
+Compatibility also reads populated restoration and attestation evidence on
+carried Client decisions. Both additive fields are omitted when empty, so its
+ordinary carries remain readable by the preceding image. Activation uses the
+same read contract unchanged. Do not roll activation back past this compatible
+image after any populated carry has been saved.
