@@ -95,6 +95,11 @@ class FixtureBaseTests(unittest.TestCase):
                 read.assert_not_called()
 
     def test_selected_child_drives_probes_wheels_builds_and_layer_check(self) -> None:
+        for target in (None, "linux/amd64"):
+            with self.subTest(target=target):
+                self.build_selected(target)
+
+    def build_selected(self, target: str | None) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             inputs = root / "inputs"
@@ -116,7 +121,11 @@ class FixtureBaseTests(unittest.TestCase):
                         return json.dumps(["fixture@sha256:" + "d" * 64])
                     if arguments[-1] == self.reference:
                         return json.dumps(
-                            [self.concrete if "--platform" in arguments else self.index]
+                            [
+                                self.concrete
+                                if target is None or "--platform" in arguments
+                                else self.index
+                            ]
                         )
                     return json.dumps(
                         [{**self.concrete, "RootFS": {"Layers": ["base-layer", "fixture-layer"]}}]
@@ -146,7 +155,7 @@ class FixtureBaseTests(unittest.TestCase):
                     inputs=inputs,
                     prefix="fixture",
                     include_settings=False,
-                    target_platform="linux/amd64",
+                    target_platform=target,
                 )
             self.assertEqual(len(result), 3)
             self.assertEqual(wheels, [images.UV_PLATFORMS["amd64"]])
@@ -154,12 +163,16 @@ class FixtureBaseTests(unittest.TestCase):
                 if call[0] in {"run", "build"} or (
                     call[:2] == ("image", "inspect") and call[-1] != self.reference
                 ):
-                    self.assertEqual(call[call.index("--platform") + 1], "linux/amd64")
+                    if call[0] == "build" or target is not None:
+                        self.assertEqual(call[call.index("--platform") + 1], "linux/amd64")
+                    else:
+                        self.assertNotIn("--platform", call)
+            parent = self.index if target is not None else self.concrete
             self.assertIn(
                 (
                     "tag",
-                    self.index["Id"],
-                    "launchplane-cutover-base:" + self.index["Id"].removeprefix("sha256:"),
+                    parent["Id"],
+                    "launchplane-cutover-base:" + parent["Id"].removeprefix("sha256:"),
                 ),
                 calls,
             )
