@@ -108,6 +108,89 @@ class ProductReviewDecisionContractTests(unittest.TestCase):
 
 
 class ProductReviewDecisionStorageTests(unittest.TestCase):
+    def test_carry_storage_preserves_old_empty_shape_and_populated_rollback_evidence(self) -> None:
+        import json
+        from sqlalchemy import text
+        from control_plane.contracts.product_review import (
+            ProductReviewCarry,
+            ProductReviewCarryCommit,
+        )
+
+        source = _decision(record_id="source-acceptance", decided_at="2026-10-27T00:00:00Z")
+        head = "b" * 40
+        ordinary = source.model_copy(
+            update={
+                "record_id": "ordinary-carry",
+                "head_sha": head,
+                "base_branch": "main",
+                "carried_from": ProductReviewCarry(
+                    record_id=source.record_id,
+                    head_sha=source.head_sha,
+                    reason="client_impact_none",
+                    commits=(ProductReviewCarryCommit(sha=head, client_impact="none"),),
+                ),
+            }
+        )
+        populated = source.model_copy(
+            update={
+                "record_id": "attested-carry",
+                "head_sha": head,
+                "base_branch": "main",
+                "carried_from": ProductReviewCarry.model_validate(
+                    {
+                        "record_id": source.record_id,
+                        "head_sha": source.head_sha,
+                        "reason": "accepted_base_integration",
+                        "comparison_base_sha": "c" * 40,
+                        "integration_attestation_ids": ("reviewed-integration",),
+                        "restored_trees": (
+                            {
+                                "head_sha": head,
+                                "ancestor_sha": "d" * 40,
+                                "tree_sha": "e" * 40,
+                                "commit_shas": (head,),
+                            },
+                        ),
+                    }
+                ),
+            }
+        )
+        with TemporaryDirectory() as temporary:
+            filesystem = FilesystemRecordStore(state_dir=Path(temporary) / "files")
+            database = PostgresRecordStore(
+                database_url=sqlite_database_url(Path(temporary) / "state.db")
+            )
+            self.addCleanup(database.close)
+            database.ensure_schema()
+            for store in (filesystem, database):
+                with self.subTest(store=type(store).__name__):
+                    store.write_product_review_decision_record(ordinary)
+                    store.write_product_review_decision_record(populated)
+                    records = {
+                        record.record_id: record
+                        for record in store.list_product_review_decision_records(
+                            repository=source.repository,
+                            pull_request_number=source.pull_request_number,
+                        )
+                    }
+                    self.assertEqual(records[ordinary.record_id], ordinary)
+                    self.assertEqual(records[populated.record_id], populated)
+                    if isinstance(store, FilesystemRecordStore):
+                        raw = store._record_path(
+                            "launchplane_product_review_decisions", ordinary.record_id
+                        ).read_text()
+                    else:
+                        with store._engine.connect() as connection:
+                            raw = connection.execute(
+                                text(
+                                    "SELECT payload FROM launchplane_product_review_decisions WHERE record_id = :id"
+                                ),
+                                {"id": ordinary.record_id},
+                            ).scalar_one()
+                    payload = json.loads(raw)
+                    self.assertNotIn("restored_trees", payload["carried_from"])
+                    self.assertNotIn("integration_attestation_ids", payload["carried_from"])
+
     def _assert_newest_first_for_one_pull_request(self, store: object) -> None:
         assert isinstance(store, FilesystemRecordStore | PostgresRecordStore)
         store.write_product_review_decision_record(

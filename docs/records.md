@@ -1791,7 +1791,6 @@ request is the current decision. The record authorizes nothing.
 A record with `carried_from` preserves an earlier acceptance. The authoritative
 rules are in [carried acceptance](owner-acceptance.md#carried-acceptance).
 
-
 ## Product Reconcile Request Records
 
 `launchplane_product_reconcile_requests` holds at most one row per target key

@@ -60,8 +60,12 @@ class ProductReviewCarry(BaseModel):
     commits: tuple[ProductReviewCarryCommit, ...] = ()
     integrated_changes: tuple[ProductReviewIntegratedChange, ...] = ()
     batch_record_ids: tuple[str, ...] = ()
-    restored_trees: tuple[ProductReviewTreeRestoration, ...] = ()
-    integration_attestation_ids: tuple[str, ...] = ()
+    restored_trees: tuple[ProductReviewTreeRestoration, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
+    integration_attestation_ids: tuple[str, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def _validate_carry(self) -> "ProductReviewCarry":

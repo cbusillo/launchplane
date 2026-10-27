@@ -35,6 +35,10 @@ returns the original; a different statement or review cannot replace it.
 Readback uses the original digest and target identifiers and remains available
 after acceptance advances. Read back lost apply responses before any retry;
 replaying a saved attestation does not prove that current acceptance carries.
+On a carried decision, `decided_at` is when Launchplane saved that carry, while
+`base_branch` is the base first bound to the original decision. Empty additive
+carry-evidence fields are omitted on writes so the preceding image can still
+read ordinary carries. Populated evidence requires the compatibility image.
 
 Carry rereads applicable Client decisions and imported-change evidence, matches
 the exact merge, tree, parents, product, Client, PR, base and source decision,
