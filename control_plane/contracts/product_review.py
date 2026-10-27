@@ -61,10 +61,14 @@ class ProductReviewCarry(BaseModel):
     integrated_changes: tuple[ProductReviewIntegratedChange, ...] = ()
     batch_record_ids: tuple[str, ...] = ()
     restored_trees: tuple[ProductReviewTreeRestoration, ...] = Field(
-        default=(), exclude_if=lambda value: not value
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
     integration_attestation_ids: tuple[str, ...] = Field(
-        default=(), exclude_if=lambda value: not value
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
 
     @model_validator(mode="after")
