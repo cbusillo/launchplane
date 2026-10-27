@@ -2558,7 +2558,6 @@ export function productReviewForFixture(
               record_id: "fixture-original-acceptance",
               head_sha: ["earlier-carried-decision", "carried-without-preview"].includes(scenario) ? "c".repeat(40) : "b".repeat(40),
               reason: scenario === "carried-base-integration" ? "accepted_base_integration" : invisibleCarry ? "client_impact_none" : "unchanged_patch_base_update",
-              base_merge_shas: [],
               restored_trees: [],
               commits: invisibleCarry ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
               refresh_record_ids: [],

@@ -1741,14 +1741,7 @@ request is the current decision. The record authorizes nothing.
 
 A record with `carried_from` preserves an earlier acceptance. The authoritative
 rules are in [carried acceptance](owner-acceptance.md#carried-acceptance).
-The evidence names the source `record_id` and `head_sha`, carry `reason`,
-`comparison_base_sha`, PR-side `commits`, and `refresh_record_ids` where used.
-`integrated_changes` holds imported change numbers and exact heads with their
-acceptance record IDs or bounded engineering bases. `batch_record_ids` identifies
-the checked train batches. Older records default the added evidence lists to
-empty. Older train records may omit `comparison_base_sha`; their refresh records
-supply the merged base. `decided_at` records when the carry was saved; `base_branch` preserves
-the base first recorded for the decision.
+
 
 ## Product Reconcile Request Records
 

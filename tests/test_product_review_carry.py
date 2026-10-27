@@ -398,12 +398,18 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(self._publish()["state"], "success")
         self.assertEqual(len(self._decisions()), 2)
 
-    def _restore_billing_integration(self) -> dict[str, object]:
+    def _restore_billing_integration(
+        self, *, declared_integration_only: bool = False
+    ) -> dict[str, object]:
         self._integrate_accepted_billing_change()
         comparison = json.loads(
             (Path(__file__).parent / "fixtures/accepted_billing_integration.json").read_text()
         )
         assert isinstance(comparison, dict)
+        if declared_integration_only:
+            comparison["commits"][-4]["commit"]["message"] = (
+                "Integrate accepted billing changes\n\nClient-impact: none"
+            )
         accepted_head = comparison["merge_base_commit"]["sha"]
         commits = comparison["commits"]
         self.accepted = self.accepted.model_copy(update={"head_sha": accepted_head})
@@ -420,8 +426,14 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             ] = [{"number": _PULL_REQUEST + 1}]
         return comparison
 
-    def test_accepted_billing_integration_survives_exact_removal_of_support_changes(self) -> None:
+    def test_exact_billing_history_still_needs_qualification_of_its_visible_integration(
+        self,
+    ) -> None:
         self._restore_billing_integration()
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_accepted_billing_integration_survives_exact_removal_of_support_changes(self) -> None:
+        self._restore_billing_integration(declared_integration_only=True)
         self.assertEqual(self._publish()["state"], "success")
         carried, accepted = self._decisions()
         self.assertEqual(carried.head_sha, self.github.head_sha)
@@ -438,7 +450,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(restoration.ancestor_sha, commits[-4]["sha"])
         self.assertEqual(restoration.tree_sha, commits[-4]["commit"]["tree"]["sha"])
         self.assertEqual(restoration.commit_shas, tuple(commit["sha"] for commit in commits[-3:]))
-        self.assertEqual(carried.carried_from.base_merge_shas, (restoration.ancestor_sha,))
+        self.assertEqual(carried.carried_from.commits[-1].sha, restoration.ancestor_sha)
         self.assertEqual(self._publish()["state"], "success")
         self.assertEqual(len(self._decisions()), 2)
 
@@ -454,7 +466,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation):
                 self.setUp()
-                comparison = self._restore_billing_integration()
+                comparison = self._restore_billing_integration(declared_integration_only=True)
                 commits = comparison["commits"]
                 assert isinstance(commits, list)
                 if mutation == "residual":
@@ -556,7 +568,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             len(carry.integrated_changes[0].engineering_basis), PRODUCT_REVIEW_REASON_MAX_LENGTH
         )
 
-    def test_recorded_refresh_can_combine_or_absorb_an_accepted_patch(self) -> None:
+    def test_recorded_refresh_qualifies_its_imported_accepted_change(self) -> None:
         self._integrate_accepted_billing_change()
         self._train_refreshed()
         self.assertEqual(self._publish()["state"], "success")
@@ -682,21 +694,11 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 assert isinstance(commits, list)
                 merge = commits[-1]
                 if mutation in {"visible", "missing"}:
-                    commits.append(
-                        {
-                            "sha": _OTHER_MERGE_HEAD,
-                            "parents": [{"sha": _REFRESHED_HEAD}],
-                            "commit": {
-                                "message": (
-                                    "New billing behavior\n\nClient-impact: visible"
-                                    if mutation == "visible"
-                                    else "New billing behavior"
-                                )
-                            },
-                        }
+                    merge["commit"]["message"] = (
+                        "New billing behavior\n\nClient-impact: visible"
+                        if mutation == "visible"
+                        else "Merge main"
                     )
-                    self.github.head_sha = _OTHER_MERGE_HEAD
-                    comparison.update(total_commits=len(commits), ahead_by=len(commits))
                 elif mutation == "foreign":
                     merge["parents"][1]["sha"] = _OTHER_MERGE_HEAD
                     self.github.responses[
@@ -1077,7 +1079,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(self._decisions()), 2)
 
     def test_carry_provenance_round_trips_through_database_storage(self) -> None:
-        self._restore_billing_integration()
+        self._restore_billing_integration(declared_integration_only=True)
         with TemporaryDirectory() as directory:
             database = PostgresRecordStore(
                 database_url=sqlite_database_url(Path(directory) / "records.sqlite")

@@ -290,7 +290,6 @@ def _accepted_base_integration(
     visited: set[str] = set()
     refresh_ids: list[str] = []
     restored_trees: list[ProductReviewTreeRestoration] = []
-    base_merges: list[str] = []
     current = head
     merged = False
     while current != accepted_head:
@@ -321,7 +320,7 @@ def _accepted_base_integration(
             ),
             None,
         )
-        if len(parents) == 1 and not declared_none:
+        if not declared_none and refresh is None:
             return None
         if len(parents) == 2:
             imported = _text(_object(parents[1]).get("sha"))
@@ -330,11 +329,9 @@ def _accepted_base_integration(
             ):
                 return None
             merged = True
-            if refresh is None:
-                base_merges.append(current)
         if declared_none:
             side.append(ProductReviewCarryCommit(sha=current, client_impact="none"))
-        if refresh is not None:
+        elif refresh is not None:
             refresh_ids.append(refresh.record_id)
         visited.add(current)
         current = _text(_object(parents[0]).get("sha"))
@@ -354,14 +351,13 @@ def _accepted_base_integration(
     return ProductReviewCarry(
         record_id=accepted_record_id,
         head_sha=accepted_head,
-        reason="accepted_base_integration" if side or base_merges else "merge_train_base_refresh",
+        reason="accepted_base_integration" if side else "merge_train_base_refresh",
         comparison_base_sha=base,
         commits=tuple(reversed(side)),
         refresh_record_ids=tuple(reversed(refresh_ids)),
         integrated_changes=tuple(evidence.changes[number] for number in sorted(evidence.changes)),
         batch_record_ids=tuple(sorted(evidence.batch_record_ids)),
         restored_trees=tuple(reversed(restored_trees)),
-        base_merge_shas=tuple(reversed(base_merges)),
     )
 
 
