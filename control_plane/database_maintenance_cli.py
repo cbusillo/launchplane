@@ -65,7 +65,7 @@ def _wait_for_release(engine: Engine, receipt: dict[str, object], stop: Event) -
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bounded Launchplane database maintenance hold.")
-    parser.add_argument("mode", choices=("status", "hold", "release"))
+    parser.add_argument("mode", choices=("status", "plan", "hold", "release"))
     parser.add_argument("--hold-id", default="")
     parser.add_argument("--reason", default="")
     parser.add_argument("--target-id", default="")
@@ -73,7 +73,7 @@ def main() -> int:
     parser.add_argument("--duration-seconds", type=int, default=900)
     parser.add_argument("--drain-seconds", type=int, default=60)
     arguments = parser.parse_args()
-    if arguments.mode == "hold" and (
+    if arguments.mode in {"plan", "hold"} and (
         not 1 <= arguments.drain_seconds < arguments.duration_seconds <= 3600
         or not arguments.reason.strip()
         or not arguments.target_id
@@ -121,7 +121,20 @@ def main() -> int:
                 target_id=arguments.target_id,
                 repository=arguments.repository,
                 expires_at=expires.isoformat(),
+                apply=arguments.mode == "hold",
             ):
+                if arguments.mode == "plan":
+                    print(
+                        json.dumps(
+                            {
+                                "state": "plan_ready",
+                                "duration_seconds": arguments.duration_seconds,
+                                **status(engine),
+                            }
+                        ),
+                        flush=True,
+                    )
+                    return 0
                 with engine.connect() as clock:
                     remaining = int(
                         (expires - clock.scalar(text("SELECT clock_timestamp()"))).total_seconds()

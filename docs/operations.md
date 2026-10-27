@@ -5625,7 +5625,7 @@ Only after that proof and the recorded approval, the approved host/image runs:
 uv run python -m control_plane.storage.schema_migration --target-revision e7c1d5e9a3b6
 ```
 
-The existing serialized migration helper holds the deployment advisory lock.
+The existing serialized migration helper holds the schema-migration advisory lock.
 The revision takes non-waiting exclusive locks on all existing retiring tables
 before dropping any, uses restrictive drops, and never cascades into an unexpected
 dependent object. A busy table or retained database dependency aborts the
@@ -5892,6 +5892,11 @@ existing stores. Supply the actual target and source repository from current
 service/provider records, never from a checked-in example:
 
 ```bash
+uv run python -m control_plane.database_maintenance_cli plan \
+  --target-id '<verified-own-compose-target>' \
+  --repository '<verified-own-source-repository>' \
+  --duration-seconds 900 --drain-seconds 60 --reason '<approved-maintenance-reason>'
+
 uv run python -m control_plane.database_maintenance_cli hold \
   --target-id '<verified-own-compose-target>' \
   --repository '<verified-own-source-repository>' \

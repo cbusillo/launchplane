@@ -28,7 +28,12 @@ def require_deployment_available(environment: Mapping[str, str]) -> None:
 
 @contextmanager
 def deployment_window(
-    *, control_plane_root: Path, target_id: str, repository: str, expires_at: str
+    *,
+    control_plane_root: Path,
+    target_id: str,
+    repository: str,
+    expires_at: str,
+    apply: bool = True,
 ) -> Iterator[None]:
     from control_plane.workflows.launchplane_self_deploy import _validate_launchplane_compose_target
 
@@ -65,6 +70,10 @@ def deployment_window(
 
     payload = read_target()
     require_deployment_available(api.parse_dokploy_env_text(str(payload.get("env") or "")))
+    if not apply:
+        require_idle_deploy_workflow(control_plane_root=control_plane_root, repository=repository)
+        yield
+        return
     write_marker(payload, remove=False)
     observed = read_target()
     if (

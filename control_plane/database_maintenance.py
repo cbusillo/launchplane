@@ -138,6 +138,7 @@ def _guard_transaction(connection: Connection) -> None:
 
 def maintenance_thread_operation[**Parameters, Result](
     operation: Callable[Parameters, Result],
+    /,
     *args: Parameters.args,
     **kwargs: Parameters.kwargs,
 ) -> Result:
@@ -148,6 +149,7 @@ def maintenance_thread_operation[**Parameters, Result](
 
 async def maintenance_thread[**Parameters, Result](
     operation: Callable[Parameters, Result],
+    /,
     *args: Parameters.args,
     **kwargs: Parameters.kwargs,
 ) -> Result:
