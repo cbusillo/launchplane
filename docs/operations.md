@@ -5763,7 +5763,11 @@ IPv4 addresses, IPv4/IPv6 routes and IPv6 addresses must prove that only
 loopback is active/configured/routed. Kernel-created DOWN unconfigured tunnel
 templates are permitted without a name allowlist; missing or unknown views
 refuse. The database container remains network-none, without NET_ADMIN or
-SYS_ADMIN, and its PostgreSQL OS user must have no effective capabilities:
+SYS_ADMIN, and its PostgreSQL OS user must have no effective capabilities. Join
+only that exact namespace with `--network container:<isolated-postgres-container>`.
+Read back matching namespace identities and both processes' zero core limits as
+operator evidence; the network guard does not inspect its PostgreSQL peer or
+replace those process-limit observations:
 
 ```bash
 python -m control_plane.database_maintenance_cli rehearse \
@@ -5801,16 +5805,31 @@ refreeze healthy services or demand the old full hashes again. A crash after
 starting a stopped original, before progress is recorded, may leave its same
 container ID/image/project running with a newer PID. Only the already bound safe
 proof and persisted resume-start intent allow fresh thawed-cgroup qualification
-and policy readback in that case. Unverified changed identities still refuse. The original
-controller uses cached provider access for cleanup. After it can no longer act,
-an exact custody-checked marker read/removal is supported. One-off intent and
-container identity are persisted; a timed-out reader is removed and its DB
-session must be gone before another read. An uncertain unfence is reconciled
-only by read-only marker observation after its local executor settles. Absence
-or the exact expired non-recovery marker proves this hold inactive; an
-unsettled recovery marker stays UNKNOWN. Unexpected markers refuse. No
-uncertain provider mutation is blindly replayed.
-The marker remains until all original recovery readbacks pass.
+and policy readback in that case. On a no-commit release, durable resume intent
+and absence of `commit-pending.json` allow the same exact-original retry; the
+host's releasing flag and state lock prevent a later commit. Unverified changed
+identities still refuse.
+
+Only the host removes the deployment marker, after all original recovery
+readbacks pass and the keeper can no longer act. Install, recovery fencing and
+removal share one private fsync'd transition journal bound to hold, target and
+expected/desired marker. The existing provider mutation observer records dispatch
+immediately before the POST, response confirmation after return and exact result
+observation after readback. It records no env body, token or credential. A failed
+GET or validation before dispatch may retry; a dispatched request is never sent
+again. One-off intent and container identity are persisted; a timed-out one-off
+is removed and its DB session must be gone before another observation.
+
+An uncertain original request permits a bounded read-only observation of its
+exact desired effect. Only that value, including absence for an original removal,
+settles it. An old marker, an expired old deadline or absence before an uncertain
+install does not prove the request cannot execute late. Unavailable or mismatched
+effect observation emits a distinct terminal recovery requirement, so the watchdog
+does not restart forever. The same manual release can re-read that original
+operation later. A newly needed repair action requires an exact Director question;
+there is no blind whole-env rewrite or cleanup override. Provider failure can
+prevent release beyond the planned bound, so successful actual marker absence
+and service release readback, rather than timer installation, qualify the window.
 
 ```bash
 python3 database_maintenance_host.py release --state STATE_JSON

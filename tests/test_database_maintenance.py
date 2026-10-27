@@ -4,9 +4,10 @@ import fcntl
 import struct
 import socket
 import sys
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 import unittest
 
 from sqlalchemy.engine import make_url
@@ -17,11 +18,83 @@ from control_plane.deployment_maintenance import MAINTENANCE_UNTIL_ENV, recovery
 from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from control_plane.database_maintenance import require_no_other_clients
 from control_plane.database_maintenance_host import dump_application_name
+from control_plane.database_maintenance_host import RecoveryRequired
+from control_plane import database_maintenance
+from sqlalchemy.exc import OperationalError
 from tempfile import TemporaryDirectory
 import io
 
 
 class DatabaseMaintenanceIsolationTests(unittest.TestCase):
+    def test_cli_emits_terminal_database_and_deployment_results_for_the_host(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "commit-pending.json").write_text(json.dumps({"hold_id": "own"}))
+            base = [
+                "keeper",
+                "verify",
+                "--expires-at",
+                (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                "--hold-id",
+                "own",
+                "--job-directory",
+                str(root),
+            ]
+            for mode, event in (
+                ("verify", "database_unsafe"),
+                ("unfence", "deployment_recovery_required"),
+            ):
+                output = io.StringIO()
+                arguments = list(base)
+                arguments[1] = mode
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"LAUNCHPLANE_DATABASE_URL": "postgresql://synthetic"},
+                        clear=True,
+                    ),
+                    patch.object(sys, "argv", arguments),
+                    patch.object(
+                        database_maintenance_cli, "_build_engine", return_value=MagicMock()
+                    ),
+                    patch.object(
+                        database_maintenance_cli,
+                        "verify_committed_database",
+                        side_effect=RecoveryRequired("actual mismatch"),
+                    ),
+                    patch.object(
+                        database_maintenance_cli,
+                        "release_deployment",
+                        side_effect=RecoveryRequired("original marker unresolved"),
+                    ),
+                    patch.object(sys, "stdout", output),
+                ):
+                    self.assertEqual(database_maintenance_cli.main(), 0)
+                self.assertEqual(json.loads(output.getvalue())["event"], event)
+
+    def test_transient_wrapped_invariant_read_is_retryable_but_mismatch_is_terminal(self) -> None:
+        connection = Mock()
+        proof = {"system_identifier": "own", "before": {}, "after": {}}
+        transient = RuntimeError("schema read unavailable")
+        transient.__cause__ = OperationalError("read", None, RuntimeError("connection reset"))
+        with (
+            patch.object(database_maintenance, "database_system_identifier", return_value="own"),
+            patch.object(database_maintenance, "require_no_other_clients"),
+            patch.object(database_maintenance, "database_snapshot", return_value={}),
+        ):
+            for error in (transient, RuntimeError("actual invariant mismatch")):
+                with patch.object(
+                    database_maintenance, "verify_postgres_schema_invariants", side_effect=error
+                ):
+                    try:
+                        database_maintenance.verify_committed_database(connection, proof)
+                    except RecoveryRequired:
+                        self.assertIsNot(error, transient)
+                    except RuntimeError:
+                        self.assertIs(error, transient)
+                    else:
+                        self.fail("A failed read or invariant must not report verified state")
+
     def test_only_the_scoped_local_dump_backend_keeps_its_exact_identity(self) -> None:
         connection = Mock()
         connection.scalar.return_value = 0

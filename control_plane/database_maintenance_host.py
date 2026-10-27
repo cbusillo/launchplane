@@ -111,7 +111,35 @@ def dump_application_name(hold_id: str) -> str:
     return name
 
 
-def operator_command(state: dict[str, Any], mode: str, *, readback_only: bool = False) -> list[str]:
+def read_marker_transition(
+    directory: Path, *, hold_id: str, target_id: str
+) -> dict[str, Any] | None:
+    path = directory / "marker-transition.json"
+    if not path.exists():
+        return None
+    try:
+        transition = json.loads(path.read_text())
+        if (
+            not isinstance(transition, dict)
+            or transition.get("hold_id") != hold_id
+            or transition.get("target_id") != target_id
+            or transition.get("action") not in {"install", "recovery", "remove"}
+            or transition.get("phase") not in {"dispatching", "confirmed", "observed"}
+            or not {"before", "desired"} <= transition.keys()
+            or any(
+                transition.get(key) is not None and not isinstance(transition[key], str)
+                for key in ("before", "desired")
+            )
+        ):
+            raise ValueError("Unbound marker transition.")
+    except (ValueError, TypeError, KeyError) as error:
+        raise RecoveryRequired(
+            "The original deployment marker transition is unverified."
+        ) from error
+    return transition
+
+
+def operator_command(state: dict[str, Any], mode: str) -> list[str]:
     command = [
         "docker",
         "compose",
@@ -150,37 +178,39 @@ def operator_command(state: dict[str, Any], mode: str, *, readback_only: bool = 
         "--target-id",
         state.get("target_id", ""),
     ]
-    return command + (["--readback-only"] if readback_only else [])
+    return command
 
 
 def operator(state: dict[str, Any], mode: str) -> dict[str, Any]:
     root = Path(state["job_directory"])
     intent_path = root / "operator-intent.json"
-    uncertain = root / "marker-cleanup-uncertain.json"
     settle_operator(state)
-    readback_only = mode == "unfence" and uncertain.exists()
     intent = {
         "name": state["operator"]
         + ("-release" if mode in {"unfence", "verify", "revision"} else ""),
-        "read_only": mode != "unfence" or readback_only,
+        "read_only": mode != "unfence",
     }
     save(intent_path, intent)
     try:
         output = run(
-            *operator_command(state, mode, readback_only=readback_only),
+            *operator_command(state, mode),
             timeout=300 if mode == "verify" else 90,
         )
         result = cast(dict[str, Any], json.loads(output.strip().splitlines()[-1]))
-    except Exception:
-        if not intent["read_only"]:
-            save(uncertain, {"hold_id": state["hold_id"], "outcome": "unknown"})
+    except Exception as error:
         settle_operator(state)
+        if mode == "unfence":
+            transition = read_marker_transition(
+                root, hold_id=state["hold_id"], target_id=state["target_id"]
+            )
+            if transition is not None and transition["phase"] != "observed":
+                raise RecoveryRequired(
+                    "The original deployment marker request requires read-only reconciliation."
+                ) from error
         raise
     settle_operator(state)
-    if mode == "unfence":
-        uncertain.unlink(missing_ok=True)
-    if result.get("event") == "database_unsafe":
-        raise RecoveryRequired("Committed database state requires an exact recovery decision.")
+    if result.get("event") in {"database_unsafe", "deployment_recovery_required"}:
+        raise RecoveryRequired("The original maintenance operation requires exact reconciliation.")
     return result
 
 
@@ -191,11 +221,6 @@ def settle_operator(state: dict[str, Any]) -> None:
     intent = json.loads(path.read_text())
     observed = operator_container(state, name=intent["name"])
     if observed is not None:
-        if not intent["read_only"]:
-            save(
-                path.parent / "marker-cleanup-uncertain.json",
-                {"hold_id": state["hold_id"], "outcome": "unknown"},
-            )
         intent["addresses"] = sorted(
             {
                 str(ipaddress.ip_address(network[key]))
@@ -425,12 +450,16 @@ def resume_original(identifier: str, state: dict[str, Any]) -> str:
             or observed["State"]["StartedAt"] != original["started_at"]
         ):
             safe = state.get("safe_to_resume", {})
+            pending = (Path(state["job_directory"]) / "commit-pending.json").exists()
             if (
                 not state.get("resume_started")
-                or not safe
-                or any(
-                    safe.get(key) != state[key]
-                    for key in ("hold_id", "system_identifier", "image_id", "revision")
+                or pending
+                and (
+                    not safe
+                    or any(
+                        safe.get(key) != state[key]
+                        for key in ("hold_id", "system_identifier", "image_id", "revision")
+                    )
                 )
             ):
                 raise RuntimeError("The original process changed before verified release.")
@@ -564,12 +593,21 @@ def remove_watchdog(state: dict[str, Any]) -> None:
         state["watchdog_disabled"] = True
         save(state_path, state)
     if not state.get("watchdog_service_settled"):
-        main_pid = run(
-            "systemctl", "show", unit + ".service", "--property=MainPID", "--value"
-        ).strip()
-        if main_pid != str(os.getpid()):
+        service = dict(
+            line.split("=", 1)
+            for line in run(
+                "systemctl",
+                "show",
+                unit + ".service",
+                "--property=MainPID",
+                "--property=LoadState",
+                "--property=ActiveState",
+            ).splitlines()
+        )
+        if service["MainPID"] != str(os.getpid()) and service["LoadState"] != "not-found":
+            if service["ActiveState"] == "failed":
+                run("systemctl", "reset-failed", unit + ".service")
             run("systemctl", "stop", unit + ".service")
-            run("systemctl", "reset-failed", unit + ".service")
         state["watchdog_service_settled"] = True
         save(state_path, state)
     for suffix in (".timer", ".service"):

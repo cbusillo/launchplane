@@ -266,9 +266,7 @@ def keep_database(
     connection.commit()
     if (arguments.job_directory / "releasing").exists():
         raise RuntimeError("The host already released this maintenance attempt.")
-    with deployment.fence(
-        arguments.expires_at, release_receipt=arguments.job_directory / "marker-release.json"
-    ):
+    with deployment.fence(arguments.expires_at):
         if (arguments.job_directory / "releasing").exists():
             raise RuntimeError("The host already released this maintenance attempt.")
         emit(
@@ -357,14 +355,37 @@ def keep_database(
             {"revision": revision, "hold_id": arguments.hold_id},
         )
         emit("database_released", revision=revision)
-        while not (arguments.job_directory / "resumed").exists():
-            if datetime.now(timezone.utc) >= expires:
-                raise TimeoutError(
-                    "Service restart did not complete before the maintenance deadline."
-                )
-            ready, _, _ = select.select([sys.stdin], [], [], 0.2)
-            if ready and not sys.stdin.readline():
-                raise EOFError("Maintenance host input closed during restart.")
+
+
+def release_deployment(arguments: argparse.Namespace, url: str) -> None:
+    if not arguments.target_id:
+        raise ValueError("unfence requires the recorded own-service target identity.")
+    deployment = DeploymentMaintenance(
+        target_id=arguments.target_id,
+        database_url=url,
+        image=os.environ.get("DOCKER_IMAGE_REFERENCE", ""),
+        root=Path("/app"),
+        job_directory=arguments.job_directory,
+        hold_id=arguments.hold_id,
+    )
+    from control_plane.deployment_maintenance import MAINTENANCE_UNTIL_ENV
+    from control_plane.dokploy.api import parse_dokploy_env_text
+
+    marker = parse_dokploy_env_text(str(deployment.read_target().get("env") or "")).get(
+        MAINTENANCE_UNTIL_ENV
+    )
+    if (arguments.job_directory / "commit-pending.json").exists() and (
+        not (arguments.job_directory / "database-safe.json").exists()
+        or not (arguments.job_directory / "resumed").exists()
+    ):
+        raise RuntimeError(
+            "Committed-state recovery must be verified before removing the deployment hold."
+        )
+    if marker is not None:
+        if marker not in {arguments.expires_at, recovery_marker(arguments.hold_id)}:
+            raise RecoveryRequired("The recorded deployment hold no longer owns this marker.")
+    deployment.marker(marker or arguments.expires_at, remove=True)
+    emit("deployment_released")
 
 
 def interrupted(_signum: int, _frame: object) -> None:
@@ -383,7 +404,6 @@ def main() -> int:
     parser.add_argument("--expires-at", required=True)
     parser.add_argument("--hold-id", required=True)
     parser.add_argument("--target-id", default="")
-    parser.add_argument("--readback-only", action="store_true")
     parser.add_argument("--job-directory", type=Path, default=Path("/maintenance"))
     arguments = parser.parse_args()
     expires = datetime.fromisoformat(arguments.expires_at)
@@ -394,36 +414,10 @@ def main() -> int:
         parser.error("The deadline must be within one hour and include a timezone.")
     url = os.environ["LAUNCHPLANE_DATABASE_URL"]
     if arguments.mode == "unfence":
-        if not arguments.target_id:
-            parser.error("unfence requires the recorded own-service target identity.")
-        deployment = DeploymentMaintenance(
-            target_id=arguments.target_id,
-            database_url=url,
-            image=os.environ.get("DOCKER_IMAGE_REFERENCE", ""),
-            root=Path("/app"),
-        )
-        from control_plane.deployment_maintenance import MAINTENANCE_UNTIL_ENV
-        from control_plane.dokploy.api import parse_dokploy_env_text
-
-        marker = parse_dokploy_env_text(str(deployment.read_target().get("env") or "")).get(
-            MAINTENANCE_UNTIL_ENV
-        )
-        if (arguments.job_directory / "commit-pending.json").exists() and (
-            not (arguments.job_directory / "database-safe.json").exists()
-            or not (arguments.job_directory / "resumed").exists()
-        ):
-            raise RuntimeError(
-                "Committed-state recovery must be verified before removing the deployment hold."
-            )
-        if marker is not None:
-            if marker not in {arguments.expires_at, recovery_marker(arguments.hold_id)}:
-                raise RuntimeError("The recorded deployment hold no longer owns this marker.")
-            if arguments.readback_only:
-                if marker != arguments.expires_at or expires > datetime.now(timezone.utc):
-                    raise RuntimeError("The recorded deployment hold is still active.")
-            else:
-                deployment.marker(marker, remove=True)
-        emit("deployment_released")
+        try:
+            release_deployment(arguments, url)
+        except RecoveryRequired:
+            emit("deployment_recovery_required", hold_id=arguments.hold_id)
         return 0
     engine = _build_engine(
         url,
@@ -436,11 +430,6 @@ def main() -> int:
     }
     try:
         with engine.connect() as connection:
-            if name := os.environ.get("PGAPPNAME"):
-                connection.execute(
-                    text("SELECT set_config('application_name', :name, false)"), {"name": name}
-                )
-                connection.commit()
             if arguments.mode == "rehearse":
                 if arguments.before_file is None:
                     parser.error("rehearse requires the held-snapshot receipt.")
@@ -485,6 +474,8 @@ def main() -> int:
                 database_url=url,
                 image=os.environ.get("DOCKER_IMAGE_REFERENCE", ""),
                 root=Path("/app"),
+                job_directory=arguments.job_directory,
+                hold_id=arguments.hold_id,
             )
             connection.commit()
             if (

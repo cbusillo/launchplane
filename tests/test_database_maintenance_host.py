@@ -57,75 +57,136 @@ def state_file(root: Path, **changes: Any) -> Path:
 
 
 class DatabaseMaintenanceHostTests(unittest.TestCase):
-    def test_timed_out_oneoffs_settle_before_reads_and_never_replay_uncertain_cleanup(self) -> None:
-        for mode in ("verify", "unfence"):
-            with self.subTest(mode=mode), TemporaryDirectory() as temporary:
+    def test_source_terminal_result_reaches_the_watchdog_without_an_exception_heuristic(
+        self,
+    ) -> None:
+        for event in ("database_unsafe", "deployment_recovery_required"):
+            with self.subTest(event=event), TemporaryDirectory() as temporary:
+                state = json.loads(state_file(Path(temporary)).read_text())
+                with (
+                    patch.object(host, "settle_operator"),
+                    patch.object(host, "run", return_value=json.dumps({"event": event})),
+                ):
+                    with self.assertRaises(host.RecoveryRequired):
+                        host.operator(state, "verify")
+
+    def test_prewrite_failure_is_retryable_but_dispatched_marker_failure_is_terminal(self) -> None:
+        for dispatched in (False, True):
+            with self.subTest(dispatched=dispatched), TemporaryDirectory() as temporary:
                 root = Path(temporary)
-                path = state_file(root)
-                state = json.loads(path.read_text())
-                active = False
-                first = True
-                marker_present = True
-                writes = []
-                observed = {
-                    "Id": "owned-oneoff",
-                    "Image": state["image_id"],
-                    "Config": {
-                        "Labels": {
-                            "com.docker.compose.project": state["project"],
-                            "com.docker.compose.oneoff": "true",
-                        }
-                    },
-                    "NetworkSettings": {"Networks": {"own": {"IPAddress": "10.0.1.2"}}},
-                }
+                state = json.loads(state_file(root).read_text())
+                if dispatched:
+                    host.save(
+                        root / "marker-transition.json",
+                        {
+                            "hold_id": state["hold_id"],
+                            "target_id": state["target_id"],
+                            "action": "remove",
+                            "before": "held",
+                            "desired": None,
+                            "phase": "dispatching",
+                        },
+                    )
+                with (
+                    patch.object(host, "settle_operator"),
+                    patch.object(host, "run", side_effect=RuntimeError("one-off failed")),
+                ):
+                    try:
+                        host.operator(state, "unfence")
+                    except host.RecoveryRequired:
+                        self.assertTrue(dispatched)
+                    except RuntimeError:
+                        self.assertFalse(dispatched)
+                    else:
+                        self.fail("The failed operation must not report successful release")
+
+    def test_watchdog_cleanup_handles_failed_inactive_and_unloaded_service_states(self) -> None:
+        for active in ("failed", "inactive", "not-found"):
+            with self.subTest(active=active), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                state = json.loads(state_file(root).read_text())
+                units = root / "systemd"
+                units.mkdir()
+                resets = []
+
+                def path(value: Any) -> Path:
+                    return units if str(value) == "/etc/systemd/system" else Path(value)
 
                 def run(*arguments: str, **_values: Any) -> str:
-                    nonlocal active, first
-                    if arguments[:2] == ("docker", "compose"):
-                        active = True
-                        if "unfence" in arguments and "--readback-only" not in arguments:
-                            writes.append(arguments)
-                        if first:
-                            first = False
-                            raise subprocess.TimeoutExpired(arguments, 1)
-                        if mode == "unfence" and marker_present:
-                            raise RuntimeError("cleanup outcome remains unknown")
-                        active = False
-                        return json.dumps(
-                            {
-                                "event": "deployment_released"
-                                if mode == "unfence"
-                                else "database_verified",
-                                "revision": "observed",
-                            }
+                    if arguments[:2] == ("systemctl", "show"):
+                        if arguments[2].endswith(".timer"):
+                            return "ActiveState=inactive\n"
+                        if "--value" in arguments:
+                            return "0"
+                        return (
+                            "MainPID=0\nLoadState="
+                            + ("not-found" if active == "not-found" else "loaded")
+                            + "\nActiveState="
+                            + ("inactive" if active == "not-found" else active)
                         )
-                    if arguments[:2] == ("docker", "ps"):
-                        return observed["Id"] if active else ""
-                    if arguments[:2] == ("docker", "inspect"):
-                        return json.dumps([observed])
-                    if arguments[:3] == ("docker", "rm", "-f"):
-                        self.assertEqual(arguments[-1], observed["Id"])
-                        active = False
-                        return ""
-                    if arguments[:3] == ("docker", "exec", "-i"):
-                        self.assertFalse(active)
-                        return "0\n"
-                    raise AssertionError("Unexpected fixture operation")
+                    if arguments[:2] == ("systemctl", "reset-failed"):
+                        if active != "failed":
+                            raise RuntimeError("Unit not loaded")
+                        resets.append(arguments)
+                    return ""
 
-                with patch.object(host, "run", side_effect=run):
-                    with self.assertRaises(subprocess.TimeoutExpired):
-                        host.operator(state, mode)
+                with (
+                    patch.object(host, "Path", side_effect=path),
+                    patch.object(host, "run", side_effect=run),
+                    patch.object(host, "sync_path"),
+                ):
+                    host.remove_watchdog(state)
+                    host.remove_watchdog(state)
+                self.assertEqual(len(resets), int(active == "failed"))
+                self.assertTrue(state["watchdog_removed"])
+
+    def test_timed_out_reader_settles_before_another_read(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = json.loads(state_file(root).read_text())
+            active = False
+            first = True
+            observed = {
+                "Id": "owned-oneoff",
+                "Image": state["image_id"],
+                "Config": {
+                    "Labels": {
+                        "com.docker.compose.project": state["project"],
+                        "com.docker.compose.oneoff": "true",
+                    }
+                },
+                "NetworkSettings": {"Networks": {"own": {"IPAddress": "10.0.1.2"}}},
+            }
+
+            def run(*arguments: str, **_values: Any) -> str:
+                nonlocal active, first
+                if arguments[:2] == ("docker", "compose"):
                     self.assertFalse(active)
-                    if mode == "unfence":
-                        self.assertTrue((root / "marker-cleanup-uncertain.json").exists())
-                        with self.assertRaises(RuntimeError):
-                            host.operator(state, mode)
-                        self.assertFalse(active)
-                        marker_present = False
-                    host.operator(state, mode)
-                self.assertEqual(len(writes), int(mode == "unfence"))
-                self.assertFalse((root / "operator-intent.json").exists())
-                self.assertFalse((root / "marker-cleanup-uncertain.json").exists())
+                    active = True
+                    if first:
+                        first = False
+                        raise subprocess.TimeoutExpired(arguments, 1)
+                    active = False
+                    return json.dumps({"event": "database_verified", "revision": "observed"})
+                if arguments[:2] == ("docker", "ps"):
+                    return observed["Id"] if active else ""
+                if arguments[:2] == ("docker", "inspect"):
+                    return json.dumps([observed])
+                if arguments[:3] == ("docker", "rm", "-f"):
+                    self.assertEqual(arguments[-1], observed["Id"])
+                    active = False
+                    return ""
+                if arguments[:3] == ("docker", "exec", "-i"):
+                    self.assertFalse(active)
+                    return "0\n"
+                raise AssertionError("Unexpected fixture operation")
+
+            with patch.object(host, "run", side_effect=run):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    host.operator(state, "verify")
+                self.assertFalse(active)
+                host.operator(state, "verify")
+            self.assertFalse((root / "operator-intent.json").exists())
 
     def test_genuine_recovery_required_returns_terminal_watchdog_status(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -314,6 +375,32 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 )
                 self.assertTrue(observed["State"]["Running"])
                 self.assertEqual(host.read_freezer(state["originals"][identifier]), ("0", "0"))
+
+    def test_no_commit_release_settles_the_already_started_exact_original(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = json.loads(
+                state_file(root, resume_started=True, freeze_requested=["own-api"]).read_text()
+            )
+            observed = {
+                "Id": "own-api",
+                "Image": state["image_id"],
+                "Config": {"Labels": {"com.docker.compose.project": state["project"]}},
+                "State": {"Running": True, "Pid": 100, "StartedAt": "recovered"},
+                "HostConfig": {"RestartPolicy": state["originals"]["own-api"]["restart_policy"]},
+            }
+            with (
+                patch.object(host, "inspect_container", return_value=observed),
+                patch.object(host, "freezer_identity", return_value={}) as qualify,
+                patch.object(host, "run") as run,
+                patch.object(time, "sleep"),
+            ):
+                self.assertEqual(host.resume_original("own-api", state), "own-api")
+                qualify.assert_called_once_with(observed)
+                self.assertEqual(run.call_args.args[:2], ("docker", "update"))
+                (root / "commit-pending.json").write_text("{}")
+                with self.assertRaises(RuntimeError):
+                    host.resume_original("own-api", state)
 
     def test_uncertain_keeper_termination_never_reopens_a_pending_commit(self) -> None:
         with TemporaryDirectory() as temporary:

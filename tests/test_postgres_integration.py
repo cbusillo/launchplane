@@ -16762,6 +16762,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 migrate.assert_not_called()
 
     def test_held_migration_joins_current_attestations_without_losing_retained_rows(self) -> None:
+        from control_plane.database_maintenance_host import RecoveryRequired
         from control_plane.database_maintenance import (
             apply_retirement,
             database_snapshot,
@@ -16867,7 +16868,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 self.assertEqual(verify_committed_database(observer, proof), final)
                 table = Table(current.TABLE_NAME, MetaData(), autoload_with=observer)
                 observer.execute(table.update().values(pull_request_number=99))
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises(RecoveryRequired):
                     verify_committed_database(observer, proof)
                 self.assertEqual(
                     observer.execute(text("SELECT version_num FROM alembic_version"))

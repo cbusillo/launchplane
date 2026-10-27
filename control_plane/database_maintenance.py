@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,
@@ -322,6 +323,8 @@ def verify_committed_database(connection: Connection, proof: dict[str, Any]) -> 
         if observed == proof["after"] and proof["after"] != proof["before"]:
             require_retired_functions_absent(connection)
     except RuntimeError as error:
+        if isinstance(error.__cause__, SQLAlchemyError):
+            raise
         raise RecoveryRequired("Committed schema invariants require recovery.") from error
     return str(connection.scalar(text("SELECT version_num FROM alembic_version")))
 

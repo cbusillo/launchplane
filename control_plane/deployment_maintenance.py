@@ -1,14 +1,20 @@
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-import json
+import fcntl
+import logging
+import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from control_plane.dokploy import api
+from control_plane.database_maintenance_host import RecoveryRequired, read_marker_transition, save
 
 
 MAINTENANCE_UNTIL_ENV = "LAUNCHPLANE_DATABASE_MAINTENANCE_UNTIL"
+_logger = logging.getLogger(__name__)
 
 
 class DeploymentHeld(ValueError):
@@ -36,7 +42,16 @@ def require_deployment_available(environment: Mapping[str, str]) -> None:
 
 
 class DeploymentMaintenance:
-    def __init__(self, *, target_id: str, database_url: str, image: str, root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        target_id: str,
+        database_url: str,
+        image: str,
+        root: Path,
+        job_directory: Path | None = None,
+        hold_id: str = "",
+    ) -> None:
         from control_plane.dokploy import api, source
         from control_plane.workflows.launchplane_self_deploy import (
             _validate_launchplane_compose_target,
@@ -46,6 +61,8 @@ class DeploymentMaintenance:
         self.database_url = database_url
         self.image = image
         self.target_id = target_id
+        self.job_directory = job_directory
+        self.hold_id = hold_id
         self.host, self.token = source.read_dokploy_config(control_plane_root=root)
         self.payload = api.fetch_dokploy_target_payload(
             host=self.host, token=self.token, target_type="compose", target_id=target_id
@@ -142,75 +159,114 @@ class DeploymentMaintenance:
                     raise ValueError("A self-deploy workflow is active or its absence is unproved.")
 
     @contextmanager
-    def fence(self, deadline: str, *, release_receipt: Path) -> Iterator[None]:
-        installed = False
-        released = False
-        try:
-            self.owned_marker = deadline
-            self.marker(deadline)
-            installed = True
-            self.require_idle_workflows()
-            self.observe(deadline=deadline)
-            yield
-        finally:
-            try:
-                if installed:
-                    pending = release_receipt.parent / "commit-pending.json"
-                    safe = release_receipt.parent / "database-safe.json"
-                    if (release_receipt.parent / "resumed").exists() and (
-                        not pending.exists() or safe.exists()
-                    ):
-                        self.marker(self.owned_marker, remove=True)
-                        released = True
-            finally:
-                receipt = {"released": released, "deadline": deadline, "target_id": self.target_id}
-                if not released:
-                    if installed:
-                        receipt["retained_for_recovery"] = True
-                    else:
-                        receipt["uncertain"] = True
-                        receipt["phase"] = "release" if installed else "install"
-                temporary = release_receipt.with_suffix(".new")
-                temporary.write_text(json.dumps(receipt))
-                temporary.chmod(0o600)
-                temporary.replace(release_receipt)
+    def fence(self, deadline: str) -> Iterator[None]:
+        self.marker(deadline)
+        self.require_idle_workflows()
+        self.observe(deadline=deadline)
+        yield
+
+    @contextmanager
+    def marker_lock(self) -> Iterator[Path]:
+        if self.job_directory is None or not self.hold_id:
+            raise ValueError("A marker mutation requires exact private maintenance custody.")
+        with (self.job_directory / "marker.lock").open("a") as lock:
+            os.fchmod(lock.fileno(), 0o600)
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "The original marker writer still owns custody."
+                        ) from None
+                    time.sleep(0.05)
+            yield self.job_directory / "marker-transition.json"
 
     def marker(self, deadline: str, *, remove: bool = False, replace: str | None = None) -> None:
+        with self.marker_lock() as path:
+            self.change_marker(path, deadline, remove=remove, replace=replace)
+
+    def observe_marker_transition(self, path: Path, transition: dict[str, Any]) -> None:
+        try:
+            observed = api.parse_dokploy_env_text(str(self.read_target().get("env") or "")).get(
+                MAINTENANCE_UNTIL_ENV
+            )
+        except Exception as error:
+            raise RecoveryRequired(
+                "The original marker request has no available effect readback."
+            ) from error
+        if observed != transition["desired"]:
+            raise RecoveryRequired(
+                "The original marker request remains unresolved; no new write is allowed."
+            )
+        transition["phase"] = "observed"
+        save(path, transition)
+
+    def change_marker(
+        self, path: Path, deadline: str, *, remove: bool, replace: str | None
+    ) -> None:
         from control_plane.dokploy import api
 
+        desired = None if remove else deadline
+        transition = read_marker_transition(
+            path.parent, hold_id=self.hold_id, target_id=self.target_id
+        )
+        if transition is not None and transition["phase"] != "observed":
+            self.observe_marker_transition(path, transition)
+            if transition["desired"] == desired:
+                return
         target = self.read_target()
         environment = api.parse_dokploy_env_text(str(target.get("env") or ""))
         if remove and MAINTENANCE_UNTIL_ENV not in environment:
             return
         if remove and environment.get(MAINTENANCE_UNTIL_ENV) != deadline:
-            raise ValueError("Maintenance marker custody changed; release will not overwrite it.")
+            raise RecoveryRequired(
+                "Maintenance marker custody changed; release will not overwrite it."
+            )
         if replace is not None and environment.get(MAINTENANCE_UNTIL_ENV) != replace:
-            raise ValueError("The owned maintenance marker changed before recovery fencing.")
+            raise RecoveryRequired("The owned maintenance marker changed before recovery fencing.")
         if not remove and replace is None:
             require_deployment_available(environment)
-        if not remove:
-            self.owned_marker = deadline
         rendered = api.render_dokploy_env_text_with_overrides(
             str(target.get("env") or ""),
             updates={} if remove else {MAINTENANCE_UNTIL_ENV: deadline},
             removals=(MAINTENANCE_UNTIL_ENV,) if remove else (),
             target_type="compose",
         )
-        api.update_dokploy_target_env(
-            host=self.host,
-            token=self.token,
-            target_type="compose",
-            target_id=self.target_id,
-            target_payload=target,
-            env_text=rendered,
-        )
-        observed = api.parse_dokploy_env_text(str(self.read_target().get("env") or ""))
-        if (
-            (MAINTENANCE_UNTIL_ENV in observed)
-            if remove
-            else (observed.get(MAINTENANCE_UNTIL_ENV) != deadline)
-        ):
-            raise ValueError("The deployment marker readback disagrees.")
+        transition = {
+            "hold_id": self.hold_id,
+            "target_id": self.target_id,
+            "action": "remove" if remove else "install" if replace is None else "recovery",
+            "before": environment.get(MAINTENANCE_UNTIL_ENV),
+            "desired": desired,
+            "phase": "dispatching",
+        }
+        dispatched = False
+
+        def record_dispatch() -> None:
+            nonlocal dispatched
+            save(path, transition)
+            dispatched = True
+
+        try:
+            with api.guard_dokploy_mutations(record_dispatch):
+                api.update_dokploy_target_env(
+                    host=self.host,
+                    token=self.token,
+                    target_type="compose",
+                    target_id=self.target_id,
+                    target_payload=target,
+                    env_text=rendered,
+                )
+            transition["phase"] = "confirmed"
+            save(path, transition)
+        except Exception:
+            if not dispatched:
+                raise
+            _logger.warning("The marker response is unavailable; observing its original effect.")
+        self.observe_marker_transition(path, transition)
 
     def hold_recovery(self, deadline: str, hold_id: str) -> None:
         self.marker(recovery_marker(hold_id), replace=deadline)
