@@ -822,6 +822,15 @@ class ApplicationFlowTests(unittest.TestCase):
                     "NetworkSettings": {"Networks": {"dokploy-network": {}}},
                 }
             ]
+        elif args[:4] == ["exec", "proxy", "nslookup", "-type=A"]:
+            name = args[-1].rstrip(".")
+            addresses = [
+                network["IPAddress"]
+                for row in self.containers.values()
+                if (row["Config"].get("Labels") or {}).get("com.docker.swarm.service.name") == name
+                for network in row["NetworkSettings"]["Networks"].values()
+            ]
+            value = "\n".join("Name: " + name + "\nAddress: " + address for address in addresses)
         elif args[:4] == ["exec", "-i", "proxy", "nc"]:
             address = args[-2]
             container = next(
@@ -829,6 +838,8 @@ class ApplicationFlowTests(unittest.TestCase):
                 for row in self.containers.values()
                 if any(
                     network.get("IPAddress") == address
+                    or (row["Config"].get("Labels") or {}).get("com.docker.swarm.service.name")
+                    == address
                     for network in row["NetworkSettings"]["Networks"].values()
                 )
             )
@@ -1151,6 +1162,334 @@ class ApplicationFlowTests(unittest.TestCase):
             mount_path=self.specification.state.container_path,
             health_path=self.specification.health_path,
         )
+
+    def test_fresh_application_configures_the_shared_endpoint_before_first_deployment(self) -> None:
+        from control_plane.dokploy.application_endpoint import application_endpoint_spec
+
+        self.prepare()
+        observed: list[api.JsonValue] = []
+        provider = self.provider
+
+        def capture(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/application.deploy":
+                observed.append(
+                    deepcopy(
+                        self.payloads[kwargs["payload"]["applicationId"]].get("endpointSpecSwarm")
+                    )
+                )
+            return provider(**kwargs)
+
+        with patch.object(api, "dokploy_request", side_effect=capture):
+            self.assertEqual(self.activate().status, "completed")
+        self.assertEqual(observed, [application_endpoint_spec({})])
+
+    def test_private_qualification_connects_to_the_backend_it_will_publish(self) -> None:
+        from urllib.parse import urlsplit
+
+        self.prepare()
+        destinations: list[str] = []
+        docker = self.docker
+
+        def capture(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[1:5] == ["exec", "-i", "proxy", "nc"]:
+                destinations.append(arguments[-2])
+            return docker(arguments, **kwargs)
+
+        with patch.object(self, "docker", side_effect=capture):
+            self.assertEqual(self.activate().status, "completed")
+        readiness = self.adapter.current().application_readiness
+        assert readiness is not None
+        self.assertTrue(destinations)
+        self.assertEqual(set(destinations), {urlsplit(readiness.backend).hostname})
+
+    def test_legacy_null_recipient_keeps_task_health_diagnostics_without_retuning(self) -> None:
+        from control_plane.testing_application_inspection import (
+            ApplicationCandidateInspection,
+            inspect_candidate_runtime,
+        )
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        record = self.adapter.current()
+        self.payloads[record.target_id]["endpointSpecSwarm"] = None
+        docker = self.docker
+
+        def vip(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[1:5] == ["exec", "proxy", "nslookup", "-type=A"]:
+                return subprocess.CompletedProcess(
+                    arguments, 0, "Name: " + arguments[-1] + "\nAddress: 192.0.2.9", ""
+                )
+            return docker(arguments, **kwargs)
+
+        before = tuple(self.writes)
+        with (
+            patch.object(self, "docker", side_effect=vip),
+            patch(
+                "control_plane.testing_application_runtime.observation_window_seconds",
+                return_value=0,
+            ),
+        ):
+            observed = inspect_candidate_runtime(
+                self.adapter,
+                record,
+                self.adapter.live(record),
+                ApplicationCandidateInspection(placement="matched"),
+            )
+        self.assertEqual(observed.current_runtime_status, "available")
+        self.assertEqual(observed.current_http_status, 200)
+        self.assertEqual(observed.current_identity_status, "match")
+        self.assertIsNone(self.payloads[record.target_id]["endpointSpecSwarm"])
+        self.assertEqual(tuple(self.writes), before)
+
+    def test_original_configured_undeployed_null_endpoint_can_continue_without_reconfiguration(
+        self,
+    ) -> None:
+        from control_plane.dokploy.application_endpoint import application_endpoint_spec
+
+        self.prepare()
+        with (
+            patch.object(
+                self.adapter, "deploy_owned_target", side_effect=OSError("Before image dispatch")
+            ),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+        ):
+            first = self.activate()
+        self.assertEqual(first.status, "reconcile_required", first)
+        record = self.adapter.current()
+        self.assertEqual(record.state_recipient["application_configured"], "true")
+        self.assertNotIn("application_deployment_id", record.state_recipient)
+        self.assertFalse(self.deployments.get(record.target_id))
+        self.payloads[record.target_id]["endpointSpecSwarm"] = None
+        before = len(self.writes)
+        completed = self.activate()
+        self.assertIn(completed.status, {"completed", "adopted"}, completed)
+        self.assertTrue(completed.response_payload["result"]["applied"])
+        self.assertEqual(
+            [body for path, body in self.writes[before:] if path == "/api/application.update"],
+            [
+                {
+                    "applicationId": record.target_id,
+                    "endpointSpecSwarm": application_endpoint_spec({}),
+                }
+            ],
+        )
+
+    def test_original_endpoint_reconfiguration_preserves_started_or_unknown_deployments(
+        self,
+    ) -> None:
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        record = self.adapter.current()
+        self.payloads[record.target_id]["endpointSpecSwarm"] = None
+        before = tuple(self.writes)
+        checkpoint = unittest.mock.Mock()
+        for updates in (
+            {},
+            {"state_recipient": {}, "phase": "deploy_application_deployment_id"},
+        ):
+            with self.subTest(updates=updates):
+                original = record.model_copy(update=updates)
+                self.assertEqual(
+                    self.adapter.configure_original_undeployed_endpoint(original, checkpoint),
+                    original,
+                )
+        original = record.model_copy(
+            update={"state_recipient": {}, "phase": "configure_application"}
+        )
+        for history in ([{"deploymentId": "original"}], ValueError("history unavailable")):
+            with self.subTest(history=type(history).__name__):
+                options = (
+                    {"side_effect": history}
+                    if isinstance(history, Exception)
+                    else {"return_value": history}
+                )
+                with (
+                    patch.object(self.adapter, "verify_provider"),
+                    patch.object(api, "list_deployments_for_target", **options) as listing,
+                    self.assertRaises((TestingActivationRefusal, ValueError)),
+                ):
+                    self.adapter.configure_original_undeployed_endpoint(original, checkpoint)
+                self.assertTrue(listing.call_args.kwargs["require_complete"])
+        checkpoint.assert_not_called()
+        self.assertEqual(tuple(self.writes), before)
+
+    def test_endpoint_readback_loss_prevents_first_deployment(self) -> None:
+        self.prepare()
+        provider = self.provider
+
+        def discard(**kwargs: Any) -> Any:
+            result = provider(**kwargs)
+            if (
+                kwargs["path"] == "/api/application.update"
+                and "endpointSpecSwarm" in kwargs["payload"]
+            ):
+                self.payloads[kwargs["payload"]["applicationId"]]["endpointSpecSwarm"] = None
+            return result
+
+        with patch.object(api, "dokploy_request", side_effect=discard):
+            result = self.activate()
+        self.assertFalse(result.response_payload.get("result", {}).get("applied", False))
+        self.assertFalse(any(path == "/api/application.deploy" for path, _ in self.writes))
+
+    def test_endpoint_drift_after_configuration_prevents_first_deployment(self) -> None:
+        self.prepare()
+        deploy = self.adapter.deploy_owned_target
+
+        def drift(record: TestingActivationRecord, **kwargs: Any) -> TestingActivationRecord:
+            self.payloads[record.target_id]["endpointSpecSwarm"] = None
+            return deploy(record, **kwargs)
+
+        with patch.object(self.adapter, "deploy_owned_target", side_effect=drift):
+            result = self.activate()
+        self.assertFalse(result.response_payload.get("result", {}).get("applied", False))
+        self.assertFalse(any(path == "/api/application.deploy" for path, _ in self.writes))
+
+    def test_configured_endpoint_validation_preserves_legacy_null_without_retuning(self) -> None:
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+        from control_plane.dokploy.application_endpoint import application_endpoint_spec
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        record = self.adapter.current()
+        payload = self.payloads[record.target_id]
+        before = tuple(self.writes)
+        payload["endpointSpecSwarm"] = None
+        self.adapter.verify_provider(record)
+        self.assertEqual(tuple(self.writes), before)
+        canonical_endpoint = application_endpoint_spec({})
+        assert isinstance(canonical_endpoint, dict)
+        for endpoint in ({}, {"Mode": "vip"}, {**canonical_endpoint, "Ports": []}):
+            with self.subTest(endpoint=endpoint):
+                payload["endpointSpecSwarm"] = endpoint
+                with self.assertRaises(TestingActivationRefusal):
+                    self.adapter.verify_provider(record)
+        payload["endpointSpecSwarm"] = application_endpoint_spec({})
+        payload["resourcesSwarm"] = {}
+        with self.assertRaises(ValueError):
+            self.adapter.verify_provider(record)
+        self.assertEqual(tuple(self.writes), before)
+
+    def test_private_qualification_rejects_foreign_ambiguous_or_changed_backend_dns(self) -> None:
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        docker = self.docker
+        for addresses in (
+            [],
+            ["192.0.2.9"],
+            ["owned", "192.0.2.9"],
+            ["owned", "changed_after_http"],
+        ):
+            with self.subTest(addresses=addresses):
+                reads: list[list[str]] = []
+
+                def resolve(arguments: list[str], **kwargs: Any) -> Any:
+                    response = docker(arguments, **kwargs)
+                    if arguments[1:5] != ["exec", "proxy", "nslookup", "-type=A"]:
+                        return response
+                    reads.append(arguments)
+                    if addresses == ["owned", "changed_after_http"]:
+                        if len(reads) == 1:
+                            return response
+                        values = ["192.0.2.9"]
+                    else:
+                        current = self.adapter.current()
+                        assert current.application_readiness is not None
+                        owned = self.containers[current.application_readiness.container_id][
+                            "NetworkSettings"
+                        ]["Networks"][self.specification.network_name]["IPAddress"]
+                        values = [owned if value == "owned" else value for value in addresses]
+                    return subprocess.CompletedProcess(
+                        arguments,
+                        0,
+                        "\n".join(
+                            "Name: " + arguments[-1] + "\nAddress: " + value for value in values
+                        ),
+                        "",
+                    )
+
+                with (
+                    patch.object(self, "docker", side_effect=resolve),
+                    patch(
+                        "control_plane.testing_application_runtime.observation_window_seconds",
+                        return_value=0,
+                    ),
+                    self.assertRaises(ValueError),
+                ):
+                    self.inspect_current_private_runtime()
+                self.assertTrue(reads)
+
+    def test_private_qualification_cannot_substitute_healthy_task_ip_for_failed_service_origin(
+        self,
+    ) -> None:
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        docker = self.docker
+        name = self.adapter.current().app_name
+
+        def failed_origin(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[1:5] == ["exec", "-i", "proxy", "nc"] and arguments[-2] == name:
+                raise subprocess.CalledProcessError(1, arguments)
+            return docker(arguments, **kwargs)
+
+        with (
+            patch.object(self, "docker", side_effect=failed_origin),
+            patch(
+                "control_plane.testing_application_runtime.observation_window_seconds",
+                return_value=0,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            self.inspect_current_private_runtime()
+
+    def test_unavailable_runtime_frame_terminates_the_registered_read_without_private_text(
+        self,
+    ) -> None:
+        from control_plane.dokploy import native_copy_stream as transport
+        from tests.test_odoo_testing_native_source import Connection
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        captured: dict[str, Any] = {}
+
+        def capture(**kwargs: Any) -> None:
+            captured.update(kwargs)
+            raise ValueError("Fixture read unavailable")
+
+        with (
+            patch("control_plane.testing_application_runtime._read_remote", side_effect=capture),
+            patch(
+                "control_plane.testing_application_runtime.observation_window_seconds",
+                return_value=0,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            self.inspect_current_private_runtime()
+        encoded = base64.b64encode(json.dumps(captured["payload"]).encode()).decode()
+        output = StringIO()
+        private = "private-supplier-token"
+        with (
+            patch.object(sys, "argv", ["program", encoded, "frame:"]),
+            patch.object(subprocess, "run", side_effect=ValueError(private)),
+            patch("sys.stdout", output),
+            self.assertRaises(SystemExit),
+        ):
+            exec(compile(APPLICATION_RUNTIME_PROGRAM, "<string>", "exec"), {})
+        frame = json.loads(output.getvalue().removeprefix("frame:"))
+        with self.assertRaises(transport.NativeProgramFailed) as raised:
+            transport._read_program(
+                Connection(frame),
+                program=APPLICATION_RUNTIME_PROGRAM,
+                payload=captured["payload"],
+                timeout_seconds=5,
+                receive=lambda _frame: None,
+            )
+        self.assertTrue(raised.exception.unavailable)
+        self.assertTrue(raised.exception.program_sites)
+        self.assertNotIn(private, output.getvalue() + str(raised.exception))
 
     def test_bounded_private_health_warmup_canonical_variants_and_unknown_tail(self) -> None:
         import itertools
