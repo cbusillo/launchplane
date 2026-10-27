@@ -472,6 +472,10 @@ def _apply_pre_dispatch_refusal(
 
     adapter = inspection.adapter
     assert adapter is not None
+    provider_inspection = inspection.provider_inspection
+    assert provider_inspection is not None
+    target = provider_inspection.resolved_deploy_target
+    assert target is not None
     with (
         serialize_generic_web_product_operation(
             record_store=store, product=inspection.product, exclusive=True
@@ -490,10 +494,12 @@ def _apply_pre_dispatch_refusal(
         check()
         current = inspect_pre_dispatch_refusal(
             store,
-            adapter,
-            inspection.reservation,
-            inspection.provider_operation_key,
-            inspection.observed_at,
+            profile=adapter.profile,
+            lane=adapter.lane,
+            target=target,
+            original=inspection.reservation,
+            operation_key=inspection.provider_operation_key,
+            observed_at=inspection.observed_at,
         )
         if current is None or current != inspection.pre_dispatch_refusal:
             raise dependencies.http_error(
@@ -507,7 +513,7 @@ def _apply_pre_dispatch_refusal(
         records, result = generic_web_record_result(
             record=record,
             product=inspection.product,
-            target=adapter._resolve_deploy_target(),
+            target=target,
             observation=GenericWebProviderDeploymentObservation(
                 outcome="absent", error_message=record.failure.code
             ),
@@ -525,10 +531,11 @@ def _apply_pre_dispatch_refusal(
             expected_original_intent=current.original_intent,
             expected_binding_evidence=(*current.bindings, record),
         )
+        completed = adopted.record
         if (
             adopted.status not in {"adopted", "replayed"}
-            or adopted.record is None
-            or _stored_recovery_metadata(adopted.record)
+            or completed is None
+            or _stored_recovery_metadata(completed)
             != (inspection.recovery_digest, "close_out_observed")
         ):
             raise dependencies.http_error(
@@ -537,7 +544,7 @@ def _apply_pre_dispatch_refusal(
                 code="reservation_changed",
                 message="Original refusal evidence changed.",
             )
-        return _apply_response(trace_id=trace_id, inspection=inspection, reservation=adopted.record)
+        return _apply_response(trace_id=trace_id, inspection=inspection, reservation=completed)
 
 
 def _apply_testing_abandonment(
@@ -1179,7 +1186,13 @@ async def _inspect_generic_web_deploy_recovery(
                 if runtime_close_out_evidence is not None:
                     proposed_action = "close_out_observed"
             pre_dispatch_refusal = inspect_pre_dispatch_refusal(
-                record_store, adapter, reservation, provider_operation_key, lookup.observed_at
+                record_store,
+                profile=adapter.profile,
+                lane=adapter.lane,
+                target=provider_inspection.resolved_deploy_target,
+                original=reservation,
+                operation_key=provider_operation_key,
+                observed_at=lookup.observed_at,
             )
             if pre_dispatch_refusal is not None:
                 if provider_outcome == "absent":

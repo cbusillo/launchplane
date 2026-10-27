@@ -2,7 +2,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
-from typing import Any
+from typing import Any, cast
 from datetime import datetime, timedelta, timezone
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
@@ -152,7 +152,7 @@ class ComposeRefusalTests(unittest.TestCase):
             "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
             side_effect=LaneMovementRefused("ancestor_build"),
         ):
-            outcome = self.adapter.apply("original-operation", lease)
+            outcome = self.adapter.apply("original-operation", cast(ProviderOperationLease, lease))
         self.assertFalse(outcome.provider_effect_performed)
         self.assertFalse(outcome.durable)
         lease.checkpoint_effect.assert_not_called()
@@ -227,8 +227,9 @@ class ComposeRefusalTests(unittest.TestCase):
 
     def hold_original(self) -> None:
         result = self.run_original(historical_failure_publication=True)
-        assert result.record is not None
-        self.assertEqual(result.record.state, "reconcile_required")
+        record = result.record
+        assert record is not None
+        self.assertEqual(record.state, "reconcile_required")
 
     def test_original_refusal_closes_without_retry_or_lane_publication(self) -> None:
         self.hold_original()
@@ -266,8 +267,9 @@ class ComposeRefusalTests(unittest.TestCase):
 
     def test_wait_before_refusal_does_not_look_like_an_earlier_incarnation(self) -> None:
         result = self.run_original(historical_failure_publication=True, workflow_delay_seconds=2)
-        assert result.record is not None
-        self.assertEqual(result.record.state, "reconcile_required")
+        record = result.record
+        assert record is not None
+        self.assertEqual(record.state, "reconcile_required")
         status, plan = self.inspect_original()
         self.assertEqual(status, 200, plan)
         self.assertEqual(plan["proposed_action"], "close_out_observed")
@@ -281,13 +283,15 @@ class ComposeRefusalTests(unittest.TestCase):
 
         self.provider.execute_artifact_deploy.side_effect = dispatch_then_fail
         result = self.run_original(refuse_build=False)
-        assert result.record is not None
-        self.assertEqual(result.record.state, "reconcile_required")
-        self.assertEqual(result.record.provider_effect_phase, "deploy_trigger")
+        record = result.record
+        assert record is not None
+        self.assertEqual(record.state, "reconcile_required")
+        self.assertEqual(record.provider_effect_phase, "deploy_trigger")
         self.provider.execute_artifact_deploy.assert_called_once()
 
     def test_cutover_ancestor_refusal_releases_without_entering_cutover(self) -> None:
         from tests.test_generic_web_cutover import WebCutoverDeploymentTests
+        from control_plane.workflows.generic_web_cutover import WebCutoverProvider
         from control_plane.workflows.generic_web_deploy import GenericWebDeployRequest
         from control_plane.workflows.generic_web_deploy_provider import (
             DokployGenericWebDeployProvider,
@@ -321,7 +325,7 @@ class ComposeRefusalTests(unittest.TestCase):
             lane=profile.lanes[0],
             trace_id="cutover-refusal",
             deploy_provider=DokployGenericWebDeployProvider(
-                cutover_provider_factory=lambda _plan: provider
+                cutover_provider_factory=lambda _plan: cast(WebCutoverProvider, provider)
             ),
         )
         with patch(
@@ -453,7 +457,8 @@ class ComposeRefusalTests(unittest.TestCase):
                 payload=_generic_web_recovery_original_deploy(),
             ),
         )
-        assert lookup.record is not None
+        original = lookup.record
+        assert original is not None
         future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
         for change in (
             {"attempt": 2},
@@ -465,7 +470,7 @@ class ComposeRefusalTests(unittest.TestCase):
                 patch.object(
                     self.store,
                     "lookup_existing_mutation_reservation",
-                    return_value=lookup._replace(record=lookup.record.model_copy(update=change)),
+                    return_value=lookup._replace(record=original.model_copy(update=change)),
                 ),
             ):
                 status, plan = self.inspect_original()
@@ -480,5 +485,5 @@ class ComposeRefusalTests(unittest.TestCase):
             side_effect=LaneMovementRefused("ancestor_build"),
         ):
             with self.assertRaises(RuntimeError):
-                self.adapter.apply("stale-worker", lease)
+                self.adapter.apply("stale-worker", cast(ProviderOperationLease, lease))
         self.assertEqual(self.store.list_deployment_records(), ())

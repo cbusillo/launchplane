@@ -8,15 +8,21 @@ from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     parse_launchplane_mutation_timestamp,
 )
-from control_plane.generic_web_deploy_provider_adapter import (
-    GenericWebDeployProviderMutationAdapter,
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
 )
 from control_plane.generic_web_testing_exclusion import bind_testing_recipient
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.generic_web_application_snapshot import recorded_application_lifecycle
+from control_plane.workflows.generic_web_application_snapshot import (
+    recorded_application_lifecycle,
+    generic_web_provider_deployment_record_id,
+)
 from control_plane.workflows.generic_web_deploy import GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID
 from control_plane.workflows.generic_web_deploy_provider import (
     decode_generic_web_provider_reconciliation_target,
+    GenericWebResolvedDeployTarget,
+    build_generic_web_provider_target_key,
 )
 from control_plane.workflows.generic_web_execution import execution_receipt
 from control_plane.generic_web_testing_inputs import DELIVERY_RECEIPT_KEY
@@ -38,7 +44,10 @@ class PreDispatchRefusal:
 
 def inspect_pre_dispatch_refusal(
     store: PostgresRecordStore,
-    adapter: GenericWebDeployProviderMutationAdapter,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    target: GenericWebResolvedDeployTarget | None,
     original: LaunchplaneIdempotencyRecord,
     operation_key: str,
     observed_at: str,
@@ -47,8 +56,9 @@ def inspect_pre_dispatch_refusal(
         original.state != "reconcile_required"
         or original.attempt != 1
         or original.provider_effect_phase != "records_commit"
-        or adapter.lane.instance != "testing"
-        or adapter.lane.generic_web_cutover is not None
+        or lane.instance != "testing"
+        or lane.generic_web_cutover is not None
+        or target is None
     ):
         return None
     try:
@@ -58,27 +68,31 @@ def inspect_pre_dispatch_refusal(
             return None
         snapshot = decode_generic_web_provider_reconciliation_target(original.reconciliation_key)
         if (
-            snapshot.product != adapter.profile.product
+            snapshot.product != profile.product
             or snapshot.target_type != "compose"
             or snapshot.testing_runtime_digest
             or snapshot.original_event_deploy is not None
-            or original.provider_target_key != adapter.target_key()
+            or original.provider_target_key != build_generic_web_provider_target_key(target)
         ):
             return None
-        bindings = bind_testing_recipient(
-            store, adapter.profile.product, adapter.lane.context, adapter.lane.instance
-        )
-        profile, target, target_id, provider = bindings
+        bindings = bind_testing_recipient(store, profile.product, lane.context, lane.instance)
+        current_profile, current_target, target_id, provider = bindings
         if (
-            profile != adapter.profile
-            or (target.target_type, target.target_name, target_id.target_id)
+            current_profile != profile
+            or (current_target.target_type, current_target.target_name, target_id.target_id)
             != (snapshot.target_type, snapshot.target_name, snapshot.target_id)
             or (provider.provider_id, provider.target_category, provider.provider_target_type)
             != (snapshot.provider_id, snapshot.target_category, snapshot.provider_target_type)
         ):
             return None
-        record = store.read_deployment_record(adapter._deployment_record_id(operation_key))
-        ship = adapter._resolve_deploy_target().ship_request
+        record = store.read_deployment_record(
+            generic_web_provider_deployment_record_id(
+                operation_key,
+                context=lane.context,
+                instance=lane.instance,
+            )
+        )
+        ship = target.ship_request
         if (
             record.failure is None
             or record.failure.code
@@ -102,7 +116,7 @@ def inspect_pre_dispatch_refusal(
             != (ship.context, ship.instance, ship.source_git_ref)
             or record.artifact_identity is None
             or record.artifact_identity.artifact_id != ship.artifact_id
-            or record.resolved_target != adapter._resolve_deploy_target().resolved_target
+            or record.resolved_target != target.resolved_target
             or record.deployed_target is None
             or (
                 record.deployed_target.provider_id,
