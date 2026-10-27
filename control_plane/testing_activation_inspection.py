@@ -63,12 +63,6 @@ class TestingActivationRouteInspection(BaseModel):
     writer_checkpoint: RouteCheckpoint | None = None
     writer_updated_at: str = ""
     writer_outcome: RouteWriterOutcome | None = None
-    private_health_status: ReleaseStatus | None = None
-    private_health_verified: bool | None = None
-    private_identity_status: RuntimeIdentityStatus | None = None
-    public_health_status: ReleaseStatus | None = None
-    public_health_verified: bool | None = None
-    public_identity_status: RuntimeIdentityStatus | None = None
 
 
 def route_checkpoint(phase: str) -> RouteCheckpoint:
@@ -160,24 +154,6 @@ def inspect_application_route_receipts(
         observed = TestingActivationRouteInspection(
             direction="inverse" if inverse else "forward",
             status="not_found",
-            private_health_status=readiness.private_health.status
-            if readiness.private_health
-            else None,
-            private_health_verified=readiness.private_health.verified
-            if readiness.private_health
-            else None,
-            private_identity_status=readiness.private_health.runtime_identity_status
-            if readiness.private_health
-            else None,
-            public_health_status=readiness.public_health.status
-            if readiness.public_health
-            else None,
-            public_health_verified=readiness.public_health.verified
-            if readiness.public_health
-            else None,
-            public_identity_status=readiness.public_health.runtime_identity_status
-            if readiness.public_health
-            else None,
         )
         suffix = ":route-inverse" if inverse else ":route"
         path, key = ROUTE.format(product=record.product) + suffix, record.plan_sha256 + suffix
@@ -245,6 +221,12 @@ class TestingActivationInspection(SeparationResourcesStatus):
     inspected_at: AwareDatetime
     qualification: Literal["not_evaluated"] = "not_evaluated"
     routes: tuple[TestingActivationRouteInspection, ...] = Field(default=(), max_length=2)
+    private_health_status: ReleaseStatus | None = None
+    private_health_verified: bool | None = None
+    private_identity_status: RuntimeIdentityStatus | None = None
+    public_health_status: ReleaseStatus | None = None
+    public_health_verified: bool | None = None
+    public_identity_status: RuntimeIdentityStatus | None = None
 
 
 def inspect_application_activation(
@@ -320,6 +302,9 @@ def inspect_application_activation(
                 }
             ),
         )
+    readiness = record.application_readiness
+    private_health = readiness.private_health if readiness else None
+    public_health = readiness.public_health if readiness else None
     return TestingActivationInspection(
         product=product,
         context=request.context,
@@ -336,4 +321,10 @@ def inspect_application_activation(
         programs=tuple(programs),
         inspected_at=datetime.now(timezone.utc),
         routes=inspect_application_route_receipts(store, record),
+        private_health_status=private_health.status if private_health else None,
+        private_health_verified=private_health.verified if private_health else None,
+        private_identity_status=private_health.runtime_identity_status if private_health else None,
+        public_health_status=public_health.status if public_health else None,
+        public_health_verified=public_health.verified if public_health else None,
+        public_identity_status=public_health.runtime_identity_status if public_health else None,
     )

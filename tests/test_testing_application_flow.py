@@ -4700,7 +4700,10 @@ class ApplicationFlowTests(unittest.TestCase):
     def test_original_route_inspection_reads_bound_receipts_without_provider_or_writes(
         self,
     ) -> None:
-        from control_plane.testing_activation_inspection import inspect_application_route_receipts
+        from control_plane.testing_activation_inspection import (
+            inspect_application_activation,
+            inspect_application_route_receipts,
+        )
         from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
         from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT
 
@@ -4728,8 +4731,12 @@ class ApplicationFlowTests(unittest.TestCase):
         )
         read = self.store.read_idempotency_record
         with (
-            patch("control_plane.dokploy.api.dokploy_request", side_effect=AssertionError),
-            patch("control_plane.secrets._decrypt_secret_value", side_effect=AssertionError),
+            patch(
+                "control_plane.dokploy.api.dokploy_request", side_effect=AssertionError
+            ) as provider_reads,
+            patch(
+                "control_plane.secrets._decrypt_secret_value", side_effect=AssertionError
+            ) as secret_reads,
         ):
             observed = inspect_application_route_receipts(self.store, record)
             self.assertEqual(observed[0].state, forward.state)
@@ -4738,9 +4745,43 @@ class ApplicationFlowTests(unittest.TestCase):
             self.assertEqual(observed[0].writer_status, "bound")
             self.assertEqual(observed[0].writer_state, writer.state)
             self.assertEqual(observed[0].writer_outcome, writer.response_payload["writer_outcome"])
-            self.assertEqual(observed[0].private_health_status, readiness.private_health.status)
-            self.assertEqual(observed[0].public_health_status, readiness.public_health.status)
             self.assertEqual(observed[1].status, "not_found")
+            with patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=[],
+            ):
+                integrated = inspect_application_activation(
+                    root=self.root,
+                    store=self.store,
+                    product=self.product,
+                    request=self.request,
+                    actor=self.actor,
+                    scope=self.scope,
+                    idempotency_key="activation",
+                    trace_id="original-route-inspection",
+                    observe_original=self.adapter.observe,
+                )
+            self.assertEqual(integrated.routes, observed)
+            self.assertEqual(integrated.private_health_status, readiness.private_health.status)
+            self.assertEqual(integrated.public_health_status, readiness.public_health.status)
+            intent = self.store.read_original_mutation_intent
+            for original in (forward, writer):
+                with (
+                    self.subTest(missing_intent=original.record_id),
+                    patch.object(
+                        self.store,
+                        "read_original_mutation_intent",
+                        side_effect=lambda row, selected=original: (
+                            {} if row == selected else intent(row)
+                        ),
+                    ),
+                ):
+                    missing = inspect_application_route_receipts(self.store, record)[0]
+                    if original == forward:
+                        self.assertEqual(missing.status, "unbound")
+                        self.assertEqual(missing.writer_status, "not_read")
+                    else:
+                        self.assertEqual(missing.writer_status, "unbound")
             for original, changes in (
                 (forward, {"request_fingerprint": "foreign-private-fingerprint"}),
                 (writer, {"request_fingerprint": "foreign-private-fingerprint"}),
@@ -4787,6 +4828,8 @@ class ApplicationFlowTests(unittest.TestCase):
             serialized = "".join(item.model_dump_json() for item in observed)
             self.assertNotIn(readiness.backend, serialized)
             self.assertNotIn("retained-only-password", serialized)
+            provider_reads.assert_not_called()
+            secret_reads.assert_not_called()
         self.assertEqual(
             (self.writes, self.schedules, self.schedule_history, routing.effect_count), before
         )
@@ -5502,6 +5545,11 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(self.canonical_password(), "retained-only-password")
 
     def test_proxy_restart_before_inverse_retains_distinct_inverse_custody(self) -> None:
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+        from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
+        from control_plane.testing_activation_inspection import inspect_application_route_receipts
+        from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT
+
         routing = self.addressed()
         self.prepare()
 
@@ -5516,6 +5564,26 @@ class ApplicationFlowTests(unittest.TestCase):
         completed = self.adapter.current()
         assert completed.failure is not None
         self.assertEqual(completed.failure.kind, "publication_refused")
+        inverse = self.store.read_idempotency_record(
+            scope=completed.scope,
+            route_path=ROUTE.format(product=self.product) + ":route-inverse",
+            idempotency_key=completed.plan_sha256 + ":route-inverse",
+        )
+        assert inverse is not None
+        execution = TestingRouteExecutionIntent.model_validate(
+            self.store.read_original_mutation_intent(inverse)["route_execution"]
+        )
+        writer = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=ROUTE_WRITER_RECEIPT,
+            idempotency_key=execution.key(attempt=inverse.attempt),
+        )
+        assert writer is not None
+        inspected = inspect_application_route_receipts(self.store, completed)[1]
+        self.assertEqual(inspected.status, "bound")
+        self.assertEqual(inspected.writer_status, "bound")
+        self.assertEqual(inspected.writer_state, writer.state)
+        self.assertEqual(inspected.writer_outcome, writer.response_payload["writer_outcome"])
 
     def test_persisted_inverse_pauses_for_staff_use_then_restores_original(self) -> None:
         routing, _, _ = self.private_addressed()

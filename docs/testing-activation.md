@@ -380,7 +380,8 @@ either read while retaining the original request and key.
 When route custody exists, inspection also projects the original forward and
 inverse child receipts and their exact physical writer receipts from stored
 records. It reports bound, unbound or missing custody, state, attempt, coarse
-checkpoint, recorded health status and closed writer outcomes. Unknown outcome
+checkpoint and closed writer outcomes. Recorded private and public health appear
+once at activation level. Unknown outcome
 text is withheld. A missing child or writer is not physical absence. These reads
 make no provider call, settle no writer and grant no continuation authority;
 they expose no route URL, script, credential or private intent. The original

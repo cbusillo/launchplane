@@ -773,6 +773,11 @@ def _apply_acquired(
             )
         except ProviderMutationUnknownError as error:
             current_reservation, _ = heartbeat.stop()
+            reconciled = _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
             log_handled_error_cause(
                 error, response_trace_id, operation_id=current_reservation.record_id
             )
@@ -790,11 +795,7 @@ def _apply_acquired(
                 current_reservation.provider_effect_phase,
                 cause_type,
             )
-            return _mark_reconcile_required(
-                store=store,
-                reservation=current_reservation,
-                reconciliation_key=reconciliation_key,
-            )
+            return reconciled
         except BaseException:
             current_reservation, _ = heartbeat.stop()
             _mark_reconcile_required(
