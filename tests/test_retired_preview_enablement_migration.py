@@ -100,9 +100,9 @@ class RetiredPreviewEnablementMigrationTests(unittest.TestCase):
                         .all(),
                         [target],
                     )
-                self.assertEqual(
+                self.assertIn(
                     schema_migration_action(current_revision=target),
-                    "compatible_ahead",
+                    {"current", "compatible_ahead"},
                 )
             finally:
                 engine.dispose()

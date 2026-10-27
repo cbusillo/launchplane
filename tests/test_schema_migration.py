@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import MagicMock, patch
 
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
@@ -32,6 +33,7 @@ from control_plane.storage.migrations.versions import (
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
     c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
     b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
+    f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -103,6 +105,7 @@ class SchemaMigrationTests(unittest.TestCase):
         )
 
     def test_hostname_only_database_does_not_infer_delivery_drop_approval(self) -> None:
+        script = ScriptDirectory.from_config(alembic_config("sqlite://"))
         for current in (
             public_host_fences.revision,
             topics_hostnames.revision,
@@ -110,13 +113,33 @@ class SchemaMigrationTests(unittest.TestCase):
             preview_hostnames_join.revision,
             idle_hostnames_join.revision,
         ):
+            with self.subTest(current=current):
+                target = schema_migration_target(
+                    current_revision=current,
+                    target_revision=SCHEMA_MIGRATION_TARGET_REVISION,
+                )
+                applied_revisions = {
+                    revision.revision for revision in script.iterate_revisions(target, "base")
+                }
+                self.assertNotIn(retired_delivery.revision, applied_revisions)
+                self.assertEqual(
+                    schema_migration_action(current_revision=current),
+                    "current" if current == target else "upgrade",
+                )
             for revision in (
                 retired_delivery.revision,
                 retirement_join.revision,
                 topics_join.revision,
             ):
-                with self.subTest(current=current, target=revision), self.assertRaises(ValueError):
-                    schema_migration_action(current_revision=current, target_revision=revision)
+                with self.subTest(current=current, explicit_target=revision):
+                    self.assertEqual(
+                        schema_migration_target(current_revision=current, target_revision=revision),
+                        idle_compatibility_join.revision,
+                    )
+                    self.assertEqual(
+                        schema_migration_action(current_revision=current, target_revision=revision),
+                        "upgrade",
+                    )
 
     def test_future_source_revision_is_not_an_approved_bootstrap_target(self) -> None:
         for revision in (
