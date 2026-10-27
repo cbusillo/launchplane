@@ -477,7 +477,7 @@ production lane. The host pin, both generic worker bindings, complete guest pin
 and public-only success receipt commit together. Existing credentials cannot be
 replaced, and an already enrolled guest must reuse its pinned pair. There is no
 private-key input, file, download, application delivery or plaintext readback.
-The key uses cryptography's [OpenSSH serialization](https://cryptography.io/en/50.0.2/hazmat/primitives/asymmetric/serialization/).
+The key uses cryptography's [OpenSSH serialization](https://cryptography.io/en/stable/hazmat/primitives/asymmetric/serialization/).
 
 The supported terminal caller uses the deployed HTTPS service, never a local
 record store:

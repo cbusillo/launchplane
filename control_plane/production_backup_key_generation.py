@@ -13,9 +13,11 @@ from control_plane.contracts.guest_capture_credential import (
     GuestCaptureCredential,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.guest_capture_credentials import (
     CAPTURE_KEYS,
+    capture_boundary,
     plan_guest_capture_credential,
     validate_guest_capture_enrollment,
 )
@@ -24,9 +26,7 @@ from control_plane.production_backup_credentials import BackupCredentialBindingR
 from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION, expected_secret_id
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
-from control_plane.contracts.production_backup_gate import ProductionBackupGateRequest
 from control_plane.workflows.production_backup_gate import resolve_production_backup_binding
-from control_plane.guest_capture_credentials import capture_boundary
 
 GENERATION_SOURCE = "service:capture-key-generation"
 
@@ -119,7 +119,7 @@ def generate_capture_key_bundle(
     boundary: GuestCaptureBoundary,
     known_hosts: str,
     actor: str,
-) -> tuple[ProductAuthorityBundle, GuestCaptureCredential, dict[str, object]]:
+) -> tuple[ProductAuthorityBundle, GuestCaptureCredential, dict[str, str]]:
     private = Ed25519PrivateKey.generate()
     public = (
         private.public_key()
@@ -166,21 +166,19 @@ def generate_capture_key_bundle(
     enrollment = plan_guest_capture_credential(
         boundary, bundle.secret_records, bundle.secret_bindings, context, instance
     )
-    public_metadata: dict[str, object] = {
+    public_metadata = {
         "public_key": public,
         "fingerprint": fingerprint,
         "boundary_binding_id": boundary.event_id,
         "private_key_binding": bundle.secret_bindings[0].binding_id,
         "known_hosts_binding": bundle.secret_bindings[1].binding_id,
     }
-    event = bundle.secret_audit_events[0]
     bundle.secret_audit_events[0].metadata.update(
         {
-            **{key: str(value) for key, value in public_metadata.items()},
+            **public_metadata,
             "version_id": bundle.secret_records[0].current_version_id,
         }
     )
-    assert event.secret_id == enrollment.private_key_secret_id
     return bundle, enrollment, public_metadata
 
 

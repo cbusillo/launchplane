@@ -84,6 +84,7 @@ def backup_capture_key(
                             "http_status": response.status_code,
                             "trace_id": error.get("trace_id", ""),
                             "error_code": error.get("error", {}).get("code", "service_error"),
+                            "message": error.get("error", {}).get("message", "Service refused."),
                         }
                     )
                 )

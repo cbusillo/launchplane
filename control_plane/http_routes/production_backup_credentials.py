@@ -44,11 +44,7 @@ from control_plane.service_auth import (
     director_agent_identity,
 )
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
-from control_plane.storage.product_authority_bundle import (
-    SecretCopySourceConflictError,
-    ProductProfileConflictError,
-    ProductContextOwnershipError,
-)
+from control_plane.storage.product_authority_bundle import ProductContextOwnershipError
 from control_plane.guest_capture_credentials import (
     guest_capture_metadata,
     resolve_guest_capture_values,
@@ -248,6 +244,7 @@ def register_production_backup_credential_routes(
         profile = store.read_product_profile_record(product)
         records, bindings = credential_metadata(store, context=context, instance=instance)
         replacements: tuple[SecretBinding, ...]
+        boundary = None
         try:
             capture_state = store.guest_capture_enrollment_state(context, instance)
             creation = None
@@ -306,6 +303,7 @@ def register_production_backup_credential_routes(
                 message="Worker records changed; review a fresh dry run.",
             )
         if body.generate_capture_key:
+            assert boundary is not None
             creation, enrollment, public_metadata = generate_capture_key_bundle(
                 store,
                 context=context,
@@ -338,11 +336,7 @@ def register_production_backup_credential_routes(
                     response_payload=response.model_dump(mode="json"),
                 ),
             )
-        except (
-            SecretCopySourceConflictError,
-            ProductProfileConflictError,
-            ProductContextOwnershipError,
-        ) as error:
+        except (ValueError, ProductContextOwnershipError) as error:
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace,

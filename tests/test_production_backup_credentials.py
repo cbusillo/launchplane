@@ -147,10 +147,9 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
         }
 
-    async def test_generate_capture_key_stays_in_custody_and_replays_public_output(self) -> None:
+    def capture_key_request(self) -> dict[str, Any]:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-        from control_plane import secrets
 
         host_key = (
             Ed25519PrivateKey.generate()
@@ -158,12 +157,18 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
             .decode()
         )
-        request: dict[str, object] = {
+        return {
             "generate_capture_key": True,
-            "known_hosts": f"{_source_target().destination.host} {host_key}\n",
+            "known_hosts": f"{_source_target().destination.host} {host_key}",
             "promotion_action": _policy().promotion_action,
             "reason": "Enroll one approved guest capture credential",
         }
+
+    async def test_generate_capture_key_stays_in_custody_and_replays_public_output(self) -> None:
+        from cryptography.hazmat.primitives import serialization
+        from control_plane import secrets
+
+        request = self.capture_key_request()
         with patch.dict("os.environ", {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "fixture"}):
             before = self.store.list_secret_records()
             dry = await self.post(request)
@@ -194,7 +199,11 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(value, applied.text + replay.text)
             self.assertEqual(
                 (private.integration, private.context, private.instance),
-                ("launchplane_worker", "example-product", "prod"),
+                (
+                    secrets.LAUNCHPLANE_WORKER_SECRET_INTEGRATION,
+                    _profile().lanes[0].context,
+                    _profile().lanes[0].instance,
+                ),
             )
             self.assertIsNotNone(
                 self.store.read_guest_capture_binding(
@@ -214,26 +223,13 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.store.list_secret_records(), records)
 
     async def test_capture_key_generation_refuses_changed_authority_and_untrusted_pin(self) -> None:
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-        host_key = (
-            Ed25519PrivateKey.generate()
-            .public_key()
-            .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
-            .decode()
-        )
-        body: dict[str, object] = {
-            "generate_capture_key": True,
-            "known_hosts": f"{_source_target().destination.host} {host_key}",
-            "promotion_action": _policy().promotion_action,
-            "reason": "Approved capture enrollment",
-        }
+        body = self.capture_key_request()
         before = self.store.list_secret_records()
+        host_key = body["known_hosts"].split(" ", 1)[1]
         for known_hosts in (
             f"wrong.example.invalid {host_key}",
             "* " + host_key,
-            str(body["known_hosts"]) + "\nother.example.invalid " + host_key,
+            body["known_hosts"] + "\nother.example.invalid " + host_key,
         ):
             response = await self.post({**body, "known_hosts": known_hosts})
             self.assertEqual(response.status_code, 409, response.text)
@@ -255,21 +251,7 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_secret_records(), before)
 
     async def test_capture_key_generation_rolls_back_secrets_pin_and_receipt_together(self) -> None:
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-        host_key = (
-            Ed25519PrivateKey.generate()
-            .public_key()
-            .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
-            .decode()
-        )
-        body: dict[str, object] = {
-            "generate_capture_key": True,
-            "known_hosts": f"{_source_target().destination.host} {host_key}",
-            "promotion_action": _policy().promotion_action,
-            "reason": "Approved capture enrollment",
-        }
+        body = self.capture_key_request()
         review = await self.post(body)
         self.assertEqual(review.status_code, 202, review.text)
         body.update(mode="apply", reviewed_plan_sha256=review.json()["result"]["plan_sha256"])
@@ -290,6 +272,47 @@ class BackupCredentialHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.post(body, "atomic-generation")).status_code, 202)
         for record in self.originals:
             self.assertEqual(self.store.read_secret_record(record.secret_id), record)
+
+    async def test_capture_key_generation_rechecks_authority_before_atomic_commit(self) -> None:
+        body = self.capture_key_request()
+        review = await self.post(body)
+        self.assertEqual(review.status_code, 202, review.text)
+        body.update(mode="apply", reviewed_plan_sha256=review.json()["result"]["plan_sha256"])
+        before = self.store.list_secret_records()
+        original = self.store.compare_and_rebind_worker_credentials
+
+        def race(**kwargs: Any) -> Any:
+            self.store.write_production_backup_policy_record(
+                _policy(revision=2, supersedes_record_id=_policy().record_id)
+            )
+            return original(**kwargs)
+
+        with patch.dict("os.environ", {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "fixture"}):
+            with patch.object(
+                self.store, "compare_and_rebind_worker_credentials", side_effect=race
+            ):
+                response = await self.post(body, "raced-generation")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.store.list_secret_records(), before)
+        self.assertFalse(self.store.guest_capture_secret_ids())
+
+    async def test_initial_secret_conflict_returns_a_reviewable_refusal(self) -> None:
+        from control_plane.storage.product_authority_bundle import SecretRecordConflictError
+
+        body = self.capture_key_request()
+        review = await self.post(body)
+        body.update(mode="apply", reviewed_plan_sha256=review.json()["result"]["plan_sha256"])
+        before = self.store.list_secret_records()
+        with patch.dict("os.environ", {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "fixture"}):
+            with patch.object(
+                self.store,
+                "_write_product_authority_bundle",
+                side_effect=SecretRecordConflictError("Created concurrently"),
+            ):
+                response = await self.post(body, "secret-conflict")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.store.list_secret_records(), before)
+        self.assertFalse(self.store.guest_capture_secret_ids())
 
     async def test_reference_rebind_preserves_versions_is_atomic_and_replays(self) -> None:
         with patch(
