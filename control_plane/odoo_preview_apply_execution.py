@@ -396,10 +396,12 @@ class OdooPreviewProviderMutationAdapter:
                     else {}
                 ),
                 **(
-                    {"qualify_existing_preview": True, "provider_mutation_guard": mutation_guard}
+                    {"provider_mutation_guard": mutation_guard}
                     if self._qualify_existing_preview
+                    or self._apply_request.preserve_original_reservation_id
                     else {}
                 ),
+                **({"qualify_existing_preview": True} if self._qualify_existing_preview else {}),
             )
         except LaneMovementRefused as error:
             from control_plane.lane_movement import LaneBuild, record_preview_refusal

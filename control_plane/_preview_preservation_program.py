@@ -105,6 +105,10 @@ def verify_filestore(path: Path, expected: dict) -> None:
         raise RuntimeError('Preview preservation archive differs from its source')
 
 
+def snapshot_identity(snapshot: dict) -> dict:
+    return {key: snapshot.get(key) for key in ('snapshot_id', 'database_sha256', 'filestore_sha256')}
+
+
 def verify_preservation(path: Path) -> dict:
     if path.is_symlink() or not path.is_dir() or path.resolve() != path.absolute():
         raise RuntimeError('Preview preservation receipt is aliased')
@@ -112,8 +116,14 @@ def verify_preservation(path: Path) -> dict:
     if receipt_path.is_symlink() or receipt_path.stat().st_size > 1024 * 1024:
         raise RuntimeError('Preview preservation receipt is unavailable')
     receipt = json.loads(receipt_path.read_text())
-    if receipt['authority'] != spec['authority'] or receipt.get('database_restore_verified') is not True:
+    if receipt['authority'] != spec['authority']:
         raise RuntimeError('Preview preservation authority differs')
+    if receipt.get('empty_overlay_verified') is True:
+        if snapshot_identity(receipt['snapshot']) != snapshot_identity(spec['snapshot']) or receipt.get('artifacts') != {}:
+            raise RuntimeError('Preview preservation empty overlay authority differs')
+        return receipt
+    if receipt.get('database_restore_verified') is not True:
+        raise RuntimeError('Preview preservation database verification is unavailable')
     for name, digest in receipt['artifacts'].items():
         if name not in {'database.dump', 'filestore.tar.gz'}:
             raise RuntimeError('Preview preservation artifact is unsupported')
@@ -126,6 +136,11 @@ def verify_preservation(path: Path) -> dict:
     return receipt
 
 
+def has_overlay_mount(source: dict, containers: dict) -> bool:
+    return any(mount.get('Name') == source['preview_volumes']['data'] + '-filestore'
+        for service in ('web', 'script-runner') for mount in containers[service]['Mounts'])
+
+
 def preview_containers(source: dict) -> dict:
     selected = {}
     identifiers = docker('ps', '-aq', '--filter',
@@ -136,8 +151,9 @@ def preview_containers(source: dict) -> dict:
         if service in selected:
             raise RuntimeError('Preview preservation service is ambiguous')
         selected[service] = container
-    if set(selected) != {'database', 'web', 'script-runner'}:
+    if set(selected) not in ({'database', 'web', 'script-runner'}, {'database', 'web', 'script-runner', 'preview-router'}):
         raise RuntimeError('Preview preservation requires its original plain preview')
+    overlay = has_overlay_mount(source, selected)
     for service in ('web', 'script-runner'):
         container = selected[service]
         environment = dict(value.split('=', 1) for value in container['Config'].get('Env', []))
@@ -150,6 +166,13 @@ def preview_containers(source: dict) -> dict:
         'web': {'/volumes/data': 'data', '/volumes/logs': 'logs'},
         'script-runner': {'/volumes/data': 'data', '/volumes/logs': 'logs'},
     }
+    volumes = dict(source['preview_volumes'])
+    if 'preview-router' in selected:
+        destinations['preview-router'] = {}
+    if overlay:
+        volumes['filestore'] = volumes['data'] + '-filestore'
+        for service in ('web', 'script-runner'):
+            destinations[service]['/volumes/data/filestore/' + source['database_name']] = 'filestore'
     for service, expected in destinations.items():
         host = selected[service]['HostConfig']
         mounts = selected[service]['Mounts']
@@ -167,9 +190,9 @@ def preview_containers(source: dict) -> dict:
             raise RuntimeError('Preview preservation runtime isolation is unavailable')
         for destination, role in expected.items():
             mounts = [mount for mount in selected[service]['Mounts'] if mount.get('Destination') == destination]
-            if len(mounts) != 1 or mounts[0].get('Type') != 'volume' or mounts[0].get('Name') != source['preview_volumes'][role]:
+            if len(mounts) != 1 or mounts[0].get('Type') != 'volume' or mounts[0].get('Name') != volumes[role]:
                 raise RuntimeError('Preview preservation mount ownership differs')
-    for role, name in source['preview_volumes'].items():
+    for role, name in volumes.items():
         expected = {selected['database']['Id']} if role == 'database' else {selected[service]['Id'] for service in ('web', 'script-runner')}
         actual = set(docker('ps', '-aq', '--no-trunc', '--filter', 'volume=' + name).decode().split())
         if actual != expected:
@@ -177,10 +200,99 @@ def preview_containers(source: dict) -> dict:
     return selected
 
 
-def verify_preservation_source(receipt: dict, source: dict) -> None:
+def require_retained_overlay_snapshot(snapshot: dict) -> Path:
+    identifier = snapshot['snapshot_id']
+    if not re.fullmatch(r'[a-f0-9]{64}', identifier):
+        raise RuntimeError('Preview preservation snapshot identity differs')
+    lower = Path.home() / CLEAN_SNAPSHOT_STATE_DIRECTORY / identifier / 'filestore'
+    if lower.resolve(strict=True) != lower.absolute() or not lower.is_dir():
+        raise RuntimeError('Preview preservation shared lower custody differs')
+    receipt = lower.parent / 'receipt.json'
+    if receipt.is_symlink() or receipt.stat().st_size > 4096:
+        raise RuntimeError('Preview preservation shared snapshot receipt differs')
+    retained = json.loads(receipt.read_text())
+    if snapshot_identity(retained) != snapshot_identity(snapshot):
+        raise RuntimeError('Preview preservation shared snapshot pin differs')
+    return lower
+
+
+def inspect_empty_overlay(source: dict, containers: dict, *, allow_running_runner: bool = False) -> dict:
+    if containers['web']['State']['Running'] or not allow_running_runner and containers['script-runner']['State']['Running']:
+        raise RuntimeError('Preview preservation empty overlay is in use')
+    binding = preview_attempt_binding(source['compose_project'], source['database_name'],
+        source['preview_volumes'], spec['authority'])
+    paths = {role: Path(value['path']) for role, value in binding['volume_backings'].items()}
+    for directory in (paths['data'], paths['logs']):
+        if any(not entry.get('directory') for entry in tree_manifest(directory).values()):
+            raise RuntimeError('Preview preservation empty overlay contains private data')
+    snapshot = spec['snapshot']
+    lower = require_retained_overlay_snapshot(snapshot)
+    volume, data, observed_lower, private = inspect_preview_filestore(source['preview_volumes']['data'], source['compose_project'])
+    if observed_lower != lower or volume['Labels']['io.launchplane.preview-snapshot'] != snapshot['snapshot_id']:
+        raise RuntimeError('Preview preservation overlay snapshot differs')
+    if not isinstance(volume.get('CreatedAt'), str) or not volume['CreatedAt']:
+        raise RuntimeError('Preview preservation overlay creation identity is unavailable')
+    for service in ('web', 'script-runner'):
+        mount = next(mount for mount in containers[service]['Mounts'] if mount['Destination'] == '/volumes/data/filestore/' + source['database_name'])
+        if mount.get('Source') != volume['Mountpoint']:
+            raise RuntimeError('Preview preservation overlay physical mount differs')
+    require_unused_preview_upper(private)
+    require_unused_preview_backing(data)
+    if any(not entry.get('directory') for entry in tree_manifest(private / 'work').values()):
+        raise RuntimeError('Preview preservation overlay work contains private data')
+    binding['overlay'] = {key: volume[key] for key in ('Name', 'CreatedAt', 'Mountpoint', 'Options')}
+    return binding
+
+
+def qualify_empty_overlay_database(database: dict, *, check_connections: bool = True) -> None:
+    with preservation_database(database):
+        facts = json.loads(database_query(database['Id'], 'postgres', b"BEGIN READ ONLY; SELECT json_build_object('databases', (SELECT json_agg(datname ORDER BY datname) FROM pg_database WHERE NOT datistemplate), 'connections', (SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'), 'relations', (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'), 'prepared', (SELECT count(*) FROM pg_prepared_xacts)); COMMIT;\n"))
+        if not check_connections:
+            facts.pop('connections', None)
+        expected = {'databases': ['postgres'], 'relations': 0, 'prepared': 0}
+        if check_connections:
+            expected['connections'] = 0
+        if facts != expected:
+            raise RuntimeError('Preview preservation empty overlay has database custody or use')
+
+
+def preserve_empty_overlay(path: Path, source: dict, containers: dict) -> dict:
+    binding = inspect_empty_overlay(source, containers, allow_running_runner=True)
+    if containers['database']['State']['Running']:
+        qualify_empty_overlay_database(containers['database'], check_connections=False)
+    if containers['script-runner']['State']['Running']:
+        docker('stop', '-t', '30', containers['script-runner']['Id'])
+    current = preview_containers(source)
+    if inspect_empty_overlay(source, current) != binding:
+        raise RuntimeError('Preview preservation empty overlay changed during qualification')
+    qualify_empty_overlay_database(current['database'])
+    temporary = path.with_name('.pending-' + path.name)
+    image = containers['database']['Image']
+    if pending_preservation(temporary, source, binding, image):
+        clear_owned_pending_preservation(temporary)
+    elif temporary.exists():
+        temporary.rmdir()
+    initialize_pending_preservation(temporary, {'authority': spec['authority'], 'source': source,
+        'volume_binding': binding, 'verification_image': image})
+    receipt = {'authority': spec['authority'], 'source': source, 'volume_binding': binding,
+        'snapshot': spec['snapshot'], 'empty_overlay_verified': True, 'artifacts': {}}
+    write_snapshot_receipt(temporary / 'receipt.json', receipt)
+    sync_snapshot_directory(temporary)
+    os.rename(temporary, path)
+    sync_preservation_parent(path)
+    return verify_preservation(path)
+
+
+def verify_preservation_source(receipt: dict, source: dict, *, inspect_only: bool = False) -> None:
     if receipt['source'] != source:
         raise RuntimeError('Preview preservation provider source changed')
     containers = preview_containers(source)
+    if receipt.get('empty_overlay_verified') is True:
+        if not has_overlay_mount(source, containers) or inspect_empty_overlay(source, containers) != receipt['volume_binding']:
+            raise RuntimeError('Preview preservation empty overlay custody changed')
+        if not inspect_only:
+            qualify_empty_overlay_database(containers['database'])
+        return
     if any(containers[service]['State']['Running'] for service in ('web', 'script-runner')):
         raise RuntimeError('Preview preservation source was reopened')
     binding = preview_attempt_binding(source['compose_project'], source['database_name'],
@@ -324,16 +436,26 @@ def require_preservation_databases(database: dict, source: dict) -> None:
         raise RuntimeError('Preview preservation has additional database custody')
 
 
+def require_preservation_memory() -> None:
+    if spec.get('memory_floor_unavailable'):
+        raise RuntimeError('Preview preservation memory policy is unavailable')
+    floor = spec.get('memory_floor')
+    if floor is not None and observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup')) < floor:
+        raise RuntimeError('Preview preservation lacks reviewed memory headroom')
+
+
 @contextmanager
 def preservation_database(database: dict):
     started = not database['State']['Running']
+    if started:
+        if not spec.get('provider_effect_phase'):
+            raise RuntimeError('Preview preservation database start requires a guarded provider checkpoint')
+        require_preservation_memory()
     try:
         if started:
             docker('start', database['Id'])
             wait_database(database['Id'])
-            floor = spec.get('memory_floor')
-            if floor is not None and observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup')) < floor:
-                raise RuntimeError('Preview preservation lacks reviewed memory headroom')
+            require_preservation_memory()
         yield
     finally:
         if started:
@@ -343,6 +465,8 @@ def preservation_database(database: dict):
 
 def preserve(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
+    if has_overlay_mount(source, containers):
+        return preserve_empty_overlay(path, source, containers)
     database = containers['database']
     if database.get('ExecIDs', 'unknown') not in (None, []):
         raise RuntimeError('Preview preservation database custody is unavailable')
@@ -362,9 +486,7 @@ def preserve(path: Path, source: dict) -> dict:
     total = sum(entry.get('bytes', 0) for entry in manifest.values())
     space = os.statvfs(path.parent)
     budget = spec['storage_budget']
-    floor = spec.get('memory_floor')
-    if floor is not None and observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup')) < floor:
-        raise RuntimeError('Preview preservation lacks reviewed memory headroom')
+    require_preservation_memory()
     if total > budget['filestore_bytes'] or space.f_bavail * space.f_frsize < budget['reserve_bytes'] + 2 * budget['database_bytes'] + total:
         raise RuntimeError('Preview preservation lacks reviewed storage headroom')
     if database['State']['Running']:
@@ -422,6 +544,10 @@ def preserve(path: Path, source: dict) -> dict:
 
 def inspect_pending_preservation(path: Path, source: dict) -> dict:
     containers = preview_containers(source)
+    if has_overlay_mount(source, containers):
+        binding = inspect_empty_overlay(source, containers, allow_running_runner=True)
+        pending_preservation(path.with_name('.pending-' + path.name), source, binding, containers['database']['Image'])
+        return {'source': source, 'volume_binding': binding}
     database = containers['database']
     if database.get('ExecIDs', 'unknown') not in (None, []):
         raise RuntimeError('Preview preservation database execution is unavailable')
@@ -465,7 +591,7 @@ def execute() -> dict:
         if path.exists() or path.is_symlink():
             receipt = verify_preservation(path)
             if spec.get('source'):
-                verify_preservation_source(receipt, spec['source'])
+                verify_preservation_source(receipt, spec['source'], inspect_only=spec['mode'] == 'inspect')
             return receipt
         if spec['mode'] == 'inspect' and spec.get('source'):
             return inspect_pending_preservation(path, spec['source'])
