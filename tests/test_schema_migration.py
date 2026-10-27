@@ -32,6 +32,10 @@ from control_plane.storage.migrations.versions import (
     a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
     a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
+    c9e3f5a7b0c2_join_attestations_retirement as attestations_retirement_join,
+    d0f4a6b8c1d3_join_attestations_hostnames as attestations_hostnames_join,
+    d1a5b7c9d2e4_join_attestations_compatibility as attestations_compatibility_join,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -73,17 +77,20 @@ class SchemaMigrationTests(unittest.TestCase):
 
         self.assertFalse(application_logger.disabled)
 
-    def test_release_archive_joins_every_applied_branch_without_activating_held_drop(
+    def test_release_attestations_join_every_applied_branch_without_activating_held_drop(
         self,
     ) -> None:
         for revision, target in (
-            (retired_delivery.revision, archive_retirement_join.revision),
-            (retirement_join.revision, archive_retirement_join.revision),
-            (topics_join.revision, archive_retirement_join.revision),
-            (public_host_fences.revision, archive_hostnames_join.revision),
-            (topics_hostnames.revision, archive_hostnames_join.revision),
-            (public_host_join.revision, archive_compatibility_join.revision),
-            (compatibility_join.revision, archive_compatibility_join.revision),
+            (retired_delivery.revision, attestations_retirement_join.revision),
+            (retirement_join.revision, attestations_retirement_join.revision),
+            (topics_join.revision, attestations_retirement_join.revision),
+            (archive_retirement_join.revision, attestations_retirement_join.revision),
+            (public_host_fences.revision, attestations_hostnames_join.revision),
+            (topics_hostnames.revision, attestations_hostnames_join.revision),
+            (archive_hostnames_join.revision, attestations_hostnames_join.revision),
+            (public_host_join.revision, attestations_compatibility_join.revision),
+            (compatibility_join.revision, attestations_compatibility_join.revision),
+            (archive_compatibility_join.revision, attestations_compatibility_join.revision),
             (discussion_topics.revision, SCHEMA_MIGRATION_TARGET_REVISION),
             (retired_preview.revision, SCHEMA_MIGRATION_TARGET_REVISION),
         ):
@@ -96,9 +103,9 @@ class SchemaMigrationTests(unittest.TestCase):
                     target,
                 )
         for revision in (
-            archive_retirement_join.revision,
-            archive_hostnames_join.revision,
-            archive_compatibility_join.revision,
+            attestations_retirement_join.revision,
+            attestations_hostnames_join.revision,
+            attestations_compatibility_join.revision,
         ):
             with self.subTest(revision=revision):
                 self.assertEqual(
@@ -112,8 +119,29 @@ class SchemaMigrationTests(unittest.TestCase):
                     schema_migration_target(
                         current_revision=SCHEMA_MIGRATION_TARGET_REVISION, target_revision=target
                     ),
-                    archive_retirement_join.revision,
+                    attestations_retirement_join.revision,
                 )
+
+    def test_additive_attestation_migration_preserves_held_delivery_tables(self) -> None:
+        with TemporaryDirectory() as temporary:
+            url = f"sqlite+pysqlite:///{Path(temporary) / 'migration.db'}"
+            command.upgrade(alembic_config(url), integration_attestations.down_revision)
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            held_before = set(retired_delivery.RETIRED_TABLES) & set(
+                inspect(engine).get_table_names()
+            )
+            self.assertTrue(held_before)
+            command.upgrade(alembic_config(url), SCHEMA_MIGRATION_TARGET_REVISION)
+            self.assertTrue(held_before <= set(inspect(engine).get_table_names()))
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            self.assertEqual(
+                store.list_integration_attestation_records(
+                    repository="example/product", pull_request_number=1
+                ),
+                (),
+            )
 
     def test_delivery_preview_join_preserves_explicit_topics_route(self) -> None:
         for current, target in (

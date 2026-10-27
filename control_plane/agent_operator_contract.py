@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.integration_attestation import INTEGRATION_ATTESTATION_ROUTE
 from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
 from control_plane.client_release_backup_continuation import BACKUP_CONTINUATION_ROUTE
@@ -106,6 +107,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        INTEGRATION_ATTESTATION_ROUTE,
+        "Record an exact-merge engineering attestation with a confirming independent model review; records no new Client decision and never promotes.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "body",
+        ("reviewed_evidence_sha256", "review"),
+    ),
     OperationSpec(
         "POST",
         RELEASE_REQUEST_ROUTE,

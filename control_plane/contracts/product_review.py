@@ -61,6 +61,7 @@ class ProductReviewCarry(BaseModel):
     integrated_changes: tuple[ProductReviewIntegratedChange, ...] = ()
     batch_record_ids: tuple[str, ...] = ()
     restored_trees: tuple[ProductReviewTreeRestoration, ...] = ()
+    integration_attestation_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_carry(self) -> "ProductReviewCarry":
@@ -78,7 +79,7 @@ class ProductReviewCarry(BaseModel):
         ):
             raise ValueError("a Client-impact carry names each distinct commit and its trailer")
         if self.reason == "accepted_base_integration" and not (
-            self.commits or self.refresh_record_ids
+            self.commits or self.refresh_record_ids or self.integration_attestation_ids
         ):
             raise ValueError("a base integration names its PR-side commits or recorded refreshes")
         return self

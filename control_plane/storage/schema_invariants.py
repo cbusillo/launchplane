@@ -26,6 +26,10 @@ from control_plane.storage.migrations.versions import (
     a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
     a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
+    c9e3f5a7b0c2_join_attestations_retirement as attestations_retirement_join,
+    d0f4a6b8c1d3_join_attestations_hostnames as attestations_hostnames_join,
+    d1a5b7c9d2e4_join_attestations_compatibility as attestations_compatibility_join,
 )
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
@@ -35,7 +39,7 @@ def _migration_head() -> str:
     head = ScriptDirectory(str(Path(__file__).parent / "migrations")).get_current_head()
     if head is None:
         raise ValueError("Launchplane migration graph has no head.")
-    if head != archive_compatibility_join.revision:
+    if head != attestations_compatibility_join.revision:
         raise ValueError(
             "The prepared retired-delivery migration hold must be reconciled before "
             "advancing the migration head. See docs/operations.md#prepared-retired-"
@@ -61,6 +65,10 @@ RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (
     profile_archive.revision,
     archive_retirement_join.revision,
     archive_hostnames_join.revision,
+    archive_compatibility_join.revision,
+    integration_attestations.revision,
+    attestations_retirement_join.revision,
+    attestations_hostnames_join.revision,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"

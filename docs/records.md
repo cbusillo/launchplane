@@ -2,6 +2,13 @@
 title: Records
 ---
 
+Reviewed conflict integration records live in `launchplane_integration_attestations`.
+They bind the exact merge, tree and parents to applicable source and imported
+Client acceptance or engineering evidence, with the confirming model review and
+authenticated recorder. Writes are append-only and exact replay returns the
+original. They are separate from Client decisions; carried decisions reference
+their IDs. See [reviewed conflict integrations](owner-acceptance.md#reviewed-conflict-integrations).
+
 ## Storage Policy
 
 - Persist local-dev records as JSON files in a local state directory.

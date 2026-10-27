@@ -4,6 +4,66 @@ title: Client Review and Retired Acceptance History
 
 ## Current Client review
 
+### Reviewed conflict integrations
+
+An admin or the Director's authenticated agent can attest that one exact conflict
+integration adds no new Client-visible work. This classifies an immutable merge;
+it records no new Client acceptance, never merges or promotes, grants no access,
+and preserves the truthful visible commit marker. Other visible merges still
+require their ordinary qualification.
+
+`POST /v1/product-review/integration-attestation` supports `dry-run`, `apply`,
+and `readback`. Dry-run resolves the open PR's exact head and base, current
+Client, applicable source acceptance, merge SHA, tree and ordered parents. The
+first parent must be the accepted head. The second parent must be on the base
+branch. Every imported commit must belong to that parent and have qualified
+merged-change evidence, including accepted Client changes, engineering-only
+changes and recorded train batches. The merge must belong to the current PR's
+history. Incomplete history, rejected imports and undelivered requested feedback
+refuse the proof.
+
+Apply repeats that proof and requires its exact `reviewed_evidence_sha256`, an
+engineering statement and a confirming model review bound to the same digest.
+The caller attests the review's provider, model, conclusion and complete report;
+its provider must differ from the author's. The authenticated engineering caller
+is responsible for truthful provenance and weighing the review. Historical
+advisory engineering decisions do not become authority. Scoped agents and
+Clients cannot write this evidence. No new credential or grant is needed.
+
+The record is immutable and identified by its evidence digest. Exact replay
+returns the original; a different statement or review cannot replace it.
+Readback uses the original digest and target identifiers and remains available
+after acceptance advances. Read back lost apply responses before any retry;
+replaying a saved attestation does not prove that current acceptance carries.
+
+Carry rereads applicable Client decisions and imported-change evidence, matches
+the exact merge, tree, parents, product, Client, PR, base and source decision,
+and saves the attestation ID with its proof. Exact-tree restoration can remove
+a subsequent zero-net single-parent suffix. Residual visible work, different
+merges, changed Clients or bases and Client rejections retain their gates. The
+existing open-PR sweep publishes the resulting carry independently of preview
+delivery; the attestation endpoint publishes no acceptance itself.
+
+The bounded repository client uses the installed admin helper's existing private
+transport. Request and response files contain review prose and belong in private
+task evidence, with no secrets:
+
+```sh
+uv run python scripts/attest-integration.py dry-run \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --request-file /private/request.json --response-file /private/plan.json
+uv run python scripts/attest-integration.py apply \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --request-file /private/reviewed-request.json --evidence-file /private/plan.json \
+  --response-file /private/applied.json
+uv run python scripts/attest-integration.py readback \
+  --operator-helper /installed/launchplane/scripts/launchplane-write-action.py \
+  --request-file /private/reviewed-request.json --evidence-file /private/plan.json \
+  --response-file /private/readback.json
+```
+
+### Client and preview decisions
+
 Setting a product's Client resolves the login through the repository-scoped
 Delivery App credential. A `github_credentials_unavailable` response identifies
 the failed stage: `request`, `identity`, `repository_inventory`, or `token_mint`.

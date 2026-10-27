@@ -9,6 +9,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from control_plane.client_test_notes import change_client_review, owner_test_notes
+from control_plane.contracts.integration_attestation import IntegrationAttestationRecord
 from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
 )
@@ -103,6 +104,7 @@ def carry_owner_acceptance(
                 read=read,
                 refreshes=refreshes,
                 accepted_record_id=accepted.record_id,
+                pull_request_number=pull_request_number,
             )
             if integration is None:
                 return None
@@ -275,6 +277,7 @@ def _accepted_base_integration(
     read: SourceControlRead,
     refreshes: tuple[MergeTrainBranchRefreshRecord, ...],
     accepted_record_id: str,
+    pull_request_number: int,
 ) -> ProductReviewCarry | None:
     read = cache(read)
     commits = {str(value["sha"]): value for value in _complete_commits(comparison, accepted_head)}
@@ -290,6 +293,18 @@ def _accepted_base_integration(
     visited: set[str] = set()
     refresh_ids: list[str] = []
     restored_trees: list[ProductReviewTreeRestoration] = []
+    attestations: list[IntegrationAttestationRecord] = []
+    attestation_reader = getattr(store, "list_integration_attestation_records", None)
+    saved_attestations = (
+        cast(
+            tuple[IntegrationAttestationRecord, ...],
+            attestation_reader(
+                repository=profile.repository, pull_request_number=pull_request_number
+            ),
+        )
+        if callable(attestation_reader)
+        else ()
+    )
     current = head
     merged = False
     while current != accepted_head:
@@ -320,7 +335,27 @@ def _accepted_base_integration(
             ),
             None,
         )
-        if not declared_none and refresh is None:
+        attestation = next(
+            (
+                record
+                for record in saved_attestations
+                if record.evidence.product == profile.product
+                and record.evidence.repository == profile.repository
+                and record.evidence.pull_request_number == pull_request_number
+                and record.evidence.base_branch == base_branch
+                and record.evidence.owner_github_id == profile.owner.github_id
+                and record.evidence.source_decision_id == accepted_record_id
+                and record.evidence.merge_sha == current
+                and record.evidence.tree_sha
+                == _object(_object(commit.get("commit")).get("tree")).get("sha")
+                and len(parents) == 2
+                and record.evidence.parent_shas
+                == tuple(_object(parent).get("sha") for parent in parents)
+                and record.evidence.parent_shas[0] == accepted_head
+            ),
+            None,
+        )
+        if not declared_none and refresh is None and attestation is None:
             return None
         if len(parents) == 2:
             imported = _text(_object(parents[1]).get("sha"))
@@ -333,6 +368,8 @@ def _accepted_base_integration(
             side.append(ProductReviewCarryCommit(sha=current, client_impact="none"))
         elif refresh is not None:
             refresh_ids.append(refresh.record_id)
+        elif attestation is not None:
+            attestations.append(attestation)
         visited.add(current)
         current = _text(_object(parents[0]).get("sha"))
     if not merged:
@@ -348,16 +385,25 @@ def _accepted_base_integration(
             evidence=evidence,
         ):
             return None
+    integrated_changes = tuple(evidence.changes[number] for number in sorted(evidence.changes))
+    batch_record_ids = tuple(sorted(evidence.batch_record_ids))
+    if any(
+        record.evidence.integrated_changes != integrated_changes
+        or record.evidence.batch_record_ids != batch_record_ids
+        for record in attestations
+    ):
+        return None
     return ProductReviewCarry(
         record_id=accepted_record_id,
         head_sha=accepted_head,
-        reason="accepted_base_integration" if side else "merge_train_base_refresh",
+        reason="accepted_base_integration" if side or attestations else "merge_train_base_refresh",
         comparison_base_sha=base,
         commits=tuple(reversed(side)),
         refresh_record_ids=tuple(reversed(refresh_ids)),
-        integrated_changes=tuple(evidence.changes[number] for number in sorted(evidence.changes)),
-        batch_record_ids=tuple(sorted(evidence.batch_record_ids)),
+        integrated_changes=integrated_changes,
+        batch_record_ids=batch_record_ids,
         restored_trees=tuple(reversed(restored_trees)),
+        integration_attestation_ids=tuple(record.record_id for record in reversed(attestations)),
     )
 
 

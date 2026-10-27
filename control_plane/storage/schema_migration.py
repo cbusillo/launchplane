@@ -27,6 +27,10 @@ from control_plane.storage.migrations.versions import (
     a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
     a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
+    c9e3f5a7b0c2_join_attestations_retirement as attestations_retirement_join,
+    d0f4a6b8c1d3_join_attestations_hostnames as attestations_hostnames_join,
+    d1a5b7c9d2e4_join_attestations_compatibility as attestations_compatibility_join,
 )
 from control_plane.storage.schema_adoption import schema_stamp_revision_for_engine
 from control_plane.storage.schema_invariants import (
@@ -34,7 +38,7 @@ from control_plane.storage.schema_invariants import (
     PRE_RETIREMENT_ALEMBIC_REVISION,
 )
 
-SCHEMA_MIGRATION_TARGET_REVISION = profile_archive.revision
+SCHEMA_MIGRATION_TARGET_REVISION = integration_attestations.revision
 SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
     PRE_RETIREMENT_ALEMBIC_REVISION,
@@ -44,6 +48,7 @@ SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     discussion_topics.revision,
     topics_join.revision,
     profile_archive.revision,
+    integration_attestations.revision,
 )
 _RECOGNIZED_SOURCE_REVISIONS = (
     *SCHEMA_MIGRATION_SUPPORTED_REVISIONS,
@@ -54,6 +59,9 @@ _RECOGNIZED_SOURCE_REVISIONS = (
     archive_retirement_join.revision,
     archive_hostnames_join.revision,
     archive_compatibility_join.revision,
+    attestations_retirement_join.revision,
+    attestations_hostnames_join.revision,
+    attestations_compatibility_join.revision,
 )
 _ARCHIVE_JOIN_BY_SOURCE = {
     retired_delivery.revision: archive_retirement_join.revision,
@@ -67,6 +75,33 @@ _ARCHIVE_JOIN_BY_SOURCE = {
 _HELD_DELIVERY_TARGETS = frozenset(
     {retired_delivery.revision, retirement_join.revision, topics_join.revision}
 )
+_ATTESTATION_JOIN_BY_SOURCE = {
+    **{
+        source: attestations_retirement_join.revision
+        for source in (
+            retired_delivery.revision,
+            retirement_join.revision,
+            topics_join.revision,
+            archive_retirement_join.revision,
+        )
+    },
+    **{
+        source: attestations_hostnames_join.revision
+        for source in (
+            public_host_fences.revision,
+            topics_hostnames.revision,
+            archive_hostnames_join.revision,
+        )
+    },
+    **{
+        source: attestations_compatibility_join.revision
+        for source in (
+            public_host_join.revision,
+            compatibility_join.revision,
+            archive_compatibility_join.revision,
+        )
+    },
+}
 _SCHEMA_MIGRATION_LOCK_KEY = "launchplane:schema-migration"
 SchemaMigrationAction = Literal["current", "upgrade", "compatible_ahead"]
 
@@ -91,6 +126,13 @@ def schema_migration_action(
 
 
 def schema_migration_target(*, current_revision: str, target_revision: str) -> str:
+    if target_revision == integration_attestations.revision:
+        return _ATTESTATION_JOIN_BY_SOURCE.get(current_revision, target_revision)
+    if (
+        current_revision == integration_attestations.revision
+        and target_revision in _HELD_DELIVERY_TARGETS
+    ):
+        return attestations_retirement_join.revision
     if target_revision == profile_archive.revision and current_revision in _ARCHIVE_JOIN_BY_SOURCE:
         return _ARCHIVE_JOIN_BY_SOURCE[current_revision]
     if current_revision == profile_archive.revision and target_revision in _HELD_DELIVERY_TARGETS:

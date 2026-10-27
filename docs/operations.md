@@ -5567,8 +5567,9 @@ health-alert policies and historical delivery evidence intact.
 ### Prepared retired-delivery table migration
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup targets the
-non-runtime profile archive `a4c8e0f2b6d3` (see below), which follows
+`RETIRED_TABLES` in that revision. Normal service startup targets the additive
+integration-attestation revision described below. It follows the
+non-runtime profile archive `a4c8e0f2b6d3`, which follows
 discussion-topic revision `b81ca763d924` and the separately approved Q533
 preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
 `e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
@@ -5744,3 +5745,17 @@ Hostname activation must target a join that includes this revision.
 Downgrade refuses. Images from before this revision reject it, so an image
 rollback across it needs this image or a later one; the hostname compatibility
 image above is no longer a rollback target once the archive has run.
+
+### Additive integration-attestation storage
+
+Normal startup targets `c8d2e4f6a9b1`, following the non-runtime profile archive.
+It adds only `launchplane_integration_attestations` and its PR lookup index.
+The default path still never applies the held delivery drop or hostname change.
+Already-applied retirement branches join at `c9e3f5a7b0c2`, hostname-only
+branches at `d0f4a6b8c1d3`, and combined compatibility branches at `d1a5b7c9d2e4`.
+Those joins are empty. Runtime recognizes both earlier supported revisions and
+these additions; the HTTP service still checks its required tables.
+An explicit approved delivery-drop request from the additive revision joins at
+`c9e3f5a7b0c2`; hostname-only databases still refuse that request. The held
+destructive application procedure and its separate approval are unchanged.
+Image rollback retains this additive table and its immutable evidence.

@@ -17,6 +17,12 @@ from control_plane.contracts.product_review import (
     ProductReviewDecisionRecord,
     PRODUCT_REVIEW_REASON_MAX_LENGTH,
 )
+from control_plane.contracts.integration_attestation import (
+    IntegrationAttestationRequest,
+    IntegrationAttestationRecord,
+    IntegrationModelReview,
+)
+from control_plane.integration_attestation import plan_integration_attestation
 from control_plane.merge_train_branch_refresh import merge_train_branch_refresh_recorder
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
@@ -431,6 +437,183 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
     ) -> None:
         self._restore_billing_integration()
         self.assert_waits_for_the_client(self._publish())
+
+    def _billing_attestation(self) -> IntegrationAttestationRecord:
+        comparison = self._restore_billing_integration()
+        commits = comparison["commits"]
+        assert isinstance(commits, list)
+        merge = commits[-4]
+        prefix = f"/repos/{_REPOSITORY}"
+        self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST}"] = {
+            "state": "open",
+            "body": "## Client test notes\nCheck the accepted billing fix.",
+            "head": {"sha": self.github.head_sha},
+            "base": {"ref": "main", "repo": {"full_name": _REPOSITORY, "id": 5150}},
+            "labels": [],
+        }
+        self.github.responses[f"{prefix}/compare/{self.accepted.head_sha}...{merge['sha']}"] = {
+            **comparison,
+            "commits": commits[:-3],
+            "ahead_by": len(commits[:-3]),
+            "total_commits": len(commits[:-3]),
+        }
+        self.github.responses[f"{prefix}/compare/{merge['sha']}...{self.github.head_sha}"] = {
+            "status": "ahead"
+        }
+        for commit in commits[:-4]:
+            self.github.responses[f"{prefix}/compare/{commit['sha']}...{self.github.base_sha}"] = {
+                "status": "ahead"
+            }
+        request = IntegrationAttestationRequest(
+            product=self.profile.product,
+            repository=_REPOSITORY,
+            pull_request_number=_PULL_REQUEST,
+            expected_head_sha=self.github.head_sha,
+            merge_sha=merge["sha"],
+            source_decision_id=self.accepted.record_id,
+        )
+        evidence = plan_integration_attestation(
+            request=request,
+            profile=self.profile,
+            store=self.store,
+            read=lambda path: self.github(path=path, token="fixture-token"),
+        )
+        return IntegrationAttestationRecord(
+            evidence=evidence,
+            review=IntegrationModelReview(
+                evidence_sha256=evidence.digest(),
+                author_provider="openai",
+                reviewer_provider="anthropic",
+                reviewer_model="independent-fixture",
+                conclusion="no_new_client_visible_work",
+                report="The immutable merge resolves only the two already accepted billing changes.",
+            ),
+            statement="This exact conflict integration adds no new Client-visible work.",
+            recorded_by="director-agent:test",
+            recorded_at=self.accepted.decided_at,
+        )
+
+    def test_reviewed_attestation_qualifies_untouched_billing_history(self) -> None:
+        record = self._billing_attestation()
+        self.assertEqual(self.store.write_integration_attestation_record_if_absent(record), record)
+        self.assertEqual(self._publish()["state"], "success")
+        carried, accepted = self._decisions()
+        self.assertEqual(accepted, self.accepted)
+        self.assertEqual(carried.owner_github_id, accepted.owner_github_id)
+        self.assertEqual(carried.feedback_url, accepted.feedback_url)
+        assert carried.carried_from is not None
+        self.assertEqual(carried.carried_from.integration_attestation_ids, (record.record_id,))
+        self.assertEqual(
+            carried.carried_from.restored_trees[0].ancestor_sha, record.evidence.merge_sha
+        )
+
+    def test_attestation_cannot_qualify_other_evidence_or_override_client_rejection(self) -> None:
+        for mutation in (
+            "merge_sha",
+            "tree_sha",
+            "parent_shas",
+            "source_decision_id",
+            "owner_github_id",
+            "base_branch",
+            "pull_request_number",
+            "integrated_changes",
+            "rejected",
+            "imported-rejected",
+            "residual",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                record = self._billing_attestation()
+                evidence = record.evidence
+                if mutation in {"merge_sha", "tree_sha"}:
+                    update: dict[str, object] = {mutation: "f" * 40}
+                elif mutation == "parent_shas":
+                    update = {mutation: ("f" * 40, evidence.parent_shas[1])}
+                elif mutation == "integrated_changes":
+                    update = {mutation: ()}
+                elif mutation == "pull_request_number":
+                    update = {mutation: _PULL_REQUEST + 2}
+                elif mutation in {"rejected", "imported-rejected", "residual"}:
+                    update = {}
+                else:
+                    update = {mutation: "different"}
+                evidence = evidence.model_copy(update=update)
+                record = record.model_copy(
+                    update={
+                        "evidence": evidence,
+                        "review": record.review.model_copy(
+                            update={"evidence_sha256": evidence.digest()}
+                        ),
+                    }
+                )
+                self.store.write_integration_attestation_record_if_absent(record)
+                if mutation == "rejected":
+                    self.store.write_product_review_decision_record(
+                        self.accepted.model_copy(
+                            update={
+                                "decision": "changes_requested",
+                                "reason": "Billing is incorrect",
+                            }
+                        )
+                    )
+                if mutation == "imported-rejected":
+                    (imported,) = self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
+                    )
+                    self.store.write_product_review_decision_record(
+                        imported.model_copy(
+                            update={
+                                "decision": "changes_requested",
+                                "reason": "Imported billing is incorrect",
+                            }
+                        )
+                    )
+                if mutation == "residual":
+                    comparison = self.github.responses[
+                        f"/repos/{_REPOSITORY}/compare/{self.accepted.head_sha}...{self.github.head_sha}"
+                    ]
+                    assert isinstance(comparison, dict)
+                    comparison["commits"][-1]["commit"]["tree"]["sha"] = "f" * 40
+                self.assertNotEqual(self._publish()["state"], "success")
+
+    def test_attestation_storage_replays_and_refuses_evidence_replacement(self) -> None:
+        from pydantic import ValidationError
+
+        record = self._billing_attestation()
+        with TemporaryDirectory() as temporary:
+            database = PostgresRecordStore(
+                database_url=sqlite_database_url(Path(temporary) / "state.db")
+            )
+            self.addCleanup(database.close)
+            database.ensure_schema()
+            for store in (self.store, database):
+                with self.subTest(store=type(store).__name__):
+                    store.write_integration_attestation_record_if_absent(record)
+                    self.assertEqual(
+                        store.write_integration_attestation_record_if_absent(
+                            record.model_copy(update={"recorded_at": "later"})
+                        ),
+                        record,
+                    )
+                    self.assertEqual(
+                        store.list_integration_attestation_records(
+                            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                        ),
+                        (record,),
+                    )
+                    with self.assertRaises(ValueError):
+                        store.write_integration_attestation_record_if_absent(
+                            record.model_copy(update={"statement": "Changed statement"})
+                        )
+        with self.assertRaises(ValidationError):
+            IntegrationModelReview.model_validate(
+                record.review.model_dump() | {"reviewer_provider": record.review.author_provider}
+            )
+        with self.assertRaises(ValidationError):
+            IntegrationAttestationRecord.model_validate(
+                record.model_dump()
+                | {"review": record.review.model_dump() | {"evidence_sha256": "0" * 64}}
+            )
 
     def test_accepted_billing_integration_survives_exact_removal_of_support_changes(self) -> None:
         self._restore_billing_integration(declared_integration_only=True)
