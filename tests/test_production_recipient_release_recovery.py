@@ -623,6 +623,17 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         checkpoint = f.store.checkpoint_mutation_provider_effect
         inserted = False
 
+        if not target_changed:
+            from control_plane.lane_movement import LaneMovementRefused
+
+            with patch(
+                "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+                side_effect=LaneMovementRefused("source_order_unavailable"),
+            ):
+                self.advance_ordinary_worker(provider)
+            self.monitor_delivery()
+            self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
+
         def change_custody_or_target(**kwargs: Any) -> Any:
             nonlocal inserted
             if not inserted:
@@ -707,6 +718,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
 
     def test_http_temporary_custody_hold_does_not_open_delivery_incident(self) -> None:
         from types import SimpleNamespace
+        from control_plane.lane_movement import LaneMovementRefused, require_forward_lane_build
         from control_plane.contracts.authz_policy_record import (
             LaunchplaneAuthzPolicyRecord,
             authz_policy_sha256,
@@ -786,56 +798,69 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             authz_policy=policy,
             control_plane_root_path=f.fixture.root,
         )
-        with (
-            self.assertLogs("control_plane.http_routes.generic_web", level="ERROR") as refusal_logs,
-            patch(
-                "control_plane.http_routes.generic_web.build_product_promotion_status",
-                return_value=(profile, lane, SimpleNamespace(release_review=review)),
-            ),
-            patch(
-                "control_plane.http_routes.generic_web.default_generic_web_deploy_provider",
-                return_value=provider,
-            ),
-        ):
-            status, response = _invoke_app(
-                app,
-                method="POST",
-                path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
-                headers={"Idempotency-Key": "fixture-custody-http-hold"},
-                payload={
-                    "schema_version": 1,
-                    "product": profile.product,
-                    "promotion": {
-                        "schema_version": 1,
-                        "product": profile.product,
-                        "artifact_id": accepted.checklist.candidate.artifact_id,
-                        "source_git_ref": accepted.checklist.candidate.source_commit,
-                        "backup_record_id": f.old_backup,
-                    },
-                },
-            )
-        self.assertEqual(status, 409, response)
-        self.assertTrue(any(response["trace_id"] in entry for entry in refusal_logs.output))
-        self.assertEqual(
-            response["error"]["code"], GenericWebPromotionAdmissionRefused.failure_code
-        )
-        self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
-        self.monitor_delivery()
-        self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
-        self.assertEqual(provider.deployed_artifacts, [])
-        self.assertEqual(f.actions, [])
-        self.assertEqual(f.store.list_held_provider_target_reservations(), ())
-        self.assertEqual(
-            require_production_promotion_backup(
-                record_store=f.store,
-                product=profile.product,
-                context=lane.context,
-                instance="prod",
-                promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
-                backup_record_id=f.old_backup,
-            ).status,
-            "pass",
-        )
+        for outage in (False, True):
+            with self.subTest(outage=outage):
+                if outage:
+                    self.remove_recipient_custody()
+                with (
+                    patch(
+                        "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+                        side_effect=LaneMovementRefused("source_order_unavailable")
+                        if outage
+                        else None,
+                        wraps=require_forward_lane_build,
+                    ),
+                    self.assertLogs(
+                        "control_plane.http_routes.generic_web", level="ERROR"
+                    ) as refusal_logs,
+                    patch(
+                        "control_plane.http_routes.generic_web.build_product_promotion_status",
+                        return_value=(profile, lane, SimpleNamespace(release_review=review)),
+                    ),
+                    patch(
+                        "control_plane.http_routes.generic_web.default_generic_web_deploy_provider",
+                        return_value=provider,
+                    ),
+                ):
+                    status, response = _invoke_app(
+                        app,
+                        method="POST",
+                        path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                        headers={"Idempotency-Key": "fixture-custody-http-hold"},
+                        payload={
+                            "schema_version": 1,
+                            "product": profile.product,
+                            "promotion": {
+                                "schema_version": 1,
+                                "product": profile.product,
+                                "artifact_id": accepted.checklist.candidate.artifact_id,
+                                "source_git_ref": accepted.checklist.candidate.source_commit,
+                                "backup_record_id": f.old_backup,
+                            },
+                        },
+                    )
+                self.assertEqual(status, 409, response)
+                self.assertTrue(any(response["trace_id"] in entry for entry in refusal_logs.output))
+                self.assertEqual(
+                    response["error"]["code"], GenericWebPromotionAdmissionRefused.failure_code
+                )
+                self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
+                self.monitor_delivery()
+                self.assertEqual(f.store.list_public_ingress_incident_records(status="open"), ())
+                self.assertEqual(provider.deployed_artifacts, [])
+                self.assertEqual(f.actions, [])
+                self.assertEqual(f.store.list_held_provider_target_reservations(), ())
+                self.assertEqual(
+                    require_production_promotion_backup(
+                        record_store=f.store,
+                        product=profile.product,
+                        context=lane.context,
+                        instance="prod",
+                        promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+                        backup_record_id=f.old_backup,
+                    ).status,
+                    "pass",
+                )
 
     def recover(self, request: Any = None, key: str | None = None) -> Any:
         f = self.fixture

@@ -415,12 +415,16 @@ class ProductPathCheckTests(unittest.TestCase):
             GenericWebPromotionAdmissionRefused,
             GenericWebPromotionSourceRefused,
         )
+        from control_plane.lane_movement import LaneMovementRefused
+
+        outage = LaneMovementRefused("source_order_unavailable").record_failure()
 
         for code, expected_code in (
             ("destination_deploy_failed", "destination_deploy_failed"),
             ("imported_failure", "previous_promotion_failed"),
             (GenericWebPromotionAdmissionRefused.failure_code,) * 2,
             (GenericWebPromotionSourceRefused.failure_code,) * 2,
+            (outage.code,) * 2,
         ):
             with self.subTest(code=code):
                 promotion = _promotion("promotion-20261002T000000Z-a").model_copy(

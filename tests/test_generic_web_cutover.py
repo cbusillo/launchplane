@@ -43,6 +43,7 @@ from control_plane.workflows.generic_web_cutover import execute_web_cutover, rol
 from control_plane.workflows.generic_web_deploy import (
     execute_generic_web_deploy,
     GenericWebDeployRequest,
+    GenericWebDeployResult,
 )
 from control_plane.workflows.generic_web_deploy_provider import DokployGenericWebDeployProvider
 from control_plane.workflows.inventory import build_environment_inventory
@@ -549,10 +550,9 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                     return provider
 
                 deploy_provider = DokployGenericWebDeployProvider(cutover_provider_factory=factory)
-                with patch(
-                    "control_plane.workflows.generic_web_deploy.require_forward_lane_build"
-                ) as movement:
-                    result = execute_generic_web_deploy(
+
+                def deploy() -> GenericWebDeployResult:
+                    return execute_generic_web_deploy(
                         control_plane_root=Path(folder),
                         record_store=store,
                         request=GenericWebDeployRequest(
@@ -565,6 +565,25 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                         deploy_provider=deploy_provider,
                         deployment_record_id="release",
                     )
+
+                from control_plane.generic_web_source_qualification import (
+                    GenericWebPromotionAdmissionRefused,
+                )
+                from control_plane.lane_movement import LaneMovementRefused
+
+                before = store.list_deployment_records()
+                with patch(
+                    "control_plane.workflows.generic_web_deploy.require_forward_lane_build",
+                    side_effect=LaneMovementRefused("source_order_unavailable"),
+                ):
+                    with self.assertRaises(GenericWebPromotionAdmissionRefused):
+                        deploy()
+                self.assertEqual(store.list_deployment_records(), before)
+                self.assertEqual(provider.actions, [])
+                with patch(
+                    "control_plane.workflows.generic_web_deploy.require_forward_lane_build"
+                ) as movement:
+                    result = deploy()
                 movement.assert_called_once()
                 self.assertEqual(result.deploy_status, "pass")
                 current = store.read_environment_inventory(
