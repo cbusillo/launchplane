@@ -1468,3 +1468,37 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
                     if server.poll() is None:
                         server.terminate()
                         server.communicate(timeout=15)
+
+
+class ActivationDeploymentReceiptTests(unittest.TestCase):
+    def test_only_raw_ids_or_exact_successful_wait_receipts_are_recognized(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.testing_application_activation import activation_deployment_key
+
+        job: api.JsonObject = {"deploymentId": "original-job", "status": "done"}
+        receipt = api._wait_for_deployment_status(
+            fetch_latest_deployment=lambda: job,
+            before_key="",
+            timeout_seconds=1,
+            failure_message_prefix="Fixture deployment",
+        )
+        self.assertEqual(activation_deployment_key(receipt), api.deployment_key(job))
+        self.assertEqual(
+            activation_deployment_key(api.deployment_key(job)), api.deployment_key(job)
+        )
+        for invalid in (
+            None,
+            "",
+            " ",
+            receipt + " ",
+            " " + receipt,
+            receipt + " status=done",
+            "deployment= status=done",
+            "deployment=id status=",
+            "deployment=id status=running",
+            "deployment=id status=error",
+            "deployment=id status=unknown",
+            "deployment=id=other status=done",
+        ):
+            with self.subTest(receipt=invalid):
+                self.assertEqual(activation_deployment_key(invalid), "")

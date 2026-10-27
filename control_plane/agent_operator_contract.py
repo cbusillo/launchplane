@@ -107,6 +107,15 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/aggregate-counts",
+        "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
         "POST",
         RELEASE_REQUEST_ROUTE,
         "Record a Director request or agreed finish-line release decision and deliver its Client invitation without accepting or deploying.",

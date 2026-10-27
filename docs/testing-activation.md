@@ -386,6 +386,26 @@ text is withheld. A missing child or writer is not physical absence. These reads
 make no provider call, settle no writer and grant no continuation authority;
 they expose no route URL, script, credential or private intent. The original
 apply remains the supported route for an evidenced original-child reconciliation.
+For an original in route restoration, private refusal or completed refusal,
+inspection also reads that original candidate's placement, domains shape and
+complete deployment history. Closed fields distinguish missing/malformed domains,
+non-singular history, an absent stored deployment, mismatched original ID/title
+and nonterminal status. Unknown history exposes no count or sole-row verdict.
+Application history uses the same complete-response and unique-ID requirements
+as Compose history; permissive historical readers retain their existing behavior.
+When original runtime admission exists, the existing fixed private runtime reader
+also reports current HTTP status, identity classification and task failure, without
+updating saved admission or the failed edge result. Managed values remain inside
+the service; the fixed reader receives only their comparison digests. No values,
+URLs, names, IDs, titles or raw health payload leave this projection. These provider
+reads settle nothing and give no qualification or retry credit. Changed original
+records discard the candidate observation. Use the qualified current checkout.
+
+After an applied physical route write, activation waits for the file provider's
+readback under the current lease and recovery guards. Only a pending reload is
+polled; foreign authority or other failures still refuse immediately. Expiry keeps
+the original operation unresolved. This wait sends no second writer and applies
+equally to the original forward and inverse directions.
 New retained-capability failures also emit bounded numeric locations in the
 generated Python program. Inspection exposes those locations and that recognized
 Python body's SHA-256 only for a matching, disabled, terminal capability run with
@@ -447,6 +467,13 @@ unresolved activations remain unchanged; an unpublished activation retaining
 this exact recipient keeps its own interlock, even with no retained target
 reservations. This continuation never settles that operation. Independent
 original recipients and their custody remain preserved.
+Original deployment receipts use the provider deployment ID. Reads also recognize
+an exact historical successful wait receipt from that same operation; malformed
+receipts remain unproved. Recognition changes no stored bytes and supplies no
+custody by itself: complete singular history, original title, terminal status,
+placement, unchanged hold and original-operation guards still apply. Image
+evidence and candidate inspection use the same deployment-ID interpretation.
+
 A refusal or failure flag alone does not prove original effects settled. That
 proof belongs to the original operation's supported custody continuation.
 After a qualified lift, resume the original blocked operation through its own
