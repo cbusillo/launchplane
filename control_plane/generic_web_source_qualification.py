@@ -64,7 +64,11 @@ class GenericWebSourceOperationUnresolved(GenericWebSourceUnqualified):
     pass
 
 
-class GenericWebPromotionSourceRefused(click.ClickException):
+class GenericWebPromotionAdmissionRefused(click.ClickException):
+    failure_code = "generic_web.admission_refused"
+
+
+class GenericWebPromotionSourceRefused(GenericWebPromotionAdmissionRefused):
     """Fresh forward admission refused; it is not a failed production attempt."""
 
     failure_code = "generic_web.source_unqualified"

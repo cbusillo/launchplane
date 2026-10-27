@@ -9,6 +9,12 @@ from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
+from control_plane.production_recipient_continuation import (
+    RecipientContinuationRequest,
+    continuation_plan,
+    supersede_recipient,
+)
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
 from control_plane.contracts.production_backup_authority import ProductionBackupPolicyRecord
@@ -1067,26 +1073,9 @@ class RecipientCutoverTests(unittest.TestCase):
         assert current is not None
         self.assertEqual(current.phase, "bootstrapping")
 
-    def test_settled_failed_bootstrap_can_supersede_with_both_writer_hosts_fenced(self) -> None:
-        from control_plane.production_recipient_continuation import (
-            RecipientContinuationRequest,
-            continuation_plan,
-            supersede_recipient,
-        )
-        from control_plane.integration_allowances import canonical_sha256
-
-        self.test_terminal_bad_health_stops_only_new_writer_and_restores_old()
-        current = custody(self.store, self.record.product, self.record.context)
-        assert current is not None
-        request = RecipientContinuationRequest(
-            context=current.context,
-            original_key=current.original_key,
-            expected_custody_sha256=canonical_sha256(current.model_dump(mode="json")),
-            replacement=current.request.model_copy(
-                update={"mode": "dry-run", "reviewed_plan_sha256": ""}
-            ),
-            reason="Retain failed bootstrap and requalify a new generation",
-        )
+    def continue_preparation(
+        self, current: ProductionRecipientRecord, request: RecipientContinuationRequest
+    ) -> tuple[ProductionRecipientRecord, Mock]:
         draft = continuation_plan(
             self.fixture.root, self.store, current.product, request, current.actor, current.scope
         )[2]
@@ -1107,6 +1096,24 @@ class RecipientCutoverTests(unittest.TestCase):
             )
         replacement = custody(self.store, current.product, current.context)
         assert replacement is not None
+        return replacement, fence
+
+    def test_settled_failed_bootstrap_can_supersede_with_both_writer_hosts_fenced(self) -> None:
+        from control_plane.integration_allowances import canonical_sha256
+
+        self.test_terminal_bad_health_stops_only_new_writer_and_restores_old()
+        current = custody(self.store, self.record.product, self.record.context)
+        assert current is not None
+        request = RecipientContinuationRequest(
+            context=current.context,
+            original_key=current.original_key,
+            expected_custody_sha256=canonical_sha256(current.model_dump(mode="json")),
+            replacement=current.request.model_copy(
+                update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+            ),
+            reason="Retain failed bootstrap and requalify a new generation",
+        )
+        replacement, fence = self.continue_preparation(current, request)
         self.assertEqual(replacement.original_key, current.original_key)
         self.assertNotEqual(replacement.namespace, current.namespace)
         self.assertEqual(replacement.prior_attempts[-1]["execution"], current.execution)

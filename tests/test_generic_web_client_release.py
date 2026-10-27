@@ -2038,6 +2038,9 @@ class GenericWebClientReleaseTests(unittest.TestCase):
 
     def test_github_outage_before_deploy_retries_accepted_release_without_rollback(self) -> None:
         from control_plane.lane_movement import LaneMovementRefused
+        from control_plane.workflows.production_promotion_backup import (
+            promotion_is_temporary_admission_refusal,
+        )
 
         accepted = self.accept()
         self.advance()
@@ -2054,6 +2057,10 @@ class GenericWebClientReleaseTests(unittest.TestCase):
                 assert run is not None
                 self.assertNotEqual(run.state, "stopped")
                 self.assertEqual(self.provider.deployed_artifacts, [])
+                promotion = self.store.list_promotion_records()[0]
+                assert promotion.failure is not None
+                self.assertTrue(promotion_is_temporary_admission_refusal(promotion))
+                self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
         self.assertEqual(len(self.advance()), 1)
         self.assertEqual(
             self.provider.deployed_artifacts, [accepted.checklist.candidate.artifact_id]
