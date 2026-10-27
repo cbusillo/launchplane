@@ -37,6 +37,15 @@ class ProductReviewIntegratedChange(BaseModel):
         return self
 
 
+class ProductReviewTreeRestoration(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    ancestor_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    tree_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    commit_shas: tuple[str, ...] = Field(min_length=1)
+
+
 class ProductReviewCarry(BaseModel):
     """The source acceptance and immutable evidence for carrying its decision."""
 
@@ -51,6 +60,8 @@ class ProductReviewCarry(BaseModel):
     commits: tuple[ProductReviewCarryCommit, ...] = ()
     integrated_changes: tuple[ProductReviewIntegratedChange, ...] = ()
     batch_record_ids: tuple[str, ...] = ()
+    restored_trees: tuple[ProductReviewTreeRestoration, ...] = ()
+    base_merge_shas: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_carry(self) -> "ProductReviewCarry":
@@ -68,7 +79,7 @@ class ProductReviewCarry(BaseModel):
         ):
             raise ValueError("a Client-impact carry names each distinct commit and its trailer")
         if self.reason == "accepted_base_integration" and not (
-            self.commits or self.refresh_record_ids
+            self.commits or self.refresh_record_ids or self.base_merge_shas
         ):
             raise ValueError("a base integration names its PR-side commits or recorded refreshes")
         return self

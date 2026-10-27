@@ -1,4 +1,5 @@
 import unittest
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -323,7 +324,6 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         ):
             with self.subTest(message=message):
                 self.setUp()
-                # Even an identical final patch cannot erase a visible/missing claim.
                 self._later_commits(message, "Change tests\n\nClient-impact: none")
                 self.assert_waits_for_the_client(self._publish())
 
@@ -378,9 +378,6 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 }
             )
         )
-        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
-            patch=_PATCH + "\n+Retain invoice while cancelling recurring billing"
-        )
 
     def test_two_accepted_billing_changes_carry_across_a_conflict_resolution(self) -> None:
         self._integrate_accepted_billing_change()
@@ -400,6 +397,84 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(imported.head_sha, decision.head_sha)
         self.assertEqual(self._publish()["state"], "success")
         self.assertEqual(len(self._decisions()), 2)
+
+    def _restore_billing_integration(self) -> dict[str, object]:
+        self._integrate_accepted_billing_change()
+        comparison = json.loads(
+            (Path(__file__).parent / "fixtures/accepted_billing_integration.json").read_text()
+        )
+        assert isinstance(comparison, dict)
+        accepted_head = comparison["merge_base_commit"]["sha"]
+        commits = comparison["commits"]
+        self.accepted = self.accepted.model_copy(update={"head_sha": accepted_head})
+        self.store.write_product_review_decision_record(self.accepted)
+        self.github.head_sha = commits[-1]["sha"]
+        self.github.base_sha = commits[-4]["parents"][1]["sha"]
+        self.github.on_base.add(self.github.base_sha)
+        self.github.responses[
+            f"/repos/{_REPOSITORY}/compare/{accepted_head}...{self.github.head_sha}"
+        ] = comparison
+        for commit in commits[:-4]:
+            self.github.responses[
+                f"/repos/{_REPOSITORY}/commits/{commit['sha']}/pulls?per_page=100"
+            ] = [{"number": _PULL_REQUEST + 1}]
+        return comparison
+
+    def test_accepted_billing_integration_survives_exact_removal_of_support_changes(self) -> None:
+        self._restore_billing_integration()
+        self.assertEqual(self._publish()["state"], "success")
+        carried, accepted = self._decisions()
+        self.assertEqual(carried.head_sha, self.github.head_sha)
+        self.assertEqual(carried.feedback_url, accepted.feedback_url)
+        assert carried.carried_from is not None
+        comparison = self.github.responses[
+            f"/repos/{_REPOSITORY}/compare/{accepted.head_sha}...{carried.head_sha}"
+        ]
+        assert isinstance(comparison, dict)
+        commits = comparison["commits"]
+        assert isinstance(commits, list)
+        (restoration,) = carried.carried_from.restored_trees
+        self.assertEqual(restoration.head_sha, carried.head_sha)
+        self.assertEqual(restoration.ancestor_sha, commits[-4]["sha"])
+        self.assertEqual(restoration.tree_sha, commits[-4]["commit"]["tree"]["sha"])
+        self.assertEqual(restoration.commit_shas, tuple(commit["sha"] for commit in commits[-3:]))
+        self.assertEqual(carried.carried_from.base_merge_shas, (restoration.ancestor_sha,))
+        self.assertEqual(self._publish()["state"], "success")
+        self.assertEqual(len(self._decisions()), 2)
+
+    def test_restored_billing_integration_preserves_side_work_and_imported_review_guards(
+        self,
+    ) -> None:
+        for mutation in (
+            "residual",
+            "missing-head-tree",
+            "missing-ancestor-tree",
+            "hidden-merge",
+            "rejected",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                comparison = self._restore_billing_integration()
+                commits = comparison["commits"]
+                assert isinstance(commits, list)
+                if mutation == "residual":
+                    commits[-1]["commit"]["tree"]["sha"] = "f" * 40
+                elif mutation == "missing-head-tree":
+                    commits[-1]["commit"].pop("tree")
+                elif mutation == "missing-ancestor-tree":
+                    commits[-4]["commit"].pop("tree")
+                elif mutation == "hidden-merge":
+                    commits[-2]["parents"].append({"sha": "f" * 40})
+                else:
+                    (decision,) = self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
+                    )
+                    self.store.write_product_review_decision_record(
+                        decision.model_copy(
+                            update={"decision": "changes_requested", "reason": "Invoice missing"}
+                        )
+                    )
+                self.assert_waits_for_the_client(self._publish())
 
     def test_base_integration_still_requires_each_imported_changes_acceptance(self) -> None:
         for update in (
@@ -482,13 +557,9 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         )
 
     def test_recorded_refresh_can_combine_or_absorb_an_accepted_patch(self) -> None:
-        for change in (_change(patch=_PATCH + "\n+Combined accepted behavior"), []):
-            with self.subTest(change=change):
-                self.setUp()
-                self._integrate_accepted_billing_change()
-                self._train_refreshed()
-                self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = change
-                self.assertEqual(self._publish()["state"], "success")
+        self._integrate_accepted_billing_change()
+        self._train_refreshed()
+        self.assertEqual(self._publish()["state"], "success")
 
     def test_recorded_refresh_never_bypasses_an_imported_changes_rejection(self) -> None:
         for declared_none in (True, False):
@@ -500,7 +571,6 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 assert isinstance(commits, list)
                 if not declared_none:
                     commits[-1]["commit"]["message"] = "Merge base branch"
-                self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change()
                 (decision,) = self.store.list_product_review_decision_records(
                     repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
                 )
@@ -612,11 +682,21 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 assert isinstance(commits, list)
                 merge = commits[-1]
                 if mutation in {"visible", "missing"}:
-                    merge["commit"]["message"] = (
-                        "New billing behavior\n\nClient-impact: visible"
-                        if mutation == "visible"
-                        else "Merge main"
+                    commits.append(
+                        {
+                            "sha": _OTHER_MERGE_HEAD,
+                            "parents": [{"sha": _REFRESHED_HEAD}],
+                            "commit": {
+                                "message": (
+                                    "New billing behavior\n\nClient-impact: visible"
+                                    if mutation == "visible"
+                                    else "New billing behavior"
+                                )
+                            },
+                        }
                     )
+                    self.github.head_sha = _OTHER_MERGE_HEAD
+                    comparison.update(total_commits=len(commits), ahead_by=len(commits))
                 elif mutation == "foreign":
                     merge["parents"][1]["sha"] = _OTHER_MERGE_HEAD
                     self.github.responses[
@@ -997,7 +1077,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(self._decisions()), 2)
 
     def test_carry_provenance_round_trips_through_database_storage(self) -> None:
-        self._integrate_accepted_billing_change()
+        self._restore_billing_integration()
         with TemporaryDirectory() as directory:
             database = PostgresRecordStore(
                 database_url=sqlite_database_url(Path(directory) / "records.sqlite")
@@ -1013,7 +1093,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 store=require_product_review_store(database),
                 profile=self.profile,
                 pull_request_number=_PULL_REQUEST,
-                head_sha=_REFRESHED_HEAD,
+                head_sha=self.github.head_sha,
                 base_branch="main",
                 read=lambda path: self.github(path=path, token="fixture-token"),
             )

@@ -20,6 +20,7 @@ from control_plane.contracts.product_review import (
     ProductReviewCarryCommit,
     ProductReviewDecisionRecord,
     ProductReviewIntegratedChange,
+    ProductReviewTreeRestoration,
     PRODUCT_REVIEW_REASON_MAX_LENGTH,
 )
 from control_plane.dependency_update_review import DEPENDENCY_UPDATE_NOTES, pure_dependency_update
@@ -288,6 +289,8 @@ def _accepted_base_integration(
     side: list[ProductReviewCarryCommit] = []
     visited: set[str] = set()
     refresh_ids: list[str] = []
+    restored_trees: list[ProductReviewTreeRestoration] = []
+    base_merges: list[str] = []
     current = head
     merged = False
     while current != accepted_head:
@@ -297,6 +300,12 @@ def _accepted_base_integration(
         parents = commit.get("parents")
         if not isinstance(parents, list) or len(parents) not in {1, 2}:
             return None
+        restoration = _restored_side_tree(current, commits)
+        if restoration is not None:
+            restored_trees.append(restoration)
+            visited.update(restoration.commit_shas)
+            current = restoration.ancestor_sha
+            continue
         declared_none = _has_none_trailer(_object(commit.get("commit")).get("message"))
         refresh = next(
             (
@@ -312,7 +321,7 @@ def _accepted_base_integration(
             ),
             None,
         )
-        if not declared_none and refresh is None:
+        if len(parents) == 1 and not declared_none:
             return None
         if len(parents) == 2:
             imported = _text(_object(parents[1]).get("sha"))
@@ -321,9 +330,11 @@ def _accepted_base_integration(
             ):
                 return None
             merged = True
+            if refresh is None:
+                base_merges.append(current)
         if declared_none:
             side.append(ProductReviewCarryCommit(sha=current, client_impact="none"))
-        elif refresh is not None:
+        if refresh is not None:
             refresh_ids.append(refresh.record_id)
         visited.add(current)
         current = _text(_object(parents[0]).get("sha"))
@@ -343,13 +354,43 @@ def _accepted_base_integration(
     return ProductReviewCarry(
         record_id=accepted_record_id,
         head_sha=accepted_head,
-        reason="accepted_base_integration" if side else "merge_train_base_refresh",
+        reason="accepted_base_integration" if side or base_merges else "merge_train_base_refresh",
         comparison_base_sha=base,
         commits=tuple(reversed(side)),
         refresh_record_ids=tuple(reversed(refresh_ids)),
         integrated_changes=tuple(evidence.changes[number] for number in sorted(evidence.changes)),
         batch_record_ids=tuple(sorted(evidence.batch_record_ids)),
+        restored_trees=tuple(reversed(restored_trees)),
+        base_merge_shas=tuple(reversed(base_merges)),
     )
+
+
+def _restored_side_tree(
+    head: str, commits: dict[str, dict[str, object]]
+) -> ProductReviewTreeRestoration | None:
+    tree = _text(_object(_object(commits[head].get("commit")).get("tree")).get("sha"))
+    if re.fullmatch(r"[0-9a-f]{40}", tree) is None:
+        return None
+    current = head
+    skipped: list[str] = []
+    while current in commits and current not in skipped:
+        commit = commits[current]
+        if (
+            current != head
+            and _object(_object(commit.get("commit")).get("tree")).get("sha") == tree
+        ):
+            return ProductReviewTreeRestoration(
+                head_sha=head,
+                ancestor_sha=current,
+                tree_sha=tree,
+                commit_shas=tuple(reversed(skipped)),
+            )
+        parents = commit.get("parents")
+        if not isinstance(parents, list) or len(parents) != 1:
+            return None
+        skipped.append(current)
+        current = _text(_object(parents[0]).get("sha"))
+    return None
 
 
 def _integrated_change_reviewed(

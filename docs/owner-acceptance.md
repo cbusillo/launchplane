@@ -194,14 +194,23 @@ and the PR to keep the base branch recorded on that decision. A decision without
 a recorded base does not carry. Retargeting the PR invalidates a carry even
 without a new commit.
 
-For a later descendant head, acceptance carries when every PR-side commit has
-one `Client-impact: none` git trailer in its final trailer paragraph. A merge
-from the recorded base branch may resolve conflicts between accepted changes:
-the Client does not have to accept either change again. The merge's `none`
-trailer declares that its resolution only combines those changes, without new
-Client-visible behavior on the PR's side. Agents declare the impact and the
-second-model review checks it against the actual changes. A new Client-visible
-change requires `Client-impact: visible` and the Client's decision.
+For a later descendant head, acceptance carries when each remaining non-merge
+PR-side commit has one `Client-impact: none` git trailer in its final trailer
+paragraph. A merge from the recorded base branch integrates its independently
+qualified changes, including conflict resolution. Its trailer describes the
+change relative to its first parent and does not require the Client to accept
+those imported changes again. Agents keep genuinely new Client-visible work in
+separate commits marked `Client-impact: visible`; that work needs the Client's
+decision. The second-model review checks that conflict resolution only combines
+the accepted changes. Release acceptance checks their integration.
+
+A sequence of single-parent commits that restores an earlier first-parent
+commit's exact Git tree contributes no remaining work. Launchplane records both
+commit heads, their identical tree SHA and every removed commit, then qualifies
+the earlier commit normally. This proof includes file content, paths, modes and
+submodules, even when intermediate commits truthfully declared visible changes.
+It never skips a merge or qualifies the restored ancestor by itself. Missing
+tree evidence or any residual visible change leaves the PR waiting.
 
 Launchplane requires the complete descendant history (at most 250 commits),
 walks the PR's first-parent path back to its accepted head, and pins the recorded
@@ -211,10 +220,9 @@ onto the same base and either have valid engineering-only notes or a delivered
 acceptance by the same current Client for its exact merged head. For a recorded
 train batch, the recorded member heads receive that check individually. Missing,
 ambiguous or incomplete evidence, a foreign parent, or a visible or missing
-PR-side trailer leaves acceptance waiting, unless that merge exactly matches a
-recorded train refresh's result and both parents. Recorded refreshes need no
-trailer and can appear before or after declared invisible commits or conflict
-merges. A test-only follow-up or a sequence
+non-merge PR-side trailer leaves acceptance waiting. Recorded refreshes match
+their result and both parents and can appear before or after declared invisible
+commits or conflict merges. A test-only follow-up or a sequence
 of such commits mixed with qualified base merges can carry without another
 Client decision. Release acceptance remains the check of how the combined
 changes work together.
@@ -223,7 +231,8 @@ A linear invisible follow-up records reason `client_impact_none`. A chain made
 only of exact recorded train refreshes retains `merge_train_base_refresh` after
 the same imported-change checks. Other base integration records
 `accepted_base_integration`, the pinned `comparison_base_sha`, each
-PR-side `none` commit in order, and any recorded train refresh IDs. It also
+PR-side `none` commit in order, qualified `base_merge_shas`, exact
+`restored_trees`, and any recorded train refresh IDs. It also
 saves `integrated_changes`: each imported change's number, exact head and
 acceptance record ID or its engineering basis (the parsed notes snapshot bounded
 to the decision-reason limit, or the shared verified-dependency explanation). `batch_record_ids` names the train batches
@@ -232,7 +241,7 @@ if a PR's notes or labels later change. Imported base commits are checked
 against their own changes rather than treated as new PR-side work. The recorded
 Client, original acceptance and delivered feedback remain the source.
 To integrate overlapping accepted changes, merge the recorded base into the PR
-with the reviewed Client-impact declaration. Rewritten history, such as a rebase,
+and review the resolution against both accepted changes. Rewritten history, such as a rebase,
 continues to use the strict unchanged-patch proof instead of descendant history.
 It carries only when:
 
