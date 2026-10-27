@@ -39,6 +39,7 @@ def inspect_application_runtime(
     volume_binding: str = "",
     mount_path: str = "",
     health_path: str,
+    qualify_backend: bool = True,
 ) -> dict[str, Any]:
     """Values stay internal; the provider request carries only comparison digests."""
     observed_at = observation_clock()
@@ -66,6 +67,7 @@ def inspect_application_runtime(
                     "volume_binding": volume_binding,
                     "mount_path": mount_path,
                     "health_path": health_path,
+                    "qualify_backend": qualify_backend,
                 },
                 receive=frames.append,
                 timeout_seconds=max(1, min(120, int(deadline - observed_at))),
@@ -217,7 +219,8 @@ try:
         for item in tasks:
             inspect_attributed_task(item, True)
     container,identifier=inspect_attributed_task(task, task_failed)
-    address='http://'+spec['application']+':'+str(spec['port'])+spec['health_path']
+    backend_host=spec['application']
+    address='http://'+backend_host+':'+str(spec['port'])+spec['health_path']
     failed=task_failed
     health=None
     http_status=0
@@ -237,12 +240,25 @@ try:
         if not isinstance(path,str) or not path.startswith('/') or path.startswith('//') or any(character.isspace() for character in path) or '?' in path or '#' in path:
             raise ValueError('private HTTP path unavailable')
         def require_owned_backend_address():
-            resolved=docker('exec',proxies[0],'getent','hosts',spec['application'])
-            addresses={str(ipaddress.ip_address(line.split()[0])) for line in resolved.splitlines() if line.strip()}
+            resolved=docker('exec',proxies[0],'nslookup','-type=A',spec['application'])
+            addresses=set()
+            answered=False
+            for line in resolved.splitlines():
+                line=line.strip()
+                if line.startswith('Name:'):
+                    if line.partition(':')[2].strip().rstrip('.').casefold()!=spec['application'].casefold():
+                        raise ValueError('application backend DNS name changed')
+                    answered=True
+                elif answered and line.startswith('Address'):
+                    match=re.fullmatch(r'Address(?:\s+\d+)?:\s+(\S+)(?:\s+.*)?',line)
+                    if match is None: raise ValueError('application backend DNS answer unavailable')
+                    addresses.add(str(ipaddress.IPv4Address(match[1])))
             if addresses!={endpoint_address}: raise ValueError('application backend DNS ownership changed')
-        require_owned_backend_address()
-        request=('GET '+path+' HTTP/1.1\r\nHost: '+spec['application']+':'+str(spec['port'])+'\r\nConnection: close\r\nAccept: application/json\r\nAccept-Encoding: identity\r\n\r\n').encode('ascii')
-        reply=subprocess.run(['docker','exec','-i',proxies[0],'nc','-w','10',spec['application'],str(spec['port'])],input=request,capture_output=True,timeout=15,check=True)
+        if spec['qualify_backend']: require_owned_backend_address()
+        backend_host=spec['application'] if spec['qualify_backend'] else endpoint_address
+        address='http://'+backend_host+':'+str(spec['port'])+path
+        request=('GET '+path+' HTTP/1.1\r\nHost: '+backend_host+':'+str(spec['port'])+'\r\nConnection: close\r\nAccept: application/json\r\nAccept-Encoding: identity\r\n\r\n').encode('ascii')
+        reply=subprocess.run(['docker','exec','-i',proxies[0],'nc',*([] if spec['qualify_backend'] else ['-n']),'-w','10',backend_host,str(spec['port'])],input=request,capture_output=True,timeout=15,check=True)
         if len(reply.stdout)>327680: raise ValueError('private HTTP response exceeds bound')
         class Socket:
             def makefile(self,*arguments): return io.BytesIO(reply.stdout)
@@ -258,9 +274,9 @@ try:
             if not isinstance(health,dict): raise ValueError('private health document unavailable')
     if (one('service','inspect',spec['application'])!=service or one('inspect',identifier)!=container
         or one('inspect','--type','task',task['ID'])!=task): raise ValueError('runtime changed during proof')
-    if not failed: require_owned_backend_address()
+    if not failed and spec['qualify_backend']: require_owned_backend_address()
     print(sys.argv[2]+json.dumps({'type':'complete','service_id':service['ID'],'task_id':task['ID'],'container_id':identifier,
-        'backend':'http://'+spec['application']+':'+str(spec['port']),'identity':spec['identity'],'health_url':address,
+        'backend':'http://'+backend_host+':'+str(spec['port']),'identity':spec['identity'],'health_url':address,
         'task_failed':task_failed,'http_status':http_status,'health_payload':health}))
 except Exception as error:
     sites=[]

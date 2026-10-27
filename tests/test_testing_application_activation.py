@@ -1295,43 +1295,6 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
             command(["docker", "info", "--format", "{{.OSType}}"]).stdout.strip(), b"linux"
         )
         command(["docker", "image", "inspect", image])
-        created = command(
-            [
-                "docker",
-                "create",
-                "--pull=never",
-                "--name",
-                "lp-application-http-" + uuid4().hex,
-                "--label",
-                "launchplane.fixture=application-http",
-                "--network",
-                "none",
-                "--read-only",
-                "--cap-drop",
-                "ALL",
-                "--security-opt",
-                "no-new-privileges",
-                "--no-healthcheck",
-                "--tmpfs",
-                "/fixture:rw,nosuid,nodev,size=1m,mode=0700",
-                "--entrypoint",
-                "sleep",
-                image,
-                "300",
-            ]
-        )
-        identifier = created.stdout.decode().strip()
-        self.assertRegex(identifier, r"^[a-f0-9]{64}$")
-
-        def cleanup() -> None:
-            command(["docker", "rm", "--force", "--volumes", identifier])
-            absent = command(
-                ["docker", "ps", "-a", "-q", "--no-trunc", "--filter", "id=" + identifier]
-            )
-            self.assertEqual(absent.stdout.strip(), b"")
-
-        self.addCleanup(cleanup)
-        command(["docker", "start", identifier])
         flow = ApplicationFlowTests()
         flow.setUp()
         self.addCleanup(flow.doCleanups)
@@ -1344,6 +1307,116 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
         values = flow.adapter.application_values(record)
         specification = flow.specification
         identity = readiness.runtime_identity.model_dump(mode="json")
+        network = "lp-application-http-" + uuid4().hex
+        command(
+            [
+                "docker",
+                "network",
+                "create",
+                "--internal",
+                "--label",
+                "launchplane.fixture=application-http",
+                network,
+            ]
+        )
+        self.addCleanup(lambda: command(["docker", "network", "rm", network]))
+        ambiguous = "ambiguous-runtime"
+
+        def create_container(aliases: tuple[str, ...]) -> str:
+            arguments = [
+                "docker",
+                "create",
+                "--pull=never",
+                "--name",
+                "lp-application-http-" + uuid4().hex,
+                "--label",
+                "launchplane.fixture=application-http",
+                "--network",
+                network,
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--no-healthcheck",
+                "--tmpfs",
+                "/fixture:rw,nosuid,nodev,size=1m,mode=0700",
+            ]
+            for alias in aliases:
+                arguments.extend(("--network-alias", alias))
+            arguments.extend(("--entrypoint", "sleep", image, "300"))
+            identifier = command(arguments).stdout.decode().strip()
+            self.assertRegex(identifier, r"^[a-f0-9]{64}$")
+
+            def cleanup() -> None:
+                command(["docker", "rm", "--force", "--volumes", identifier])
+                absent = command(
+                    ["docker", "ps", "-a", "-q", "--no-trunc", "--filter", "id=" + identifier]
+                )
+                self.assertEqual(absent.stdout.strip(), b"")
+
+            self.addCleanup(cleanup)
+            command(["docker", "start", identifier])
+            return identifier
+
+        identifier = create_container((record.app_name, ambiguous))
+        other = create_container((ambiguous,))
+
+        def address(container: str) -> str:
+            networks = json.loads(
+                command(
+                    [
+                        "docker",
+                        "inspect",
+                        "--format",
+                        "{{json .NetworkSettings.Networks}}",
+                        container,
+                    ]
+                ).stdout
+            )
+            return str(networks[network]["IPAddress"])
+
+        private = address(identifier)
+        flow.containers[readiness.container_id]["NetworkSettings"]["Networks"][
+            specification.network_name
+        ]["IPAddress"] = private
+        resolved = command(
+            ["docker", "exec", identifier, "nslookup", "-type=A", ambiguous]
+        ).stdout.decode()
+        self.assertIn(private, resolved.split())
+        self.assertIn(address(other), resolved.split())
+
+        def inspect() -> dict[str, Any]:
+            return inspect_application_runtime(
+                host="https://provider.test",
+                token="fixture-token",
+                server_id="server",
+                application=record.app_name,
+                runtime_port=specification.runtime_port,
+                network=specification.network_name,
+                image=record.image_reference,
+                identity=readiness.runtime_identity,
+                values=values,
+                volume=resources.volumes.get("state", ""),
+                volume_binding=resources.binding_sha256,
+                mount_path=specification.state.container_path,
+                health_path=specification.health_path,
+            )
+
+        fixture_docker = flow.docker
+
+        def ambiguous_dns(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[1:5] == ["exec", "proxy", "nslookup", "-type=A"]:
+                actual = [*arguments]
+                actual[2], actual[-1] = identifier, ambiguous
+                return native_run(actual, **kwargs)
+            return fixture_docker(arguments, **kwargs)
+
+        with (
+            patch.object(flow, "docker", side_effect=ambiguous_dns),
+            self.assertRaises(ValueError),
+        ):
+            inspect()
         cases = [
             ("healthy", 200, {"runtime_identity": identity}, None),
             ("redirect", 302, b"", ValueError),
@@ -1423,6 +1496,11 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
                     calls = []
 
                     def actual_http(arguments: list[str], **kwargs: Any) -> Any:
+                        if arguments[1:5] == ["exec", "proxy", "nslookup", "-type=A"]:
+                            self.assertEqual(arguments[-1], record.app_name)
+                            actual = [*arguments]
+                            actual[2] = identifier
+                            return native_run(actual, **kwargs)
                         if arguments[1:5] != ["exec", "-i", "proxy", "nc"]:
                             return fixture_docker(arguments, **kwargs)
                         self.assertEqual(
@@ -1430,25 +1508,8 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
                         )
                         calls.append(arguments)
                         actual = [*arguments]
-                        actual[3], actual[-2], actual[-1] = identifier, "127.0.0.1", port
+                        actual[3], actual[-1] = identifier, port
                         return native_run(actual, **kwargs)
-
-                    def inspect() -> dict[str, Any]:
-                        return inspect_application_runtime(
-                            host="https://provider.test",
-                            token="fixture-token",
-                            server_id="server",
-                            application=record.app_name,
-                            runtime_port=specification.runtime_port,
-                            network=specification.network_name,
-                            image=record.image_reference,
-                            identity=readiness.runtime_identity,
-                            values=values,
-                            volume=resources.volumes.get("state", ""),
-                            volume_binding=resources.binding_sha256,
-                            mount_path=specification.state.container_path,
-                            health_path=specification.health_path,
-                        )
 
                     with patch.object(flow, "docker", side_effect=actual_http):
                         if expected_error is None:
