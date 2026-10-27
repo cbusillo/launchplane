@@ -133,6 +133,13 @@ def read_lane_runtime_verification(
     )
     if split_binding is not None and lane.health_monitoring.monitoring_intent != "public":
         return missing
+    if split_binding is not None and any(
+        split_ingress_monitoring_policy(
+            profile, lane, tuple(d.domain_name for d in split_binding.domains), domain.domain_name
+        ).conflict
+        for domain in split_binding.domains
+    ):
+        return missing
     checks = tuple(
         check
         for check in lane.health_monitoring.checks

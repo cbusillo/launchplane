@@ -17,7 +17,7 @@ function expireEvidence<T extends Evidence>(evidence: T, now: number): T {
 function publicTopologyEvidence(topology: Topology): Evidence[] {
   const recorded = topology.provider_recorded;
   return [recorded, recorded.ingress, recorded.tls,
-    topology.observed.ingress, ...topology.observed.tls_domains];
+    topology.observed.ingress, ...topology.observed.tls_domains.filter(domain => !domain.advisory)];
 }
 
 function publicTopologyApplicable(topology: Topology): boolean {
@@ -64,7 +64,7 @@ export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | 
   topology.trust_state = expiredAggregate(topology.trust_state, publicExpired || placementExpired);
   topology.observed.trust_state = expiredAggregate(topology.observed.trust_state,
     placementExpired || publicTopologyApplicable(topology) &&
-    [topology.observed.ingress, ...topology.observed.tls_domains].some(evidence => evidence.trust_state === "stale"));
+    [topology.observed.ingress, ...topology.observed.tls_domains.filter(domain => !domain.advisory)].some(evidence => evidence.trust_state === "stale"));
   return {
     ...environment, provenance,
     trust_state: provenance.freshness_status === "stale" ? "stale" : expiredAggregate(environment.trust_state, topology.trust_state === "stale"),
@@ -129,13 +129,6 @@ function productionDeliveryWarning(environment: ProductEnvironmentSummary, incid
     incident.severity === "warning";
 }
 
-function recoveryDomain(topology: Topology, domain: string): boolean {
-  const recorded = topology.provider_recorded;
-  return Boolean(recorded.external_ingress &&
-    !recorded.external_ingress.domains.includes(domain) &&
-    recorded.domains.some(item => item.domain_name === domain));
-}
-
 function runtimeVerificationGap(environment: ProductEnvironmentSummary, now: number, { requireChecks = true } = {}): string | null {
   const placement = environment.topology.observed.placement;
   if (placement.runtime_identity_status !== "match" || placement.trust_state !== "verified")
@@ -181,7 +174,7 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
   healthWarnings(environment).filter(warning => warning.severity === "error")
     .forEach(warning => reasons.add(warning.detail));
   environment.topology.observed.tls_domains.filter(domain => negativeTlsStates.has(domain.status))
-    .forEach(domain => (recoveryDomain(environment.topology, domain.domain_name) ? warnings : reasons)
+    .forEach(domain => (domain.advisory ? warnings : reasons)
       .add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
   const runtimeTone = environmentRuntimeTone(environment, now);
   const runtimeGap = runtimeVerificationGap(environment, now);
@@ -191,7 +184,7 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
     const recovery = incident.severity === "warning" && (
       environment.health_monitoring.checks.some(check => check.advisory && check.name === incident.check_name && check.kind === incident.check_kind) ||
       incident.check_kind === "tls" && environment.topology.observed.tls_domains.some(domain =>
-        domain.incident_id === incident.incident_id && recoveryDomain(environment.topology, domain.domain_name)));
+        domain.incident_id === incident.incident_id && domain.advisory));
     if (recovery) warnings.add(`Recovery path: ${readable(incident.failure_code)}`);
     return !recovery;
   });

@@ -36,6 +36,7 @@ from control_plane.lane_runtime_verification import (
     read_lane_runtime_verification,
 )
 from control_plane.product_promotion_http import _promotion_evidence
+from control_plane.contracts.product_environment_read_model import _public_ingress_summary
 from control_plane.production_delivery_monitor import _resolve_guard_refusal
 from control_plane.outbound_http import (
     PublicHttpResponse,
@@ -192,6 +193,14 @@ class SplitIngressTests(unittest.TestCase):
             for state in ("missing", "mismatch", "stale"):
                 with self.subTest(domain=domain, state=state):
                     failing = split_observation(binding, profile, domain, status="mismatch")
+                    failing = failing.model_copy(
+                        update={
+                            "observed_at": (
+                                datetime.fromisoformat(failing.observed_at.replace("Z", "+00:00"))
+                                + timedelta(seconds=1)
+                            ).isoformat()
+                        }
+                    )
                     if state == "stale":
                         failing = healthy[index].model_copy(
                             update={
@@ -268,6 +277,10 @@ class SplitIngressTests(unittest.TestCase):
                             observe.assert_not_called()
                     if index == 2:
                         self.assertEqual(topology.observed.ingress.status, "pass")
+                        public = _public_ingress_summary(
+                            record_store=store, profile=profile, lane=lane
+                        )
+                        self.assertEqual(public.status, "pass")
                     readiness = build_product_operational_readiness(
                         replace(_inputs(), topology=topology)
                     )
@@ -275,6 +288,29 @@ class SplitIngressTests(unittest.TestCase):
                         next(d.state for d in readiness.dimensions if d.dimension == "topology"),
                         "ready" if index == 2 else "blocked",
                     )
+        checks = tuple(
+            lane.health_monitoring.checks[0].model_copy(
+                update={
+                    "name": f"dns-{index}",
+                    "expected_dns_targets": (
+                        PublicDnsExpectedTarget(
+                            public_name=binding.domains[2].domain_name, addresses=(address,)
+                        ),
+                    ),
+                }
+            )
+            for index, address in enumerate(("93.184.216.34", "1.1.1.1"))
+        )
+        conflicted = profile.model_copy(update={"lanes": (lane_with_checks(lane, *checks),)})
+        store.observations = healthy + tls
+        verification = read_lane_runtime_verification(
+            record_store=store,
+            profile=conflicted,
+            lane=conflicted.lanes[0],
+            summary=summary,
+            now=_NOW,
+        )
+        self.assertNotEqual(verification.provenance.freshness_status, "verified")
 
     def test_recovery_http_and_tls_failures_have_advisory_material_severity(self) -> None:
         binding = split_binding().model_copy(
@@ -333,6 +369,20 @@ class SplitIngressTests(unittest.TestCase):
                 warning.severity,
                 "warning" if domain.domain_name == "operator.example.test" else "error",
             )
+        payload = split_tls_observation(binding, "operator.example.test").model_dump(mode="json")
+        payload["targets"][0]["tls"]["recorded"]["owner"] = "external"
+        store.observations = (PublicIngressObservationRecord.model_validate(payload),)
+        topology = build_product_environment_topology(
+            record_store=store,
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=_lane_summary(),
+            now=_NOW,
+        )
+        self.assertEqual(
+            next(w.severity for w in topology.warnings if w.code == "tls_ownership_divergence"),
+            "error",
+        )
 
     def test_split_projection_retains_checks_dns_and_recovery_policy(self) -> None:
         profile = _strict_public_profile(domain_name="business.example.test")

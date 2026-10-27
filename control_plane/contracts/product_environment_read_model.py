@@ -2711,6 +2711,8 @@ def _public_ingress_summary(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductPublicIngressSummary:
+    binding = read_split_ingress_binding(record_store, profile, lane)
+    lane = split_ingress_monitoring_lane(profile, lane, binding)
     monitoring_intent = lane.health_monitoring.monitoring_intent
     incident_eligible = monitoring_intent == "public"
     if monitoring_intent == "private":
@@ -2732,9 +2734,7 @@ def _public_ingress_summary(
         check_kind="public_http",
         limit=50,
     )
-    latest, _ = select_public_probe_observations(
-        lane=lane, records=records, binding=read_split_ingress_binding(record_store, profile, lane)
-    )
+    latest, _ = select_public_probe_observations(lane=lane, records=records, binding=binding)
     if latest is None or not isinstance(latest, PublicIngressObservationRecord):
         return ProductPublicIngressSummary(
             monitoring_intent=monitoring_intent,

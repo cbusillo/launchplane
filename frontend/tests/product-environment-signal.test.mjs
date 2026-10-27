@@ -11,7 +11,7 @@ else Reflect.deleteProperty(globalThis, "window");
 
 /** @returns {import("../src/generated/openapi.ts").ProductEnvironmentSummary} */
 function environment() {
-  const lane = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "testing"));
+  const lane = /** @type {import("../src/generated/openapi.ts").ProductEnvironmentSummary} */ (structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "testing")));
   lane.trust_state = "recorded";
   lane.provenance.freshness_status = "verified";
   lane.provenance.stale_after = new Date(Date.now() + 60_000).toISOString();
@@ -50,15 +50,20 @@ test("recovery failures stay yellow while business failures stay red", () => {
   for (const state of ["fail", "missing", "stale"]) {
     Object.assign(recovery, { status: state === "stale" ? "pass" : state, trust_state: state === "stale" ? "stale" : "verified" });
     assert.equal(environmentOperationalTone(lane), "warning");
-    assert.notEqual(sidebarStatus(lane, "Production").tone, "danger");
+    assert.equal(sidebarStatus(lane, "Production").tone, "warning");
     assert.equal(operationalAttentionReasons(lane).length, 0);
     assert.ok(operationalWarningReasons(lane).length);
   }
   Object.assign(recovery, { status: "pass", trust_state: "verified" });
-  const tls = { ...structuredClone(lane.topology.observed.tls_domains[0]), domain_name: recoveryHost, status: "expired" };
+  const tls = { ...structuredClone(lane.topology.observed.tls_domains[0]), domain_name: recoveryHost, advisory: true, status: "expired" };
   lane.topology.observed.tls_domains.push(tls);
   assert.equal(environmentOperationalTone(lane), "warning");
+  Object.assign(tls, { status: "valid", trust_state: "stale", provenance: { ...tls.provenance, stale_after: new Date(0).toISOString() } });
+  assert.equal(sidebarStatus(lane, "Production").tone, "warning");
+  assert.equal(expireEnvironmentEvidence(lane).provenance.freshness_status, "verified");
+  tls.status = "expired";
   tls.domain_name = business;
+  tls.advisory = false;
   assert.equal(environmentOperationalTone(lane), "danger");
   lane.topology.observed.tls_domains.pop();
   lane.health_monitoring.checks[0].status = "fail";

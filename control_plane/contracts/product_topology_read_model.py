@@ -55,6 +55,7 @@ from control_plane.route_binding_reconcile import read_unchanged_route_binding_e
 from control_plane.split_ingress import (
     split_ingress_check_name,
     split_ingress_monitoring_lane,
+    split_ingress_monitoring_policy,
     split_ingress_recovery_check,
     split_ingress_recovery_domain,
     read_split_ingress_binding,
@@ -270,6 +271,11 @@ class ProductObservedTlsDomain(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     domain_name: str
+    advisory: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     role: ProductTopologyDomainRole = "primary"
     status: ProductObservedTlsStatus = "missing"
     failure_code: str = ""
@@ -504,6 +510,9 @@ def _split_ingress_warnings(
                 scope="observation",
                 severity="warning"
                 if split_ingress_recovery_domain(binding, domain.domain_name)
+                and not split_ingress_monitoring_policy(
+                    profile, lane, tuple(d.domain_name for d in binding.domains), domain.domain_name
+                ).conflict
                 else "error",
                 domain_name=domain.domain_name,
                 detail="This split ingress hostname has no current passing strict runtime-identity observation.",
@@ -753,6 +762,7 @@ def _observed_topology(
     now: datetime,
     runtime_verification: LaneRuntimeVerification | None = None,
 ) -> tuple[ProductObservedTopology, tuple[_ObservedTlsEvidence, ...]]:
+    binding = read_split_ingress_binding(record_store, profile, lane)
     ingress_evidence = _observed_ingress(
         record_store=record_store,
         profile=profile,
@@ -801,6 +811,7 @@ def _observed_topology(
                     instance=lane.instance,
                     domain_name=domain_name,
                     role=role,
+                    advisory=split_ingress_recovery_domain(binding, domain_name),
                     now=now,
                 )
             )
@@ -820,7 +831,6 @@ def _observed_topology(
     observed_tls_by_domain = {
         evidence.projection.domain_name: evidence.projection for evidence in tls_evidence
     }
-    binding = read_split_ingress_binding(record_store, profile, lane)
     if lane.health_monitoring.monitoring_intent != "private":
         for domain_name in expected_tls_domains:
             if split_ingress_recovery_domain(binding, domain_name):
@@ -1184,6 +1194,7 @@ def _observed_tls_evidence(
     domain_name: str,
     role: ProductTopologyDomainRole,
     now: datetime,
+    advisory: bool = False,
 ) -> _ObservedTlsEvidence | None:
     check_name = build_public_ingress_tls_check_name(domain_name)
     records = _optional_records(
@@ -1243,6 +1254,7 @@ def _observed_tls_evidence(
     )
     projection = ProductObservedTlsDomain(
         domain_name=tls.public_name,
+        advisory=advisory,
         role=tls.recorded.domain_role or role,
         status=tls.status,
         failure_code=target.failure_code or "",
@@ -1843,7 +1855,7 @@ def _tls_warnings(
     if split_ingress_recovery_domain(route_binding, projection.domain_name):
         warnings = [
             warning.model_copy(update={"severity": "warning"})
-            if warning.scope == "tls" and warning.severity == "error"
+            if warning.code in {"tls_mismatch", "tls_expired", "tls_untrusted", "tls_unavailable"}
             else warning
             for warning in warnings
         ]
