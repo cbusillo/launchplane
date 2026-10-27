@@ -991,8 +991,10 @@ labels and the accessible status name identify the lane, state and known
 diagnostic layers. A warning-severity production delivery failure or deploy fence
 shows yellow when the current production release has fresh passing health,
 matching runtime identity and the required public DNS/TLS observations. The
-incident and its inspection link remain visible. Missing or stale runtime proof,
-failed health, wrong identity and other active incidents retain their existing
+incident and its inspection link remain visible. On production lanes with public
+or private monitoring, missing or stale runtime proof is red even when no incident
+is open. Prelaunch and testing lanes retain their unverified-evidence states.
+Failed health, wrong identity and other active incidents retain their existing
 alert treatment. Colors are tuned separately for light and dark themes;
 fresh sidebar signals use the same operational health calculation as the product view.
 Amber hover labels explain missing runtime identity, incomplete public DNS/TLS

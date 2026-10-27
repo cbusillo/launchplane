@@ -1,7 +1,7 @@
 import { setClockTime, expect, test } from "./state";
 import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
-const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "delivery-warning", "stale", "unknown", "absent"] as const;
+const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "delivery-warning", "production-unknown", "stale", "unknown", "absent"] as const;
 
 for (const theme of ["dark", "light"] as const) {
 
@@ -44,6 +44,12 @@ for (const state of cases) {
         lane.health_monitoring.open_incidents = [incident];
       }
       if (state === "failed") check.status = "fail";
+      if (state === "production-unknown") {
+        lane.environment = "prod";
+        lane.health_monitoring.monitoring_intent = "public";
+        lane.health_monitoring.open_incidents = [];
+        lane.topology.observed.placement.runtime_identity_status = "unchecked";
+      }
       if (state === "incident") check.incident_status = "open";
       if (state === "stale") lane.provenance.stale_after = new Date(now - 1000).toISOString();
       if (state === "missing-route" || state === "expired-route") {
@@ -81,7 +87,7 @@ for (const state of cases) {
           products.push(extra);
         }
       }
-      const laneLabel = state === "delivery-warning" ? "Production" : "Testing";
+      const laneLabel = lane.environment === "prod" ? "Production" : "Testing";
       return { product, products, identity: module.fixtureIdentity, now, laneLabel, laneName: lane.environment, testingDescription: sidebarStatus(product.environments[0] ?? null, laneLabel).description };
     }, state);
     await setClockTime(page, fixtures.now);
@@ -103,7 +109,7 @@ for (const state of cases) {
     const dot = railLink.locator(`[data-lane="${fixtures.laneName}"]`);
     const signal = page.locator(".signal-tile").filter({ hasText: new RegExp(`^${fixtures.laneLabel}`, "i") });
     const healthy = state === "healthy" || state === "missing-route" || state === "expired-route";
-    const tone = healthy ? "verified" : state === "failed" || state === "incident" ? "danger" : state === "stale" || state === "delivery-warning" ? "warning" : "missing";
+    const tone = healthy ? "verified" : state === "failed" || state === "incident" || state === "production-unknown" ? "danger" : state === "stale" || state === "delivery-warning" ? "warning" : "missing";
     await expect(signal).toHaveAttribute("data-tone", tone);
     await expect(dot).toHaveAttribute("data-tone", state === "stale" ? "stale" : tone);
     await expect(dot).toHaveAttribute("title", fixtures.testingDescription);
