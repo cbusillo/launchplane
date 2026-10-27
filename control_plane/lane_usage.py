@@ -1,17 +1,18 @@
 """One usage rule for disposable work; downtime never attests data or isolation."""
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import logging
 from typing import Protocol, cast
 
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
     health_monitor_interval_seconds,
 )
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 
 VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX = "service:verified-down:"
 
@@ -67,8 +68,8 @@ def _down_observations(
     # Use the monitor's actual target resolution for every driver, including
     # inherited drivers and private endpoints. A diagnostic failure is not an
     # application outage, nor is one failed URL alongside a serving URL.
-    from control_plane.workflows.public_ingress_monitor import effective_health_check_monitor_target
     from control_plane.health_monitor_scheduler import monitor_slot
+    from control_plane.workflows.public_ingress_monitor import effective_health_check_monitor_target
 
     reader = getattr(store, "list_public_ingress_observation_records", None)
     if not callable(reader):
@@ -82,7 +83,9 @@ def _down_observations(
     ]
     if len(lanes) != 1 or target.instance == "prod":
         return ()
-    lane = lanes[0]
+    lane = split_ingress_monitoring_lane(
+        profile, lanes[0], read_split_ingress_binding(store, profile, lanes[0])
+    )
     checks = [
         check
         for check in lane.health_monitoring.checks

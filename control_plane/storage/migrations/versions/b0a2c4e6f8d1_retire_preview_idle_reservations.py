@@ -2,11 +2,11 @@ from alembic import op
 import sqlalchemy as sa
 
 from control_plane.storage.migrations.versions import (
-    a4c8e0f2b6d3_archive_nonruntime_product_profiles as archive,
+    b8f2c4d6e0a7_managed_preview_settings as preview_settings,
 )
 
 revision: str = "b0a2c4e6f8d1"
-down_revision: str = archive.revision
+down_revision: str = preview_settings.revision
 branch_labels: str | None = None
 depends_on: str | None = None
 

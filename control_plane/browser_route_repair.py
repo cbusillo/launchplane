@@ -250,6 +250,9 @@ def binding_repair_review(
     if plan.record is not None:
         semantic_record = plan.record.model_dump(mode="json")
         semantic_record.pop("updated_at", None)
+        external = semantic_record.get("external_ingress")
+        if isinstance(external, dict):
+            external.pop("attested_at", None)
         source = semantic_record.get("source")
         if isinstance(source, dict):
             source.pop("refreshed_at", None)

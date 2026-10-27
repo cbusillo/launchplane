@@ -30,6 +30,8 @@ from control_plane.storage.migrations.versions import (
     f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
     f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
+    c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
+    b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -105,6 +107,8 @@ class SchemaMigrationTests(unittest.TestCase):
             public_host_fences.revision,
             topics_hostnames.revision,
             archive_hostnames_join.revision,
+            preview_hostnames_join.revision,
+            idle_hostnames_join.revision,
         ):
             for revision in (
                 retired_delivery.revision,

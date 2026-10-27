@@ -11,6 +11,8 @@ from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
 from control_plane.contracts.product_profile_record import ProductLaneProfile
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.split_ingress import split_ingress_check_base_url, split_ingress_check_name
 from control_plane.contracts.public_dns import PublicDnsObservation
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
@@ -36,6 +38,7 @@ def build_public_dns_diagnostics(
     product: str,
     lane: ProductLaneProfile,
     now: datetime,
+    route_binding: EnvironmentRouteBindingRecord | None = None,
 ) -> tuple[PublicDnsDiagnostic, ...]:
     if lane.health_monitoring.monitoring_intent == "private":
         return ()
@@ -67,9 +70,16 @@ def build_public_dns_diagnostics(
             ),
             None,
         )
+        base_url = (
+            split_ingress_check_base_url(lane, check.url)
+            if route_binding is not None
+            and route_binding.external_ingress
+            and check.name == split_ingress_check_name(urlsplit(check.url).hostname or "")
+            else lane.base_url
+        )
         names = {
             urlsplit(value).hostname
-            for value in (lane.base_url, check.url or lane.health_url or lane.base_url)
+            for value in (base_url, check.url or lane.health_url or lane.base_url)
             if value
         }
         expectations = {item.public_name: item.addresses for item in check.expected_dns_targets}

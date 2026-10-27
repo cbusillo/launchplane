@@ -27,6 +27,10 @@ from control_plane.storage.migrations.versions import (
     a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
     a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    b8f2c4d6e0a7_managed_preview_settings as preview_settings,
+    b9a3d5e7f1b8_join_preview_retirement as preview_retirement_join,
+    c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
+    c1c5f7a9b3d0_join_preview_compatibility as preview_compatibility_join,
     b0a2c4e6f8d1_retire_preview_idle_reservations as idle_retirement,
     b1b3d5f7a9e2_join_idle_retirement as idle_retirement_join,
     b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
@@ -48,6 +52,7 @@ SCHEMA_MIGRATION_SUPPORTED_REVISIONS = (
     discussion_topics.revision,
     topics_join.revision,
     profile_archive.revision,
+    preview_settings.revision,
     idle_retirement.revision,
 )
 _RECOGNIZED_SOURCE_REVISIONS = (
@@ -59,6 +64,9 @@ _RECOGNIZED_SOURCE_REVISIONS = (
     archive_retirement_join.revision,
     archive_hostnames_join.revision,
     archive_compatibility_join.revision,
+    preview_retirement_join.revision,
+    preview_hostnames_join.revision,
+    preview_compatibility_join.revision,
     idle_retirement_join.revision,
     idle_hostnames_join.revision,
     idle_compatibility_join.revision,
@@ -84,6 +92,9 @@ _IDLE_JOIN_BY_SOURCE = {
     archive_retirement_join.revision: idle_retirement_join.revision,
     archive_hostnames_join.revision: idle_hostnames_join.revision,
     archive_compatibility_join.revision: idle_compatibility_join.revision,
+    preview_retirement_join.revision: idle_retirement_join.revision,
+    preview_hostnames_join.revision: idle_hostnames_join.revision,
+    preview_compatibility_join.revision: idle_compatibility_join.revision,
 }
 
 _HELD_DELIVERY_TARGETS = frozenset(
@@ -117,6 +128,17 @@ def schema_migration_target(*, current_revision: str, target_revision: str) -> s
         return _IDLE_JOIN_BY_SOURCE[current_revision]
     if current_revision == idle_retirement.revision and target_revision in _HELD_DELIVERY_TARGETS:
         return idle_retirement_join.revision
+    if target_revision == preview_settings.revision:
+        previous_join = _ARCHIVE_JOIN_BY_SOURCE.get(current_revision, current_revision)
+        preview_join = {
+            archive_retirement_join.revision: preview_retirement_join.revision,
+            archive_hostnames_join.revision: preview_hostnames_join.revision,
+            archive_compatibility_join.revision: preview_compatibility_join.revision,
+        }.get(previous_join)
+        if preview_join is not None:
+            return preview_join
+    if current_revision == preview_settings.revision and target_revision in _HELD_DELIVERY_TARGETS:
+        return preview_retirement_join.revision
     if target_revision == profile_archive.revision and current_revision in _ARCHIVE_JOIN_BY_SOURCE:
         return _ARCHIVE_JOIN_BY_SOURCE[current_revision]
     if current_revision == profile_archive.revision and target_revision in _HELD_DELIVERY_TARGETS:

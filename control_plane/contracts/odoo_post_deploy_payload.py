@@ -12,6 +12,8 @@ from control_plane.contracts.odoo_instance_override_record import (
 from control_plane.contracts.runtime_environment_record import ScalarValue
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
 
+ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
+
 OdooPostDeployWorkflowIntent = Literal["deploy", "restore", "bootstrap"]
 
 

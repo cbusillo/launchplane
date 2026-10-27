@@ -1,3 +1,4 @@
+from control_plane.preview_settings import validate_preview_scope
 import hashlib
 import re
 from typing import Protocol
@@ -468,12 +469,45 @@ def plan_product_onboarding_authority_bundle(
         (record.scope, record.context, record.instance): record
         for record in existing_runtime_records
     }
+    existing_secret_bindings = record_store.list_secret_bindings(limit=None)
     secret_binding_plan = build_secret_bindings(
         manifest=manifest,
         updated_at=recorded_at,
-        existing_bindings=record_store.list_secret_bindings(limit=None),
+        existing_bindings=existing_secret_bindings,
     )
     secret_bindings = secret_binding_plan.active_bindings
+    resulting_bindings = {
+        binding.binding_id: binding
+        for binding in (
+            *existing_secret_bindings,
+            *secret_binding_plan.retired_bindings,
+            *secret_bindings,
+        )
+    }
+    preview_secret_keys = frozenset(
+        binding.binding_key
+        for binding in resulting_bindings.values()
+        if binding.context == product_profile.preview.context
+        and binding.instance == "preview"
+        and binding.integration == "runtime_environment"
+        and binding.status == "configured"
+    )
+    validate_preview_scope(
+        {}, context=product_profile.preview.context, secret_keys=preview_secret_keys
+    )
+    resulting_runtime = {
+        (record.scope, record.context, record.instance): record
+        for record in (*existing_runtime_records, *runtime_environments)
+    }
+    for record in resulting_runtime.values():
+        if (
+            record.scope == "instance"
+            and record.instance == "preview"
+            and record.context == product_profile.preview.context
+        ):
+            validate_preview_scope(
+                record.env, context=record.context, secret_keys=preview_secret_keys
+            )
     target_records_by_route = {
         (record.context, record.instance): record for record in provider_targets
     }

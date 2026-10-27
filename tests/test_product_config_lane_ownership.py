@@ -78,6 +78,44 @@ class ProductConfigLaneOwnershipTests(unittest.IsolatedAsyncioTestCase):
         finally:
             cls._record_store.reset(token)
 
+    def test_preview_scope_requires_an_explicit_instance(self) -> None:
+        from control_plane.contracts.product_profile_record import product_target_owner_products
+
+        profile = LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+        profile.preview.context = "preview-only"
+        for historical in ((), (profile.preview.context,)):
+            with self.subTest(historical=historical):
+                profile.historical_contexts = historical
+                self.assertFalse(
+                    product_target_owner_products(
+                        iter((profile,)), context=profile.preview.context, config_scopes=True
+                    )
+                )
+                self.assertEqual(
+                    product_target_owner_products(
+                        (profile,),
+                        context=profile.preview.context,
+                        instance="preview",
+                        config_scopes=True,
+                    ),
+                    frozenset((profile.product,)),
+                )
+        stable_context = profile.lanes[0].context
+        self.assertEqual(
+            product_target_owner_products(
+                iter((profile,)), context=stable_context, config_scopes=True
+            ),
+            frozenset((profile.product,)),
+        )
+        foreign = profile.model_copy(deep=True, update={"product": "foreign-product", "lanes": ()})
+        foreign.preview.context = stable_context
+        self.assertEqual(
+            product_target_owner_products(
+                (profile, foreign), context=stable_context, config_scopes=True
+            ),
+            frozenset((profile.product, foreign.product)),
+        )
+
     async def test_authorized_product_cannot_plan_or_write_another_lane(self) -> None:
         for driver in ("generic-web", "odoo"):
             for mode in ("dry-run", "apply"):

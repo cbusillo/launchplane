@@ -1,5 +1,5 @@
 from control_plane.storage.migrations.versions import (
-    a6e0a2c4d8f5_join_archive_topics_hostnames as hostnames,
+    c0b4e6f8a2c9_join_preview_hostnames as hostnames,
     b0a2c4e6f8d1_retire_preview_idle_reservations as idle,
 )
 

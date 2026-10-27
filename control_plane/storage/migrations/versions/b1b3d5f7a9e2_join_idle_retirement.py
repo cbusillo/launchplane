@@ -1,5 +1,5 @@
 from control_plane.storage.migrations.versions import (
-    a5d9f1b3c7e4_join_archive_topics_retirement as retirement,
+    b9a3d5e7f1b8_join_preview_retirement as retirement,
     b0a2c4e6f8d1_retire_preview_idle_reservations as idle,
 )
 

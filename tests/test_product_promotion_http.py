@@ -40,7 +40,11 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.product_health_monitoring_migration import (
+    canonical_health_check_record_token,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     health_monitor_freshness_seconds,
     PublicIngressObservationRecord,
@@ -101,6 +105,11 @@ NEW_TESTING_SOURCE_REF = "3" * 40
 
 
 class _PromotionStore(PostgresRecordStore):
+    def read_route_binding_record(
+        self, *, product: str, context_name: str, instance_name: str
+    ) -> EnvironmentRouteBindingRecord:
+        raise FileNotFoundError("This promotion fixture has no route binding")
+
     def __init__(
         self,
         *,
@@ -250,10 +259,16 @@ class _MonitoredPromotionStore(_PromotionStore):
                 record.product,
                 record.context,
                 record.instance,
-                record.check_name,
+                canonical_health_check_record_token(record.check_name),
                 record.check_kind,
             )
-            == (product, context_name, instance_name, check_name, check_kind)
+            == (
+                product,
+                context_name,
+                instance_name,
+                canonical_health_check_record_token(check_name),
+                check_kind,
+            )
             and (not incident_id or record.incident_id == incident_id)
             and (not check_name_prefix or record.check_name.startswith(check_name_prefix))
         )
@@ -688,7 +703,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
         store = _MonitoredPromotionStore()
         lane = store.profile.lanes[0]
         health_only = lane.health_monitoring.checks[0].model_copy(
-            update={"name": "public-root", "require_runtime_identity": False}
+            update={"name": "public-root", "url": lane.base_url, "require_runtime_identity": False}
         )
         lane = lane.model_copy(
             update={
@@ -701,7 +716,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
         passed = store.observations[0].model_copy(
             update={
                 "record_id": "public-root-observation",
-                "check_name": health_only.name,
+                "check_name": "Public Root",
                 "targets": (
                     PublicIngressTargetObservation(
                         target="base_url",

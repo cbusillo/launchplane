@@ -280,6 +280,50 @@ def _assert_odoo_stable_lane_runtime_contract(
 
 
 class ProductOnboardingTests(unittest.TestCase):
+    def test_onboarding_refuses_preview_credentials_at_the_manifest_boundary(self) -> None:
+        payload = _manifest_payload()
+        preview = payload["preview"]
+        assert isinstance(preview, dict)
+        payload["runtime_environments"] = [
+            {
+                "scope": "instance",
+                "context": preview["context"],
+                "instance": "preview",
+                "env": {"CONNECTION": "host=x password=private"},
+            }
+        ]
+        with self.assertRaises(ValueError):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_preview_settings_use_existing_runtime_records_in_onboarding(self) -> None:
+        payload = _manifest_payload()
+        preview = payload["preview"]
+        assert isinstance(preview, dict)
+        context = str(preview["context"])
+        payload["runtime_environments"] = [
+            {
+                "scope": "instance",
+                "context": context,
+                "instance": "preview",
+                "env": {"COLOR": "preview"},
+            }
+        ]
+        payload["expected_config"] = {
+            "runtime_environment_keys": [
+                {
+                    "key": "COLOR",
+                    "context": context,
+                    "instance": "preview",
+                }
+            ]
+        }
+        manifest = ProductOnboardingManifest.model_validate(payload)
+        self.assertEqual(manifest.runtime_environments[0].instance, "preview")
+        self.assertNotIn("preview", [lane.instance for lane in manifest.lanes])
+        preview["override_env"] = {"COLOR": "retired"}
+        with self.assertRaises(ValueError):
+            ProductOnboardingManifest.model_validate(payload)
+
     def test_reapply_updates_manifest_settings_and_preserves_service_owned_state(self) -> None:
         manifest = ProductOnboardingManifest.model_validate(_manifest_payload())
         existing = build_product_profile_record(

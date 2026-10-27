@@ -1,5 +1,5 @@
 from control_plane.storage.migrations.versions import (
-    a7f1b3d5e9a6_join_archive_compatibility as compatibility,
+    c1c5f7a9b3d0_join_preview_compatibility as compatibility,
     b1b3d5f7a9e2_join_idle_retirement as retirement,
     b2c4e6a8f0d3_join_idle_hostnames as hostnames,
 )

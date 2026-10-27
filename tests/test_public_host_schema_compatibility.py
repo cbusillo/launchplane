@@ -38,6 +38,10 @@ from control_plane.storage.migrations.versions import (
     a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
     a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
     a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    b8f2c4d6e0a7_managed_preview_settings as preview_settings,
+    b9a3d5e7f1b8_join_preview_retirement as preview_retirement_join,
+    c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
+    c1c5f7a9b3d0_join_preview_compatibility as preview_compatibility_join,
 )
 from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_host_fences import (
     PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,
@@ -87,6 +91,10 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
             archive_retirement_join.revision,
             archive_hostnames_join.revision,
             archive_compatibility_join.revision,
+            preview_settings.revision,
+            preview_retirement_join.revision,
+            preview_hostnames_join.revision,
+            preview_compatibility_join.revision,
         ):
             expected = schema_migration_target(
                 current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION

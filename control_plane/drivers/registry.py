@@ -487,7 +487,6 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
                 "preview.required_template_env_keys",
                 "preview.copied_env_keys",
                 "preview.omitted_env_keys",
-                "preview.override_env",
                 "preview.preview_url_env_keys",
                 "preview.preview_domain_env_keys",
             ),

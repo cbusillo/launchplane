@@ -1,27 +1,33 @@
+import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import unittest
 from unittest.mock import patch
+from urllib.parse import urlsplit
+
 from sqlalchemy.exc import OperationalError
 
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetStaffTestingHold,
 )
-from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.product_profile_record import ProductLaneHealthCheck
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
-from control_plane.disposable_lanes import require_disposable_lane, DisposableLaneSafetyUnknown
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneHealthCheck,
+)
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown, require_disposable_lane
 from control_plane.lane_usage import LaneUsageDecision, evaluate_lane_usage
 from control_plane.storage.postgres import PostgresRecordStore
-from tests.support.disposable_lanes import record_safety, prepare_held_rebuild
+from tests.support.disposable_lanes import prepare_held_rebuild, record_safety
 from tests.support.down_lanes import record_lane_health
 from tests.support.profiles import (
     _generic_site_profile_payload,
     _odoo_profile_payload_with_prod_lane,
 )
+from tests.test_route_binding_record import _route_binding_record
 
 
 class LaneUsageTests(unittest.TestCase):
@@ -127,6 +133,25 @@ class LaneUsageTests(unittest.TestCase):
         )
         for usage in ("unknown", "in_use"):
             self.assertTrue(self.decision(usage).protected)
+
+    def test_legacy_down_probes_cannot_hide_unobserved_split_hosts(self) -> None:
+        self.health()
+        self.assertFalse(self.decision().protected)
+        profile = self.store.read_product_profile_record(self.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        domain = urlsplit(lane.base_url).hostname
+        assert domain is not None
+        payload = _route_binding_record(domain=domain).model_dump(mode="json")
+        payload.update(product=self.product, context=self.context, instance="testing")
+        payload["domains"].append({"domain_name": "recovery.example.test", "role": "alias"})
+        payload["external_ingress"] = {
+            "domains": [domain],
+            "custodian": "Office operator",
+            "evidence_url": "https://example.test/report",
+            "attested_at": payload["updated_at"],
+        }
+        self.store.write_route_binding_record(EnvironmentRouteBindingRecord.model_validate(payload))
+        self.assertTrue(self.decision().protected)
 
     def test_verified_down_repair_does_not_need_a_running_copy_safety_observation(self) -> None:
         self.health()
