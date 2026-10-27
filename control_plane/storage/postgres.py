@@ -479,6 +479,7 @@ from control_plane.contracts.product_retirement import (
     product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.integration_attestation import IntegrationAttestationRecord
 from control_plane.contracts.testing_retry import (
     TestingRetryRearm,
     TESTING_RETRY_REARM_SCOPE,
@@ -3010,6 +3011,20 @@ class LaunchplaneReleaseReviewDecisionRow(Base):
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
     product: Mapped[str] = mapped_column(String, nullable=False)
     decided_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneIntegrationAttestationRow(Base):
+    __tablename__ = "launchplane_integration_attestations"
+    __table_args__ = (
+        Index(
+            "launchplane_integration_attestations_change_idx", "repository", "pull_request_number"
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pull_request_number: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -26568,6 +26583,44 @@ class PostgresRecordStore(HumanSessionStore):
                 session, f"product-review-{purpose}:{repository.casefold()}#{pull_request_number}"
             )
             yield
+
+    def list_integration_attestation_records(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[IntegrationAttestationRecord, ...]:
+        return self._list_models(
+            model_type=IntegrationAttestationRecord,
+            orm_model=LaunchplaneIntegrationAttestationRow,
+            filters=[
+                LaunchplaneIntegrationAttestationRow.repository == repository,
+                LaunchplaneIntegrationAttestationRow.pull_request_number == pull_request_number,
+            ],
+            order_by=(LaunchplaneIntegrationAttestationRow.record_id,),
+        )
+
+    def write_integration_attestation_record_if_absent(
+        self, record: IntegrationAttestationRecord
+    ) -> IntegrationAttestationRecord:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_landing_authority(session, record.record_id)
+            existing_row = session.get(LaunchplaneIntegrationAttestationRow, record.record_id)
+            if existing_row is not None:
+                existing = IntegrationAttestationRecord.model_validate(existing_row.payload)
+                if existing.review != record.review or existing.statement != record.statement:
+                    raise ValueError(
+                        "Integration attestation is immutable; read back the original."
+                    )
+                return existing
+            session.add(
+                LaunchplaneIntegrationAttestationRow(
+                    record_id=record.record_id,
+                    repository=record.evidence.repository,
+                    pull_request_number=record.evidence.pull_request_number,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+        return record
 
     def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> None:
         self._write_row(

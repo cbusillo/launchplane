@@ -1,4 +1,5 @@
 import unittest
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -16,6 +17,12 @@ from control_plane.contracts.product_review import (
     ProductReviewDecisionRecord,
     PRODUCT_REVIEW_REASON_MAX_LENGTH,
 )
+from control_plane.contracts.integration_attestation import (
+    IntegrationAttestationRequest,
+    IntegrationAttestationRecord,
+    IntegrationModelReview,
+)
+from control_plane.integration_attestation import plan_integration_attestation
 from control_plane.merge_train_branch_refresh import merge_train_branch_refresh_recorder
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
@@ -323,7 +330,6 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         ):
             with self.subTest(message=message):
                 self.setUp()
-                # Even an identical final patch cannot erase a visible/missing claim.
                 self._later_commits(message, "Change tests\n\nClient-impact: none")
                 self.assert_waits_for_the_client(self._publish())
 
@@ -378,9 +384,6 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 }
             )
         )
-        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
-            patch=_PATCH + "\n+Retain invoice while cancelling recurring billing"
-        )
 
     def test_two_accepted_billing_changes_carry_across_a_conflict_resolution(self) -> None:
         self._integrate_accepted_billing_change()
@@ -400,6 +403,332 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(imported.head_sha, decision.head_sha)
         self.assertEqual(self._publish()["state"], "success")
         self.assertEqual(len(self._decisions()), 2)
+
+    def _restore_billing_integration(
+        self, *, declared_integration_only: bool = False
+    ) -> dict[str, object]:
+        self._integrate_accepted_billing_change()
+        comparison = json.loads(
+            (Path(__file__).parent / "fixtures/accepted_billing_integration.json").read_text()
+        )
+        assert isinstance(comparison, dict)
+        if declared_integration_only:
+            comparison["commits"][-4]["commit"]["message"] = (
+                "Integrate accepted billing changes\n\nClient-impact: none"
+            )
+        accepted_head = comparison["merge_base_commit"]["sha"]
+        commits = comparison["commits"]
+        self.accepted = self.accepted.model_copy(update={"head_sha": accepted_head})
+        self.store.write_product_review_decision_record(self.accepted)
+        self.github.head_sha = commits[-1]["sha"]
+        self.github.base_sha = commits[-4]["parents"][1]["sha"]
+        self.github.on_base.add(self.github.base_sha)
+        self.github.responses[
+            f"/repos/{_REPOSITORY}/compare/{accepted_head}...{self.github.head_sha}"
+        ] = comparison
+        for commit in commits[:-4]:
+            self.github.responses[
+                f"/repos/{_REPOSITORY}/commits/{commit['sha']}/pulls?per_page=100"
+            ] = [{"number": _PULL_REQUEST + 1}]
+        return comparison
+
+    def test_exact_billing_history_still_needs_qualification_of_its_visible_integration(
+        self,
+    ) -> None:
+        self._restore_billing_integration()
+        self.assert_waits_for_the_client(self._publish())
+
+    def _billing_attestation(
+        self, *, engineering_import: bool = False
+    ) -> IntegrationAttestationRecord:
+        comparison = self._restore_billing_integration()
+        commits = comparison["commits"]
+        assert isinstance(commits, list)
+        merge = commits[-4]
+        prefix = f"/repos/{_REPOSITORY}"
+        if engineering_import:
+            change = self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST + 1}"]
+            assert isinstance(change, dict)
+            change["body"] = (
+                "## Client test notes\nNothing for the Client to test: Engineering cleanup."
+            )
+        self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST}"] = {
+            "state": "open",
+            "body": "## Client test notes\nCheck the accepted billing fix.",
+            "head": {"sha": self.github.head_sha},
+            "base": {"ref": "main", "repo": {"full_name": _REPOSITORY, "id": 5150}},
+            "labels": [],
+        }
+        self.github.responses[f"{prefix}/compare/{self.accepted.head_sha}...{merge['sha']}"] = {
+            **comparison,
+            "commits": commits[:-3],
+            "ahead_by": len(commits[:-3]),
+            "total_commits": len(commits[:-3]),
+        }
+        self.github.responses[f"{prefix}/compare/{merge['sha']}...{self.github.head_sha}"] = {
+            "status": "ahead"
+        }
+        for commit in commits[:-4]:
+            self.github.responses[f"{prefix}/compare/{commit['sha']}...{self.github.base_sha}"] = {
+                "status": "ahead"
+            }
+        request = IntegrationAttestationRequest(
+            product=self.profile.product,
+            repository=_REPOSITORY,
+            pull_request_number=_PULL_REQUEST,
+            expected_head_sha=self.github.head_sha,
+            merge_sha=merge["sha"],
+            source_decision_id=self.accepted.record_id,
+        )
+        evidence = plan_integration_attestation(
+            request=request,
+            profile=self.profile,
+            store=self.store,
+            read=lambda path: self.github(path=path, token="fixture-token"),
+        )
+        return IntegrationAttestationRecord(
+            evidence=evidence,
+            review=IntegrationModelReview(
+                evidence_sha256=evidence.digest(),
+                author_provider="openai",
+                reviewer_provider="anthropic",
+                reviewer_model="independent-fixture",
+                conclusion="no_new_client_visible_work",
+                report="The immutable merge resolves only the two already accepted billing changes.",
+            ),
+            statement="This exact conflict integration adds no new Client-visible work.",
+            recorded_by="director-agent:test",
+            recorded_at=self.accepted.decided_at,
+        )
+
+    def test_reviewed_attestation_qualifies_untouched_billing_history(self) -> None:
+        record = self._billing_attestation()
+        self.assertEqual(self.store.write_integration_attestation_record_if_absent(record), record)
+        self.assertEqual(self._publish()["state"], "success")
+        carried, accepted = self._decisions()
+        self.assertEqual(accepted, self.accepted)
+        self.assertEqual(carried.owner_github_id, accepted.owner_github_id)
+        self.assertEqual(carried.feedback_url, accepted.feedback_url)
+        assert carried.carried_from is not None
+        self.assertEqual(carried.carried_from.integration_attestation_ids, (record.record_id,))
+        self.assertEqual(
+            carried.carried_from.restored_trees[0].ancestor_sha, record.evidence.merge_sha
+        )
+
+    def test_attestation_cannot_qualify_other_evidence_or_override_client_rejection(self) -> None:
+        for mutation in (
+            "merge_sha",
+            "tree_sha",
+            "parent_shas",
+            "source_decision_id",
+            "owner_github_id",
+            "base_branch",
+            "pull_request_number",
+            "integrated_changes",
+            "rejected",
+            "imported-rejected",
+            "residual",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                record = self._billing_attestation()
+                evidence = record.evidence
+                if mutation in {"merge_sha", "tree_sha"}:
+                    update: dict[str, object] = {mutation: "f" * 40}
+                elif mutation == "parent_shas":
+                    update = {mutation: ("f" * 40, evidence.parent_shas[1])}
+                elif mutation == "integrated_changes":
+                    update = {mutation: ()}
+                elif mutation == "pull_request_number":
+                    update = {mutation: _PULL_REQUEST + 2}
+                elif mutation in {"rejected", "imported-rejected", "residual"}:
+                    update = {}
+                else:
+                    update = {mutation: "different"}
+                evidence = evidence.model_copy(update=update)
+                record = record.model_copy(
+                    update={
+                        "evidence": evidence,
+                        "review": record.review.model_copy(
+                            update={"evidence_sha256": evidence.digest()}
+                        ),
+                    }
+                )
+                self.store.write_integration_attestation_record_if_absent(record)
+                if mutation == "rejected":
+                    self.store.write_product_review_decision_record(
+                        self.accepted.model_copy(
+                            update={
+                                "decision": "changes_requested",
+                                "reason": "Billing is incorrect",
+                            }
+                        )
+                    )
+                if mutation == "imported-rejected":
+                    (imported,) = self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
+                    )
+                    self.store.write_product_review_decision_record(
+                        imported.model_copy(
+                            update={
+                                "decision": "changes_requested",
+                                "reason": "Imported billing is incorrect",
+                            }
+                        )
+                    )
+                if mutation == "residual":
+                    comparison = self.github.responses[
+                        f"/repos/{_REPOSITORY}/compare/{self.accepted.head_sha}...{self.github.head_sha}"
+                    ]
+                    assert isinstance(comparison, dict)
+                    comparison["commits"][-1]["commit"]["tree"]["sha"] = "f" * 40
+                self.assertNotEqual(self._publish()["state"], "success")
+
+    def test_attestation_survives_later_qualified_imports_and_engineering_prose_edits(self) -> None:
+        record = self._billing_attestation(engineering_import=True)
+        self.store.write_integration_attestation_record_if_absent(record)
+        prefix = f"/repos/{_REPOSITORY}"
+        imported = self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST + 1}"]
+        assert isinstance(imported, dict)
+        imported["body"] = (
+            "## Client test notes\nNothing for the Client to test: Clarified engineering explanation."
+        )
+        comparison = self.github.responses[
+            f"{prefix}/compare/{self.accepted.head_sha}...{self.github.head_sha}"
+        ]
+        assert isinstance(comparison, dict)
+        new_base, new_merge = "d" * 40, "e" * 40
+        commits = comparison["commits"]
+        assert isinstance(commits, list)
+        commits.extend(
+            [
+                {
+                    "sha": new_base,
+                    "parents": [{"sha": self.github.base_sha}],
+                    "commit": {"message": "Engineering import"},
+                },
+                {
+                    "sha": new_merge,
+                    "parents": [{"sha": self.github.head_sha}, {"sha": new_base}],
+                    "commit": {"message": "Integrate engineering work\n\nClient-impact: none"},
+                },
+            ]
+        )
+        comparison.update(ahead_by=len(commits), total_commits=len(commits))
+        self.github.responses[f"{prefix}/compare/{self.accepted.head_sha}...{new_merge}"] = (
+            comparison
+        )
+        self.github.responses[f"{prefix}/commits/{new_base}/pulls?per_page=100"] = [
+            {"number": _PULL_REQUEST + 2}
+        ]
+        self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST + 2}"] = {
+            "merged": True,
+            "head": {"sha": new_base},
+            "base": {"ref": "main", "repo": {"full_name": _REPOSITORY}},
+            "body": "## Client test notes\nNothing for the Client to test: More engineering cleanup.",
+            "labels": [],
+        }
+        change = self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST}"]
+        assert isinstance(change, dict)
+        change["head"] = {"sha": new_merge}
+        self.github.head_sha, self.github.base_sha = new_merge, new_base
+        self.github.on_base.add(new_base)
+        self.assertEqual(self._publish()["state"], "success")
+
+    def test_attestation_storage_replays_and_refuses_evidence_replacement(self) -> None:
+        from pydantic import ValidationError
+
+        record = self._billing_attestation()
+        with TemporaryDirectory() as temporary:
+            database = PostgresRecordStore(
+                database_url=sqlite_database_url(Path(temporary) / "state.db")
+            )
+            self.addCleanup(database.close)
+            database.ensure_schema()
+            for store in (self.store, database):
+                with self.subTest(store=type(store).__name__):
+                    store.write_integration_attestation_record_if_absent(record)
+                    self.assertEqual(
+                        store.write_integration_attestation_record_if_absent(
+                            record.model_copy(update={"recorded_at": "later"})
+                        ),
+                        record,
+                    )
+                    self.assertEqual(
+                        store.list_integration_attestation_records(
+                            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST
+                        ),
+                        (record,),
+                    )
+                    with self.assertRaises(ValueError):
+                        store.write_integration_attestation_record_if_absent(
+                            record.model_copy(update={"statement": "Changed statement"})
+                        )
+        with self.assertRaises(ValidationError):
+            IntegrationModelReview.model_validate(
+                record.review.model_dump() | {"reviewer_provider": record.review.author_provider}
+            )
+        with self.assertRaises(ValidationError):
+            IntegrationAttestationRecord.model_validate(
+                record.model_dump()
+                | {"review": record.review.model_dump() | {"evidence_sha256": "0" * 64}}
+            )
+
+    def test_accepted_billing_integration_survives_exact_removal_of_support_changes(self) -> None:
+        self._restore_billing_integration(declared_integration_only=True)
+        self.assertEqual(self._publish()["state"], "success")
+        carried, accepted = self._decisions()
+        self.assertEqual(carried.head_sha, self.github.head_sha)
+        self.assertEqual(carried.feedback_url, accepted.feedback_url)
+        assert carried.carried_from is not None
+        comparison = self.github.responses[
+            f"/repos/{_REPOSITORY}/compare/{accepted.head_sha}...{carried.head_sha}"
+        ]
+        assert isinstance(comparison, dict)
+        commits = comparison["commits"]
+        assert isinstance(commits, list)
+        (restoration,) = carried.carried_from.restored_trees
+        self.assertEqual(restoration.head_sha, carried.head_sha)
+        self.assertEqual(restoration.ancestor_sha, commits[-4]["sha"])
+        self.assertEqual(restoration.tree_sha, commits[-4]["commit"]["tree"]["sha"])
+        self.assertEqual(restoration.commit_shas, tuple(commit["sha"] for commit in commits[-3:]))
+        self.assertEqual(carried.carried_from.commits[-1].sha, restoration.ancestor_sha)
+        self.assertEqual(self._publish()["state"], "success")
+        self.assertEqual(len(self._decisions()), 2)
+
+    def test_restored_billing_integration_preserves_side_work_and_imported_review_guards(
+        self,
+    ) -> None:
+        for mutation in (
+            "residual",
+            "missing-head-tree",
+            "missing-ancestor-tree",
+            "hidden-merge",
+            "rejected",
+        ):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                comparison = self._restore_billing_integration(declared_integration_only=True)
+                commits = comparison["commits"]
+                assert isinstance(commits, list)
+                if mutation == "residual":
+                    commits[-1]["commit"]["tree"]["sha"] = "f" * 40
+                elif mutation == "missing-head-tree":
+                    commits[-1]["commit"].pop("tree")
+                elif mutation == "missing-ancestor-tree":
+                    commits[-4]["commit"].pop("tree")
+                elif mutation == "hidden-merge":
+                    commits[-2]["parents"].append({"sha": "f" * 40})
+                else:
+                    (decision,) = self.store.list_product_review_decision_records(
+                        repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
+                    )
+                    self.store.write_product_review_decision_record(
+                        decision.model_copy(
+                            update={"decision": "changes_requested", "reason": "Invoice missing"}
+                        )
+                    )
+                self.assert_waits_for_the_client(self._publish())
 
     def test_base_integration_still_requires_each_imported_changes_acceptance(self) -> None:
         for update in (
@@ -481,14 +810,10 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             len(carry.integrated_changes[0].engineering_basis), PRODUCT_REVIEW_REASON_MAX_LENGTH
         )
 
-    def test_recorded_refresh_can_combine_or_absorb_an_accepted_patch(self) -> None:
-        for change in (_change(patch=_PATCH + "\n+Combined accepted behavior"), []):
-            with self.subTest(change=change):
-                self.setUp()
-                self._integrate_accepted_billing_change()
-                self._train_refreshed()
-                self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = change
-                self.assertEqual(self._publish()["state"], "success")
+    def test_recorded_refresh_qualifies_its_imported_accepted_change(self) -> None:
+        self._integrate_accepted_billing_change()
+        self._train_refreshed()
+        self.assertEqual(self._publish()["state"], "success")
 
     def test_recorded_refresh_never_bypasses_an_imported_changes_rejection(self) -> None:
         for declared_none in (True, False):
@@ -500,7 +825,6 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 assert isinstance(commits, list)
                 if not declared_none:
                     commits[-1]["commit"]["message"] = "Merge base branch"
-                self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change()
                 (decision,) = self.store.list_product_review_decision_records(
                     repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
                 )
@@ -603,7 +927,15 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(carry.batch_record_ids, (record.record_id,))
 
     def test_base_integration_cannot_hide_visible_side_work_or_foreign_parents(self) -> None:
-        for mutation in ("visible", "missing", "foreign", "truncated", "wrong-base", "unmerged"):
+        for mutation in (
+            "visible",
+            "missing",
+            "no-new-import",
+            "foreign",
+            "truncated",
+            "wrong-base",
+            "unmerged",
+        ):
             with self.subTest(mutation=mutation):
                 self.setUp()
                 self._integrate_accepted_billing_change()
@@ -617,6 +949,11 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                         if mutation == "visible"
                         else "Merge main"
                     )
+                elif mutation == "no-new-import":
+                    commits.pop(0)
+                    merge["parents"][1]["sha"] = _NEWER_BASE_COMMIT
+                    merge["commit"]["message"] = "New billing behavior\n\nClient-impact: visible"
+                    comparison.update(total_commits=len(commits), ahead_by=len(commits))
                 elif mutation == "foreign":
                     merge["parents"][1]["sha"] = _OTHER_MERGE_HEAD
                     self.github.responses[
@@ -997,7 +1334,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(self._decisions()), 2)
 
     def test_carry_provenance_round_trips_through_database_storage(self) -> None:
-        self._integrate_accepted_billing_change()
+        self._restore_billing_integration(declared_integration_only=True)
         with TemporaryDirectory() as directory:
             database = PostgresRecordStore(
                 database_url=sqlite_database_url(Path(directory) / "records.sqlite")
@@ -1013,7 +1350,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 store=require_product_review_store(database),
                 profile=self.profile,
                 pull_request_number=_PULL_REQUEST,
-                head_sha=_REFRESHED_HEAD,
+                head_sha=self.github.head_sha,
                 base_branch="main",
                 read=lambda path: self.github(path=path, token="fixture-token"),
             )

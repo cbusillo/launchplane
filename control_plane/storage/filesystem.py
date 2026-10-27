@@ -198,6 +198,7 @@ from control_plane.contracts.product_retirement import (
     product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.integration_attestation import IntegrationAttestationRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
@@ -7428,6 +7429,34 @@ class FilesystemRecordStore:
             f"product-review-{purpose}", f"{repository.casefold()}#{pull_request_number}"
         ):
             yield
+
+    def list_integration_attestation_records(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[IntegrationAttestationRecord, ...]:
+        return tuple(
+            record
+            for record in self._list_models(
+                IntegrationAttestationRecord, "launchplane_integration_attestations"
+            )
+            if record.evidence.repository == repository
+            and record.evidence.pull_request_number == pull_request_number
+        )
+
+    def write_integration_attestation_record_if_absent(
+        self, record: IntegrationAttestationRecord
+    ) -> IntegrationAttestationRecord:
+        kind = "launchplane_integration_attestations"
+        with self._exclusive_record_lock(kind, record.record_id):
+            path = self._record_path(kind, record.record_id)
+            if path.exists():
+                existing = IntegrationAttestationRecord.model_validate_json(path.read_text())
+                if existing.review != record.review or existing.statement != record.statement:
+                    raise ValueError(
+                        "Integration attestation is immutable; read back the original."
+                    )
+                return existing
+            self._write_model(kind, record.record_id, record)
+        return record
 
     def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> Path:
         return self._write_model("launchplane_product_review_decisions", record.record_id, record)
