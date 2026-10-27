@@ -2,6 +2,7 @@
 
 from enum import StrEnum
 
+from control_plane._odoo_website_settings_program import ODOO_STRING_PARAMETERS_PROGRAM
 from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.odoo_connection_isolation import connection_isolation_library
@@ -365,10 +366,9 @@ except Exception:
 
 ACCOUNT_ODOO_PROGRAM = (
     connection_isolation_library()
+    + ODOO_STRING_PARAMETERS_PROGRAM
     + r"""
-import json, logging, os, secrets, sys, time
-sys.path.insert(0,'/volumes/scripts')
-from odoo_website_settings import read_string_parameter, write_string_parameter
+import json, logging, os, secrets, time
 logging.disable(logging.CRITICAL)
 if request['instance']!='testing': raise RuntimeError('Not testing')
 env.cr.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+request['binding'],))

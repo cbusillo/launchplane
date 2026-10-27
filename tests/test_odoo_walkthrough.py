@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -30,8 +30,6 @@ from control_plane.contracts.odoo_walkthrough import (
     WalkthroughStep,
     walkthrough_activity_scope,
     WALKTHROUGH_DISPATCH_SECONDS,
-    WALKTHROUGH_MARKER_PREFIX,
-    WALKTHROUGH_CLOSED_STATE,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.dokploy.odoo_walkthrough import (
@@ -610,13 +608,10 @@ class TaskRouteTests(unittest.TestCase):
 class AccountProgramTests(unittest.TestCase):
     """Execute the shipped consumer against a tiny ORM, including staff negatives."""
 
+    parameter_api = ("get_param", "set_param")
+
     def setUp(self) -> None:
         self.addCleanup(logging.disable, logging.root.manager.disable)
-        adapter = ModuleType("odoo_website_settings")
-        source = Path(__file__).parent / "fixtures/website-settings/consumer.txt"
-        exec(compile(source.read_text(), str(source), "exec"), adapter.__dict__)
-        self.enterContext(patch.dict(sys.modules, {"odoo_website_settings": adapter}))
-        self.enterContext(patch.object(sys, "path", list(sys.path)))
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.parameters: dict[str, str] = {TESTING_COPY_COMPLETION_PARAMETER: "testing-copy"}
@@ -634,9 +629,12 @@ class AccountProgramTests(unittest.TestCase):
 
         self.users.create.side_effect = create_user
         self.users.browse.return_value.exists.return_value = self.user
-        parameters = MagicMock(spec=["sudo", "get_param", "set_param"])
-        parameters.get_param.side_effect = lambda key, default="": self.parameters.get(key, default)
-        parameters.set_param.side_effect = self.parameters.__setitem__
+        read, write = self.parameter_api
+        parameters = MagicMock(spec=["sudo", read, write])
+        getattr(parameters, read).side_effect = lambda key, default="": self.parameters.get(
+            key, default
+        )
+        getattr(parameters, write).side_effect = self.parameters.__setitem__
         self.env = MagicMock()
         models = {"res.users": self.users, "ir.config_parameter": parameters}
         self.env.__getitem__.side_effect = lambda name: models[name]
@@ -699,31 +697,16 @@ class AccountProgramTests(unittest.TestCase):
         self.users.create.assert_called_once()
         self.user.write.assert_not_called()
 
-    def test_typed_parameters_preserve_provision_run_and_cleanup_ownership(self) -> None:
-        parameters = MagicMock(spec=["sudo", "get_str", "set_str"])
-        parameters.sudo.return_value = parameters
-        parameters.get_str.side_effect = lambda key, default="": self.parameters.get(key, default)
-        parameters.set_str.side_effect = self.parameters.__setitem__
-        self.env.__getitem__.side_effect = lambda name: {
-            "res.users": self.users,
-            "ir.config_parameter": parameters,
-        }[name]
-        self.assertEqual(self.execute()["account_id"], self.user.id)
-        self.request["operation"] = "run"
-        self.assertEqual(self.execute()["account_id"], self.user.id)
-        self.users.create.assert_called_once()
-        self.user.write.assert_not_called()
-        self.request["operation"] = "cleanup"
-        self.user.write.side_effect = lambda values: setattr(self.user, "active", values["active"])
-        self.assertEqual(self.execute()["account_id"], self.user.id)
-        marker = json.loads(self.parameters[WALKTHROUGH_MARKER_PREFIX + self.request["task_id"]])
-        self.assertEqual(marker["account_id"], self.user.id)
-        self.assertEqual(marker["state"], WALKTHROUGH_CLOSED_STATE)
-        self.assertFalse(self.user.active)
-        self.user.write.reset_mock()
-        self.execute()
-        self.users.create.assert_called_once()
-        self.user.write.assert_not_called()
+    def test_cleanup_works_without_image_parameter_adapter(self) -> None:
+        with patch.dict(sys.modules, {"odoo_website_settings": None}):
+            self.execute()
+            self.request["operation"] = "cleanup"
+            self.user.write.side_effect = lambda values: setattr(
+                self.user, "active", values["active"]
+            )
+            self.execute()
+        self.user.write.assert_called_once()
+        self.assertFalse(self.user.write.call_args.args[0]["active"])
 
     def test_connection_isolation_must_still_pass_before_each_account_operation(self) -> None:
         self.execute()
@@ -1006,3 +989,7 @@ class AccountProgramTests(unittest.TestCase):
         self.assertFalse(read_journal())
         journal.unlink()
         self.assertFalse(read_journal())
+
+
+class TypedAccountProgramTests(AccountProgramTests):
+    parameter_api = ("get_str", "set_str")
