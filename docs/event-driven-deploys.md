@@ -414,6 +414,18 @@ returns them to a caller with `product_profile.read` on the product, so an
 event-driven preview or testing deploy can be checked without service logs.
 It includes every recorded target for that product rather than using the
 worker's queue page limit.
+The last plan's `timing` records `requested_at`, `started_at`,
+`planning_finished_at` and `feedback_finished_at`. These boundaries separate
+the time this pass became pending, reconcile work and comment publication.
+Coalescing can preserve an earlier pending time or requeue at completion of
+an earlier pass. `requested_at` is not a webhook receipt timestamp; use the
+persisted delivery record for that boundary. An Odoo deployment's queued
+operation has its own start and terminal timestamps.
+They describe the latest attempt, not a retained history of earlier passes.
+Completed in-place Odoo replacements retain `provider_deploy`, `post_deploy`,
+`readiness` and, when required, `runtime_identity` start/finish timestamp pairs
+in the deployment's `runtime_source`. A missing finish marks an incomplete
+phase. The deployment finish follows required identity verification.
 Exact commit SHAs and `sha256:` digests come back as they are, and so do the
 ids Launchplane records itself: the GitHub delivery id and the plan's top-level
 `*_id` fields, when they are a UUID or a `name-<hex>` id; those ids also stay
@@ -704,6 +716,11 @@ testing lanes, preview enablement, and preview context. Its existing installatio
 tracked repository inventory and managed credential binding must be available;
 an unavailable read is reported and retried on the next sweep, without another
 identity or a new grant.
+
+Discovery runs on one background thread, so slow repository or provider reads
+cannot delay the worker's operation and reconcile polls. An unfinished sweep
+prevents another sweep from starting, and shutdown joins the admitted sweep
+before closing the record store. The interval and target coalescing are unchanged.
 
 A PR without configured previews and without existing preview lifecycle work or
 retained reservations takes a PR-only reconcile path. It rereads the PR's state

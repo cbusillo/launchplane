@@ -4,6 +4,7 @@ import os
 from urllib.parse import urlsplit
 import unittest
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -1899,6 +1900,16 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(health_url, "https://internal.example.test/web/health")
 
     def test_apply_recreates_target_in_place_and_writes_breadcrumb_inventory(self) -> None:
+        clock = [datetime.now(timezone.utc)]
+        durations = {
+            phase: timedelta(seconds=seconds)
+            for phase, seconds in (
+                ("provider_deploy", 3),
+                ("post_deploy", 5),
+                ("readiness", 7),
+                ("runtime_identity", 11),
+            )
+        }
         store = _Store(
             target_record=_target_record(),
             target_id_record=_target_id_record(),
@@ -2036,6 +2047,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             persisted_env = env_text
 
         def _wait_for_deploy(**_: object) -> None:
+            clock[0] += durations["provider_deploy"]
             deployment_records.insert(0, {"deploymentId": "deploy-456", "status": "done"})
 
         post_deploy_result = OdooPostDeployResult(
@@ -2071,7 +2083,23 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "changed": "true",
             }
 
+        def timed_post_deploy(**_: object) -> OdooPostDeployResult:
+            clock[0] += durations["post_deploy"]
+            return post_deploy_result
+
+        def timed_readiness(**_: object) -> OdooVerificationResult:
+            clock[0] += durations["readiness"]
+            return _verification_result()
+
+        def timed_identity(**kwargs: Any) -> object:
+            clock[0] += durations["runtime_identity"]
+            return _matching_runtime_identity_healthcheck(**kwargs)
+
         with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.utc_now_timestamp",
+                side_effect=lambda: clock[0].isoformat(),
+            ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
                 return_value=("host", "token"),
@@ -2115,15 +2143,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ) as wait_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
-                return_value=post_deploy_result,
+                side_effect=timed_post_deploy,
             ) as post_deploy,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
-                return_value=_verification_result(),
+                side_effect=timed_readiness,
             ) as verify_readiness,
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.wait_for_runtime_identity_healthcheck_with_retry",
-                side_effect=_matching_runtime_identity_healthcheck,
+                side_effect=timed_identity,
             ) as verify_runtime_identity,
         ):
             ensure_domain.side_effect = _ensure_domain
@@ -2246,6 +2274,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         self.assertGreaterEqual(len(store.deployment_records), 2)
         final_deployment = store.deployment_records[-1]
+        for phase, duration in durations.items():
+            started = datetime.fromisoformat(final_deployment.runtime_source[f"{phase}_started_at"])
+            finished = datetime.fromisoformat(
+                final_deployment.runtime_source[f"{phase}_finished_at"]
+            )
+            self.assertEqual(finished - started, duration, phase)
+        self.assertEqual(datetime.fromisoformat(final_deployment.deploy.finished_at), clock[0])
         self.assertEqual(final_deployment.deploy.status, "pass")
         self.assertEqual(
             final_deployment.post_deploy_update.evidence,

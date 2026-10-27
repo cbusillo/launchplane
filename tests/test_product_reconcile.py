@@ -20,7 +20,7 @@ from contextlib import closing, contextmanager, nullcontext
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event, current_thread, main_thread
+from threading import Event, Thread, current_thread, main_thread
 from typing import Any, Literal, cast
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -9288,6 +9288,47 @@ class _ClaimOrderStore:
 
 
 class ProductReconcileWorkerTests(ProductReconcileTestCase):
+    def test_persists_queue_planning_and_feedback_boundaries(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        target = self.request()
+        requested = self.store.read_product_reconcile_request(target).requested_at
+        queue_wait, planning, publication = (timedelta(seconds=value) for value in (20, 7, 3))
+        clock = [datetime.fromisoformat(requested) + queue_wait]
+
+        def reconcile(**_kwargs: object) -> ReconcileOutcome:
+            clock[0] += planning
+            return ReconcileOutcome({"target": "testing", "action": "none"})
+
+        def feedback(**_kwargs: object) -> None:
+            clock[0] += publication
+
+        with (
+            patch(
+                "control_plane.product_reconcile._utc_now", side_effect=lambda: clock[0].isoformat()
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request", side_effect=reconcile
+            ),
+            patch("control_plane.product_reconcile.post_reconcile_feedback", side_effect=feedback),
+        ):
+            completed = self.run_once()
+
+        timing = cast(dict[str, str], completed.last_plan["timing"])
+        boundaries = [
+            datetime.fromisoformat(timing[key])
+            for key in (
+                "requested_at",
+                "started_at",
+                "planning_finished_at",
+                "feedback_finished_at",
+            )
+        ]
+        self.assertEqual(
+            [end - start for start, end in zip(boundaries, boundaries[1:])],
+            [queue_wait, planning, publication],
+        )
+
     def test_worker_tries_reconcile_only_after_every_operation_kind(self) -> None:
         store = _ClaimOrderStore()
 
@@ -9331,9 +9372,21 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
 
     def test_worker_loop_sweeps_at_most_every_thirty_minutes(self) -> None:
         clock = [0.0]
+        interval = 1800
+        swept = Event()
+        sweep_threads: list[Thread] = []
+
+        def discover(*_args: object, **_kwargs: object) -> None:
+            sweep_threads.append(current_thread())
+            swept.set()
 
         def advance(_result: OdooStableOperationWorkerResult) -> None:
-            clock[0] += 900
+            if clock[0] % interval == 0:
+                self.assertTrue(swept.wait(10))
+                sweep_threads[-1].join(10)
+                self.assertFalse(sweep_threads[-1].is_alive())
+                swept.clear()
+            clock[0] += interval / 2
 
         with (
             patch(
@@ -9341,7 +9394,8 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
                 return_value=OdooStableOperationWorkerResult(status="worked"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep"
+                "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep",
+                side_effect=discover,
             ) as sweep,
         ):
             run_odoo_stable_operation_worker_loop(
@@ -9349,6 +9403,7 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
                 control_plane_root_path=Path("."),
                 lease_owner="worker-a",
                 max_iterations=4,
+                reconcile_sweep_seconds=interval,
                 iteration_callback=advance,
                 monotonic=lambda: clock[0],
             )
