@@ -1774,10 +1774,12 @@ The deployed merge train resolves the policy's `github_app` source instead.
 See the [configuration boundary](config-boundary.md#bootstrap-env-only) for
 retired chooser-source settings and self-deploy cleanup.
 
-Passing `--mutate` applies exactly one ordered-queue worker transition from that
-fresh snapshot. Use it only from the intended admin environment for the smoke
-or configured target; the command is a narrow bootstrap surface, not the full
-batch train scheduler.
+Local `--mutate` refuses before reading credentials or creating a provider
+transport. Mutations use the deployed service's
+`POST /v1/work-graph/merge-train/run-once`; Odoo uses
+`POST /v1/work-graph/merge-train/controller/run-once` for full candidate Build.
+This removes the token-only local mutation carrier for every repository, while
+leaving non-Odoo service admission and required checks unchanged.
 
 The dry-run orders eligible pull requests by `created_at` and then PR number. It
 excludes draft, closed, unlabeled, or unauthorized entries and fails closed when
