@@ -695,3 +695,36 @@ class TestingPublicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             publication.prepare_publication(self.store, plan=changed, reservation=self.reservation)
         self.assertEqual(self.current(), self.before)
+
+    def test_publication_cannot_change_integration_protection_in_target_policy(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
+
+        policy = self.plan.after.target.policies
+        for changed in (
+            policy.model_copy(
+                update={
+                    "shopify": policy.shopify.model_copy(
+                        update={"protected_store_keys": ("protected-fixture-store",)}
+                    )
+                }
+            ),
+            policy.model_copy(
+                update={
+                    "integration_allowances": (
+                        DokployTargetIntegrationAllowance(
+                            integration="fixture", kind="dev_store", reason="Foreign policy"
+                        ),
+                    )
+                }
+            ),
+        ):
+            with self.subTest(policy=changed):
+                target = self.plan.after.target.model_copy(update={"policies": changed})
+                plan = self.plan.model_copy(
+                    update={"after": self.plan.after.model_copy(update={"target": target})}
+                )
+                with self.assertRaises(ValueError):
+                    publication.prepare_publication(
+                        self.store, plan=plan, reservation=self.reservation
+                    )
+                self.assertEqual(self.current(), self.before)

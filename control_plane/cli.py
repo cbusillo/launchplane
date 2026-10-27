@@ -2940,7 +2940,7 @@ register_ci_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_local_consumer_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_action_pin_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_dependency_health_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
-register_every_code_commands(cast(click.Group, main), store_factory=_store)  # type: ignore[redundant-cast]
+register_every_code_commands(main)
 register_ingress_commands(
     cast(click.Group, main),  # type: ignore[redundant-cast]
     callbacks=IngressCliCallbacks(

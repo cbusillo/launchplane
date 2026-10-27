@@ -40,6 +40,154 @@ def native_fixture(record: Any, key: str, digest: str, disposed: bool = False) -
     ).model_dump(mode="json")
 
 
+class NeverStartedRehearsalRetirementTests(unittest.TestCase):
+    def test_never_started_and_refused_execute_dispose_without_rewriting_the_original(self) -> None:
+        from control_plane.odoo_incomplete_rehearsal_retirement import IncompleteRehearsalRetirement
+        from control_plane.provider_operations import (
+            ProviderMutationOutcome,
+            provider_operation_response_payload,
+            run_durable_provider_operation,
+        )
+
+        for refusal, pending in (
+            ("", False),
+            ("rehearsal_storage_capacity_insufficient", False),
+            ("rehearsal_precheck_refused", False),
+            ("", True),
+        ):
+            with self.subTest(refusal=refusal, pending=pending):
+                fixture = rehearsal.RehearsalScenario()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                store = fixture.store
+                prepared = fixture.record.model_copy(
+                    update={
+                        "state": "prepared",
+                        "compose_id": "own-compose",
+                        "project_id": "own-project",
+                        "environment_id": "own-environment",
+                    }
+                )
+                store.compare_and_write_odoo_upgrade_rehearsal(fixture.record, prepared)
+                prepare_rehearsal_local_credentials(
+                    store, fixture.identifier, actor=fixture.principal
+                )
+                adapter = fixture.adapter("prepare")
+
+                def prepare(key: str, lease: Any) -> ProviderMutationOutcome:
+                    lease.checkpoint_effect("prepare")
+                    return ProviderMutationOutcome(
+                        202,
+                        provider_operation_response_payload(
+                            trace_id=adapter.trace,
+                            records={"rehearsal": fixture.identifier},
+                            result=adapter.public(prepared),
+                        ),
+                    )
+
+                with patch.object(adapter, "apply", side_effect=prepare):
+                    completed = fixture.run_operation(adapter, "original-prepare")
+                key = "original-prepare"
+                if refusal:
+                    key = "refused-execute"
+                    with patch.object(
+                        OdooRehearsalAdapter,
+                        "host",
+                        return_value={
+                            "refusal_code": refusal,
+                            "completed": False,
+                        },
+                    ):
+                        completed = fixture.run_operation(fixture.adapter("execute"), key)
+                    self.assertEqual(completed.response_status_code, 409)
+                original = completed.record
+                operation = IncompleteRehearsalRetirement(fixture.adapter("retire-incomplete"), key)
+                if pending:
+                    with patch.object(
+                        OdooRehearsalAdapter, "host", side_effect=TimeoutError("held")
+                    ):
+                        with self.assertRaises(TimeoutError):
+                            fixture.run_operation(fixture.adapter("execute"), "uncertain-execute")
+                    with patch.object(type(operation), "host") as inspection:
+                        with self.assertRaises(RehearsalRefused):
+                            operation.plan()
+                        held = store.list_held_provider_target_reservations()[0]
+                        retried = store.retry_reconciled_mutation(
+                            reservation=held,
+                            lease_owner="lost-executor",
+                            preserve_effect_checkpoint=True,
+                        )
+                        assert retried.record is not None
+                        expired_at = datetime.fromisoformat(
+                            retried.record.lease_expires_at.replace("Z", "+00:00")
+                        ) + timedelta(seconds=1)
+                        with (
+                            patch.object(
+                                store,
+                                "_database_mutation_timestamp",
+                                return_value=expired_at.isoformat(),
+                            ),
+                            self.assertRaises(RehearsalRefused),
+                        ):
+                            operation.plan()
+                        inspection.assert_not_called()
+                    self.assertEqual(
+                        store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared
+                    )
+                    continue
+                native = native_fixture(prepared, key, "a" * 64)
+
+                def host(mode: str, check: Any) -> dict[str, Any]:
+                    check()
+                    return {
+                        **native,
+                        **{
+                            field: mode == "apply"
+                            for field in (
+                                "disposed",
+                                "containers_absent",
+                                "volumes_absent",
+                                "network_absent",
+                                "raw_source_absent",
+                            )
+                        },
+                    }
+
+                with (
+                    patch.object(type(operation), "host", side_effect=host),
+                    patch.object(type(operation), "placement", return_value=True),
+                ):
+                    plan = operation.plan()
+                    operation.adapter.request = operation.adapter.request.model_copy(
+                        update={"reviewed_plan_sha256": plan["plan_sha256"]}
+                    )
+                    outcome = run_durable_provider_operation(
+                        store=store,
+                        scope=operation.reservation_scope(),
+                        route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                        idempotency_key=key,
+                        request_fingerprint=operation.request_fingerprint(),
+                        lease_owner="retirement-worker",
+                        response_trace_id="retirement-trace",
+                        adapter=operation,
+                    )
+                    self.assertEqual(outcome.status, "completed")
+                    result = cast(dict[str, Any], outcome.response_payload["result"])
+                    self.assertTrue(result["disposed"])
+                    self.assertEqual(operation.readback(), result)
+                    with self.assertRaises(RehearsalRefused):
+                        IncompleteRehearsalRetirement(operation.adapter, "unrelated-key").readback()
+                self.assertEqual(
+                    store.read_idempotency_record(
+                        scope=fixture.principal,
+                        route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                        idempotency_key=key,
+                    ),
+                    original,
+                )
+                self.assertFalse(store.list_held_provider_target_reservations())
+
+
 class IncompleteRehearsalRetirementTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = rehearsal.RehearsalScenario()
@@ -189,6 +337,29 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
         assert original is not None
         self.assertEqual(original.state, "completed")
         self.assertFalse(self.store.list_held_provider_target_reservations())
+
+    def test_unreviewed_plan_preserves_rehearsal_without_host_apply(self) -> None:
+        operation = self.retirement()
+        native = native_fixture(self.prepared, self.key, "a" * 64)
+        held = self.store.list_held_provider_target_reservations()
+        original = operation.original(self.prepared)
+        with (
+            patch.object(type(operation), "host", return_value=native) as host,
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            reviewed = operation.plan()["plan_sha256"]
+            stale = ("0" if reviewed[0] != "0" else "1") + reviewed[1:]
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": stale}
+            )
+            with self.assertRaises(RehearsalRefused):
+                self.run_retirement(operation)
+        self.assertNotIn("apply", [call.args[0] for call in host.call_args_list])
+        self.assertEqual(
+            self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), self.prepared
+        )
+        self.assertEqual(operation.original(self.prepared), original)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), held)
 
     def test_failed_publication_keeps_original_hold_record_and_target_registration(self) -> None:
         operation = self.retirement()
@@ -1330,6 +1501,43 @@ class LaterPhaseRetirementTests(unittest.TestCase):
 
 
 class IncompleteRetirementHostTests(unittest.TestCase):
+    def test_unused_prepared_runtime_requires_no_execute_or_capture_before_disposal(self) -> None:
+        import shutil
+
+        (self.root / "execute.started").unlink()
+        shutil.rmtree(self.root / "raw-source")
+        self.spec["execute_never_started"] = True
+        source = self.fixture.host["database_names"](self.spec)["source"]
+        for container in self.fixture.fixture.containers.values():
+            container["Config"]["Env"] = [
+                "ODOO_DB_NAME=" + source if value.startswith("ODOO_DB_NAME=") else value
+                for value in container["Config"]["Env"]
+            ]
+        for forbidden in (
+            "execute.started",
+            "execute.json",
+            "capture.json",
+            "capture.pending",
+            "raw-source",
+            "simulate-final.started",
+            *self.fixture.host["database_names"](self.spec).values(),
+        ):
+            with self.subTest(forbidden=forbidden):
+                path = self.root / forbidden
+                path.touch()
+                with self.assertRaises(RuntimeError):
+                    self.fixture.run_host(self.spec)
+                path.unlink()
+                self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
+        plan = self.fixture.run_host(self.spec)
+        self.admit(plan)
+        self.spec["mode"] = "apply"
+        result = self.fixture.run_host(self.spec)
+        self.assertTrue(result["disposed"])
+        self.assertFalse(self.fixture.fixture.containers)
+        self.assertFalse(self.fixture.fixture.volumes)
+        self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
+
     def recovery_snapshot(self, role: str) -> dict[str, Any]:
         import hashlib
         import json
@@ -1824,7 +2032,9 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                 patch.object(subprocess, "run", side_effect=command),
                 redirect_stdout(output),
             ):
-                exec(compile(rehearsal.python_heredoc(script), "<delivered-wrapper>", "exec"), {})
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(script)
             return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
 
         with (
@@ -1836,6 +2046,31 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.assertFalse(result["disposed"])
         self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertEqual(operation.original(scenario.prepared).state, "reconcile_required")
+
+        import shutil
+
+        original = operation.original(scenario.prepared)
+        (self.root / "execute.started").unlink()
+        shutil.rmtree(self.root / "raw-source")
+        source = self.fixture.host["database_names"](self.spec)["source"]
+        for container in self.fixture.fixture.containers.values():
+            container["Config"]["Env"] = [
+                "ODOO_DB_NAME=" + source if value.startswith("ODOO_DB_NAME=") else value
+                for value in container["Config"]["Env"]
+            ]
+        spec = {**copy.deepcopy(self.spec), "program": rehearsal_host_program()}
+        with (
+            patch("control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec", return_value=spec),
+            patch.object(operation.adapter, "run_script", side_effect=scheduler),
+            patch.object(
+                operation,
+                "original",
+                return_value=original.model_copy(update={"state": "completed"}),
+            ),
+        ):
+            unused = operation.host("dry-run", lambda: None)
+        self.assertTrue(unused["qualified"])
+        self.assertFalse(unused["disposed"])
 
     def test_host_refuses_unreviewed_inventory_without_deleting_custody(self) -> None:
         plan = self.fixture.run_host(self.spec)
@@ -2049,6 +2284,9 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             copy_runner=upgrade,
             before_web=Mock(),
             private_health=Mock(),
+            verify_before_switch=Mock(
+                side_effect=lambda spec, root, containers, database: containers
+            ),
             rehearsal_storage_capacity=Mock(return_value=True),
             capture=Mock(side_effect=AssertionError("No source recapture")),
         )
@@ -2365,7 +2603,7 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         **payload,
                         "action": "execute",
                         "mode": "readback",
-                        "reviewed_plan_sha256": "",
+                        "reviewed_plan_sha256": prepared.binding_sha256,
                     },
                     headers=headers,
                 )
@@ -2411,7 +2649,7 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(routed["idempotency_key"], headers["Idempotency-Key"])
                 self.assertNotEqual(routed["adapter"].target_key(), fixture.identifier)
             calls = host.call_count
-            payload.update(mode="readback", reviewed_plan_sha256="")
+            payload.update(mode="readback")
             readback = await request(fixture.app, "POST", route, payload=payload, headers=headers)
             self.assertEqual(readback.status_code, 202, readback.text)
             self.assertEqual(readback.json()["result"]["state"], "retired")

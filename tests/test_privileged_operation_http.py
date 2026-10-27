@@ -436,8 +436,10 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             message: str,
             authz: dict[str, object] | None = None,
             records: dict[str, str] | None = None,
+            reason: str | None = None,
+            details: dict[str, str] | None = None,
         ) -> HTTPException:
-            _ = trace_id, authz, records
+            _ = trace_id, authz, records, reason, details
             return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
         register_privileged_operation_routes(
@@ -724,8 +726,8 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             len(operation_events),
             1,
         )
-        self.assertEqual(review.json()["review"]["title"], "Review agent delivery administration")
-        self.assertIn("does not enroll", review.json()["review"]["change"]["summary"])
+        self.assertEqual(operation_records[0].status, "planned")
+        self.assertEqual(review.json()["review"]["operation_id"], operation_records[0].operation_id)
         self.assertEqual(policy_record, active_policy_record)
 
     async def test_terminal_enrollment_candidate_plans_without_active_policy_or_principal_write(

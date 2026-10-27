@@ -1361,11 +1361,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["repository"], "every/example-site")
         sections = context["sections"]
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["every_code_summary"]["status"], "available")
         self.assertEqual(sections["preview_readiness"]["status"], "available")
-        summary = sections["every_code_summary"]["payload"]["summary"]
-        self.assertEqual(summary["repository"], "every/example-site")
-        self.assertEqual(summary["summaries"][0]["issue_number"], 190)
         readiness = sections["preview_readiness"]["payload"]["readiness"]
         self.assertEqual(readiness["repository"], "every/example-site")
         self.assertEqual(readiness["items"][0]["readiness_status"], "ready")
@@ -1476,7 +1472,6 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mapping_response.status_code, 200)
         sections = response.json()["context"]["sections"]
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
-        self.assertEqual(sections["every_code_summary"]["status"], "available")
         self.assertEqual(sections["preview_readiness"]["status"], "available")
 
     async def test_openapi_includes_agent_context_read_contracts(self) -> None:
@@ -2352,7 +2347,8 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(set(payload), {"status", "trace_id", "driver_id", "profiles"})
+        self.assertEqual(payload["coverage"]["status"], "complete")
+        self.assertEqual(payload["coverage"]["source"], "complete")
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(payload["trace_id"].startswith("launchplane_req_"))
         self.assertEqual(payload["driver_id"], "generic-web")

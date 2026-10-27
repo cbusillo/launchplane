@@ -28,6 +28,7 @@ from control_plane.generic_web_deploy_http import (
     GenericWebDeployProductMismatchError,
     resolve_generic_web_deploy_lane,
 )
+from control_plane.http_error_evidence import log_handled_error_cause
 from control_plane.production_recipient_resources import inspect_resources
 from control_plane.production_recipient_upstreams import (
     require_delivered_upstreams,
@@ -45,7 +46,11 @@ from control_plane.provider_operations import (
 from control_plane.runtime_platform_credentials import looks_like_credential
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_activation import read_product_compose, verified_product_image
-from control_plane.testing_activation_compose import interpolate, qualify_compose
+from control_plane.testing_activation_compose import (
+    environment_mapping,
+    interpolate,
+    qualify_compose,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 ROUTE = "/v1/products/{product}/production-recipient"
@@ -86,6 +91,10 @@ def custody(
 
 class RecipientAuthorityChanged(ValueError):
     """Successful authority or provider comparisons proved the review outdated."""
+
+
+class RecipientSourceNotMaterialized(ValueError):
+    pass
 
 
 def require_readable_provider_payload(payload: dict[str, Any], *, prepared: bool = False) -> None:
@@ -393,26 +402,23 @@ def _qualified_render(record: ProductionRecipientRecord, values: dict[str, str])
     qualified = deepcopy(document)
     upstream_connections(record, document, values)
     for upstream in record.request.upstreams:
-        environment = qualified["services"][upstream.service].get("environment", {})
-        if isinstance(environment, list):
-            environment = dict(item.split("=", 1) for item in environment)
-            qualified["services"][upstream.service]["environment"] = environment
+        environment = environment_mapping(
+            qualified["services"][upstream.service].get("environment", {})
+        )
+        qualified["services"][upstream.service]["environment"] = environment
         for key in upstream.keys.values():
             environment.pop(key, None)
     for service in qualified["services"].values():
         service.pop("deploy")
-        environment = service.get("environment", {})
-        if isinstance(environment, list):
-            environment = dict(item.split("=", 1) for item in environment)
-            service["environment"] = environment
-        if isinstance(environment, dict):
-            from urllib.parse import urlsplit
+        environment = environment_mapping(service.get("environment", {}))
+        service["environment"] = environment
+        from urllib.parse import urlsplit
 
-            for key, value in tuple(environment.items()):
-                if key.endswith("_URL") and isinstance(value, str):
-                    parsed = urlsplit(value)
-                    if parsed.hostname in {*services, "localhost", "127.0.0.1", "::1"}:
-                        environment.pop(key)
+        for key, value in tuple(environment.items()):
+            if key.endswith("_URL") and isinstance(value, str):
+                parsed = urlsplit(value)
+                if parsed.hostname in {*services, "localhost", "127.0.0.1", "::1"}:
+                    environment.pop(key)
     qualify_compose(
         qualified,
         volumes=set(record.volumes.values()),
@@ -640,7 +646,9 @@ class ProductionRecipientAdapter:
         )
         return replacement
 
-    def verify(self, record: ProductionRecipientRecord, *, published: bool = False) -> None:
+    def verify_configuration(
+        self, record: ProductionRecipientRecord, *, published: bool = False
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         self.require_unchanged(record)
         host, token = source.read_dokploy_config(control_plane_root=self.root)
         payload = api.fetch_dokploy_target_payload(
@@ -696,11 +704,18 @@ class ProductionRecipientAdapter:
             raise RecipientAuthorityChanged(
                 "The provider environment differs from managed production inputs."
             )
-        actual = read_provider_compose(
-            compose.fetch_dokploy_converted_compose_file(
-                host=host, token=token, compose_id=record.target_id
-            )
+        qualified_render(record, values)
+        return expected, values
+
+    def verify(self, record: ProductionRecipientRecord, *, published: bool = False) -> None:
+        expected, values = self.verify_configuration(record, published=published)
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        converted = compose.fetch_dokploy_converted_compose_file(
+            host=host, token=token, compose_id=record.target_id
         )
+        if converted.strip() == "null":
+            raise RecipientSourceNotMaterialized("The recipient source is not materialized.")
+        actual = read_provider_compose(converted)
         actual.pop("name", None)
         for name, service in actual.get("services", {}).items():
             labels = service.pop("labels", {})
@@ -731,11 +746,16 @@ class ProductionRecipientAdapter:
                 raise RecipientAuthorityChanged(
                     "Provider-added labels are not private recipient metadata."
                 )
-        if interpolate(actual, values) != interpolate(expected, values):
+        actual = interpolate(actual, values)
+        expected = interpolate(expected, values)
+        if not expected.get("networks") and all(
+            "networks" not in service for service in actual["services"].values()
+        ):
+            compose.discard_unused_dokploy_network(actual, expected=expected)
+        if actual != expected:
             raise RecipientAuthorityChanged(
                 "The actual provider render differs from reviewed source and limits."
             )
-        qualified_render(record, values)
 
     def unused_recipient(self, record: ProductionRecipientRecord) -> dict[str, Any]:
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -869,14 +889,18 @@ class ProductionRecipientAdapter:
                 return ProviderObservation("absent", retry_safe=True)
             try:
                 self.verify(record)
-            except ValueError:
+            except ValueError as error:
+                log_handled_error_cause(error, self.trace_id)
                 unused = self.unused_recipient(record)
                 if (
                     record.before_configuration_sha256
                     and provider_binding_digest(unused) == record.before_configuration_sha256
                 ):
                     return ProviderObservation("absent", retry_safe=True)
-                return ProviderObservation("unknown")
+                if not isinstance(error, RecipientSourceNotMaterialized):
+                    return ProviderObservation("unknown")
+                self.verify_configuration(record)
+                return ProviderObservation("absent", retry_safe=True)
             if not record.qualified_at:
                 return ProviderObservation("absent", retry_safe=True)
             return ProviderObservation(
@@ -885,7 +909,8 @@ class ProductionRecipientAdapter:
                     trace_id=self.trace_id, records={}, result=plan(record)
                 ),
             )
-        except Exception:
+        except Exception as error:
+            log_handled_error_cause(error, self.trace_id)
             return ProviderObservation("unknown")
 
     def apply(
@@ -1029,7 +1054,7 @@ class ProductionRecipientAdapter:
             configured = False
             if record.before_configuration_sha256:
                 if provider_binding_digest(fresh) != record.before_configuration_sha256:
-                    self.verify(record)
+                    self.verify_configuration(record)
                     configured = True
             else:
                 if fresh.get("env"):
@@ -1039,7 +1064,9 @@ class ProductionRecipientAdapter:
                     app_name=app_name,
                     before_configuration_sha256=provider_binding_digest(fresh),
                 )
-            inspect_resources(self.root, record, prepare=not configured, checkpoint=checkpoint)
+            inspect_resources(
+                self.root, record, prepare=not configured, materialize=True, checkpoint=checkpoint
+            )
             if record.request.upstreams:
                 from control_plane.production_recipient_host import (
                     run_recipient_program,
@@ -1112,6 +1139,7 @@ class ProductionRecipientAdapter:
                 ),
             )
         except Exception as error:
+            log_handled_error_cause(error, self.trace_id)
             if not started:
                 raise ProviderMutationRejectedError(
                     error

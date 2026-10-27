@@ -16,8 +16,9 @@ authorization rule with durable provenance, and `Idempotency-Key`. The service
 resolves current typed authority and stores the exact binding in a durable
 operation. The same caller/key and request reuses that operation even after
 authority changes; changed requests conflict. New captures resolve current
-authority. Backup record IDs cannot be reused for another capture, including
-after an operation finishes.
+authority. Backup record IDs cannot be reused for another capture. Reviewed
+continuation of a proven pre-capture failure preserves the original operation;
+see [release review](release-review.md).
 
 The enqueue and cancel routes accept a bearer or OIDC caller, or a signed-in
 browser session through the CSRF-checked browser-mutation dependency; terminal
@@ -74,9 +75,8 @@ The Compose grace remains protection for ordinary shutdown. Roll out new shutdow
 behavior while no capture is running: existing containers retain their old
 stop timeout until replaced. A forced kill or host loss still produces
 `backup_effect_outcome_unknown`; the status read explains that the release is
-stopped and the capture is not automatically retried. This does not resume an
-already stopped release; the Client's fresh explicit Accept starts a new gated
-run as described in [release review](release-review.md).
+stopped and the capture is not automatically retried. [Release review](release-review.md)
+owns supported continuation and reconciliation of the original accepted run.
 
 A database advisory lock covers capture and retention for the configured host,
 guest kind and guest ID, across backup record IDs and worker replicas. A second
@@ -177,6 +177,32 @@ multiline commands remain denied. Storage commands follow the
 
 ## Evidence and rollout
 
+### Reading lane readiness
+
+The installed Launchplane skill exposes the current policy/target read and
+capture-free qualification as bounded commands. Replace the skill path and
+scope placeholders with the installed skill location and recorded lane:
+
+```bash
+uv run <launchplane-skill>/scripts/launchplane-write-action.py \
+  production-backup-authority-read --product PRODUCT --context CONTEXT \
+  --instance prod --promotion-action ACTION
+uv run <launchplane-skill>/scripts/launchplane-write-action.py \
+  production-backup-preflight-read --product PRODUCT --context CONTEXT \
+  --instance prod --promotion-action ACTION
+```
+
+The [qualification contract](#reusing-stored-worker-credentials-and-checking-without-capture)
+below describes the result fields. Neither command enumerates products or
+supplies real backup/release proof. A
+`backup_preflight_unavailable` response does not identify the missing
+prerequisite or establish that a new credential is needed. The
+[rollout evidence](https://github.com/cbusillo/launchplane/issues/2309)
+keeps dated qualification receipts and links to actual capture/release proof;
+it does not replace current service records or a complete lane inventory.
+
+### Capture evidence
+
 Capture creates and reads back the named snapshot, then requires successful
 `vzdump` completion and the exact reported archive in the bound storage's backup
 listing. This proves capture and presence; it is not a full restore test or a
@@ -214,10 +240,11 @@ until promotion runs from Launchplane itself (#2682 for the CM website, #2792
 for generic-web) and #2606 deletes the call-in path; the gate itself stays.
 
 The Launchplane reusable Odoo and generic-web promotion workflows first enforce
-the current release-review requirement, then enqueue the shared capture and poll the same
-idempotent request until it completes. The service checks release approval again
-before deployment. A prelaunch product whose review explicitly says `required=false`
-follows the service's existing exemption; absent review metadata does not grant it.
+the current release-review requirement, then enqueue the shared capture and
+poll the same idempotent request until it completes. The service checks release
+approval again before deployment. A prelaunch product whose review explicitly
+says `required=false` follows the service's existing exemption; absent review
+metadata does not grant it.
 Failure or cancellation stops the workflow before promotion. Generic-web reads
 the production context from the current product profile. Odoo's thin workflow
 then sends `run.infrastructure_backup_record_id`; Launchplane resolves the
@@ -331,6 +358,10 @@ Authority and credential metadata are rechecked after the reads. It creates no
 capture operation, snapshot, archive, retention change or promotion evidence.
 This checks the service execution surface using the shared resolver/provider;
 separately confirm the installed backup worker's revision before real capture.
+In helper output, policy readiness requires `result.ready=true`; capture-free
+qualification requires `result.status=pass`, `result.boundary_status=match_capture_only`,
+`result.storage_status=active_pbs` and `result.capture_started=false`.
+A successful helper invocation alone does not establish readiness.
 
 The typed policy and targets already supply the host/login/guest/storage tuple,
 snapshot prefix and retention. Do not create generic topology environment keys
@@ -365,6 +396,13 @@ an exact product/context/instance. Its allowlisted projection contains no host,
 login, guest ID, storage ID, private request, or free-text preparation reason.
 The generic privileged-operation raw-detail and transition routes refuse this
 descriptor; its product card owns review and decisions.
+
+Pending reads recheck the pinned plan against current backup authority and the
+policy and target protection review windows, using the decision's qualification.
+A stale or unavailable plan disables approval and explains why on the card;
+decline and historical records keep their existing rules. Reads write no
+decision, authority or lifecycle event. The decision and worker still recheck
+independently; this adds no proposal-age expiry.
 
 **Approve** and **Decline** send only the proposal ID, decision and stable source
 event to `/v1/production-backup-authority/proposals/{operation_id}/decision`.
@@ -414,3 +452,73 @@ neither captures nor approves nor applies the policy. Its response reports the
 proposed policy revision, opaque `credential_binding_id` and
 `capture_started: false`; mismatched or stale
 proposals refuse. Without a proposal ID, the route qualifies active authority.
+
+## Initial capture key generation
+
+When a separately approved guest has no capture credential, the existing
+backup-worker-bindings `/apply` route accepts `generate_capture_key: true`
+instead of binding references. It uses the same scoped `product_config.plan`
+and `product_config.apply` authority, and still refuses terminal read identities.
+Creating live-site credentials remains a Director stop boundary; an authorized
+API caller is not evidence of that decision.
+
+Supply a concrete reason, the lane's promotion action, and `known_hosts` with
+one public host key independently verified through existing administrator
+access. The host field must name only the active approved target's exact host;
+wildcards, aliases, additional lines and key options are refused. No host is
+contacted by generation. Policy and target records must be active and current.
+The dry run generates no key and binds its digest to the profile, worker
+metadata, guest enrollments, policy/target revisions and exact public request.
+
+After review, apply with that digest and an original idempotency key. Launchplane
+generates an ED25519 key in server memory and encrypts its private half directly
+into `launchplane_worker`, `context_instance` custody for the product's recorded
+production lane. The host pin, both generic worker bindings, complete guest pin
+and public-only success receipt commit together. Existing credentials cannot be
+replaced, and an already enrolled guest must reuse its pinned pair. There is no
+private-key input, file, download, application delivery or plaintext readback.
+The key uses cryptography's [OpenSSH serialization](https://cryptography.io/en/stable/hazmat/primitives/asymmetric/serialization/).
+
+Use the catalog's installed bounded `launchplane-write-action.py` helper with
+the existing private configuration for `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN`.
+It calls the deployed service and owns configuration, transport, saved review
+and uncertainty handling:
+
+```sh
+uv run /installed/catalog/skills/launchplane/scripts/launchplane-write-action.py \
+  backup-worker-bindings-dry-run --product example-product --context example --instance prod \
+  --generate-capture-key --known-hosts-file /private/capture-host.known_hosts \
+  --promotion-action PROMOTION_ACTION --reason REASON --idempotency-key ORIGINAL_KEY \
+  > /private/capture-review.json
+uv run /installed/catalog/skills/launchplane/scripts/launchplane-write-action.py \
+  backup-worker-bindings-apply --product example-product --context example --instance prod \
+  --generate-capture-key --known-hosts-file /private/capture-host.known_hosts \
+  --promotion-action PROMOTION_ACTION --reason REASON --idempotency-key ORIGINAL_KEY \
+  --reviewed-dry-run --dry-run-evidence-file /private/capture-review.json \
+  --expected-plan-digest REVIEWED_DIGEST
+uv run /installed/catalog/skills/launchplane/scripts/launchplane-write-action.py \
+  backup-worker-bindings-read --product example-product --context example --instance prod \
+  --include-public-key
+```
+
+The pin file contains only the independently verified public known-hosts entry.
+Generation refuses private-key files and mixed binding-reference inputs. The
+helper supplies an empty `bindings` map. Apply returns the public key, its
+OpenSSH SHA256 fingerprint, boundary and binding identifiers, and plan metadata.
+Successful apply also independently reads the canonical references back.
+The explicit metadata read supplies `generated_capture_keys` for the currently
+configured key version without decrypting it. A lost response is recovered by
+readback and replay of the unchanged request, pin file, digest and original key,
+never by generating another pair. See the
+[bounded caller contract](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/write-action-helper-contract.md#backup-worker-references-and-capture-free-preflight).
+Existing rebinding receipts retain their pre-generation request fingerprint, so
+an original-key retry across this service upgrade still replays without writes.
+
+Enroll only that public half through the separately approved host-admin path,
+using a per-guest forced command with restore, shell and forwarding disabled.
+Record custody locations and purpose in the private credentials index. Then
+review/apply/read back the existing binding control and run capture-free
+preflight. Generation and binding never prove host restrictions or active PBS;
+require `match_capture_only`, `active_pbs` and `capture_started=false` from the
+preflight before claiming qualification. No capture, restore, deploy or
+promotion is started by any setup mode.

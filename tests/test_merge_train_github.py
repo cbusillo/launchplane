@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_repository_policy
 import unittest
 import json
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -1764,6 +1765,36 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         self.assertEqual(observed_candidate.status, "ready_for_checks")
         self.assertEqual(observed_candidate.required_checks_status, "pending")
+
+    def test_full_ci_requires_success_without_changing_other_check_semantics(self) -> None:
+        for full_gate, other_gate, expected in (
+            ("skipped", "success", "unknown"),
+            ("neutral", "success", "unknown"),
+            ("success", "skipped", "pass"),
+            ("success", "neutral", "pass"),
+        ):
+            with self.subTest(full_gate=full_gate, other_gate=other_gate):
+                candidate = _batch_candidate().model_copy(
+                    update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+                )
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks(),
+                        [],
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                _required_check_run("ci-gate", "completed", full_gate),
+                                _required_check_run("security-gate", "completed", other_gate),
+                            ]
+                        },
+                    )
+                )
+                observed = GitHubMergeTrainClient(
+                    transport=transport
+                ).observe_batch_candidate_checks(candidate=candidate)
+                self.assertEqual(observed.required_checks_status, expected)
+                self.assertEqual(observed.status == "passed", expected == "pass")
 
     def test_observe_batch_candidate_checks_requires_every_protected_check(self) -> None:
         missing = "missing-security-check"
@@ -4296,6 +4327,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 ]
                 if expected == "patch_or_minor" or label == "force-pushed by someone else":
                     responses.append(timeline)
+                if expected == "patch_or_minor":
+                    responses.append(
+                        {"files": [{"filename": "package.json", "status": "modified"}]}
+                    )
                 responses.extend(
                     [
                         _protected_branch_with_checks("ci-status", app_id=None),
@@ -4309,12 +4344,58 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
 
                 snapshot = GitHubMergeTrainSnapshotReader(
-                    transport=transport
+                    transport=transport, repository_policy=dependency_repository_policy()
                 ).read_merge_train_snapshot(
                     repository="cbusillo/sellyouroutboard", base_branch="main"
                 )
 
                 self.assertEqual(snapshot.pull_requests[0].dependency_update_class, expected)
+
+    def test_dependency_bots_share_immutable_diff_and_signature_admission(self) -> None:
+        from tests.test_merge_train_dependency_updates import renovate_message
+
+        for login, message in (
+            ("dependabot[bot]", INDIRECT_PATCH),
+            ("renovate[bot]", renovate_message()),
+            ("renovate[bot]", renovate_message(updateType="digest")),
+        ):
+            for filename, fork, verified, expected in (
+                ("package.json", False, True, "patch_or_minor"),
+                ("app.py", False, True, "needs_review"),
+                ("package.json", True, True, "needs_review"),
+                ("package.json", False, False, "needs_review"),
+            ):
+                with self.subTest(
+                    login=login, filename=filename, fork=fork, verified=verified, message=message
+                ):
+                    pull = _github_pull_request(16, head_repository="someone/fork" if fork else "")
+                    pull["user"] = {"id": 123, "login": login, "type": "Bot"}
+                    transport = RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            [_github_commit(123, message, sha="head-16", verified=verified)],
+                            [],
+                            {"files": [{"filename": filename, "status": "modified"}]},
+                        )
+                    )
+                    reader = GitHubMergeTrainSnapshotReader(
+                        transport=transport,
+                        repository_policy=dependency_repository_policy(
+                            123,
+                            metadata_format="dependabot_trailer"
+                            if login == "dependabot[bot]"
+                            else "renovate_metadata",
+                        ),
+                    )
+                    result = reader._safe_dependency_update_class(
+                        repository_path="cbusillo/sellyouroutboard",
+                        pull_request_number=16,
+                        author_id=123,
+                        pull_request=pull,
+                        head_sha="head-16",
+                        base_branch="main",
+                        base_sha="base",
+                    )
+                    self.assertEqual(result, expected)
 
     def test_snapshot_reader_paginates_check_runs_before_computing_status(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(

@@ -6,6 +6,12 @@ title: Launchplane UI Experience
 
 Launchplane admin work is API-first. The Client's browser path is the release
 review page described in [release-review.md](release-review.md).
+Product overview pages link to **Release review** after the existing review
+access read confirms access, for admins and the product's recorded Client. A Client
+session gets a focused product page with that link, without operational data
+or controls. Other viewers see no link; release-page permissions are unchanged.
+`GET /v1/release-review/access` reuses the release page's profile-access check
+without compiling a checklist or calling the source-control provider.
 The current React context picker and product-config layout remain transitional.
 Do not refine those transitional layouts except to correct secret-safety
 regressions.
@@ -693,6 +699,14 @@ fingerprint survive navigation/reload; a pre-dispatch failure or explicit client
 refusal remains definitive. A retry that began uncertain still requires evidence
 that the original operation settled before its identity can be discarded.
 
+Unreadable API responses show a plain-language failure and HTTP status instead
+of browser JSON parser text or the response body. This includes a gateway page
+during a service restart and a failed session refresh before dispatch. A fresh
+route-record review can be requested after the service recovers. An unreadable
+apply response is never proof of a refusal or completion, even with a 2xx or 4xx
+status; original-request recovery retains its key. Structured service errors
+still show their specific reason and trace.
+
 The environment Managed secrets form can also select a credential supplied by the
 named Client. The Client receives the focused `/ui/owner-secrets` page, containing
 only profile-declared input requests. It exposes no existing values or admin
@@ -838,6 +852,23 @@ types remain only for UI state and view models.
 
 ### Browser Route Contract
 
+The signed-in Route binding review can record separate external business-domain
+custody and managed recovery ingress. Expand **Separate externally managed
+domains**, name the custodian and configuration report, and review the complete
+hostname set. The remaining managed hosts still need their exact applied audit
+and active edge join. A blocked plan offers no Apply. A ready decision shows
+both custodians and binds their exact evidence; it changes no live route.
+Review a changed custodian or configuration report in the same card. Current
+health, runtime identity and TLS checks qualify every hostname without monthly
+re-attestation. Unchanged stored managed sources are rechecked on reads.
+Saving also enables strict runtime-identity HTTP checks and TLS checks for
+every hostname. The lane stays unverified until those observations are current.
+Evidence refreshes reload untouched custody fields. If saved custody changes
+while fields are edited, choose the saved custody or keep the edits before
+reviewing again. An uncertain Apply retains its original request and key across
+refreshes and reloads. Removing external custody is shown explicitly and needs
+managed evidence for every hostname.
+
 The light/dark switch saves only an explicit choice in browser local storage,
 scoped to the browser profile and Launchplane origin. The saved choice applies
 before the first render on every UI route, survives return visits, and updates
@@ -867,8 +898,6 @@ The clean-slate shell uses URL-owned product selection under the service-owned
   may show exact-change identity, Client acceptance, independent engineering
   evidence, dependency health, admission, and landing outcomes.
 - The unused Work graph and Issue inbox routes are removed.
-- Existing `/ui/engineering/every-code` belongs to the Every Code design that
-  [DIRECTION.md](../DIRECTION.md) retires. It receives no new UI work.
 - Existing `/ui/engineering/merge-train` behavior remains in scope only where
   it presents or executes guarded admission and truthful landing evidence from
   DB-backed policy. It must not infer a planning queue or make forge projections
@@ -967,8 +996,14 @@ check for healthy, triangle for warning, clock for stale data or evidence,
 x for an alert or failure, question
 mark for unverified evidence, and minus for absent or unsupported lanes. Hover
 labels and the accessible status name identify the lane, state and known
-diagnostic layers. An alert can include an open warning-severity incident;
-its tone follows the shared operational health calculation. Colors are tuned separately for light and dark themes;
+diagnostic layers. A warning-severity production delivery failure or deploy fence
+shows yellow when the current production release has fresh passing health,
+matching runtime identity and the required public DNS/TLS observations. The
+incident and its inspection link remain visible. On production lanes with public
+or private monitoring, missing or stale runtime proof is red even when no incident
+is open. Prelaunch and testing lanes retain their unverified-evidence states.
+Failed health, wrong identity and other active incidents retain their existing
+alert treatment. Colors are tuned separately for light and dark themes;
 fresh sidebar signals use the same operational health calculation as the product view.
 Amber hover labels explain missing runtime identity, incomplete public DNS/TLS
 observations, or returned warning details. Route authority diagnostics alone

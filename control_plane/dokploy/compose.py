@@ -2,13 +2,20 @@ import hashlib
 import json
 import re
 
-from typing import Literal
+from typing import Any, Literal
 
 import click
+import yaml
 
 from control_plane.dokploy import api
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
+from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.preview_gateway import (
+    PREVIEW_GATEWAY_PROGRAM,
+    PREVIEW_GATEWAY_SERVICE,
+    preview_backend_alias,
+)
 
 TESTING_CONNECTION_CSP = (
     "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
@@ -27,6 +34,32 @@ DOKPLOY_COMPOSE_METADATA_LABELS = frozenset(
         "dokploy.service",
     }
 )
+
+
+def discard_unused_dokploy_network(actual: dict[str, Any], *, expected: dict[str, Any]) -> None:
+    networks = actual.get("networks")
+    expected_networks = expected.get("networks", {})
+    services = actual.get("services")
+    if (
+        not isinstance(networks, dict)
+        or not isinstance(expected_networks, dict)
+        or "dokploy-network" in expected_networks
+        or not isinstance(network := networks.get("dokploy-network"), dict)
+        or set(network) != {"external"}
+        or network["external"] is not True
+        or not isinstance(services, dict)
+        or not services
+        or any(
+            not isinstance(service, dict)
+            or not isinstance(service.get("networks", []), (list, dict))
+            or "dokploy-network" in service.get("networks", [])
+            for service in services.values()
+        )
+    ):
+        return
+    networks.pop("dokploy-network")
+    if not networks and "networks" not in expected:
+        actual.pop("networks")
 
 
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
@@ -142,7 +175,19 @@ def render_odoo_raw_compose_file(
     isolated_testing: bool = False,
     private_backend_alias: str = "",
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
+    preview_filestore: dict[str, object] | None = None,
+    preview_identity: RuntimeIdentity | None = None,
 ) -> str:
+    if preview_identity is not None and (
+        publish_host_ports
+        or mount_workflow_ssh
+        or preview_identity.environment_kind != "preview"
+        or not preview_identity.preview_generation_id
+        or not preview_identity.preview_id
+    ):
+        raise ValueError("A preview gateway requires a bound private preview generation.")
+    if preview_filestore is not None and (publish_host_ports or mount_workflow_ssh):
+        raise ValueError("A preview filestore requires private ports and no source identity.")
     if protect_workflow_ssh and not mount_workflow_ssh:
         raise ValueError("Protected workflow SSH requires its source mount.")
     if private_backend_alias and (
@@ -213,7 +258,7 @@ def render_odoo_raw_compose_file(
     # Keep this intentionally close to odoo-devkit/docker-compose.yml. Launchplane
     # renders the image reference directly so Dokploy git checkout state cannot
     # decide what Odoo artifact is deployed.
-    return f"""x-odoo-base: &odoo-base
+    compose_file = f"""x-odoo-base: &odoo-base
   image: {rendered_image_reference}
   pull_policy: always
   restart: unless-stopped
@@ -372,6 +417,50 @@ networks:
   dokploy-network:
     external: true
 """
+    if preview_filestore is None and preview_identity is None:
+        return compose_file
+    compose = yaml.safe_load(compose_file)
+    if preview_filestore is not None:
+        compose["volumes"]["odoo_filestore"] = preview_filestore
+        for service in ("web", "script-runner"):
+            compose["services"][service]["volumes"].append(
+                {
+                    "type": "volume",
+                    "source": "odoo_filestore",
+                    "target": "/volumes/data/filestore/${ODOO_DB_NAME:?missing}",
+                    "volume": {"nocopy": True},
+                }
+            )
+    if preview_identity is not None:
+        web = compose["services"]["web"]
+        web["networks"] = {
+            "default": {
+                "aliases": [
+                    preview_backend_alias(
+                        runtime_identity_env(preview_identity)["LAUNCHPLANE_RUNTIME_IDENTITY_JSON"]
+                    )
+                ]
+            },
+            "dokploy-network": {},
+        }
+        compose["services"][PREVIEW_GATEWAY_SERVICE] = {
+            "image": normalized_image_reference,
+            "pull_policy": "always",
+            "restart": "unless-stopped",
+            "entrypoint": ["/venv/bin/python3", "-I", "-S", "-c"],
+            "command": [PREVIEW_GATEWAY_PROGRAM.replace("$", "$$"), str(runtime_port)],
+            "environment": {
+                "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": runtime_identity_env(preview_identity)[
+                    "LAUNCHPLANE_RUNTIME_IDENTITY_JSON"
+                ]
+            },
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges:true"],
+            "networks": ["default", "dokploy-network"],
+            "labels": web.pop("labels", []),
+        }
+        web["labels"] = ["traefik.enable=false"]
+    return yaml.safe_dump(compose, sort_keys=False)
 
 
 _COMPOSE_DEFAULT_PATTERN = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")
@@ -609,6 +698,7 @@ def ensure_compose_web_domain_route(
     domain_host: str,
     runtime_port: int,
     certificate_type: str = "none",
+    service_name: str = "web",
 ) -> str:
     normalized_compose_id = compose_id.strip()
     normalized_domain_host = domain_host.strip()
@@ -662,7 +752,7 @@ def ensure_compose_web_domain_route(
         "certificateType": normalized_certificate_type,
         "customCertResolver": None,
         "composeId": normalized_compose_id,
-        "serviceName": "web",
+        "serviceName": service_name,
         "domainType": "compose",
         "previewDeploymentId": None,
         "stripPath": False,

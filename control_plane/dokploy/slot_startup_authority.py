@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.contracts.canonical_json import canonical_model_sha256
 from control_plane.dokploy.slot_maintenance import ContainerCommand
 
 
@@ -63,7 +63,7 @@ def absolute_path(value: str) -> str:
 
 
 def plan_digest(plan: OdooCutoverPlan) -> str:
-    return hashlib.sha256(plan.model_dump_json().encode()).hexdigest()
+    return canonical_model_sha256(plan)
 
 
 # The host supplies a private, persistent directory, shared by its API/worker

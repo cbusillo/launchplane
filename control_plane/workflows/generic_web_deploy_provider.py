@@ -13,6 +13,7 @@ from typing import Literal, NamedTuple, Protocol, cast, runtime_checkable
 import click
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deploy_target import (
@@ -75,6 +76,7 @@ class GenericWebResolvedDeployTarget(BaseModel):
     deployed_target: DeployedTargetReference | None = None
     deploy_timeout_seconds: int = Field(ge=1)
     provider_dispatch_evidence: dict[str, object] = Field(default_factory=dict)
+    release_settings: GenericWebReleaseSettings | None = Field(default=None, exclude=True)
     testing_runtime_digest: str = Field(default="", exclude_if=lambda value: not value)
     testing_runtime_verified_digest: str = Field(default="", exclude=True)
     testing_runtime_values: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
@@ -1023,6 +1025,26 @@ class DokployGenericWebDeployProvider:
         prepare_generic_web_testing_runtime(resolved, record_store, profile, lane)
         return resolved
 
+    def read_release_settings(
+        self,
+        *,
+        control_plane_root: Path,
+        target: GenericWebResolvedDeployTarget,
+        keys: frozenset[str],
+    ) -> GenericWebReleaseSettings:
+        host, token = self._read_provider_config(control_plane_root=control_plane_root)
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target.resolved_target.target_type,
+            target_id=target.resolved_target.target_id,
+        )
+        values = dokploy_api.parse_dokploy_env_text(str(payload.get("env") or ""))
+        return GenericWebReleaseSettings(
+            values={key: values[key] for key in sorted(keys) if key in values},
+            absent_keys=tuple(sorted(keys - values.keys())),
+        )
+
     def preflight_testing_runtime(
         self, *, control_plane_root: Path, target: GenericWebResolvedDeployTarget
     ) -> None:
@@ -1100,11 +1122,21 @@ class DokployGenericWebDeployProvider:
                 deployment_title=deployment_title,
                 before_provider_mutation=checked_mutation,
                 effect_started=effect_started,
-                runtime_environment=resolved_deploy_target.testing_runtime_values
-                if resolved_deploy_target.testing_runtime_digest
-                else None,
-                retired_runtime_keys=resolved_deploy_target.testing_runtime_retired_keys,
+                runtime_environment=(
+                    resolved_deploy_target.release_settings.values
+                    if resolved_deploy_target.release_settings is not None
+                    else resolved_deploy_target.testing_runtime_values
+                    if resolved_deploy_target.testing_runtime_digest
+                    else None
+                ),
+                retired_runtime_keys=(
+                    frozenset(resolved_deploy_target.release_settings.absent_keys)
+                    if resolved_deploy_target.release_settings is not None
+                    else resolved_deploy_target.testing_runtime_retired_keys
+                ),
                 runtime_verified=runtime_verified,
+                strict_runtime_environment=resolved_deploy_target.ship_request.instance
+                == "testing",
                 dispatch_evidence_checkpoint=retain_dispatch,
                 accept_sole_new_deployment=(
                     resolved_deploy_target.resolved_target.target_type == "compose"

@@ -18,6 +18,7 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy.application_endpoint import application_endpoint_spec
 from control_plane.runtime_environments import merge_provider_environment
 from control_plane import runtime_platform_credentials
 from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
@@ -86,6 +87,8 @@ def update_dokploy_target_artifact(
     runtime_environment: dict[str, str] | None = None,
     retired_runtime_keys: frozenset[str] = frozenset(),
     runtime_verified: Callable[[], None] | None = None,
+    strict_runtime_environment: bool = True,
+    testing_application: bool = False,
 ) -> None:
     target_payload = dokploy_api.fetch_dokploy_target_payload(
         host=host,
@@ -93,6 +96,8 @@ def update_dokploy_target_artifact(
         target_type=target_type,
         target_id=target_id,
     )
+    if runtime_environment is not None and strict_runtime_environment:
+        require_dokploy_testing_environment_representable(runtime_environment)
     if target_type == "application":
         if is_digest_pinned_image_reference(artifact_id):
             raise click.ClickException(
@@ -121,7 +126,7 @@ def update_dokploy_target_artifact(
                     desired=desired,
                     retired_keys=retired_runtime_keys,
                 )
-                if runtime_environment is not None
+                if runtime_environment is not None and strict_runtime_environment
                 else dokploy_api.serialize_dokploy_env_text(merged)
             )
         if runtime_environment is not None and target_payload.get("registryId"):
@@ -153,19 +158,40 @@ def update_dokploy_target_artifact(
                 env_text=env_text,
             )
             if runtime_environment is not None:
-                persisted = dokploy_api.fetch_dokploy_target_payload(
-                    host=host, token=token, target_type=target_type, target_id=target_id
+                verify_dokploy_runtime_environment(
+                    host=host,
+                    token=token,
+                    target_type=target_type,
+                    target_id=target_id,
+                    desired=desired,
+                    retired_keys=retired_runtime_keys,
+                    runtime_verified=runtime_verified,
                 )
-                values = dokploy_api.parse_dokploy_env_text(str(persisted.get("env") or ""))
-                if (
-                    any(values.get(key) != value for key, value in desired.items())
-                    or retired_runtime_keys & values.keys()
-                ):
-                    raise TestingInputSafetyRefused(
-                        "Application testing runtime environment readback failed."
-                    )
-                if runtime_verified is not None:
-                    runtime_verified()
+        if (
+            testing_application
+            and "endpointSpecSwarm" in target_payload
+            and target_payload["endpointSpecSwarm"] in (None, {})
+            and target_payload.get("ports") == []
+        ):
+            endpoint_spec = application_endpoint_spec(target_payload)
+            if before_provider_mutation is not None:
+                before_provider_mutation("target_update")
+            if effect_started is not None:
+                effect_started()
+            dokploy_api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/application.update",
+                method="POST",
+                payload={"applicationId": target_id, "endpointSpecSwarm": endpoint_spec},
+            )
+            persisted = dokploy_api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type=target_type, target_id=target_id
+            )
+            if persisted.get("endpointSpecSwarm") != endpoint_spec:
+                raise TestingInputSafetyRefused(
+                    "Application testing endpoint setting readback failed."
+                )
         if before_provider_mutation is not None:
             before_provider_mutation("target_update")
         if effect_started is not None:
@@ -186,12 +212,19 @@ def update_dokploy_target_artifact(
         return
 
     if target_type == "compose":
+        desired = {
+            **(runtime_environment or {}),
+            **{key: artifact_id for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS},
+            **(runtime_identity_env(runtime_identity) if runtime_identity is not None else {}),
+        }
+        if runtime_environment is not None and strict_runtime_environment:
+            prepare_dokploy_testing_environment(
+                target_payload=target_payload, desired=desired, retired_keys=retired_runtime_keys
+            )
         env_text = dokploy_api.render_dokploy_env_text_with_overrides(
             str(target_payload.get("env") or ""),
-            updates={
-                **{key: artifact_id for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS},
-                **(runtime_identity_env(runtime_identity) if runtime_identity is not None else {}),
-            },
+            updates=desired,
+            removals=tuple(retired_runtime_keys),
             target_type="compose",
             compose_type=str(target_payload.get("composeType") or "docker-compose"),
         )
@@ -207,9 +240,45 @@ def update_dokploy_target_artifact(
             target_payload=target_payload,
             env_text=env_text,
         )
+        if runtime_environment is not None:
+            verify_dokploy_runtime_environment(
+                host=host,
+                token=token,
+                target_type=target_type,
+                target_id=target_id,
+                desired=desired,
+                retired_keys=retired_runtime_keys,
+                runtime_verified=runtime_verified,
+            )
         return
 
     raise click.ClickException(f"Unsupported Dokploy target type: {target_type}")
+
+
+def verify_dokploy_runtime_environment(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    desired: dict[str, str],
+    retired_keys: frozenset[str],
+    runtime_verified: Callable[[], None] | None,
+) -> None:
+    persisted = dokploy_api.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    values = dokploy_api.parse_dokploy_env_text(str(persisted.get("env") or ""))
+    if (
+        any(values.get(key) != value for key, value in desired.items())
+        or retired_keys & values.keys()
+    ):
+        raise TestingInputSafetyRefused("Application runtime environment readback failed.")
+    if runtime_verified is not None:
+        runtime_verified()
 
 
 def _prepare_saved_registry_login(
@@ -310,6 +379,7 @@ def execute_dokploy_artifact_deploy(
     runtime_environment: dict[str, str] | None = None,
     retired_runtime_keys: frozenset[str] = frozenset(),
     runtime_verified: Callable[[], None] | None = None,
+    strict_runtime_environment: bool = True,
     accept_sole_new_deployment: bool = False,
     dispatch_evidence_checkpoint: Callable[[frozenset[str]], None] | None = None,
 ) -> dokploy_api.JsonObject | None:
@@ -362,6 +432,10 @@ def execute_dokploy_artifact_deploy(
         runtime_environment=runtime_environment,
         retired_runtime_keys=retired_runtime_keys,
         runtime_verified=runtime_verified,
+        strict_runtime_environment=strict_runtime_environment,
+        testing_application=(
+            ship_request.instance == "testing" and before_provider_mutation is not None
+        ),
     )
     if before_provider_mutation is not None:
         before_provider_mutation("deploy_trigger")

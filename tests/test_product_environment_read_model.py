@@ -962,6 +962,33 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertEqual(allowed.preview.records[0].recorded_state, "active")
         self.assertEqual(allowed.preview.trust_state, overview.preview.trust_state)
 
+    def test_sleep_observations_require_individual_preview_read_authority(self) -> None:
+        from control_plane.contracts.data_provenance import DataProvenance
+        from control_plane.contracts.preview_inventory_scan_record import PreviewSleepObservation
+        from control_plane.preview_inventory_evidence import PreviewInventoryEvidence
+
+        profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
+        store = _PreviewRecordStore(profile, ())
+        evidence = PreviewInventoryEvidence(
+            status="nonempty",
+            observed_slugs=("pr-1",),
+            sleep_observations=(PreviewSleepObservation(slug="pr-1", state="asleep"),),
+            provenance=DataProvenance(source_kind="record", freshness_status="verified"),
+        )
+        with patch(
+            "control_plane.contracts.product_environment_read_model.read_preview_inventory_evidence",
+            return_value=evidence,
+        ):
+            denied = build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: False
+            )
+            allowed = build_product_site_overview(
+                record_store=store, product=profile.product, action_allowed=lambda *_: True
+            )
+        assert denied.preview.inventory is not None and allowed.preview.inventory is not None
+        self.assertEqual(denied.preview.inventory.sleep_observations, ())
+        self.assertEqual(allowed.preview.inventory.sleep_observations, evidence.sleep_observations)
+
     def test_product_ops_keeps_preview_failure_attention_through_retry(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
         store = _PreviewRecordStore(profile, ())

@@ -15,6 +15,7 @@ services:
       LAUNCHPLANE_SERVICE_PORT: 8080
       LAUNCHPLANE_STATE_DIR: /app/runtime
       LAUNCHPLANE_BROWSER_WS_ENDPOINT: ws://launchplane-browser:3000/
+      LAUNCHPLANE_PREPARED_PUBLIC_ROOT: /app/prepared-public
     healthcheck:
       test:
         - CMD
@@ -36,6 +37,7 @@ services:
     volumes:
       - launchplane-runtime:/app/runtime
       - launchplane-odoo-copy:/app/runtime/private-testing-source
+      - launchplane-prepared-public:/app/prepared-public
     networks:
       - default
       - launchplane-external-network
@@ -94,9 +96,11 @@ services:
       DOCKER_IMAGE_REFERENCE: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
       LAUNCHPLANE_STATE_DIR: /app/runtime
       LAUNCHPLANE_BROWSER_WS_ENDPOINT: ws://launchplane-browser:3000/
+      LAUNCHPLANE_PREPARED_PUBLIC_ROOT: /app/prepared-public
     volumes:
       - launchplane-runtime:/app/runtime
       - launchplane-odoo-copy:/app/runtime/private-testing-source
+      - launchplane-prepared-public:/app/prepared-public
     networks:
       - default
       - launchplane-external-network
@@ -207,3 +211,4 @@ networks:
 volumes:
   launchplane-runtime: {}
   launchplane-odoo-copy: {}
+  launchplane-prepared-public: {}

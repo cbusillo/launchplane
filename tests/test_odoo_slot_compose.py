@@ -46,9 +46,11 @@ class SlotComposeTests(unittest.TestCase):
             try:
                 for service in ("web", "scheduler"):
                     definition = compose["services"][service]
-                    command = definition["command"].replace("$$", "$")
+                    command = definition["command"]
+                    arguments = shlex.split(command) if isinstance(command, str) else command
+                    arguments = [argument.replace("$$", "$") for argument in arguments]
                     process = subprocess.Popen(
-                        [*definition["entrypoint"], command],
+                        [*definition["entrypoint"], *arguments],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,

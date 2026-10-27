@@ -13,7 +13,10 @@ from control_plane.contracts.route_binding_record import (
     EnvironmentRouteBindingRecord,
     route_binding_record_sha256,
 )
-from control_plane.contracts.testing_route_refresh import TestingRouteRefreshSources
+from control_plane.contracts.testing_route_refresh import (
+    TestingRouteRefreshSources,
+    testing_route_domains,
+)
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import (
@@ -43,6 +46,7 @@ from control_plane.testing_publication_storage import (
     read_snapshot,
 )
 from control_plane.testing_serving_copy import published_testing_copy
+from control_plane.testing_address_storage import effective_testing_route
 
 
 def plan_native_testing_route_refresh(
@@ -67,7 +71,7 @@ def plan_native_testing_route_refresh(
             raise ValueError("Testing binding changed during observation.")
         profile = store.read_product_profile_record(current.product)
         candidate = publication.plan.candidate
-        route = publication.plan.route
+        route = effective_testing_route(store, publication)
         if snapshot.inventory is None or snapshot.inventory.runtime_identity is None:
             raise ValueError("The current testing build identity is unavailable.")
         host, token = source.read_dokploy_config(
@@ -97,6 +101,7 @@ def plan_native_testing_route_refresh(
             product=current.product,
             context=current.context,
             public_host=route.host,
+            public_aliases=route.aliases,
             entrypoints=route.public_entrypoints,
             old_runtime_identity=snapshot.inventory.runtime_identity,
         )
@@ -142,7 +147,8 @@ def plan_native_testing_route_refresh(
         due = _route_binding_refresh_due(
             current_record=current, evaluated_at=observed_at.isoformat()
         )
-        if not due:
+        domains = testing_route_domains(route)
+        if not due and current.domains == domains:
             return RouteBindingReconcilePlan(
                 status="unchanged",
                 current_record_sha256=digest,
@@ -154,6 +160,7 @@ def plan_native_testing_route_refresh(
         stamp = observed_at.isoformat()
         replacement = current.model_copy(
             update={
+                "domains": domains,
                 "source": current.source.model_copy(
                     update={
                         "source_versions": {

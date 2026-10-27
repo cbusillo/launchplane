@@ -1,12 +1,11 @@
+import { EngineeringRuntimeSettingRemovalRoute } from "./EngineeringRuntimeSettingRemovalRoute";
 import {
   ArrowRight,
-  Boxes,
   KeyRound,
   ShieldCheck,
   Wrench,
 } from "lucide-react";
 
-import { EngineeringEveryCodeRoute } from "./EngineeringEveryCodeRoute";
 import { EngineeringMergeTrainRoute } from "./EngineeringMergeTrainRoute";
 import { EngineeringGovernanceProjectionRoute } from "./EngineeringGovernanceProjectionRoute";
 import { EngineeringPrivilegedOperationsRoute } from "./EngineeringPrivilegedOperationsRoute";
@@ -22,6 +21,8 @@ import {
 import type { DevFixtureMode } from "./dev-fixture-loader";
 
 const ENGINEERING_SURFACES = [
+  { detail: "Review exact stored plain-setting removals and approve them as the signed-in administrator.",
+    icon: KeyRound, label: "Director controls", title: "Remove stored settings", view: "runtime-setting-removal" as const },
   {
     detail: "Select the service's existing Delivery App key and review obsolete service-token retirement.",
     icon: KeyRound,
@@ -36,14 +37,6 @@ const ENGINEERING_SURFACES = [
     label: "Read only",
     title: "Governance evidence",
     view: "governance-projection" as const,
-  },
-  {
-    detail:
-      "Review bounded work-request summaries, provenance, active claims, and completion evidence.",
-    icon: Boxes,
-    label: "Read only",
-    title: "Every Code",
-    view: "every-code" as const,
   },
   {
     detail:
@@ -82,11 +75,9 @@ export function EngineeringOpsRoute({
   view: EngineeringView;
   actorId: number;
 }) {
+  if (view === "runtime-setting-removal") return <EngineeringRuntimeSettingRemovalRoute admin={admin} actorId={actorId} />;
   if (view === "github-delivery") {
     return <EngineeringGitHubDeliveryRoute actorId={actorId} />;
-  }
-  if (view === "every-code") {
-    return <EngineeringEveryCodeRoute fixtureMode={fixtureMode} />;
   }
   if (view === "merge-train") {
     return <EngineeringMergeTrainRoute fixtureMode={fixtureMode} />;

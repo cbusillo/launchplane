@@ -14,18 +14,10 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
-    e8d2f6a0b4c7_drop_preview_enablement as retired_preview,
-    e9e3a7b1c5d8_join_retirement_paths as retirement_join,
-    b81ca763d924_add_discussion_topics as discussion_topics,
-    da72490fce13_join_topics_retirement as topics_join,
-    f0a4c8e2b6d9_canonical_public_host_fences as public_host_fences,
-    f1b5d9a3c7e0_join_public_host_fences as public_host_join,
-    f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
-    f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
-    a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
-    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
-    a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
-    a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
+    f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
+    c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
+    d1a5b7c9d2e4_join_attestations_compatibility as attestations_compatibility_join,
 )
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
@@ -35,7 +27,7 @@ def _migration_head() -> str:
     head = ScriptDirectory(str(Path(__file__).parent / "migrations")).get_current_head()
     if head is None:
         raise ValueError("Launchplane migration graph has no head.")
-    if head != archive_compatibility_join.revision:
+    if head != attestations_compatibility_join.revision:
         raise ValueError(
             "The prepared retired-delivery migration hold must be reconciled before "
             "advancing the migration head. See docs/operations.md#prepared-retired-"
@@ -48,19 +40,9 @@ EXPECTED_ALEMBIC_HEAD_REVISION = _migration_head()
 # Expand/contract: shipping the prepared drop does not apply it at startup.
 PRE_RETIREMENT_ALEMBIC_REVISION = retired_delivery.down_revision
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (
-    PRE_RETIREMENT_ALEMBIC_REVISION,
-    retired_preview.revision,
-    retired_delivery.revision,
-    retirement_join.revision,
-    discussion_topics.revision,
-    topics_join.revision,
-    public_host_fences.revision,
-    public_host_join.revision,
-    topics_hostnames.revision,
-    compatibility_join.revision,
-    profile_archive.revision,
-    archive_retirement_join.revision,
-    archive_hostnames_join.revision,
+    idle_hostnames_join.revision,
+    idle_compatibility_join.revision,
+    integration_attestations.revision,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"

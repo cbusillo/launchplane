@@ -33,7 +33,6 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     LaunchplaneProductionRecipientRow,
-    LaunchplanePrivateHealthEndpointRow,
     LaunchplaneProductionBackupPolicyRow,
     LaunchplaneProductionBackupTargetRow,
     LaunchplaneDeploymentRow,
@@ -210,18 +209,7 @@ def commit_publication(
             session.flush()
             session.merge(store._production_backup_policy_row(policy))
         for endpoint in publication.health_endpoints:
-            session.merge(
-                LaunchplanePrivateHealthEndpointRow(
-                    endpoint_key=endpoint.endpoint_key,
-                    product=endpoint.product,
-                    context=endpoint.context,
-                    instance=endpoint.instance,
-                    url=endpoint.url,
-                    status=endpoint.status,
-                    updated_at=endpoint.updated_at,
-                    payload=endpoint.model_dump(mode="json"),
-                )
-            )
+            store._merge_private_health_endpoint_record(session, endpoint)
         result = record.model_copy(
             update={
                 "phase": "published",
@@ -372,18 +360,7 @@ def rollback_publication(
         )
         for endpoint in before["health_endpoints"]:
             old = PrivateHealthEndpointRecord.model_validate(endpoint)
-            session.merge(
-                LaunchplanePrivateHealthEndpointRow(
-                    endpoint_key=old.endpoint_key,
-                    product=old.product,
-                    context=old.context,
-                    instance=old.instance,
-                    url=old.url,
-                    status=old.status,
-                    updated_at=old.updated_at,
-                    payload=old.model_dump(mode="json"),
-                )
-            )
+            store._merge_private_health_endpoint_record(session, old)
         inverse_policies = []
         for policy in published.backup_policies:
             old_policy = next(

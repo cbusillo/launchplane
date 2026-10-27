@@ -1,4 +1,33 @@
+from typing import Literal, get_args
+
+FailureStage = Literal[
+    "capacity",
+    "authority",
+    "runtime_selection",
+    "artifact",
+    "runtime_connection",
+    "producer_inventory",
+    "runtime_inspection",
+    "transport",
+    "result_validation",
+    "host_inspection",
+    "host_execution",
+    "configuration",
+    "code_roots",
+    "payload_provenance",
+    "payload_producer",
+    "payload_decode",
+    "source_provenance",
+    "source_producer",
+    "applied_parameters",
+    "addon_state",
+    "source_resolution",
+    "drift",
+]
+
 _VALIDATOR = r"""
+failure_stages=__FAILURE_STAGES__
+
 def validate_result(value, names):
     agreements={'match','mismatch','unknown'}
     origins={'explicit','empty','absent','unknown'}
@@ -9,16 +38,20 @@ def validate_result(value, names):
            'applied_settings':{'valid','unknown'}, 'delivered_settings':{'valid','unknown'},
            'authority_tls_configuration':tls, 'delivered_tls_configuration':tls,
            'applied_tls_configuration':tls}
-    if (not isinstance(value,dict) or set(value)-{'runtime','sources','applied','values_redacted'}
+    if (not isinstance(value,dict) or set(value)-{'runtime','sources','applied','values_redacted','failure_stage'}
         or value.get('runtime') not in {'verified','unknown'}
         or value.get('applied',False) is not False or value.get('values_redacted',True) is not True
+        or (value.get('failure_stage') is not None and
+            (value.get('failure_stage') not in failure_stages or value.get('runtime')!='unknown'))
         or not isinstance(value.get('sources'),list) or len(value['sources'])!=len(names)):
         raise ValueError()
     found=[]
     for source in value['sources']:
-        if not isinstance(source,dict) or set(source)-({'source','options'}|set(enums)):
+        if not isinstance(source,dict) or set(source)-({'source','options','failure_stage'}|set(enums)):
             raise ValueError()
         if source.get('source') not in names:
+            raise ValueError()
+        if source.get('failure_stage') is not None and source['failure_stage'] not in failure_stages:
             raise ValueError()
         found.append(source['source'])
         for key,allowed in enums.items():
@@ -45,6 +78,8 @@ def validate_result(value, names):
     if set(found)!=set(names) or len(found)!=len(set(found)):
         raise ValueError()
 """
+
+_VALIDATOR = _VALIDATOR.replace("__FAILURE_STAGES__", repr(get_args(FailureStage)))
 
 CONTAINER_LIBRARY = (
     _VALIDATOR
@@ -88,7 +123,7 @@ def code_roots(options):
         raise ValueError()
     roots.append(safe_path('/opt/launchplane/addons'))
     package=safe_path('/odoo/odoo')
-    if not safe_path(package/'__init__.py').is_file():
+    if not package.is_dir() or not safe_path(package/'release.py').is_file() or not safe_path(package/'addons').is_dir():
         raise ValueError()
     roots.extend((package/'addons',package.parent/'addons'))
     mounts=[safe_path(value) for value in spec['mounts']]
@@ -321,46 +356,61 @@ def source_result(name,module,payload_producer,payload,applied):
 """
 )
 
-CONTAINER_PROGRAM = (
-    CONTAINER_LIBRARY
-    + r"""
+CONTAINER_RUN = r"""
 def run():
+    global stage
+    stage='runtime_inspection'
     if os.environ.get('PLATFORM_INSTANCE')!='testing' or json.loads(os.environ[__IDENTITY_KEY__])!=spec['identity']:
         raise ValueError()
+    stage='configuration'
     config,options=config_snapshot()
+    stage='code_roots'
     roots=code_roots(options)
+    stage='payload_provenance'
     payload_raw,payload_snapshot=payload_bytes(roots)
+    stage='payload_producer'
     payload_producer=load_payload_producer(payload_raw)
-    encoded=os.environ.get(payload_producer.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,'')
+    payload_key=payload_producer.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+    stage='payload_decode'
+    encoded=os.environ.get(payload_key,'')
     if len(encoded)>262144:
         raise ValueError()
     payload=payload_producer.decode_payload(encoded)
     modules={}
     snapshots={}
+    failures={}
     for name in names:
         try:
+            stage='source_provenance' if spec['files'][name] else 'producer_inventory'
             raw,snapshots[name]=source_bytes(name,roots)
+            stage='source_producer'
             modules[name]=load_producer(name,raw)
         except Exception:
-            pass
+            failures[name]=stage
+    if not modules:
+        return {**unknown,'sources':[{'source':name,'failure_stage':failures[name]} for name in names]}
     keys=list(dict.fromkeys(key for module in modules.values() for key in module.PARAMETER_KEYS))
+    stage='applied_parameters'
     before,installed=parameters(keys,options) if keys else ({},{})
+    stage='addon_state'
     if not installed.get(spec['payload_addon']):
         raise ValueError()
     results=[]
     for name in names:
         if name not in modules:
-            results.append({'source':name})
+            results.append({'source':name,'failure_stage':failures[name]})
             continue
         if not installed.get(spec['addons'][name]):
-            results.append({'source':name,'producer':'verified'})
+            results.append({'source':name,'producer':'verified','failure_stage':'addon_state'})
             continue
         try:
             with open(os.devnull,'w') as sink,contextlib.redirect_stdout(sink),contextlib.redirect_stderr(sink):
                 results.append(source_result(name,modules[name],payload_producer,payload,before))
         except Exception:
-            results.append({'source':name})
+            results.append({'source':name,'failure_stage':'source_resolution'})
+    stage='applied_parameters'
     after=parameters(keys,options) if keys else ({},{})
+    stage='drift'
     if (after!=(before,installed) or config_snapshot()[0]!=config or code_roots(options)!=roots):
         raise ValueError()
     if payload_bytes(roots)[1]!=payload_snapshot:
@@ -371,17 +421,19 @@ def run():
                 if source_bytes(name,roots)[1]!=snapshots[name]:
                     raise ValueError()
             except Exception:
-                results[index]={'source':name}
+                results[index]={'source':name,'failure_stage':'drift'}
     return {'runtime':'verified','sources':results}
 
 try:
     result=run()
+    stage='result_validation'
     validate_result(result,names)
 except BaseException:
-    result=unknown
+    result={**unknown,'failure_stage':stage}
 print(json.dumps(result))
 """
-)
+
+CONTAINER_PROGRAM = CONTAINER_LIBRARY + CONTAINER_RUN
 
 HOST_LIBRARY = (
     _VALIDATOR
@@ -428,9 +480,8 @@ def inspect(instance="testing"):
 """
 )
 
-HOST_PROGRAM = (
-    HOST_LIBRARY
-    + r"""
+HOST_RUN = r"""
+stage='host_inspection'
 try:
     before=inspect()
     mounts=before['Mounts']
@@ -439,16 +490,21 @@ try:
     payload={key:spec[key] for key in ('identity','files','addons','prefixes','option_fields','authority','metadata',
                                       'payload_addon','payload_root')}
     payload['mounts']=[mount['Destination'] for mount in mounts]
+    stage='host_execution'
     child=subprocess.run(['docker','exec','-i',before['Id'],'timeout','--kill-after=2s','20s','python3','-I','-c',spec['container_program']],
         input=json.dumps(payload),text=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=25,check=False)
+    stage='drift'
     after=inspect()
+    stage='drift' if before!=after else 'host_execution'
     if before!=after or child.returncode!=0 or len(child.stdout)>16384:
         raise ValueError()
+    stage='result_validation'
     observed=json.loads(child.stdout)
     validate_result(observed,names)
     result=observed
 except Exception:
-    pass
+    result={**result,'failure_stage':stage}
 print(prefix+json.dumps({'type':'complete','result':result}),flush=True)
 """
-)
+
+HOST_PROGRAM = HOST_LIBRARY + HOST_RUN

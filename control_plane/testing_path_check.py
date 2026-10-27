@@ -21,6 +21,8 @@ from control_plane.contracts.odoo_walkthrough import (
 from control_plane.testing_replacement_resources import (
     resource_context,
     TestingReplacementResourcesRequest,
+    NativeTestingRebuildRequired,
+    require_legacy_testing_target,
 )
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.testing_initial_generation import (
@@ -79,33 +81,39 @@ def read_testing_prerequisites(
     context = lane.context
     steps: list[PathCheckStep] = []
 
-    def check(step_id: str, code: str, description: str, read: Callable[[], object]) -> None:
-        state: Literal["clear", "blocked", "unknown"] = "clear"
+    def check(step_id: str, step_code: str, description: str, read: Callable[[], object]) -> None:
+        step_state: Literal["clear", "blocked", "unknown"] = "clear"
         try:
             read()
         except TestingPathHoldActive:
-            state, code = "blocked", TESTING_HOLD_ACTIVE
+            step_state, step_code = "blocked", TESTING_HOLD_ACTIVE
             description = "The testing hold prevents this action-admission check; inspect its recorded purpose and supported continuation."
         except TestingCredentialsOverlap:
-            state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
+            step_state, step_code = "blocked", BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
             description = "Generate independent testing-local passwords; an existing value equals production's."
         except TestingCredentialVersionsMissing:
-            state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING
+            step_state, step_code = "blocked", BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING
             description = "Configure the missing managed local passwords before comparing testing and production."
+        except NativeTestingRebuildRequired as error:
+            step_state, step_code, description = "blocked", error.code, str(error)
         except TestingBootstrapPrerequisiteError as error:
-            state, code = "unknown" if error.unavailable else "blocked", error.code
+            step_state, step_code = "unknown" if error.unavailable else "blocked", error.code
             description = str(error)  # Fixed code-owned text, never the underlying exception.
         except ValueError:
-            state = "blocked"
+            step_state = "blocked"
         except Exception:  # noqa: BLE001 - private provider/storage text never leaves this read.
-            state = "unknown"
+            step_state = "unknown"
         steps.append(
             PathCheckStep(
                 step_id=step_id,
-                state=state,
-                code=code if state != "clear" else step_id + "_clear",
-                description=description if state != "clear" else "This prerequisite passed.",
-                fix="none" if state == "clear" else "wait" if state == "unknown" else "by_hand",
+                state=step_state,
+                code=step_code if step_state != "clear" else step_id + "_clear",
+                description=description if step_state != "clear" else "This prerequisite passed.",
+                fix="none"
+                if step_state == "clear"
+                else "wait"
+                if step_state == "unknown"
+                else "by_hand",
             )
         )
 
@@ -272,6 +280,8 @@ def read_testing_prerequisites(
         provider = store.read_provider_target_record(context_name=context, instance_name="testing")
         if target.target_type != "compose" or provider.target_id != target_id.target_id:
             raise ValueError("Testing resource authority disagrees.")
+        if intent != "provision":
+            require_legacy_testing_target(store, target, target_id.target_id)
         if target.pending_public_host_effects:
             raise ValueError("Testing has pending route effects.")
         if any(

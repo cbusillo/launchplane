@@ -526,7 +526,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 result = b"1" if self.existing_database else b"0"
             elif command[-2:] in (["id", "-u"], ["id", "-g"]):
                 result = b"1000"
-            elif kwargs.get("input") == self.spec["runner"].encode():
+            elif kwargs.get("input") == self.spec.get("runner", "").encode():
                 result = (
                     b"testing_copy_pre_registry_sanitized=true\ntesting_copy_sanitized=true\nodoo_module_update_completed=true\nodoo_module_update_modules_configured=true\n"
                     if self.sanitized
@@ -555,7 +555,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     exec(command[-1], {})
                     self.gate_hash = write.call_args.args[0]
         if (
-            kwargs.get("input") == self.spec["runner"].encode()
+            kwargs.get("input") == self.spec.get("runner", "").encode()
             and self.existing_database
             and not self.resume_verified
         ):
@@ -590,10 +590,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     validate_dokploy_schedule_script(
                         {"script": script, "appName": self.gen.namespace}
                     )
-                    program = script.partition("<<'LP_FRESH_COPY'\n")[2].rsplit(
-                        "\nLP_FRESH_COPY", 1
-                    )[0]
-                    exec(compile(program, "<fresh-copy-stdin>", "exec"), {})
+                    from tests.support.host_package import execute_host_schedule
+
+                    execute_host_schedule(script)
             except SystemExit as error:
                 status = int(error.code or 0)
         return status, output.getvalue()

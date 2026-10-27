@@ -10,6 +10,7 @@ import click
 import yaml
 
 from control_plane.dokploy import api, post_deploy, source
+from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimeOperation
 from control_plane.contracts.disposable_lane import (
     ODOO_PREVIEW_RESOURCES_OK_MARKER,
@@ -43,14 +44,38 @@ def require_existing_preview_resources(
     environment: dict[str, str],
     checkpoint: Callable[[], None],
     operation: OdooPreviewRuntimeOperation = "refresh",
+    pending_filestore: bool = False,
+    unstarted: bool = False,
+    expected_server_id: str = "",
 ) -> str:
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=compose_id
     )
-    binding = _preview_resource_binding(payload, compose_id=compose_id, environment=environment)
+    if unstarted and (
+        not expected_server_id
+        or payload.get("serverId") != expected_server_id
+        or api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            require_complete=True,
+        )
+    ):
+        raise click.ClickException("Preview recipient is not unstarted on its reviewed server.")
+    binding = _preview_resource_binding(
+        payload, compose_id=compose_id, environment=environment, unstarted=unstarted
+    )
     if operation == "destroy":
         _require_preview_destroy_source(payload)
     volumes = [environment[key] for key in RESOURCE_KEYS]
+    declaration = yaml.safe_load(str(payload.get("composeFile") or ""))
+    if (
+        unstarted
+        or pending_filestore
+        or (isinstance(declaration, dict) and "odoo_filestore" in declaration.get("volumes", {}))
+    ):
+        volumes.append(environment["ODOO_DATA_VOLUME"] + "-filestore")
     schedule_type, lookup_id, project, server_id = post_deploy._resolve_dokploy_schedule_runtime(
         host=host,
         token=token,
@@ -60,11 +85,21 @@ def require_existing_preview_resources(
     )
     if operation == "destroy":
         volumes = _preview_destroy_volumes(payload, project=project, environment=environment)
+    absent_volumes: list[str] = []
+    if unstarted and str(payload.get("composeFile") or "").strip():
+        _require_preview_destroy_source(payload, resource_environment=environment)
+        referenced = _preview_destroy_volumes(payload, project=project, environment=environment)
+        absent_volumes = sorted(set(referenced) - set(volumes))
+        volumes.extend(absent_volumes)
     spec = {
         "compose_id": compose_id,
         "project": project,
         "volumes": volumes,
         "operation": operation,
+        **({"unstarted": True, "absent_volumes": absent_volumes} if unstarted else {}),
+        "pending_filestore": environment["ODOO_DATA_VOLUME"] + "-filestore"
+        if pending_filestore
+        else "",
     }
     encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
     digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
@@ -136,7 +171,20 @@ def require_existing_preview_resources(
         host=host, token=token, target_type="compose", target_id=compose_id
     )
 
-    if _preview_resource_binding(latest, compose_id=compose_id, environment=environment) != binding:
+    if (
+        _preview_resource_binding(
+            latest, compose_id=compose_id, environment=environment, unstarted=unstarted
+        )
+        != binding
+        or unstarted
+        and api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            require_complete=True,
+        )
+    ):
         raise click.ClickException("Preview target changed during resource inspection.")
     return binding
 
@@ -155,7 +203,11 @@ def require_preview_resource_binding(
 
 
 def _preview_resource_binding(
-    payload: Mapping[str, object], *, compose_id: str, environment: dict[str, str]
+    payload: Mapping[str, object],
+    *,
+    compose_id: str,
+    environment: dict[str, str],
+    unstarted: bool = False,
 ) -> str:
     current = api.parse_dokploy_env_text(str(payload.get("env") or ""))
     volumes = [environment.get(key, "") for key in RESOURCE_KEYS]
@@ -163,7 +215,10 @@ def _preview_resource_binding(
         payload.get("composeId") != compose_id
         or len(set(volumes)) != len(RESOURCE_KEYS)
         or any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,200}", name) for name in volumes)
-        or any(current.get(key) != environment.get(key) for key in RESOURCE_KEYS)
+        or (not unstarted or any(key in current for key in RESOURCE_KEYS))
+        and any(current.get(key) != environment.get(key) for key in RESOURCE_KEYS)
+        or unstarted
+        and any(key.startswith("COMPOSE_") for key in current)
     ):
         raise click.ClickException("Existing preview storage changed or is unavailable.")
     fields = (
@@ -185,7 +240,9 @@ def _preview_resource_binding(
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
-def _require_preview_destroy_source(payload: Mapping[str, object]) -> None:
+def _require_preview_destroy_source(
+    payload: Mapping[str, object], *, resource_environment: dict[str, str] | None = None
+) -> None:
     if (
         payload.get("sourceType") != "raw"
         or payload.get("composePath") != "docker-compose.yml"
@@ -201,8 +258,24 @@ def _require_preview_destroy_source(payload: Mapping[str, object]) -> None:
     explicit_names: set[str] = set()
     if not isinstance(declarations, dict) or not declarations:
         raise click.ClickException("Preview destruction storage declarations are unavailable.")
-    for declaration in declarations.values():
+    for key, declaration in declarations.items():
         if declaration in (None, {}):
+            continue
+        if key == "odoo_filestore":
+            environment = resource_environment or api.parse_dokploy_env_text(
+                str(payload.get("env") or "")
+            )
+            if (
+                not isinstance(declaration, dict)
+                or set(declaration) != {"name", "driver", "driver_opts", "labels"}
+                or declaration.get("name") != environment.get("ODOO_DATA_VOLUME", "") + "-filestore"
+                or declaration.get("driver") != "local"
+                or not isinstance(declaration.get("driver_opts"), dict)
+                or declaration["driver_opts"].get("type") != "overlay"
+            ):
+                raise click.ClickException(
+                    "Preview filestore declaration is unsafe or unsupported."
+                )
             continue
         if (
             not isinstance(declaration, dict)
@@ -239,7 +312,13 @@ def _preview_destroy_volumes(
     declarations = yaml.safe_load(str(payload["composeFile"]))["volumes"]
     explicit = {"${" + key + ":?missing}": environment[key] for key in RESOURCE_KEYS}
     return [
-        explicit[declaration["name"]] if declaration else f"{project}_{key}"
+        (
+            environment["ODOO_DATA_VOLUME"] + "-filestore"
+            if key == "odoo_filestore"
+            else explicit[declaration["name"]]
+        )
+        if declaration
+        else f"{project}_{key}"
         for key, declaration in declarations.items()
     ]
 
@@ -248,7 +327,8 @@ def _preview_destroy_volumes(
 # resource. It runs on the selected host, outside application containers; the
 # schedule carries identifiers only, never copied environment/secret values.
 PREVIEW_RESOURCE_PROGRAM = (
-    f"OK_MARKER = {ODOO_PREVIEW_RESOURCES_OK_MARKER!r}\nBINDING_MARKER = {ODOO_PREVIEW_RESOURCES_BINDING_MARKER!r}\n"
+    PREVIEW_FILESTORE_LIBRARY
+    + f"OK_MARKER = {ODOO_PREVIEW_RESOURCES_OK_MARKER!r}\nBINDING_MARKER = {ODOO_PREVIEW_RESOURCES_BINDING_MARKER!r}\n"
     + r"""
 import base64
 import hashlib
@@ -269,7 +349,7 @@ def docker(*arguments):
 
 # Query only needed metadata. Do not collect container environment values,
 # arbitrary labels, or driver options that may hold credentials.
-VOLUME_FORMAT = '{"Name":{{json .Name}},"Driver":{{json .Driver}},"HasOptions":{{if .Options}}true{{else}}false{{end}},"Device":{{if .Options}}{{json (index .Options "device")}}{{else}}null{{end}},"Anonymous":{{$anon := false}}{{range $key,$value := .Labels}}{{if eq $key "com.docker.volume.anonymous"}}{{$anon = true}}{{end}}{{end}}{{$anon}},"Mountpoint":{{json .Mountpoint}}}'
+VOLUME_FORMAT = '{"Name":{{json .Name}},"Driver":{{json .Driver}},"Project":{{if .Labels}}{{json (index .Labels "com.docker.compose.project")}}{{else}}null{{end}},"HasOptions":{{if .Options}}true{{else}}false{{end}},"Device":{{if .Options}}{{json (index .Options "device")}}{{else}}null{{end}},"Overlay":{{if .Options}}{{if eq (index .Options "type") "overlay"}}{{json .Options}}{{else}}null{{end}}{{else}}null{{end}},"Anonymous":{{$anon := false}}{{range $key,$value := .Labels}}{{if eq $key "com.docker.volume.anonymous"}}{{$anon = true}}{{end}}{{end}}{{$anon}},"Mountpoint":{{json .Mountpoint}}}'
 CONTAINER_FORMAT = '{"Id":{{json .Id}},"Config":{"Labels":{"com.docker.compose.project":{{if (index .Config "Labels")}}{{json (index (index .Config "Labels") "com.docker.compose.project")}}{{else}}null{{end}}},"Volumes":{{json (index .Config "Volumes")}}},"HostConfig":{"PortBindings":{{json .HostConfig.PortBindings}},"NetworkMode":{{json .HostConfig.NetworkMode}}},"Mounts":{{json .Mounts}}}'
 
 
@@ -291,7 +371,7 @@ def container_inventory():
     if not identifiers:
         return []
     result = subprocess.run(["docker", "inspect", "--format", CONTAINER_FORMAT, *identifiers], check=False, capture_output=True, text=True, timeout=15)
-    if result.returncode and (not result.stderr.strip() or any(not re.search(r"No such (?:container|object):", line, re.IGNORECASE) for line in result.stderr.splitlines() if line.strip())):
+    if result.returncode and not missing_container_error(result.stderr):
         raise RuntimeError("Container inspection unavailable")
     rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
     found = [item.get("Id") for item in rows if isinstance(item, dict)]
@@ -321,8 +401,12 @@ def main():
         if name in paths:
             return
         item = volume(name)
+        overlay = name.endswith('-filestore') and item.get('Driver') == 'local' and item.get('HasOptions')
+        if overlay:
+            _, _, _, private = inspect_preview_filestore(name.removesuffix('-filestore'), spec['project'], allow_missing_backing=destroying)
+            paths[name + '-writable'] = backing_path(str(private))
         # Docker's default local allocation has no remote/bind backing options.
-        if item.get("Driver") != "local" or item.get("HasOptions") is not False:
+        if not overlay and (item.get("Driver") != "local" or item.get("HasOptions") is not False):
             raise RuntimeError("Unsupported storage backing")
         path = backing_path(item.get("Mountpoint"))
         if path.name != "_data" or path.parent.name != name or any(path == old or path in old.parents or old in path.parents for old in paths.values()):
@@ -330,7 +414,22 @@ def main():
         paths[name] = path
 
     destroying = spec.get("operation") == "destroy"
-    existing_names = set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) if destroying else names
+    unstarted = spec.get("unstarted") is True
+    pending = spec.get('pending_filestore')
+    if pending and (pending not in names or not pending.endswith('-filestore')):
+        raise RuntimeError('Invalid pending preview filestore')
+    existing_names = set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) if destroying or pending or unstarted else names
+    if unstarted:
+        absent = set(spec.get("absent_volumes", [])) if pending else names
+        if not absent.issubset(names) or absent & existing_names:
+            raise RuntimeError("Unstarted preview has retained storage")
+        if any(volume(name).get("Project") != spec["project"] for name in names & existing_names):
+            raise RuntimeError("Unstarted preview storage ownership differs")
+        root = Path(docker("info", "--format", "{{.DockerRootDir}}").strip())
+        if root.resolve(strict=True) != root.absolute():
+            raise RuntimeError("Docker storage root is aliased")
+    if not destroying and not unstarted and names - existing_names - {pending}:
+        raise RuntimeError('Preview storage is missing')
     for name in names:
         if name in existing_names:
             add_volume(name)
@@ -350,6 +449,8 @@ def main():
             if item.get("HasOptions"):
                 if name in seen:
                     raise RuntimeError("Cyclic backing identity")
+                if item.get('Overlay'):
+                    return path
                 device = backing_path(item.get("Device"))
                 tail = path.relative_to(mountpoint) if path == mountpoint or mountpoint in path.parents else PurePosixPath()
                 return resolved_backing(device / tail, seen | {name})
@@ -358,6 +459,11 @@ def main():
     # Re-read complete inventory to include new consumers. An unrelated helper
     # disappearing is gone, not evidence of a hidden writable consumer.
     for _ in range(2):
+        if unstarted:
+            if names & set(docker("volume", "ls", "--format", "{{.Name}}").splitlines()) != names & existing_names:
+                raise RuntimeError("Unstarted preview storage changed")
+            if any((root / "volumes" / name).exists() or (root / "volumes" / name).is_symlink() for name in names - existing_names):
+                raise RuntimeError("Unstarted preview has unregistered storage")
         containers = []
         for item in container_inventory():
             config = item.get("Config")
@@ -369,6 +475,8 @@ def main():
             if not isinstance(mounts, list):
                 raise RuntimeError("Mount inventory unavailable")
             if ours:
+                if unstarted:
+                    raise RuntimeError("Preview recipient has started containers")
                 host = item.get("HostConfig")
                 if not destroying and (not isinstance(host, dict) or host.get("PortBindings") not in (None, {}) or host.get("NetworkMode") == "host"):
                     raise RuntimeError("Preview has shared host networking")
@@ -406,6 +514,12 @@ def main():
                         if isinstance(device, str) and device.startswith("/"):
                             device = resolved_backing(backing_path(device))
                             device_overlap = any(device == candidate or device in candidate.parents or candidate in device.parents for candidate in paths.values())
+                    if mount.get('Type') == 'volume' and foreign.get('Overlay'):
+                        referenced = volume_storage_paths({'Mountpoint': foreign['Mountpoint'], 'Options': foreign['Overlay']})
+                        device_overlap = device_overlap or any(
+                            reference == candidate or reference in candidate.parents or candidate in reference.parents
+                            for reference in map(lambda item: backing_path(str(item)), referenced)
+                            for candidate in paths.values())
                     if device_overlap or overlap or mount.get("Name") in names or mount.get("Name") in paths:
                         if not device_overlap and mount.get("Type") == "bind" and mount.get("RW") is False and all(path != candidate and candidate not in path.parents for candidate in paths.values()):
                             continue

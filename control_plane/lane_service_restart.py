@@ -47,23 +47,35 @@ from control_plane.workflows.generic_web_preview import serialize_generic_web_pr
 
 
 class ServiceRestartRefused(ValueError):
-    """A fixed, credential-free diagnosis; no provider write has occurred."""
+    def __init__(
+        self, reason: str, message: str, *, blocking_deployment_id: str | None = None
+    ) -> None:
+        self.reason = reason
+        self.blocking_deployment_id = blocking_deployment_id
+        super().__init__(message)
 
 
 def _deployment_timestamp(value: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise ServiceRestartRefused("Deployment history has an unavailable timestamp.") from error
+        raise ServiceRestartRefused(
+            "deployment_timestamp_unavailable", "Deployment history has an unavailable timestamp."
+        ) from error
     if parsed.tzinfo is None or parsed.year < 1970:
-        raise ServiceRestartRefused("Deployment history has an ambiguous timestamp.")
+        raise ServiceRestartRefused(
+            "deployment_timestamp_ambiguous", "Deployment history has an ambiguous timestamp."
+        )
     return parsed
 
 
 def _latest_attempt_timestamp(started_at: str, finished_at: str) -> datetime:
     timestamps = tuple(_deployment_timestamp(value) for value in (started_at, finished_at) if value)
     if not timestamps:
-        raise ServiceRestartRefused("Deployment history has no timestamp to establish its order.")
+        raise ServiceRestartRefused(
+            "deployment_timestamp_missing",
+            "Deployment history has no timestamp to establish its order.",
+        )
     return max(timestamps)
 
 
@@ -84,17 +96,26 @@ def plan_service_restart(
         None,
     )
     if not profile.is_active or lane is None:
-        raise ServiceRestartRefused("The requested active product lane is not recorded.")
+        raise ServiceRestartRefused(
+            "active_lane_unrecorded", "The requested active product lane is not recorded."
+        )
     if request.service == "web" and not lane.health_url.strip():
-        raise ServiceRestartRefused("The lane's HTTP runtime identity endpoint is unavailable.")
+        raise ServiceRestartRefused(
+            "runtime_identity_endpoint_unavailable",
+            "The lane's HTTP runtime identity endpoint is unavailable.",
+        )
     if profile.driver_id not in {"odoo", "generic-web"}:
         raise ServiceRestartRefused(
-            "This driver does not support service restart with release exclusion."
+            "driver_restart_unsupported",
+            "This driver does not support service restart with release exclusion.",
         )
     if request.service == "database" and (
         profile.driver_id != "odoo" or request.instance != "testing"
     ):
-        raise ServiceRestartRefused("Database dependency recovery is limited to Odoo testing.")
+        raise ServiceRestartRefused(
+            "database_recovery_scope_unsupported",
+            "Database dependency recovery is limited to Odoo testing.",
+        )
     target = store.read_provider_target_record(
         context_name=request.context, instance_name=request.instance
     )
@@ -111,13 +132,17 @@ def plan_service_restart(
         and target.target_id == target_id.target_id
         and target.display_name == legacy.target_name
     ):
-        raise ServiceRestartRefused("The recorded provider target is ambiguous or unsupported.")
+        raise ServiceRestartRefused(
+            "provider_target_ambiguous", "The recorded provider target is ambiguous or unsupported."
+        )
     inventory = store.read_environment_inventory(
         context_name=request.context, instance_name=request.instance
     )
     deployment = store.read_deployment_record(inventory.deployment_record_id)
     if not deployment_record_passed(deployment):
-        raise ServiceRestartRefused("The lane has no settled current deployment.")
+        raise ServiceRestartRefused(
+            "current_deployment_unsettled", "The lane has no settled current deployment."
+        )
     current_started_at = _deployment_timestamp(deployment.deploy.started_at)
     for attempt in store.list_deployment_records(
         context_name=request.context, instance_name=request.instance
@@ -140,7 +165,9 @@ def plan_service_restart(
             and attempt.runtime_source.get("provider_outcome", "") != "uncertain"
         ):
             raise ServiceRestartRefused(
-                f"A newer deployment may have changed the provider: {attempt.record_id}."
+                "newer_deployment",
+                f"A newer deployment may have changed the provider: {attempt.record_id}.",
+                blocking_deployment_id=attempt.record_id,
             )
     expected = deployment.runtime_identity
     if (
@@ -159,21 +186,32 @@ def plan_service_restart(
         or deployment.artifact_identity is None
         or deployment.artifact_identity.artifact_id != expected.artifact_id
     ):
-        raise ServiceRestartRefused("Current deployment identity is ambiguous.")
+        raise ServiceRestartRefused(
+            "deployment_identity_ambiguous", "Current deployment identity is ambiguous."
+        )
     manifest = store.read_artifact_manifest(expected.artifact_id)
     if expected.image_reference != f"{manifest.image.repository}@{manifest.image.digest}":
-        raise ServiceRestartRefused("Current artifact image identity is ambiguous.")
+        raise ServiceRestartRefused(
+            "artifact_image_ambiguous", "Current artifact image identity is ambiguous."
+        )
     if expected.source_git_ref != manifest.source_commit:
-        raise ServiceRestartRefused("Current artifact source identity is ambiguous.")
+        raise ServiceRestartRefused(
+            "artifact_source_ambiguous", "Current artifact source identity is ambiguous."
+        )
     if request.service == "database" and not deployment.deploy.finished_at:
-        raise ServiceRestartRefused("The database deployment completion time is unavailable.")
+        raise ServiceRestartRefused(
+            "database_completion_time_unavailable",
+            "The database deployment completion time is unavailable.",
+        )
     acceptance_id = ""
     if request.instance == "prod":
         decisions = store.list_release_review_decision_records(product=request.product)
         for decision in decisions:
             run = read_client_release_run(store=store, profile=profile, decision=decision)
             if run is not None and run.state in {"running", "waiting"}:
-                raise ServiceRestartRefused("A Client release run holds this lane.")
+                raise ServiceRestartRefused(
+                    "client_release_holds_lane", "A Client release run holds this lane."
+                )
             if (
                 decision.decision == "accepted"
                 and decision.checklist.candidate.artifact_id == expected.artifact_id
@@ -182,7 +220,8 @@ def plan_service_restart(
                 acceptance_id = decision.record_id
         if not acceptance_id:
             raise ServiceRestartRefused(
-                "The current production artifact has no recorded acceptance."
+                "production_acceptance_unrecorded",
+                "The current production artifact has no recorded acceptance.",
             )
     host, token = source.read_dokploy_config(
         control_plane_root=root, database_url=store.database_url
@@ -193,7 +232,9 @@ def plan_service_restart(
     app_name = str(payload.get("appName") or "")
     server_id = str(payload.get("serverId") or "")
     if payload.get("composeId") != target.target_id or not app_name:
-        raise ServiceRestartRefused("The live provider target identity is ambiguous.")
+        raise ServiceRestartRefused(
+            "live_provider_identity_ambiguous", "The live provider target identity is ambiguous."
+        )
     before = inspect_service(
         host=host,
         token=token,
@@ -206,9 +247,15 @@ def plan_service_restart(
         else "",
     )
     if before.health == "unavailable":
-        raise ServiceRestartRefused("The service has no supported container health check.")
+        raise ServiceRestartRefused(
+            "container_health_check_unsupported",
+            "The service has no supported container health check.",
+        )
     if request.service == "database" and request.mode == "dry-run" and before.running:
-        raise ServiceRestartRefused("Database dependency recovery requires a stopped container.")
+        raise ServiceRestartRefused(
+            "database_container_running",
+            "Database dependency recovery requires a stopped container.",
+        )
     return (
         LaneServiceRestartPlan(
             product=request.product,
@@ -411,7 +458,9 @@ class ServiceRestartAdapter:
         with reservation as owner:
             if owner is not None:
                 raise ProviderMutationRejectedError(
-                    ServiceRestartRefused("A release operation holds this lane.")
+                    ServiceRestartRefused(
+                        "release_operation_holds_lane", "A release operation holds this lane."
+                    )
                 )
             try:
                 fresh, expected, host, token, _ = plan_service_restart(
@@ -419,7 +468,8 @@ class ServiceRestartAdapter:
                 )
                 if fresh.digest() != self.request.reviewed_plan_sha256:
                     raise ServiceRestartRefused(
-                        "Restart identity changed; inspect and review again."
+                        "restart_identity_changed",
+                        "Restart identity changed; inspect and review again.",
                     )
                 if self.require_disposable:
                     runtime_stopped = fresh.service == "web" and (
@@ -452,7 +502,8 @@ class ServiceRestartAdapter:
             except (ValueError, click.ClickException, OSError) as error:
                 raise ProviderMutationRejectedError(
                     ServiceRestartRefused(
-                        "Restart identity or release ownership changed; inspect and review again."
+                        "restart_identity_or_release_changed",
+                        "Restart identity or release ownership changed; inspect and review again.",
                     )
                 ) from error
             lease.checkpoint_effect("restart_container")

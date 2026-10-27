@@ -6,10 +6,8 @@ export default defineConfig({
   testDir: "./tests/browser",
   testMatch: "**/*.spec.ts",
   outputDir: smokeArtifact("test-results"),
-  // Tests mock their own API reads in fresh contexts. CI runners can share a
-  // host, so keep browser fan-out bounded independently of its CPU count.
   fullyParallel: true,
-  workers: process.env.CI ? 4 : undefined,
+  workers: process.env.CI ? 4 : 2,
   retries: 0,
   forbidOnly: Boolean(process.env.CI),
   timeout: browserDeadlines.test,
@@ -43,6 +41,11 @@ export default defineConfig({
         isMobile: false,
         viewport: { width: 390, height: 844 },
       },
+    },
+    {
+      name: "mobile-safari",
+      grep: /@webkit\b/,
+      use: { ...devices["iPhone 13"] },
     },
   ],
   webServer: {

@@ -1,7 +1,6 @@
 """Host-side source capture and pre-registry sanitization for a fresh testing copy."""
 
 import base64
-import gzip
 import inspect
 import json
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
@@ -13,6 +12,7 @@ from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBu
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from typing import Literal, TypeVar, TypedDict, NotRequired
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
+from control_plane.testing_address_settings_program import CANONICAL_ADDRESS_HOST_LIBRARY
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
 from control_plane.contracts.product_profile_record import (
@@ -472,9 +472,6 @@ def build_fresh_testing_restore_script(
     return render_fresh_testing_restore_spec(spec)
 
 
-# Native capture is a separate bounded literal, so reserving this many script
-# bytes before capture/delivery bounds the exact final script independently of
-# how the rest of the input compresses.
 NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES = 1024
 
 
@@ -496,31 +493,14 @@ def render_fresh_testing_restore_spec(spec: dict[str, object]) -> str:
                 "filestore",
             )
         }
-        if len(repr(capture).encode()) > NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES:
+        if len(json.dumps(capture, sort_keys=True).encode()) > NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES:
             from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 
             raise ScheduleMaterializationTooLarge()
-    encoded = base64.b64encode(
-        gzip.compress(json.dumps(spec, sort_keys=True).encode(), mtime=0)
-    ).decode()
-    program = base64.b64encode(
-        gzip.compress(FRESH_TESTING_RESTORE_HOST_PROGRAM.encode(), mtime=0)
-    ).decode()
-    return (
-        "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_FRESH_COPY'\n"
-        + "import base64,gzip,json,sys\n"
-        + "spec=json.loads(gzip.decompress(base64.b64decode("
-        + repr(encoded)
-        + ")))\n"
-        + "spec['native_capture']="
-        + repr(capture)
-        + "\n"
-        + "sys.argv=['fresh-copy',base64.b64encode(json.dumps(spec).encode()).decode()]\n"
-        + "exec(compile(gzip.decompress(base64.b64decode("
-        + repr(program)
-        + ")), '<fresh-testing-restore>', 'exec'), {})"
-        + "\nLP_FRESH_COPY\n"
-    )
+    from control_plane.host_package import host_schedule
+
+    spec["native_capture"] = capture
+    return host_schedule("restore", spec)
 
 
 def fresh_testing_restore_spec(
@@ -960,6 +940,11 @@ def restore_main():
     containers = inspect_copy_runtime(spec, expected_instance="testing")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
+    if spec.get('canonical_settings'):
+        if not spec.get('verification_only'):
+            raise RuntimeError('Canonical settings require the qualified copy lock')
+        canonical_address_settings(spec, containers)
+        return
     if spec.get('storage_maintenance'):
         storage_maintenance(spec, containers)
         return
@@ -1648,5 +1633,6 @@ FRESH_TESTING_RESTORE_HOST_PROGRAM = (
     COPY_RUNTIME_INSPECTION_LIBRARY
     + "\n"
     + inspect.getsource(docker_daemon_authorization_denied)
+    + CANONICAL_ADDRESS_HOST_LIBRARY
     + FRESH_TESTING_RESTORE_HOST_PROGRAM
 )

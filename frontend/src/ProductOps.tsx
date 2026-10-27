@@ -16,7 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ProviderHoldAttention, useProviderHoldAttention } from "./ProviderHoldAttention";
 import { providerAttentionQualifier } from "./provider-hold-attention";
 
-import { LaunchplaneApiError, readProduct } from "./api";
+import { isLaunchplaneHttpError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductGenericWebTransitionPanel } from "./ProductGenericWebTransitionPanel";
@@ -26,10 +26,11 @@ import { ProductRetirementPanel } from "./ProductRetirementPanel";
 import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
 import { ProductSetupPanel } from "./ProductSetupPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
+import { ProductReleaseReviewLink } from "./ProductReleaseReviewLink";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, environmentReleaseHealthy, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -239,8 +240,8 @@ export function ProductWorkspaceRoute({
             error instanceof Error
               ? error.message
               : "Launchplane could not load this product workspace.",
-          traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
-          statusCode: error instanceof LaunchplaneApiError ? error.statusCode : 503,
+          traceId: isLaunchplaneHttpError(error) ? error.traceId : "",
+          statusCode: isLaunchplaneHttpError(error) ? error.statusCode : 503,
         }));
       });
     return () => {
@@ -453,7 +454,8 @@ function ProductWorkspace({
     environments.length === 0 ||
     environments.some(
       (environment) =>
-        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)),
+        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)) &&
+        !environmentReleaseHealthy(environment),
     );
 
   useEffect(() => {
@@ -502,6 +504,7 @@ function ProductWorkspace({
       </header>
 
       <ProductWorkspaceNav product={product} route={route} />
+      <ProductReleaseReviewLink key={`release-review:${product.product}`} product={product.product} admin={admin} fixtureMode={fixtureMode} />
       {admin && !fixtureMode ? <a className="button" href="#product-setup-title">Environment setup</a> : null}
 
       <a className="mobile-next-inspection" href={`#${inspection.targetId}`}>
@@ -539,6 +542,7 @@ function ProductWorkspace({
           label="Production"
           state={production?.trust_state ?? "missing"}
           value={signalHeadline(production)}
+          detail={environmentReleaseHealthy(production) ? "Current release is healthy" : undefined}
         />
         <SignalTile
           label="Previews"
@@ -956,7 +960,7 @@ function ProductDiagnostics({ product }: { product: ProductSiteOverview }) {
               </div>
               <div>
                 <dt>Ingress path</dt>
-                <dd>{environment.topology.provider_recorded.ingress.path}</dd>
+                <dd>{environment.topology.provider_recorded.external_ingress ? "Separate business and recovery paths" : environment.topology.provider_recorded.ingress.path}</dd>
               </div>
             </dl>
           </section>
@@ -1280,6 +1284,8 @@ function ingressHeadline(environment: ProductEnvironmentSummary): string {
   if (environmentOperationalTone(environment) === "danger") {
     return "Needs attention";
   }
+  const warnings = operationalWarningReasons(environment);
+  if (warnings.length) return warnings.join(" · ");
   const retained = recordedPublicObservation(environment);
   if (retained) {
     return retained;

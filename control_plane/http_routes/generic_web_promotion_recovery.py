@@ -16,6 +16,7 @@ from control_plane.contracts.generic_web_promotion_recovery import (
     PromotionRecoveryApplied,
 )
 from control_plane.generic_web_promotion_recovery import (
+    adopt_inspected_promotion,
     PromotionInspection,
     inspect_promotion,
     inspect_rollback_drill,
@@ -199,21 +200,11 @@ def register_promotion_recovery_routes(
             "action": inspection.action,
         }
         adoption = await asyncio.to_thread(
-            store.adopt_reconciled_mutation,
-            reservation=inspection.reservation,
-            response_status_code=202,
-            response_trace_id=trace,
-            response_payload={
-                "status": "accepted",
-                "trace_id": trace,
-                "records": {},
-                "result": inspection.result,
-                "recovery": recovery_receipt,
-            },
-            expected_promotion_evidence=inspection.evidence,
-            promotion_recovery_inventory=inspection.inventory,
-            promotion_recovery_record=inspection.promotion,
-            promotion_recovery_deployments=inspection.deployments,
+            adopt_inspected_promotion,
+            store=store,
+            inspection=inspection,
+            trace_id=trace,
+            recovery_receipt=recovery_receipt,
         )
         if (
             adoption.status == "replayed"

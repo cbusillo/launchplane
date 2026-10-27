@@ -541,7 +541,11 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             ),
             timeout=15,
         ) as response:
-            return response.status, response.read(), dict(response.headers.items())
+            return (
+                response.status,
+                response.read(),
+                {key.lower(): value for key, value in response.headers.items()},
+            )
 
     def wait_web(self, container: str) -> None:
         deadline = time.monotonic() + 100
@@ -746,7 +750,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             try:
                 status, body, headers = self.http(self.public)
                 self.samples.append(
-                    headers.get("X-Launchplane-Served-Mode", "odoo") + ":" + body.decode()
+                    headers.get("x-launchplane-served-mode", "odoo") + ":" + body.decode()
                 )
                 if status != 200:
                     self.errors.append(str(status))
@@ -760,7 +764,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         payload = json.loads(
             render_odoo_app_slot_compose(plan, data_volume="fixture", private_network=self.network)
         )
-        command = payload["services"]["web"]["command"].replace("$$", "$")
+        command = payload["services"]["web"]["command"][0].replace("$$", "$")
         self.new_web = self.start_web(
             plan.candidate, plan.new.slot_id, plan.new.runtime_identity, command=command
         )
@@ -779,7 +783,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             public=True,
             status=status,
             body=body,
-            content_type=headers.get("Content-Type", "").split(";")[0],
+            content_type=headers.get("content-type", "").split(";")[0],
             headers=headers,
         )
 
@@ -833,7 +837,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
     def observe_prepared(self, pause_id: str) -> str:
         status, _body, headers = self.http(self.public)
         return (
-            headers.get("X-Launchplane-Public-Copy", "")
+            headers.get("x-launchplane-public-copy", "")
             if status == 200 and pause_id == self.record_id
             else ""
         )
@@ -1192,6 +1196,11 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
             == 200
             if old or plan.compatibility.classification == "compatible"
             else self.http(self.private_origin + "/cutover_probe/static/site.css")[0] == 200,
+            writers_fenced=all(
+                not self.writers._running(target)
+                for target in self.writers.targets
+                if target.slot_id == slot.slot_id and target.writer.kind != "web"
+            ),
         )
 
     def verify_endpoint(self, plan: OdooCutoverPlan, slot: OdooSlot) -> HealthcheckEvidence:
@@ -1301,7 +1310,25 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
                         writer=writer, slot_id=slot.slot_id, container=container, image=slot.image
                     )
                 )
-        return ContainerSlotWriters(plan, tuple(targets), self.execute, self.active_writer_jobs)
+
+        def native_ready(target: SlotWriterContainer) -> None:
+            if target.writer.kind == "web":
+                self.verify_endpoint(
+                    plan, plan.old if target.slot_id == plan.old.slot_id else plan.new
+                )
+            elif self.active_writer_jobs(target) != 1:
+                raise ValueError("fixture writer lacks its observed database session")
+
+        return ContainerSlotWriters(
+            plan,
+            tuple(targets),
+            self.execute,
+            self.active_writer_jobs,
+            native_ready=native_ready,
+            database_evidence=lambda target: json.dumps(
+                {"container": target.container, "active_jobs": self.active_writer_jobs(target)}
+            ),
+        )
 
     def active_writer_jobs(self, target: SlotWriterContainer) -> int:
         if target.writer.kind == "web":

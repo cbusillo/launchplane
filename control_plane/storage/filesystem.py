@@ -54,14 +54,7 @@ from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationPolicyRecord,
 )
 from control_plane.contracts.every_code_work_request import (
-    EveryCodeWorkRequestHeartbeat,
     EveryCodeWorkRequestRecord,
-    EveryCodeWorkRequestStatusUpdate,
-    apply_every_code_work_request_status,
-    claim_every_code_work_request,
-    close_every_code_work_request_for_pull_request,
-    heartbeat_every_code_work_request,
-    recover_stale_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
@@ -205,6 +198,7 @@ from control_plane.contracts.product_retirement import (
     product_retirement_secret_authority,
 )
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
+from control_plane.contracts.integration_attestation import IntegrationAttestationRecord
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentEventRecord,
@@ -2274,7 +2268,7 @@ class FilesystemRecordStore:
                 MergeTrainPrFeedbackRecord,
                 "launchplane_merge_train_pr_feedback",
             )
-            if (not repository or record.repository == repository)
+            if (not repository or record.repository == repository.lower())
             and (not base_branch or record.base_branch == base_branch)
             and (pr_number is None or record.pull_request_number == pr_number)
         ]
@@ -2864,7 +2858,7 @@ class FilesystemRecordStore:
                 MergeTrainStackCollapsePlanRecord,
                 "launchplane_merge_train_stack_collapse_plans",
             )
-            if (not repository or record.plan.repository == repository)
+            if (not repository or record.plan.repository == repository.lower())
             and (not base_branch or record.plan.base_branch == base_branch)
             and (not status or record.status == status)
             and (
@@ -3034,18 +3028,6 @@ class FilesystemRecordStore:
         with self._exclusive_record_lock(record_type, record.request_id):
             return self._write_model(record_type, record.request_id, record)
 
-    def create_every_code_work_request_record_if_absent(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> tuple[EveryCodeWorkRequestRecord, bool]:
-        created = self._create_model_if_absent(
-            "launchplane_every_code_work_requests",
-            record.request_id,
-            record,
-        )
-        if created:
-            return record, True
-        return self.read_every_code_work_request_record(record.request_id), False
-
     def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
         return EveryCodeWorkRequestRecord.model_validate(
             self._read_model(
@@ -3078,169 +3060,6 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
-
-    def close_every_code_work_request_for_pull_request_record(
-        self,
-        *,
-        request_id: str,
-        expected_lifecycle_id: str,
-        pr_url: str,
-        merged: bool,
-        closed_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            if record.lifecycle_id != expected_lifecycle_id:
-                return None
-            closed_record = close_every_code_work_request_for_pull_request(
-                record,
-                pr_url=pr_url,
-                merged=merged,
-                closed_at=closed_at,
-            )
-            if closed_record is None:
-                return None
-            self._write_model(record_type, request_id, closed_record)
-            return closed_record
-
-    def claim_every_code_work_request_record(
-        self,
-        *,
-        request_id: str,
-        host: str,
-        claimed_at: str,
-        lease_seconds: int = 1800,
-        idempotency_record_factory: (
-            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
-        ) = None,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            claimed_record = claim_every_code_work_request(
-                record, host=host, claimed_at=claimed_at, lease_seconds=lease_seconds
-            )
-            if claimed_record is None:
-                return None
-            self._write_model(record_type, request_id, claimed_record)
-            if idempotency_record_factory is not None:
-                self.write_idempotency_record(idempotency_record_factory(claimed_record))
-            return claimed_record
-
-    def heartbeat_every_code_work_request_record(
-        self,
-        *,
-        request_id: str,
-        host: str,
-        fencing_token: int,
-        heartbeat_at: str,
-        lease_expires_at: str,
-        lease_seconds: int = 1800,
-    ) -> bool:
-        del lease_seconds
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            try:
-                record = self.read_every_code_work_request_record(request_id)
-            except FileNotFoundError:
-                return False
-            updated = heartbeat_every_code_work_request(
-                record,
-                EveryCodeWorkRequestHeartbeat(
-                    host=host,
-                    fencing_token=fencing_token,
-                    heartbeat_at=heartbeat_at,
-                    lease_expires_at=lease_expires_at,
-                ),
-            )
-            if updated is None:
-                return False
-            self._write_model(record_type, request_id, updated)
-            return True
-
-    def update_every_code_work_request_status_record(
-        self,
-        *,
-        request_id: str,
-        update: EveryCodeWorkRequestStatusUpdate,
-    ) -> EveryCodeWorkRequestRecord:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            if record.fencing_token > 0 and update.fencing_token != record.fencing_token:
-                raise ValueError(
-                    f"Every Code status update fencing token {update.fencing_token} "
-                    f"does not match record fencing token {record.fencing_token}"
-                )
-            updated = apply_every_code_work_request_status(record, update)
-            self._write_model(record_type, request_id, updated)
-            return updated
-
-    def compare_and_write_every_code_work_request_record(
-        self,
-        *,
-        expected_record: EveryCodeWorkRequestRecord,
-        record: EveryCodeWorkRequestRecord,
-        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
-    ) -> Literal["updated", "changed", "missing"]:
-        if expected_record.request_id != record.request_id:
-            raise ValueError("Every Code compare-and-write requires matching request IDs")
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, expected_record.request_id):
-            try:
-                current = self.read_every_code_work_request_record(expected_record.request_id)
-            except FileNotFoundError:
-                return "missing"
-            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
-                return "changed"
-            self._write_model(record_type, record.request_id, record)
-            if idempotency_record is not None:
-                self.write_idempotency_record(idempotency_record)
-            return "updated"
-
-    def list_stale_every_code_work_request_records(
-        self,
-        *,
-        as_of: str,
-        limit: int = 50,
-    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
-        stale_states = {"claimed", "running"}
-        records = [
-            record
-            for record in self._list_models(
-                EveryCodeWorkRequestRecord,
-                "launchplane_every_code_work_requests",
-            )
-            if record.state in stale_states
-            and record.lease_expires_at
-            and record.lease_expires_at < as_of
-        ]
-        records.sort(key=lambda r: (r.lease_expires_at, r.request_id))
-        return tuple(records[:limit])
-
-    def recover_stale_every_code_work_request_record(
-        self,
-        *,
-        expected_record: EveryCodeWorkRequestRecord,
-        recovered_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, expected_record.request_id):
-            try:
-                current = self.read_every_code_work_request_record(expected_record.request_id)
-            except FileNotFoundError:
-                return None
-            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
-                return None
-            if not current.lease_expires_at or current.lease_expires_at >= recovered_at:
-                return None
-            recovered = recover_stale_every_code_work_request(
-                current,
-                recovered_at=recovered_at,
-            )
-            self._write_model(record_type, recovered.request_id, recovered)
-            return recovered
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
         return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)
@@ -4018,6 +3837,13 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def collection_read_coverage(self, collection: str) -> str:
+        return (
+            "complete"
+            if collection in {"product_profiles", "secret_records", "secret_bindings"}
+            else "unsupported"
+        )
 
     def write_secret_version(self, version: SecretVersion) -> Path:
         return self._write_model("launchplane_secret_versions", version.version_id, version)
@@ -7603,6 +7429,34 @@ class FilesystemRecordStore:
             f"product-review-{purpose}", f"{repository.casefold()}#{pull_request_number}"
         ):
             yield
+
+    def list_integration_attestation_records(
+        self, *, repository: str, pull_request_number: int
+    ) -> tuple[IntegrationAttestationRecord, ...]:
+        return tuple(
+            record
+            for record in self._list_models(
+                IntegrationAttestationRecord, "launchplane_integration_attestations"
+            )
+            if record.evidence.repository == repository
+            and record.evidence.pull_request_number == pull_request_number
+        )
+
+    def write_integration_attestation_record_if_absent(
+        self, record: IntegrationAttestationRecord
+    ) -> IntegrationAttestationRecord:
+        kind = "launchplane_integration_attestations"
+        with self._exclusive_record_lock(kind, record.record_id):
+            path = self._record_path(kind, record.record_id)
+            if path.exists():
+                existing = IntegrationAttestationRecord.model_validate_json(path.read_text())
+                if existing.review != record.review or existing.statement != record.statement:
+                    raise ValueError(
+                        "Integration attestation is immutable; read back the original."
+                    )
+                return existing
+            self._write_model(kind, record.record_id, record)
+        return record
 
     def write_product_review_decision_record(self, record: ProductReviewDecisionRecord) -> Path:
         return self._write_model("launchplane_product_review_decisions", record.record_id, record)

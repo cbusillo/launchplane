@@ -23,7 +23,7 @@ from control_plane.preview_lifecycle_cleanup_routes import (
     build_preview_lifecycle_sweep,
     require_preview_lifecycle_sweep_store,
 )
-from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_STALE_AFTER
+from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_INTERVAL_SECONDS
 from control_plane.preview_inventory_collection import collect_preview_inventory
 from control_plane.provider_operations import _ReservationHeartbeat
 from control_plane.storage.postgres import PostgresRecordStore
@@ -206,7 +206,7 @@ class PreviewInventoryScheduler(_PreviewScheduler):
     route = "service:preview-inventory-scheduler"
     fingerprint = "preview-inventory-scheduler-v1"
     # Three opportunities to collect before the shared evidence deadline.
-    interval = int(PREVIEW_INVENTORY_STALE_AFTER.total_seconds() / 3)
+    interval = PREVIEW_INVENTORY_INTERVAL_SECONDS
     offset = 0
 
     def _run_sweep(self) -> dict[str, object]:
@@ -214,6 +214,7 @@ class PreviewInventoryScheduler(_PreviewScheduler):
             control_plane_root=self.control_plane_root,
             record_store=self.store,
             should_stop=self._stop.is_set,
+            scan_slot=self.slot(),
         )
 
 
@@ -234,13 +235,19 @@ class PreviewLifecycleScheduler(_PreviewScheduler):
             control_plane_root=control_plane_root,
             clock=clock,
         )
+        from control_plane.preview_idle import PreviewIdleScheduler
+
+        self.idle_scheduler = PreviewIdleScheduler(store, control_plane_root=control_plane_root)
 
     def start(self) -> None:
+        self.idle_scheduler.start()
         self.inventory_scheduler.start()
         super().start()
 
     def stop(self) -> None:
+        self.idle_scheduler._stop.set()
         self._stop.set()
         self.inventory_scheduler._stop.set()
         self.inventory_scheduler.stop()
+        self.idle_scheduler.stop()
         super().stop()

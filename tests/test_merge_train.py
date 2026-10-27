@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 from functools import partial
 import json
 from pathlib import Path
@@ -395,6 +396,33 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertEqual(reasons[9], ("dependency update needs agent review",))
         self.assertIn("missing ready-to-merge label", reasons[10])
 
+    def test_dependency_candidates_are_isolated_without_original_pr_landing(self) -> None:
+        policy = _dependency_update_policy(49699333)
+        for position in (0, 1, 2):
+            with self.subTest(position=position):
+                pulls = [_pull_request(number) for number in (1, 2, 3)]
+                pulls[position] = pulls[position].model_copy(update={"actor_id": 49699333})
+                result = build_merge_train_dry_run_result(
+                    policy=policy,
+                    snapshot=MergeTrainDryRunSnapshot(
+                        repository=policy.policies[0].repository,
+                        base_branch="main",
+                        pull_requests=tuple(pulls),
+                    ),
+                    batch_landing=True,
+                    new_candidate=True,
+                )
+                self.assertEqual(result.queue_order, (1,) if position < 2 else (1, 2))
+                self.assertFalse(any(entry.requires_individual_landing for entry in result.queue))
+                self.assertTrue(all(entry.eligible for entry in result.queue))
+                self.assertTrue(
+                    all(
+                        entry.deferred_reasons
+                        for entry in result.queue
+                        if entry.number not in result.queue_order
+                    )
+                )
+
     def test_max_batch_size_caps_a_new_batch_and_leaves_the_rest_queued(self) -> None:
         snapshot = MergeTrainDryRunSnapshot(
             repository="cbusillo/sellyouroutboard",
@@ -748,58 +776,13 @@ class MergeTrainDryRunTests(unittest.TestCase):
         )
         reader_class.assert_called_once()
 
-    def test_cli_merge_train_run_once_mutates_one_worker_step_when_requested(self) -> None:
-        snapshot_reader = _FakeSnapshotReader(
-            MergeTrainDryRunSnapshot(
-                repository="cbusillo/sellyouroutboard",
-                base_branch="main",
-                pull_requests=(_pull_request(24, required_checks_status="fail"),),
-            )
-        )
-        label_client = _FakeLabelClient()
-
-        class _FakeGitHubClient:
-            def __init__(self, *, transport: object) -> None:
-                self.transport = transport
-
-            def add_pull_request_label(
-                self, *, repository: str, pull_request_number: int, label: str
-            ) -> None:
-                label_client.add_pull_request_label(
-                    repository=repository,
-                    pull_request_number=pull_request_number,
-                    label=label,
-                )
-
-            def update_pull_request_branch(
-                self, *, repository: str, pull_request_number: int, expected_head_sha: str
-            ) -> None:
-                raise AssertionError("block path should not update branches")
-
-            def merge_pull_request(
-                self,
-                *,
-                repository: str,
-                pull_request_number: int,
-                head_sha: str,
-                merge_method: str,
-            ) -> str:
-                raise AssertionError("block path should not merge")
-
+    def test_local_cli_refuses_mutation_before_creating_provider_transport(self) -> None:
         with (
-            TemporaryDirectory() as temp_dir,
-            patch(
-                "control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport",
-                return_value=object(),
-            ),
-            patch(
-                "control_plane.cli_merge_train.GitHubMergeTrainSnapshotReader",
-                return_value=snapshot_reader,
-            ),
-            patch("control_plane.cli_merge_train.GitHubMergeTrainClient", _FakeGitHubClient),
+            TemporaryDirectory() as directory,
+            patch("control_plane.cli_merge_train.UrllibMergeTrainGitHubTransport") as transport,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
-            policy_file = _write_policy_file(Path(temp_dir))
+            policy_file = _write_policy_file(Path(directory))
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
@@ -811,16 +794,8 @@ class MergeTrainDryRunTests(unittest.TestCase):
                     "--mutate",
                 ],
             )
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
-        self.assertEqual(payload["mode"], "mutate")
-        self.assertEqual(payload["status"], "blocked")
-        self.assertEqual(payload["block_result"]["pull_request_number"], 24)
-        self.assertEqual(
-            label_client.applied_labels,
-            [("cbusillo/sellyouroutboard", 24, "merge-blocked")],
-        )
+        self.assertNotEqual(result.exit_code, 0)
+        transport.assert_not_called()
 
     def test_cli_merge_train_run_once_requires_github_token(self) -> None:
         with TemporaryDirectory() as temp_dir, patch.dict("os.environ", {}, clear=True):
@@ -1348,7 +1323,9 @@ def _dependency_update_policy(
         trusted_automation_github_user_ids=trusted if trusted is not None else (github_user_id,)
     )
     payload = base.model_dump(mode="json")
-    payload["policies"][0]["enqueue"]["dependency_update_github_user_ids"] = [github_user_id]
+    payload["policies"][0]["enqueue"]["dependency_update_bots"] = [
+        dependency_bot_policy(github_user_id).model_dump()
+    ]
     return MergeTrainPolicy.model_validate(payload)
 
 

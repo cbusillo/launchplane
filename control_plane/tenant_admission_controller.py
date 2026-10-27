@@ -966,6 +966,17 @@ def _evaluate_tenant_admission_candidate(
             detail="The exact pull request was already merged into the target branch.",
         )
     evaluated_at = utc_now_timestamp()
+    from control_plane.merge_train_github import requires_full_odoo_build
+
+    if requires_full_odoo_build(store, repository=request.candidate.repository):
+        return TenantAdmissionControllerRunOnceResult(
+            outcome="blocked",
+            candidate=request.candidate,
+            base_branch=request.base_branch,
+            merge_method=request.merge_method,
+            pull_request_facts=facts,
+            detail="Odoo requires an exact full-build candidate. Use POST /v1/work-graph/merge-train/controller/run-once.",
+        )
     admission = get_tenant_admission_status(
         store=store,
         candidate=request.candidate,

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from control_plane.contracts.odoo_cutover import (
+    ODOO_CUTOVER_TERMINAL_STEPS,
     CutoverStep,
     OdooCutoverPlan,
     OdooCutoverRecord,
@@ -24,7 +25,12 @@ from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsInt
 from control_plane.prepared_public_pause import PreparedPublicPause, PublicPauseProvider
 from control_plane.prepared_public_site import verify_snapshot
 from control_plane.odoo_cutover_plan import rollback_pause_identity
-from control_plane.traffic_switch import require_serving_route, require_fresh_readiness
+from control_plane.odoo_cutover_recovery import BackupVerificationRejected, backup_recovery_eligible
+from control_plane.traffic_switch import (
+    require_serving_route,
+    require_fresh_readiness,
+    require_route_authority,
+)
 
 
 class OdooCutoverStore(Protocol):
@@ -46,6 +52,9 @@ class OdooCutoverProvider(PublicPauseProvider, Protocol):
     def prepare_public(self, plan: OdooCutoverPlan) -> PreparedPublicSite:
         """Capture exact old runtime and prove passive navigation/assets in a browser."""
         ...
+
+    def owns_prepared_pause(self, pause_id: str) -> bool: ...
+    def cancel_backup_restore(self, plan: OdooCutoverPlan) -> None: ...
 
     def backup(self, plan: OdooCutoverPlan) -> OdooRecoveryTuple: ...
     def maintenance(self, plan: OdooCutoverPlan) -> OdooMaintenanceReceipt:
@@ -71,9 +80,17 @@ class OdooCutoverProvider(PublicPauseProvider, Protocol):
 
 
 class _PauseStore:
-    def __init__(self, store: OdooCutoverStore, record_id: str, *, rollback: bool = False) -> None:
+    def __init__(
+        self,
+        store: OdooCutoverStore,
+        record_id: str,
+        *,
+        rollback: bool = False,
+        checkpoint: Callable[[str], None] = lambda _step: None,
+    ) -> None:
         self.store, self.record_id = store, record_id
         self.field = "rollback_pause" if rollback else "pause"
+        self.checkpoint = checkpoint
 
     def load(self, pause_id: str) -> PublicPauseRecord:
         record = self.store.load(self.record_id)
@@ -83,6 +100,7 @@ class _PauseStore:
         return pause
 
     def save(self, pause: PublicPauseRecord) -> None:
+        self.checkpoint("pause_checkpoint")
         record = self.store.load(self.record_id)
         self.store.save(record.model_copy(update={self.field: pause}))
 
@@ -120,6 +138,20 @@ def _require_ready(
         raise ValueError("private readiness identity is wrong, stale or unavailable")
 
 
+def _require_recovery_route(
+    route: OdooRouteObservation, plan: OdooCutoverPlan, slot: OdooSlot
+) -> None:
+    require_route_authority(
+        route,
+        route_id=plan.route_id,
+        host=plan.host,
+        target_url=slot.private_url,
+        slot_id=slot.slot_id,
+    )
+    if route.binding != slot.binding or route.runtime_identity not in (None, slot.runtime_identity):
+        raise ValueError("rollback traffic authority belongs to another runtime")
+
+
 def require_website_receipt(
     receipt: OdooWebsiteSettingsReceipt | None,
     slot: OdooSlot,
@@ -149,17 +181,27 @@ def execute_odoo_cutover(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     checkpoint: Callable[[str], None] = lambda _step: None,
     settings_checkpoint: Callable[[], None] = lambda: None,
+    abort_only: bool = False,
 ) -> OdooCutoverRecord:
     """The caller supplies existing accepted-release/worker and backup authority.
 
     No fallback to in-place deployment, guessed maintenance, or image-only
     recovery is permitted. A provider failure leaves the recorded intent open.
     """
-    plan = OdooCutoverPlan.model_validate(plan.model_dump())
+    try:
+        admitted = store.load(record_id)
+    except FileNotFoundError:
+        plan = OdooCutoverPlan.model_validate(plan.model_dump())
+    else:
+        if admitted.plan != plan:
+            raise ValueError("cannot change the stored cutover plan")
+        plan = OdooCutoverRecord.model_validate(admitted.model_dump()).plan
     with provider.exclusive(plan):
         try:
             record = store.load(record_id)
         except FileNotFoundError:
+            if abort_only:
+                raise ValueError("abort-only continuation cannot create a cutover")
             provider.preflight(plan)
             _require_route(provider.current_route(plan), plan, plan.old)
             record = OdooCutoverRecord(
@@ -169,7 +211,9 @@ def execute_odoo_cutover(
         record = OdooCutoverRecord.model_validate(record.model_dump())
         if record.plan != plan:
             raise ValueError("cannot change an uncertain cutover's immutable release plan")
-        if record.step in {"complete", "rolled_back"}:
+        if abort_only and record.step != "aborted" and not backup_recovery_eligible(record):
+            raise ValueError("abort-only continuation requires its existing pre-maintenance record")
+        if record.step in ODOO_CUTOVER_TERMINAL_STEPS:
             slot = plan.new if record.step == "complete" else plan.old
             if slot == plan.new:
                 if record.maintenance is None:
@@ -186,6 +230,7 @@ def execute_odoo_cutover(
             route = provider.current_route(plan)
             _require_route(route, plan, slot)
             record = record.model_copy(update={"route": route, "updated_at": clock()})
+            checkpoint("terminal_audit")
             store.save(record)
             return record
         if record.step == "rolling_back":
@@ -193,13 +238,20 @@ def execute_odoo_cutover(
 
         def advance(step: CutoverStep, **values: object) -> None:
             nonlocal record
-            record = store.load(record_id).model_copy(
+            checkpoint(step)
+            current = store.load(record_id)
+            if current.step != record.step:
+                raise RuntimeError("the original cutover advanced under another continuation")
+            record = current.model_copy(
                 update={"step": step, "updated_at": clock(), "error": "", **values}
             )
             store.save(record)
-            checkpoint(step)
 
         try:
+            if record.step == "aborting":
+                return abort_before_maintenance(
+                    store, provider, record_id, clock=clock, checkpoint=checkpoint
+                )
             if record.step == "preparing":
                 checkpoint("prepare_candidate")
                 provider.prepare_candidate(plan)
@@ -217,7 +269,7 @@ def execute_odoo_cutover(
                 advance("pausing" if record.public_site else "backing_up")
             if record.step == "pausing":
                 assert record.public_site is not None
-                pause_store = _PauseStore(store, record_id)
+                pause_store = _PauseStore(store, record_id, checkpoint=checkpoint)
                 pause = record.pause
                 if pause is None:
                     # The identity and beginning survive a crash during publication.
@@ -240,7 +292,21 @@ def execute_odoo_cutover(
                 advance("backing_up")
             if record.step == "backing_up":
                 checkpoint("capture_backup")
-                backup = provider.backup(plan)
+                try:
+                    if abort_only:
+                        provider.cancel_backup_restore(plan)
+                        advance("aborting")
+                        return abort_before_maintenance(
+                            store, provider, record_id, clock=clock, checkpoint=checkpoint
+                        )
+                    backup = provider.backup(plan)
+                except BackupVerificationRejected:
+                    if not backup_recovery_eligible(store.load(record_id)):
+                        raise ValueError("backup failure cannot abort an unverified pause")
+                    advance("aborting")
+                    return abort_before_maintenance(
+                        store, provider, record_id, clock=clock, checkpoint=checkpoint
+                    )
                 if backup.binding != plan.old.binding or backup.image != plan.old.image:
                     raise ValueError(
                         "backup is not the coherent current image/database/filestore tuple"
@@ -317,7 +383,10 @@ def execute_odoo_cutover(
                 checkpoint("resume_writers")
                 if record.public_site:
                     PreparedPublicPause(
-                        record.public_site, _PauseStore(store, record_id), provider, clock=clock
+                        record.public_site,
+                        _PauseStore(store, record_id, checkpoint=checkpoint),
+                        provider,
+                        clock=clock,
                     ).finish(record_id, expected=plan.new.binding)
                 else:
                     provider.handoff_writers(plan, plan.new)
@@ -329,10 +398,71 @@ def execute_odoo_cutover(
                 advance("complete", ended_at=clock(), old_connections_drained=True)
         except Exception as error:
             # Never persist exception text, which may contain provider secrets/logs.
-            record = store.load(record_id).model_copy(update={"error": type(error).__name__})
-            store.save(record)
+            failed_record = store.load(record_id)
+            if (
+                failed_record.step == record.step
+                and failed_record.step not in ODOO_CUTOVER_TERMINAL_STEPS
+            ):
+                checkpoint("record_failure")
+                record = failed_record.model_copy(update={"error": type(error).__name__})
+                store.save(record)
             raise
         return store.load(record_id)
+
+
+def abort_before_maintenance(
+    store: OdooCutoverStore,
+    provider: OdooCutoverProvider,
+    record_id: str,
+    *,
+    clock: Callable[[], datetime],
+    checkpoint: Callable[[str], None] = lambda _step: None,
+) -> OdooCutoverRecord:
+    record = store.load(record_id)
+    if record.step != "aborting" or not backup_recovery_eligible(record):
+        raise ValueError("abort requires rejected backup verification before maintenance")
+    plan = record.plan
+    provider.preflight(plan)
+    route = (
+        provider.current_route(plan)
+        if record.pause is None or record.pause.state != "drained"
+        else None
+    )
+    if route is not None:
+        _require_route(route, plan, plan.old)
+    elif record.pause is not None:
+        assert record.public_site is not None
+        try:
+            current = provider.current_route(plan)
+        except (ValueError, OSError):
+            current = None
+        if current is not None and current.slot_id == plan.old.slot_id:
+            _require_recovery_route(current, plan, plan.old)
+            route = current
+        else:
+            if not provider.owns_prepared_pause(record.pause.pause_id):
+                raise ValueError("abort lacks its original prepared-route authority")
+            _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
+            route = provider.switch(plan, plan.old)
+            _require_route(route, plan, plan.old)
+    if route is None:
+        raise ValueError("abort has no verified old serving route")
+    if record.pause is not None:
+        assert record.public_site is not None
+        PreparedPublicPause(
+            record.public_site,
+            _PauseStore(store, record_id, checkpoint=checkpoint),
+            provider,
+            clock=clock,
+        ).finish(record_id, expected=plan.old.binding)
+    provider.handoff_writers(plan, plan.old)
+    checkpoint("aborted")
+    ended = clock()
+    record = store.load(record_id).model_copy(
+        update={"step": "aborted", "route": route, "updated_at": ended, "ended_at": ended}
+    )
+    store.save(record)
+    return record
 
 
 def rollback_compatible_cutover(
@@ -342,6 +472,7 @@ def rollback_compatible_cutover(
     *,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     settings_checkpoint: Callable[[], None] = lambda: None,
+    checkpoint: Callable[[str], None] = lambda _step: None,
 ) -> OdooCutoverRecord:
     record = OdooCutoverRecord.model_validate(store.load(record_id).model_dump())
     plan = record.plan
@@ -357,7 +488,6 @@ def rollback_compatible_cutover(
                 plan.rollback_website_settings if record.website_settings_attempted else None,
             )
             _require_route(provider.current_route(plan), plan, plan.old)
-            _require_route(provider.switch(plan, plan.old), plan, plan.old)
             return record
         if record.step != "rolling_back":
             route = provider.current_route(plan)
@@ -368,7 +498,7 @@ def rollback_compatible_cutover(
                 pass
             else:
                 slot = plan.old if route.slot_id == plan.old.slot_id else plan.new
-                _require_route(route, plan, slot)
+                _require_recovery_route(route, plan, slot)
             started_at = clock()
             record = record.model_copy(
                 update={
@@ -377,12 +507,13 @@ def rollback_compatible_cutover(
                     "rollback_started_at": started_at,
                 }
             )
+            checkpoint("rollback_started")
             store.save(record)
         intent = plan.rollback_website_settings if record.website_settings_attempted else None
         if intent is not None:
             if record.public_site is None:
                 raise ValueError("website rollback lacks its prepared public site")
-            pause_store = _PauseStore(store, record_id, rollback=True)
+            pause_store = _PauseStore(store, record_id, rollback=True, checkpoint=checkpoint)
             pause = record.rollback_pause
             if pause is None:
                 pause = PublicPauseRecord(
@@ -413,6 +544,7 @@ def rollback_compatible_cutover(
                 record = store.load(record_id).model_copy(
                     update={"rollback_website_settings": receipt}
                 )
+                checkpoint("rollback_settings_receipt")
                 store.save(record)
             require_website_receipt(record.rollback_website_settings, plan.old, intent)
         route = provider.current_route(plan)
@@ -428,16 +560,15 @@ def rollback_compatible_cutover(
                 record.public_site is None
                 or provider.observed_public_copy(record_id) != record.public_site.content_digest
             ):
-                _require_route(route, plan, plan.new)
+                _require_recovery_route(route, plan, plan.new)
             _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
-        route = provider.switch(plan, plan.old)
+            route = provider.switch(plan, plan.old)
         _require_route(route, plan, plan.old)
-        _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
         if intent is not None:
             assert record.public_site is not None
             recovered = PreparedPublicPause(
                 record.public_site,
-                _PauseStore(store, record_id, rollback=True),
+                _PauseStore(store, record_id, rollback=True, checkpoint=checkpoint),
                 provider,
                 clock=clock,
             ).finish(rollback_pause_id, expected=plan.old.binding)
@@ -453,6 +584,7 @@ def rollback_compatible_cutover(
                         "recovery_binding": plan.old.binding,
                     }
                 )
+                checkpoint("rollback_pause_complete")
                 store.save(store.load(record_id).model_copy(update={"pause": pause}))
         elif (
             record.public_site is not None
@@ -460,10 +592,14 @@ def rollback_compatible_cutover(
             and record.pause.state in {"drained", "resuming"}
         ):
             PreparedPublicPause(
-                record.public_site, _PauseStore(store, record_id), provider, clock=clock
+                record.public_site,
+                _PauseStore(store, record_id, checkpoint=checkpoint),
+                provider,
+                clock=clock,
             ).finish(record_id, expected=plan.old.binding)
         else:
             provider.handoff_writers(plan, plan.old)
+        checkpoint("rolled_back")
         record = store.load(record_id).model_copy(
             update={"step": "rolled_back", "route": route, "updated_at": clock()}
         )

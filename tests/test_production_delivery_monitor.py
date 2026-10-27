@@ -40,8 +40,6 @@ from control_plane.production_delivery_monitor import (
     record_production_delivery_failure,
     _record_rejected_payload,
     _observe,
-    RefusedProductionRequestReconciliation,
-    reconcile_refused_production_requests,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
@@ -66,6 +64,13 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.lane = self.profile.lanes[0]
         self.store.write_product_profile_record(self.profile)
         self.now = datetime.now(timezone.utc)
+        self.enterContext(
+            patch.object(
+                self.store,
+                "_database_mutation_timestamp",
+                side_effect=lambda _session: self.now.isoformat(),
+            )
+        )
         self.head = "b" * 40
         self.current = "a" * 40
         self.transport = Mock()
@@ -138,15 +143,19 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         )
 
     def seed_legacy_lag(self) -> None:
-        _observe(
-            self.store,
-            self.profile,
-            self.lane,
-            check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
-            failed=True,
-            summary="Merged source has not reached production; Client acceptance pending.",
-            observed_at=self.timestamp(),
-        )
+        with patch(
+            "control_plane.workflows.public_ingress_monitor._discord_incident_pages",
+            return_value=True,
+        ):
+            _observe(
+                self.store,
+                self.profile,
+                self.lane,
+                check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
+                failed=True,
+                summary="Merged source has not reached production; Client acceptance pending.",
+                observed_at=self.timestamp(),
+            )
 
     def test_waiting_merged_source_never_opens_a_failure_or_notification(self) -> None:
         self.profile = self.profile.model_copy(
@@ -242,70 +251,13 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.store.write_public_ingress_observation_record(record)
         return record
 
-    def reconciliation(self, incident_id: str) -> RefusedProductionRequestReconciliation:
-        return RefusedProductionRequestReconciliation(
-            incident_id=incident_id,
-            caller_retired=True,
-            caller_retired_at=self.now - timedelta(seconds=1),
-            caller_retirement_evidence="https://example.test/changes/retire-caller",
-        )
-
-    def test_four_historical_refusals_reconcile_without_releasing_the_candidates(self) -> None:
-        for source in ("b", "c", "d", "e"):
-            self.reject("image@" + source * 40, reason="promotion_required")
-        incidents = self.store.list_public_ingress_incident_records(status="open")
-        self.now += timedelta(seconds=2)
-        self.healthy_production()
-        requests = tuple(self.reconciliation(incident.incident_id) for incident in incidents)
-        deployments = self.store.list_deployment_records()
-        self.assertEqual(
-            set(
-                reconcile_refused_production_requests(
-                    self.store,
-                    requests=requests,
-                    observed_at=self.timestamp(),
-                )
-            ),
-            {incident.incident_id for incident in incidents},
-        )
-        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
-        for original in incidents:
-            resolved = self.store.read_public_ingress_incident_record(original.incident_id)
-            self.assertIn(original.summary, resolved.summary)
-            self.assertEqual(resolved.resolution_reason, PRODUCTION_REQUEST_REFUSED)
-            self.assertEqual(resolved.opened_observation_id, original.opened_observation_id)
-        # A retry after restart is harmless, and normal scanning does not reopen the refusals.
-        self.store.close()
-        self.store = PostgresRecordStore(database_url=self.store.database_url)
-        self.addCleanup(self.store.close)
-        reconcile_refused_production_requests(
-            self.store, requests=requests, observed_at=self.timestamp()
-        )
-        self.monitor()
-        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
-        self.assertEqual(self.store.list_deployment_records(), deployments)
-        sender = Mock()
-        resolver = Mock()
-        for _incident in incidents:
-            run_outbox_worker_once(
-                record_store=self.store,
-                control_plane_root=self.root,
-                lease_owner="test",
-                notification_drivers=PublicIngressNotificationDriverSet(
-                    secret_resolver=resolver,
-                    discord_sender=sender,
-                ),
-            )
-        sender.assert_not_called()
-        resolver.assert_not_called()
-
-        attempts = self.store.list_public_ingress_notification_attempt_records()
-        self.assertEqual(len(attempts), len(incidents))
-        self.assertTrue(all(attempt.delivery_status == "skipped" for attempt in attempts))
-
     def test_scheduled_recheck_resolves_historical_refusals_and_preserves_history(self) -> None:
-        for source in ("b", "c", "d", "e"):
-            self.reject("image@" + source * 40, reason="promotion_required")
+        with patch(
+            "control_plane.workflows.public_ingress_monitor._discord_incident_pages",
+            return_value=True,
+        ):
+            for source in ("b", "c", "d", "e"):
+                self.reject("image@" + source * 40, reason="promotion_required")
         originals = self.store.list_public_ingress_incident_records(status="open")
         deployments = self.store.list_deployment_records()
         self.now += timedelta(seconds=2)
@@ -336,6 +288,34 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.monitor()
         self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
         self.assertEqual(self.store.list_deployment_records(), deployments)
+
+        sender = Mock()
+        resolver = Mock()
+        queued = self.store.list_outbox_delivery_records()
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            return_value=max(value.next_attempt_at for value in queued),
+        ):
+            for _ in range(len(queued) + 1):
+                run_outbox_worker_once(
+                    record_store=self.store,
+                    control_plane_root=self.root,
+                    lease_owner="test",
+                    notification_drivers=PublicIngressNotificationDriverSet(
+                        secret_resolver=resolver,
+                        discord_sender=sender,
+                    ),
+                )
+        sender.assert_not_called()
+        resolver.assert_not_called()
+
+        self.assertTrue(
+            all(
+                value.state == "delivered" and not value.provider_operation_key
+                for value in self.store.list_outbox_delivery_records()
+            )
+        )
 
     def test_scheduled_recheck_waits_for_health_identity_and_no_newer_refusal(self) -> None:
         self.reject(reason="promotion_required")
@@ -451,17 +431,21 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         )
 
     def test_reconciled_refusal_keeps_an_interrupted_notification_outcome_unknown(self) -> None:
-        self.reject(reason="promotion_required")
+        with patch(
+            "control_plane.workflows.public_ingress_monitor._discord_incident_pages",
+            return_value=True,
+        ):
+            self.reject(reason="promotion_required")
         incident = self.store.list_public_ingress_incident_records(status="open")[0]
         queued = self.store.list_outbox_delivery_records()[0].model_copy(
             update={"provider_operation_key": "interrupted-send", "provider_id": "discord"}
         )
         self.now += timedelta(seconds=2)
         self.healthy_production()
-        reconcile_refused_production_requests(
-            self.store,
-            requests=(self.reconciliation(incident.incident_id),),
-            observed_at=self.timestamp(),
+        self.monitor()
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id).resolution_reason,
+            PRODUCTION_REQUEST_REFUSED,
         )
         sender = Mock()
         started = Mock()
@@ -476,159 +460,6 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertEqual(result.provider_operation_key, queued.provider_operation_key)
         sender.assert_not_called()
         started.assert_not_called()
-
-    def test_refusal_reconciliation_preserves_unhealthy_uncertain_and_recurring_cases(self) -> None:
-        self.reject(reason="promotion_required")
-        incident = self.store.list_public_ingress_incident_records(status="open")[0]
-        self.now += timedelta(seconds=2)
-        request = self.reconciliation(incident.incident_id)
-        for health in (
-            "missing",
-            "failed",
-            "stale",
-            "identity_mismatch",
-            "caller_active",
-        ):
-            with self.subTest(health=health):
-                if health != "missing":
-                    record = self.healthy_production()
-                    if health == "failed":
-                        record = record.model_copy(
-                            update={
-                                "status": "fail",
-                                "failure_code": "http_error",
-                                "targets": tuple(
-                                    target.model_copy(
-                                        update={
-                                            "status": "fail",
-                                            "failure_code": "http_error",
-                                        }
-                                    )
-                                    for target in record.targets
-                                ),
-                            }
-                        )
-                    elif health == "stale":
-                        self.now += timedelta(days=1)
-                    elif health == "identity_mismatch":
-                        record = record.model_copy(update={"expected_runtime_identity": None})
-                    elif health == "caller_active":
-                        _observe(
-                            self.store,
-                            self.profile,
-                            self.lane,
-                            check_name=REFUSED_REQUEST_CHECK_PREFIX + "retrying",
-                            failed=False,
-                            refused=True,
-                            summary="Caller still trying.",
-                            observed_at=self.timestamp(),
-                        )
-                    self.store.write_public_ingress_observation_record(record)
-                with self.assertRaises(ValueError):
-                    reconcile_refused_production_requests(
-                        self.store, requests=(request,), observed_at=self.timestamp()
-                    )
-                self.assertEqual(
-                    self.store.read_public_ingress_incident_record(incident.incident_id).status,
-                    "open",
-                )
-
-    def test_reconciliation_cannot_erase_an_earlier_real_failure_for_the_same_candidate(
-        self,
-    ) -> None:
-        self.reject(reason="deployment_failed")
-        self.now += timedelta(seconds=1)
-        self.reject(reason="promotion_required")
-        incident = self.store.list_public_ingress_incident_records(status="open")[0]
-        self.now += timedelta(seconds=2)
-        self.healthy_production()
-        with self.assertRaises(ValueError):
-            reconcile_refused_production_requests(
-                self.store,
-                requests=(self.reconciliation(incident.incident_id),),
-                observed_at=self.timestamp(),
-            )
-        self.assertEqual(
-            self.store.read_public_ingress_incident_record(incident.incident_id).status, "open"
-        )
-
-    def test_reconciliation_preserves_a_concurrent_failure(self) -> None:
-        self.reject(reason="promotion_required")
-        incident = self.store.list_public_ingress_incident_records(status="open")[0]
-        self.now += timedelta(seconds=2)
-        self.healthy_production()
-        original = self.store.write_public_ingress_transition_with_outbox
-
-        def race(**kwargs: Any) -> object:
-            with patch.object(self.store, "write_public_ingress_transition_with_outbox", original):
-                self.reject(reason="deployment_failed")
-            return original(**kwargs)
-
-        with patch.object(
-            self.store, "write_public_ingress_transition_with_outbox", side_effect=race
-        ):
-            with self.assertRaises(ValueError):
-                reconcile_refused_production_requests(
-                    self.store,
-                    requests=(self.reconciliation(incident.incident_id),),
-                    observed_at=self.timestamp(),
-                )
-        self.assertEqual(
-            self.store.read_public_ingress_incident_record(incident.incident_id).status, "open"
-        )
-
-    def test_reconciliation_does_not_reclassify_a_successful_delivery(self) -> None:
-        self.reject(reason="promotion_required")
-        incident = self.store.list_public_ingress_incident_records(status="open")[0]
-        self.now += timedelta(seconds=2)
-        self.deploy(self.head)
-        self.monitor()
-        recovered = self.store.read_public_ingress_incident_record(incident.incident_id)
-        self.assertEqual(recovered.status, "resolved")
-        with self.assertRaises(ValueError):
-            reconcile_refused_production_requests(
-                self.store,
-                requests=(self.reconciliation(incident.incident_id),),
-                observed_at=self.timestamp(),
-            )
-        self.assertEqual(
-            self.store.read_public_ingress_incident_record(incident.incident_id), recovered
-        )
-
-    def test_reconciliation_refuses_a_removed_production_lane(self) -> None:
-        self.reject(reason="promotion_required")
-        incident = self.store.list_public_ingress_incident_records(status="open")[0]
-        self.now += timedelta(seconds=2)
-        self.store.write_product_profile_record(self.profile.model_copy(update={"lanes": ()}))
-        with self.assertRaises(ValueError):
-            reconcile_refused_production_requests(
-                self.store,
-                requests=(self.reconciliation(incident.incident_id),),
-                observed_at=self.timestamp(),
-            )
-        self.assertEqual(
-            self.store.read_public_ingress_incident_record(incident.incident_id), incident
-        )
-
-    def test_reconciliation_refuses_while_the_delivery_monitor_holds_the_lane(self) -> None:
-        self.reject(reason="promotion_required")
-        incident = self.store.list_public_ingress_incident_records(status="open")[0]
-        self.now += timedelta(seconds=2)
-        self.healthy_production()
-        with (
-            self.store.delivery_evidence_index() as index,
-            index.lane_lock(self.lane.context, self.profile.product) as acquired,
-        ):
-            self.assertTrue(acquired)
-            with self.assertRaises(ValueError):
-                reconcile_refused_production_requests(
-                    self.store,
-                    requests=(self.reconciliation(incident.incident_id),),
-                    observed_at=self.timestamp(),
-                )
-        self.assertEqual(
-            self.store.read_public_ingress_incident_record(incident.incident_id), incident
-        )
 
     def test_legacy_lag_retires_without_recovering_a_real_delivery_failure(self) -> None:
         self.seed_legacy_lag()
@@ -661,20 +492,25 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.seed_legacy_lag()
         sender = Mock()
         resolver = Mock(return_value="https://discord.com/api/webhooks/example/test")
-        result = run_outbox_worker_once(
-            record_store=self.store,
-            control_plane_root=self.root,
-            lease_owner="test",
-            notification_drivers=PublicIngressNotificationDriverSet(
-                secret_resolver=resolver,
-                discord_sender=sender,
-            ),
-        )
+        queued = self.store.list_outbox_delivery_records()[0]
+        with patch.object(
+            self.store, "_database_mutation_timestamp", return_value=queued.next_attempt_at
+        ):
+            result = run_outbox_worker_once(
+                record_store=self.store,
+                control_plane_root=self.root,
+                lease_owner="test",
+                notification_drivers=PublicIngressNotificationDriverSet(
+                    secret_resolver=resolver,
+                    discord_sender=sender,
+                ),
+            )
         sender.assert_not_called()
         resolver.assert_not_called()
         self.assertEqual(result.status, "delivered")
-        attempts = self.store.list_public_ingress_notification_attempt_records()
-        self.assertEqual(attempts[0].delivery_status, "skipped")
+        self.assertFalse(
+            self.store.read_outbox_delivery_record(result.delivery_id).provider_operation_key
+        )
 
     @patch.dict(
         "os.environ",
@@ -782,43 +618,8 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         incidents = self.store.list_public_ingress_incident_records(status="open")
         self.assertEqual(len(incidents), 1)
         self.assertIn("launchplane_req_failure", incidents[0].summary)
-        self.assertEqual(len(self.store.list_outbox_delivery_records()), 1)
+        self.assertEqual(self.store.list_outbox_delivery_records(), ())
         self.assertEqual(self.store.list_deployment_records()[0].destination_health.status, "pass")
-
-    def test_notification_failure_retries_and_records_recovery(self) -> None:
-        self.reject()
-        sender = Mock(side_effect=[RuntimeError("transport failed"), None])
-        drivers = PublicIngressNotificationDriverSet(
-            secret_resolver=lambda _key: "https://discord.com/api/webhooks/example/test",
-            discord_sender=sender,
-        )
-        first = run_outbox_worker_once(
-            record_store=self.store,
-            control_plane_root=self.root,
-            lease_owner="test",
-            notification_drivers=drivers,
-        )
-        self.assertEqual(first.status, "pending")
-        attempts = self.store.list_public_ingress_notification_attempt_records()
-        self.assertEqual(attempts[0].delivery_status, "failed")
-        queued = self.store.list_outbox_delivery_records()[0]
-        self.store.write_outbox_delivery_record(
-            queued.model_copy(
-                update={
-                    "next_attempt_at": self.timestamp(),
-                }
-            )
-        )
-        second = run_outbox_worker_once(
-            record_store=self.store,
-            control_plane_root=self.root,
-            lease_owner="test",
-            notification_drivers=drivers,
-        )
-        self.assertEqual(second.status, "delivered")
-        self.assertEqual(sender.call_count, 2)
-        self.assertIn("launchplane_req_failure", str(sender.call_args))
-        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
 
     def test_recovery_preserves_a_failure_arriving_during_its_commit(self) -> None:
         self.reject()
@@ -1030,7 +831,10 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         incidents = self.store.list_public_ingress_incident_records(status="open")
         self.assertEqual({incident.incident_id for incident in incidents}, {original.incident_id})
         self.assertIn("launchplane_req_new_stage", incidents[0].summary)
-        self.assertEqual(len(self.store.list_outbox_delivery_records()), 2)
+        events = self.store.list_public_ingress_incident_event_records(
+            incident_id=original.incident_id
+        )
+        self.assertEqual(sorted(value.event for value in events), ["opened", "updated"])
 
     def test_explicit_lifecycle_change_retires_lag_attention(self) -> None:
         self.seed_legacy_lag()

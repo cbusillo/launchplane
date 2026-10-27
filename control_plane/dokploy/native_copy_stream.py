@@ -19,6 +19,7 @@ from threading import Event, Timer
 from typing import Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 import uuid
+import zlib
 import click
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_failure_evidence
@@ -258,9 +259,21 @@ def _read_program(
         "termios.tcsetattr(0,termios.TCSANOW,a);print('\\n'+sys.argv[1]+'\\n',flush=True);"
         "line=sys.stdin.readline(262145);"
         "assert line.endswith('\\n') and len(line)<=262144;v=json.loads(line);"
-        "sys.argv=[sys.argv[0],v['payload'],sys.argv[2]];"
-        "exec(base64.b64decode(v['program'],validate=True))"
+        "exec(base64.b64decode(v['loader'],validate=True))"
     )
+    dispatcher = (
+        "import hashlib,io,zipfile,zlib;"
+        "chunks=v.get('archive_chunks',0);assert type(chunks) is int and 0<=chunks<=128;"
+        "archive=b''.join(base64.b64decode(sys.stdin.readline(65538).rstrip('\\n'),validate=True) for _ in range(chunks));"
+        "assert 'action' not in v or hashlib.sha256(archive).hexdigest()==v['archive_sha256'];"
+        "sys.argv=(['launchplane-host',v['action'],'--input','-','--prefix',sys.argv[2]]"
+        " if 'action' in v else [sys.argv[0],v['payload'],sys.argv[2]]);"
+        "sys.stdin=io.StringIO(base64.b64decode(v['payload']).decode()) if 'action' in v else sys.stdin;"
+        "exec(compile(zipfile.ZipFile(io.BytesIO(archive)).read('__main__.py'),'<launchplane-host>','exec'),"
+        "{'__name__':'__main__','HOST_PACKAGE_CONTENT':archive}) if 'action' in v"
+        " else exec(zlib.decompress(base64.b64decode(v['program'],validate=True)))"
+    )
+    encoded_dispatcher = base64.b64encode(dispatcher.encode()).decode()
     # Replace the interactive shell before sending any private payload. The
     # loader itself disables canonical input/echo and then proves readiness;
     # shell readline can otherwise reset tty settings and truncate long input.
@@ -272,13 +285,56 @@ def _read_program(
     for line in lines:
         if line == ready:
             break
-    encoded = base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode()
-    encoded_program = base64.b64encode(program.encode()).decode()
+    from control_plane.host_package import (
+        compact_host_input,
+        host_package,
+        HOST_PACKAGE_CHUNK_BYTES,
+        native_package,
+    )
+
+    from control_plane.host_package_runtime import program_names
+
+    package = host_package()
+    action = next(
+        (name for name, member in package.actions.items() if package.programs[member] == program),
+        None,
+    )
+    wire_payload = compact_host_input(payload) if action is not None else payload
+    if action is not None:
+        package = native_package(action, tuple(sorted(program_names(wire_payload) | {action})))
+    encoded = base64.b64encode(json.dumps(wire_payload, sort_keys=True).encode()).decode()
+    encoded_program = (
+        "" if action is not None else base64.b64encode(zlib.compress(program.encode())).decode()
+    )
     if len(encoded) > 120 * 1024 or len(encoded_program) > 120 * 1024:
         raise NativeSourceUnavailable("The fixed remote read exceeds the transport argument bound.")
 
     def dispatch() -> None:
-        message = json.dumps({"program": encoded_program, "payload": encoded}) + "\n"
+        if action is None:
+            message = (
+                json.dumps(
+                    {"loader": encoded_dispatcher, "program": encoded_program, "payload": encoded}
+                )
+                + "\n"
+            )
+        else:
+            chunks = [
+                package.content[offset : offset + HOST_PACKAGE_CHUNK_BYTES]
+                for offset in range(0, len(package.content), HOST_PACKAGE_CHUNK_BYTES)
+            ]
+            message = (
+                json.dumps(
+                    {
+                        "loader": encoded_dispatcher,
+                        "action": action,
+                        "archive_sha256": package.version,
+                        "archive_chunks": len(chunks),
+                        "payload": encoded,
+                    }
+                )
+                + "\n"
+            )
+            message += "".join(base64.b64encode(chunk).decode() + "\n" for chunk in chunks)
         if abort_send is None:
             connection.send(message)
             return
@@ -486,7 +542,7 @@ except BaseException:
 """.replace("__CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES))
 
 
-def _read_remote(
+def run_managed_server_program(
     *,
     host: str,
     token: str,
@@ -538,6 +594,9 @@ def _read_remote(
         json.JSONDecodeError,
     ):
         raise NativeSourceUnavailable("The provider source stream is incomplete.") from None
+
+
+_read_remote = run_managed_server_program
 
 
 NATIVE_ODOO_SOURCE_READ_PROGRAM = (

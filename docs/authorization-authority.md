@@ -48,16 +48,6 @@ access to an invalid policy or silently starting with bootstrap authority.
   change, as [Denial Handling](#denial-handling) requires, is not such a
   workaround.
 
-The [feedback continuation foundation](every-code-feedback-resume.md), which is
-not continued and remains unwired in code, defines
-`every_code_feedback_resume.request` and
-`every_code_feedback_resume.execute` as separate exclusively instance-scoped
-actions. Structural immutable-ID human matching and exact authenticated worker
-matching produce policy provenance only; they create no grant, live route or
-execution authority. The webhook-specific human predicate does not synthesize a
-browser identity or expand browser role permissions. New live grants and worker
-enablement remain a Director decision and need their rollout approvals.
-
 `owner-control` channel-session, issued-challenge, and shadow-verification event
 records are inert verification evidence, not authorization policy or grants.
 They define no HTTP action, route, managed set, workflow, secret, or production
@@ -125,6 +115,18 @@ restrictions remain. Exact product/lane/check and private endpoint validation,
 reviewed plan digest, idempotency, concurrent-profile checks and readback still
 govern apply. Other machine identities retain their existing scoped policy.
 
+Route-binding reconcile admits the Director's existing `local_operator` transport
+to refresh evidence on an exclusively owned declared lane, including production,
+without granting `route_binding.apply`. The request must name the current record
+digest. The server must derive a ready refresh or unchanged plan from its source
+records, with no findings and identical route, target, domains, ingress and TLS
+authority. Creating a binding, replacing admin-owned authority and accepting
+an external-authority handoff still require the existing explicit authority.
+The transaction rechecks all five source records, lane ownership and current
+binding before writing the observation and its idempotency receipt atomically.
+It changes no provider state, credentials, release or access policy. Other
+callers and terminal mutation restrictions retain their existing checks.
+
 Repository inventory apply also inherits that standing permission, for tracked
 and retired records alike. A record identifies one immutable GitHub repository;
 it cannot install the Delivery App, widen its installed permissions, grant
@@ -165,6 +167,9 @@ in force. See [testing retry](testing-deploy-retry.md).
 
 The [same-artifact testing service restart](lane-service-restart.md#supported-lane-and-identity)
 also has a bounded Director-agent path; that contract owns its safety and recovery rules.
+
+The [health alert drill](health-alert-drills.md) also has a bounded Director-agent
+send path; that contract owns its authorization and delivery rules.
 
 Generic-web deploy recovery dry runs authorize the instance-scoped
 `generic_web_deploy_recovery.plan` action, with the existing execute grant as a
@@ -422,8 +427,9 @@ Odoo preview apply uses the same source-owned Director identity boundary as
 [testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
 including preview destruction. It requires the caller's exact service-issued
 plan and an existing uniquely owned preview. Stable lanes cannot be substituted
-for a preview. The frozen plan must name the discovered compose and cannot alias
-a recorded stable target. Completed same-key replay and read-only outcome
+for a preview. The frozen plan must name the discovered compose, or create the
+replacement of an owned destroyed preview without a recorded target binding.
+It cannot alias a recorded stable target. Completed same-key replay and read-only outcome
 reconciliation remain available after qualification expires or lifecycle changes.
 Scoped callers retain their explicit policy rules and inherit no Director authority.
 Source-read permission for an import credential remains separate from execution.
@@ -438,15 +444,39 @@ only; they cannot admit runtime sync or another preview mutation. Unknown facts 
 observations retain their separate service-collector requirement. Same-key
 observation and lifecycle finalization remain available after evidence expires.
 A unique service preview is required. A fresh issued refresh plan can rebuild
-an owned destroyed preview whose provider target still exists, retaining its
-history until the new generation passes. The issued plan must postdate the
-recorded teardown authority; unknown teardown
-authority and stale plans still refuse. Other disposable-lane operations do not
+an owned destroyed preview, retaining its history until the new generation
+passes. An existing deployed target keeps its physical resource qualification.
+A recipient with no deployment history stays on the creation path only after
+the service verifies its owned destroyed lifecycle, absence of a target binding,
+template server, unchanged configuration and complete unstarted-resource proof.
+An allocated provider shell is inspected before source, environment, data or
+deploy mutations. Its project must have no containers; ordinary storage and
+referenced auxiliary volumes must be absent, including unregistered backing
+directories. Snapshot preparation may retain only its qualified incomplete
+attempt and overlay custody. Unknown, queued, changed or foreign resources
+refuse. The same proof runs again before deployment and for every native
+creation-shaped request, including an existing shell found by name. The issued
+plan must postdate the recorded teardown authority; unknown teardown authority
+and stale plans still refuse. Other disposable-lane operations do not
 gain permission from destroyed history. A staff hold or recorded `in_use`, `only_copy` or shared
 resource report refuses refresh even after that report expires or its binding
 changes. Resolve the real exception first through the existing target-policy or
 `/v1/disposable-lanes/observations` clear path; expiry never clears it. Positive reports confer no admission on this path and are not required.
 Destroy and stable testing retain their existing qualification requirements.
+
+An interrupted creation keeps its provider shell, domain, storage and original
+checkpoint. There is no automatic pre-deploy deletion: namespace allocation does
+not prove custody of globally named volumes that appear later. A qualified
+unstarted recipient keeps the ordinary creation-plan shape, so an original
+retry within its plan validity can continue without another allocation.
+Before a replacement request can supersede a held original, existing immutable
+intent, complete deployment and bound-job quiescence, expired lease, grace and
+atomic comparison still apply. Plan/result rollback fields retain their issued shape for original-operation
+compatibility; they are historical metadata and are never executed by refresh.
+Refresh requires no delete capability. Explicit preview destruction retains its
+independent qualification. An interrupted provider effect remains held until
+original-operation reconciliation or the guarded replacement path settles it;
+removing automatic deletion deliberately preserves that recovery wait.
 
 Before changing an existing preview compose and again before deployment, the
 service runs a fixed read-only Docker inspector on that compose's actual server
@@ -1170,13 +1200,11 @@ The set deliberately leaves out:
   panel keeps the reviewed request frozen for Apply. Image Apply checks the
   starting repository; production-use and release Apply verify the full reviewed
   plan digest.
-  The existing profile POST separately admits authenticated Director agents
-  setting one nonsecret `preview.override_env` key on an existing enabled
-  Odoo preview. It requires a strong matching revision and idempotency key,
-  reconstructs the change from the stored profile, and preserves all other
-  profile authority with atomic CAS. It adds no policy grant. Deletions,
-  secret-bearing settings, Shopify payloads and broader edits remain outside
-  this bounded admission; see [preview settings](preview-settings.md).
+  Preview runtime settings use the existing product-config plan/apply authority
+  on the product's preview context and exact instance `preview`. Product-profile
+  POST rejects nonempty `preview.override_env`; its old one-key conditional
+  admission is retired. The other bounded profile operations retain their
+  existing checks. See [preview settings](preview-settings.md).
 
 - `product_onboarding.apply`. It is checked on product `launchplane` with no
   product or lane scope, so it would reach every product. Adding the lane record

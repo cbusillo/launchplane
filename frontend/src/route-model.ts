@@ -23,12 +23,12 @@ export type EnvironmentView =
 
 export type EngineeringView =
   | "hub"
-  | "every-code"
   | "merge-train"
   | "tenant-admission"
   | "governance-projection"
   | "github-delivery"
-  | "privileged-operations";
+  | "privileged-operations"
+  | "runtime-setting-removal";
 
 export function productIndexPath(): string {
   return "/ui/products";
@@ -65,11 +65,9 @@ export function ownerReviewPath(): string {
 }
 
 export function engineeringViewLabel(view: EngineeringView): string {
+  if (view === "runtime-setting-removal") return "Remove stored settings";
   if (view === "github-delivery") {
     return "GitHub delivery";
-  }
-  if (view === "every-code") {
-    return "Every Code";
   }
   if (view === "merge-train") {
     return "Merge train";
@@ -111,12 +109,12 @@ export function parseAppRoute(pathname: string): AppRoute {
     if (
       routeSegments.length === 1 &&
       [
-        "every-code",
         "merge-train",
         "tenant-admission",
         "governance-projection",
         "github-delivery",
         "privileged-operations",
+        "runtime-setting-removal",
       ].includes(view)
     ) {
       return { kind: "engineering", view };

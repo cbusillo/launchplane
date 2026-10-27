@@ -55,6 +55,23 @@ def _fake_target_payload(
 
 
 class DokployTargetInspectTests(unittest.TestCase):
+    def test_application_endpoint_summary_distinguishes_default_custom_and_unknown(self) -> None:
+        cases: tuple[tuple[dict[str, object], str, int | None], ...] = (
+            ({"endpointSpecSwarm": None, "ports": []}, "provider_default", 0),
+            ({"endpointSpecSwarm": {}, "ports": []}, "provider_default", 0),
+            ({"endpointSpecSwarm": {"Mode": "vip"}, "ports": [{}]}, "vip", 1),
+            ({"endpointSpecSwarm": {"Mode": "dnsrr"}, "ports": []}, "dnsrr", 0),
+            ({"endpointSpecSwarm": {"Mode": "synthetic-secret"}}, "unknown", None),
+            ({}, "unknown", None),
+        )
+        for payload, mode, port_count in cases:
+            with self.subTest(payload=payload):
+                summary = summarize_dokploy_target_payload(
+                    target_type="application", target_id="app-fixture", payload=payload
+                )
+                self.assertEqual(summary.get("endpoint"), {"mode": mode, "port_count": port_count})
+                self.assertNotIn("synthetic-secret", str(summary))
+
     def test_summarize_payload_redacts_env_values_and_keeps_identity_fields(self) -> None:
         summary = summarize_dokploy_target_payload(
             target_type="compose",

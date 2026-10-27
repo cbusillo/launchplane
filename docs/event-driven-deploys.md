@@ -299,6 +299,15 @@ reservation. The webhook request never waits on a deploy.
   - The manifest is not recorded in the artifact store. The preview's slug
     and URL come from the product profile as today. The result is posted on
     the PR; see [Pull request feedback](#pull-request-feedback).
+  - A snapshot Odoo preview without its Launchplane lifecycle record needs
+    native restore custody before a refresh can supersede its original operation.
+    The receipt, physical storage binding and database witness must prove an
+    owned restore; unknown data leaves the original held. The same inspection
+    runs before provider effects, including when a creation plan adopts an
+    existing compose. Completed copies retain their data, and interrupted
+    owned attempts stay pinned to their original snapshot. Observation and
+    recovery of the original key remain available. An unowned legacy copy
+    uses the [preserving destroy](legacy-preview-reconciliation.md#unrecorded-odoo-resources-with-retained-original-intent).
   - Read the PR state again after taking the preview's reservation and just
     before the provider apply; if it closed or moved its head, the reservation is released with no provider effect and the
     reconcile runs again.
@@ -340,6 +349,18 @@ reservation. The webhook request never waits on a deploy.
     waivers or preview collectors. Open PR previews remain; unavailable PR state
     is held. Teardown preserves resources shared with another lane or production,
     including target aliases and credentials outside the destroy set.
+    A failed creation with no lifecycle record remains a cleanup candidate when
+    its retained original identifies the exact preview, including a completed
+    failed creation or a failed recreation after an earlier retirement. The
+    sweep stops revisiting completed originals once newer retirement is recorded.
+    It uses the existing fresh provider inventory to select untracked PRs before
+    reading their failed originals, rather than scanning all historical failures.
+    Closed-PR reconciliation
+    uses that original as its lifecycle token and rechecks its product, context,
+    PR, target naming and exclusive ownership before effects. Existing executor
+    exclusion, recovery grace, original schedule quiescence, target supersession
+    and physical resource inspection still apply. Missing original proof holds
+    the operation; the cleanup never invents a serving generation.
     A qualified destroy may supersede a missing-original-intent reservation
     under the same target execution lock, expired-lease grace and exact-record
     compare-and-swap. It records the earlier operation as superseded, never as
@@ -357,8 +378,8 @@ reservation. The webhook request never waits on a deploy.
     The first qualified cleanup has its own bounded retry budget. Reopened PRs,
     active executors and unknown provider outcomes remain protected. No
     production or whole-product retirement is authorized by this behavior.
-  - Odoo preview addon settings explicitly supplied in the product profile's
-    `preview.override_env.ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` survive generated
+  - Odoo preview addon settings explicitly supplied as
+    `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` in the managed preview scope survive generated
     website-bootstrap and import-source payloads. Generated bootstrap retains
     the preview's canonical URL, and template addon settings remain excluded.
     Only preview addon settings are carried over; other preview payload fields
@@ -400,6 +421,18 @@ returns them to a caller with `product_profile.read` on the product, so an
 event-driven preview or testing deploy can be checked without service logs.
 It includes every recorded target for that product rather than using the
 worker's queue page limit.
+The last plan's `timing` records `requested_at`, `started_at`,
+`planning_finished_at` and `feedback_finished_at`. These boundaries separate
+the time this pass became pending, reconcile work and comment publication.
+Coalescing can preserve an earlier pending time or requeue at completion of
+an earlier pass. `requested_at` is not a webhook receipt timestamp; use the
+persisted delivery record for that boundary. An Odoo deployment's queued
+operation has its own start and terminal timestamps.
+They describe the latest attempt, not a retained history of earlier passes.
+Completed in-place Odoo replacements retain `provider_deploy`, `post_deploy`,
+`readiness` and, when required, `runtime_identity` start/finish timestamp pairs
+in the deployment's `runtime_source`. A missing finish marks an incomplete
+phase. The deployment finish follows required identity verification.
 Exact commit SHAs and `sha256:` digests come back as they are, and so do the
 ids Launchplane records itself: the GitHub delivery id and the plan's top-level
 `*_id` fields, when they are a UUID or a `name-<hex>` id; those ids also stay
@@ -691,6 +724,11 @@ tracked repository inventory and managed credential binding must be available;
 an unavailable read is reported and retried on the next sweep, without another
 identity or a new grant.
 
+Discovery runs on one background thread, so slow repository or provider reads
+cannot delay the worker's operation and reconcile polls. An unfinished sweep
+prevents another sweep from starting, and shutdown joins the admitted sweep
+before closing the record store. The interval and target coalescing are unchanged.
+
 A PR without configured previews and without existing preview lifecycle work or
 retained reservations takes a PR-only reconcile path. It rereads the PR's state
 and refreshes Client review without build-provenance credentials, provider planning,
@@ -720,9 +758,19 @@ Successful delivery leaves the recovery set; a new event can retry an exhausted
 target with a fresh budget bound to its persisted delivery ID; duplicate deliveries
 do not refill it. Open PRs waiting for a build retain normal sweep coverage. Failed feedback
 and legacy entries without a status remain visible for supported observation rather
-than being assumed pending. Destroyed and teardown-pending preview records do not
-hide stale pending feedback; their reconciliation remains a no-op. Previews still
-requiring lifecycle work retain their existing sweep coverage and retry rules.
+than being assumed pending. A destroyed preview in the product's preview context
+also makes its failed feedback eligible for the existing bounded recovery. The
+reconcile rereads the PR before clearing a stale failure; qualified retired
+failed-feedback reads and unknown PR states use the same bound, and a confirmed
+closed PR leaves this recovery set. Apply, destroy and held-operation failures do
+not spend this retirement recovery budget. Retirement classification runs only on
+failed-result paths;
+unavailable metadata leaves the original failure intact. This lets a supported
+teardown settle Product Ops without another source-control event. Teardown-pending
+records do not qualify a failed preview as retired. Destroyed and teardown-pending
+preview records do not hide stale pending feedback; their reconciliation remains
+a no-op. Previews still requiring lifecycle work retain their existing sweep
+coverage and retry rules.
 
 ## Director steps
 

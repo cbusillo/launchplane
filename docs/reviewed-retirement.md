@@ -64,7 +64,12 @@ returns the original result; it does not reapply. `mode: readback` uses the
 same review binding and compares fresh stored survivors/absence and retirement
 intent, returning `readback_matches`; false means drift or incomplete removal,
 not success. The commit receipt identifies historical completion; readback is
-the separate current-state proof.
+the separate current-state proof. A 409 `runtime_setting_removal_stale` means
+this exact attempt acquired its reservation but refused changed state before
+writing, and the transaction rolled back. The browser may settle that attempt
+and request a fresh review. The generic `runtime_setting_removal_unverified`
+response does not prove that outcome and preserves continuity on a retry after
+an uncertain reply.
 
 Rollback custody stays inside the service's private database in the saved
 review's original record. The preview preimage is not an HTTP response and has
@@ -149,3 +154,42 @@ prove current absence or unchanged survivors.
 After the first proposal containing this request is persisted, retain a rollback
 image with this request reader. Older strict readers cannot load that new proposal;
 rolling back the service image never restores removed authorization data.
+
+## Signed-in removal page
+
+Engineering Ops → **Remove stored settings** (`/ui/engineering/runtime-setting-removal`)
+uses the existing removal endpoint. Enter the product, exact stored scope,
+context/lane when applicable, selected names and reason. **Review removal** saves
+a fresh service review and shows the exact selected names, survivors, retirement
+intent and reader/rollback requirement. Changing any field invalidates that review.
+No stored values, secret bindings or rollback preimages are displayed.
+
+Before confirming, qualify the actual runtime consumers and the effective value
+that would be inherited from broader scopes. A context removal can change every
+lane without a more specific override; a global removal can reach other products.
+The page does not discover or attest those dependencies. Follow the live-site and
+Client boundaries in DIRECTION.md before approving the exact change.
+
+**Remove reviewed settings** uses the signed-in administrator's existing authority,
+CSRF protection and one retained operation key. The original request stays in that
+browser tab's session storage for same-request recovery after a lost reply or
+reload. Recovery is keyed by the administrator and the physical stored record
+(scope, context and instance), independently of product ownership. The record
+selector stays usable after uncertainty so other records can be reviewed;
+returning to the same record restores its original request and key. An uncertain
+outcome locks that record's setting names, reason and new reviews; **Retry original removal**
+reuses the request and key. Missing recovery storage blocks submission. A stale
+attempt that is proven rolled back requires a fresh review, including after
+an uncertain reply. An unverified reservation keeps the original operation locked.
+A committed removal is followed by an independent readback, and its local saved
+request is cleared. Historical completion remains in service custody. An unavailable or
+mismatched readback stays unverified. **Check current record**
+can repeat that read, including while an Apply is uncertain. The previous
+result is cleared while a fresh check runs, and progress is shown until the
+request finishes. Completed checks show their service reference so a fast recheck
+is distinguishable from its predecessor. A mismatch reports changed state;
+a failed check stays unverified. A previous match is not current proof during
+the recheck. A current match or mismatch never settles the original Apply. After a confirmed
+commit, a fresh review can inspect the current record even if another writer
+has changed it; the historical receipt does not promise current agreement.
+Runtime sync, deployment and production acceptance remain separate operations.

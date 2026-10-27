@@ -182,7 +182,10 @@ uv run python scripts/reconcile-odoo-secret-references.py apply <same arguments>
 
 Dry-run saves the value-free review outside the repository. Apply sends that
 review's keys and digest with the lane confirmation, then reads the plan again
-and passes only when every entry is `already_agrees`.
+and passes only when the readback is nonempty, contains exactly the reviewed
+key set and every entry is `already_agrees`. Empty, missing or extra keys leave
+the correction `accepted_unverified`; preserve its trace and inspect the lane
+before considering another apply.
 
 Use the service route
 `/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile`:
@@ -252,7 +255,8 @@ secret, private-key input or process-wide trust change. The receiver's CA bundle
 and real issuer/key provisioning remain the custodian's reviewed steps.
 
 The [testing local-consumer path](testing-local-consumer.md) delivers one exact
-testing bridge binding through a human-reviewed recipient-encrypted envelope.
+testing bridge binding through a reviewed recipient-encrypted envelope issued by
+an administrator or an agent with existing exact-testing-lane authority.
 It exposes no plaintext read and creates no client service credential or grant.
 The local receiver verifies current custody and actual testing-server
 authentication before creating a separate private token file.
@@ -722,7 +726,6 @@ decryption key state denies the reveal or resolution.
     `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST`; request bodies cannot
     override them
   - route-specific webhook ingress secrets such as
-    `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` and
     `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
 - Treat these as DB-backed Launchplane-owned data instead of live service-host
   env once the shared store is available:
@@ -872,8 +875,75 @@ prove absence outside that access. Binding metadata is a record like the rest of
 a product environment, and reading is never a stop, so the Director's agents
 read it through the same standing environment read across products
 (cbusillo/repairshopr_api#103). Preview
-and removed-lane bindings and contexts shared ambiguously between products are
-excluded.
+configuration scopes are included; removed-lane bindings and contexts shared
+ambiguously between products are excluded.
+
+### Read coverage and binding selection
+
+The existing product catalog (`GET /v1/product-profiles`) and binding response
+include `coverage`: `population`, `source`, `authorization`, `status` and explicit
+`exclusions`. Catalog coverage is for active products within the requested
+`driver_id`; an empty driver filter includes all drivers. A product-scoped catalog
+reports `scoped` even when its returned subset is empty. It never reveals hidden
+product identities or counts.
+
+Binding `coverage` describes the copy metadata population above. `complete`
+means unbounded source enumeration and authorized records within that stated
+population, not every effective secret or every historical lane. The coverage
+proof includes every configuration target, including the managed preview scope;
+stable-lane authority alone cannot certify complete copy metadata coverage.
+The storage adapter's `collection_read_coverage` attests unbounded profile, secret-record and
+binding enumeration; a limited, unsupported or unknown collection keeps that
+limitation in the response. Adapters without the capability report `unknown`.
+These are current read observations, not an atomic snapshot or runtime proof.
+
+For names-only selection evidence on the same binding endpoint, request
+`include_resolution=true`. `integration` defaults to `runtime_environment` and
+can explicitly select another existing integration without discovering hidden
+integration names. Repeated `scopes` parameters select `global`, `context` and/or
+`context_instance`; omitting them selects all three. For example,
+`?include_resolution=true&integration=launchplane_worker&scopes=context_instance`
+asks the shared selector the same scope question as the exact-lane worker
+resolver. `lane_binding_resolution` states these inputs and reports each stable
+lane declared in the product profile, its selected binding metadata and coverage.
+The managed preview configuration scope is explicitly excluded from this
+selection population, even though copy metadata can include it. Selection reads
+no versions or values.
+
+Selection uses the existing secret resolver's precedence before authorization.
+Each lane's qualification view returns selected rows only when authority covers
+every requested scope; otherwise the whole selection is withheld with `scoped`
+coverage. A hidden higher-precedence source cannot make a readable shadow appear
+or disappear in that view. The ordinary copy `bindings` remain available under
+their existing eligibility and authorization. A context-only reader may request
+only `scopes=context` for a complete answer to that narrower question; that does
+not claim coverage of instance or global delivery sources. Coverage
+depends on authority over every requested scope, even when no binding exists,
+so it cannot reveal whether a hidden source exists. Complete global coverage
+needs the existing Director-agent standing or policy-named administrator authority;
+an allow on the empty context alone cannot prove every global source readable.
+Other selection scopes require that standing or explicit `secret.list` to prove
+complete scope coverage. Environment metadata access still returns authorized
+copy names, but selection stays `scoped` without that proof. Metadata enumeration
+still uses the shared resolver even when selection rows are withheld. Hidden
+context-ownership records cannot change the qualification projection or its
+coverage through inherited product-read rules.
+Existing copy eligibility and grants are unchanged.
+
+All-scope selection is not a delivery claim: site delivery may exclude global
+or context sources, and worker delivery selects exact-instance sources. Declare
+the appropriate scopes when qualifying one of those paths. Historical and
+undeclared lanes and other integrations remain outside the stated population;
+runtime delivery, value validity and health need their own evidence.
+The binding endpoint also accepts inactive products; active-fleet qualification
+starts from the active catalog. `integration` and `scopes` affect only the opt-in
+resolution view and do not filter or broaden copy `bindings` when that view is
+not requested.
+
+Consumers must preserve server coverage and requested selection evidence. Missing
+coverage from an older server or projection is `unknown`; zero client omissions
+does not prove server completeness. A bounded client projection must retain its
+own bound separately and cannot turn partial rows into a complete inventory.
 
 A product-config secret entry can use `copy_from` instead of `value`:
 
@@ -896,12 +966,13 @@ A product-config secret entry can use `copy_from` instead of `value`:
 ```
 
 The top-level product-config target is the destination lane. The source must be
-a stable lane of that same product, and the destination must be lane-exact
+a configuration scope of that same product, and the destination must be exact
 in `runtime_environment`. The source binding key is the destination binding key;
 renaming a token to bypass integration key safety is not supported. Neither a
 source product nor another secret store can be supplied. Site-shared sources
 may be selected when that source lane has no configured exact binding. Ambiguous,
-disabled, missing or superseded sources are refused. Copies to previews are refused.
+disabled, missing or superseded sources are refused. Copies to the managed
+`preview` scope use the same checks and must pass preview key-safety policy.
 An explicit class on the source must allow the destination lane; a `prod_only`
 source cannot be copied to testing by relabelling its destination `shared_safe`.
 
@@ -1002,3 +1073,8 @@ deployed: the provider copy stays in place and already holds the same value, and
 a later live-target runtime sync delivers it from the managed secret. A
 production secret adopted as `shared_safe` with a sharing reason can then be
 copied to testing by reference, as described above.
+
+## Shared preview settings
+
+See [preview runtime settings](preview-settings.md) for the managed `preview`
+scope, precedence, UI and helper usage, and migration from profile overrides.

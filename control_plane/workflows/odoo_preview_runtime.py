@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import click
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.text_fields import require_text
@@ -319,6 +320,11 @@ def build_odoo_preview_apply_inputs(
         app_name_prefix=effective_preview_app_name_prefix(profile=profile),
         preview_slug=preview_slug,
     )
+    template_compose_id = _preview_template_compose_id(
+        control_plane_root=control_plane_root,
+        context_name=preview_profile.context,
+        instance_name=template_instance,
+    )
     target: OdooPreviewRuntimeTargetEvidence | None = None
     discovery_error = ""
     block_discovery_error = False
@@ -337,6 +343,20 @@ def build_odoo_preview_apply_inputs(
     except click.ClickException as exc:
         discovery_error = str(exc)
         block_discovery_error = request.operation == "destroy"
+    if (
+        target is not None
+        and request.operation == "refresh"
+        and _preview_target_is_unstarted(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            profile=profile,
+            target=target,
+            compose_name=compose_name,
+            template_compose_id=template_compose_id,
+            database_url=database_url,
+        )
+    ):
+        target = None
     runtime_plan = plan_odoo_preview_runtime(
         request=OdooPreviewRuntimePlanRequest(
             operation=request.operation,
@@ -395,11 +415,6 @@ def build_odoo_preview_apply_inputs(
                 message=discovery_error,
             ),
         )
-    template_compose_id = _preview_template_compose_id(
-        control_plane_root=control_plane_root,
-        context_name=preview_profile.context,
-        instance_name=template_instance,
-    )
     environment_id, environment_error = _preview_environment_id(
         control_plane_root=control_plane_root,
         context_name=preview_profile.context,
@@ -445,6 +460,114 @@ def build_odoo_preview_apply_inputs(
             "" if status == "ready" else _blocked_inputs_message(runtime_plan, dry_run_plan)
         ),
     )
+
+
+def _preview_target_is_unstarted(
+    *,
+    control_plane_root: Path,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    target: OdooPreviewRuntimeTargetEvidence,
+    compose_name: str,
+    template_compose_id: str,
+    database_url: str | None,
+) -> bool:
+    from control_plane.clean_testing_snapshot import preview_snapshot
+    from control_plane.disposable_lanes import (
+        DisposableLaneStore,
+        require_disposable_lane,
+        resolve_disposable_preview,
+    )
+    from control_plane.odoo_preview_resources import (
+        preview_resource_environment,
+        require_existing_preview_resources,
+    )
+    from control_plane.preview_filestore import prepare_preview_filestore
+    from control_plane.storage.postgres import PostgresRecordStore
+
+    if not isinstance(record_store, PostgresRecordStore) or not template_compose_id:
+        return False
+    store = cast(DisposableLaneStore, record_store)
+    try:
+        preview = resolve_disposable_preview(
+            store, profile, profile.preview.context, target.instance, allow_destroyed=True
+        )
+        if preview.state != "destroyed":
+            return False
+        require_disposable_lane(
+            store,
+            product=profile.product,
+            context=preview.context,
+            instance=target.instance,
+            preview=preview,
+            preview_operation="refresh",
+        )
+        try:
+            bound = store.read_dokploy_target_id_record(
+                context_name=preview.context, instance_name=target.instance
+            )
+        except FileNotFoundError:
+            bound = None
+        if bound is not None or any(
+            item.target_id == target.target_id for item in store.list_dokploy_target_id_records()
+        ):
+            return False
+        host, token = dokploy_source.read_dokploy_config(
+            control_plane_root=control_plane_root, database_url=database_url
+        )
+        template = dokploy_api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=template_compose_id
+        )
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=target.target_id
+        )
+        server_id = str(template.get("serverId") or "").strip()
+        if (
+            not server_id
+            or payload.get("serverId") != server_id
+            or dokploy_api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=target.target_id,
+                require_complete=True,
+            )
+        ):
+            return False
+        environment = preview_resource_environment(compose_name)
+        filestore = None
+        if profile.preview.clean_testing_snapshot:
+            filestore = prepare_preview_filestore(
+                host=host,
+                token=token,
+                server_id=server_id,
+                project=str(payload.get("appName") or ""),
+                data_volume=environment["ODOO_DATA_VOLUME"],
+                database_volume=environment["ODOO_DB_VOLUME"],
+                logs_volume=environment["ODOO_LOG_VOLUME"],
+                database_name=environment["ODOO_DB_NAME"],
+                snapshot=preview_snapshot(record_store, profile),
+                apply=False,
+                dispatch_guard=lambda dispatch: dispatch(),
+            )
+        require_existing_preview_resources(
+            host=host,
+            token=token,
+            compose_id=target.target_id,
+            compose_name=compose_name,
+            context=preview.context,
+            instance=target.instance,
+            environment=environment,
+            checkpoint=lambda: None,
+            unstarted=True,
+            expected_server_id=server_id,
+            pending_filestore=filestore is not None,
+        )
+    except NativeSourceAuthorizationDenied:
+        raise
+    except (FileNotFoundError, ValueError, click.ClickException):
+        return False
+    return True
 
 
 def _needs_preview_environment_id(runtime_plan: OdooPreviewRuntimePlan) -> bool:
@@ -1261,7 +1384,13 @@ def observe_odoo_preview_dokploy_apply(
         )
         status = dokploy_api.deployment_status(deployment)
         if deployment is None:
-            retry_safe_phases = {"", "compose_create", "compose_update", "domain_ensure"}
+            retry_safe_phases = {
+                "",
+                "compose_create",
+                "compose_update",
+                "domain_ensure",
+                "preview_filestore_prepare",
+            }
             return OdooPreviewDokployObservation(
                 outcome=("absent" if provider_effect_phase in retry_safe_phases else "unknown"),
                 retry_safe=provider_effect_phase in retry_safe_phases,
@@ -1304,6 +1433,7 @@ def odoo_preview_target_is_quiescent(
     request: OdooPreviewDokployApplyRequest,
     database_url: str | None,
     schedule_binding: dokploy_post_deploy.ComposeDataWorkflowBinding | None = None,
+    require_snapshot_custody: bool = False,
 ) -> bool:
     plan = request.dry_run_plan
     if not plan.compose_ref:
@@ -1354,6 +1484,29 @@ def odoo_preview_target_is_quiescent(
             )
         ):
             return False
+        if require_snapshot_custody:
+            if plan.clean_snapshot is None:
+                return False
+            from control_plane.preview_filestore import prepare_preview_filestore
+            from control_plane.odoo_preview_resources import preview_resource_environment
+
+            target = dokploy_api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type="compose", target_id=compose_id
+            )
+            environment = preview_resource_environment(plan.compose_name)
+            prepare_preview_filestore(
+                host=host,
+                token=token,
+                server_id=str(target.get("serverId") or ""),
+                project=str(target.get("appName") or ""),
+                data_volume=environment["ODOO_DATA_VOLUME"],
+                database_volume=environment["ODOO_DB_VOLUME"],
+                logs_volume=environment["ODOO_LOG_VOLUME"],
+                database_name=environment["ODOO_DB_NAME"],
+                snapshot=plan.clean_snapshot,
+                apply=False,
+                dispatch_guard=lambda dispatch: dispatch(),
+            )
         if schedule_binding is not None:
             current_binding = dokploy_post_deploy.compose_data_workflow_binding(
                 host=host,
@@ -1563,10 +1716,6 @@ def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tupl
         deploy_path = spec.compose_redeploy_path if request.no_cache else spec.compose_deploy_path
         if not deploy_path:
             missing.append("compose_redeploy_path" if request.no_cache else "compose_deploy_path")
-        if runtime_plan.target is None and not spec.domain_delete_path:
-            missing.append("domain_delete_path")
-        if runtime_plan.target is None and not spec.compose_delete_path:
-            missing.append("compose_delete_path")
     else:
         if not spec.domain_by_compose_path:
             missing.append("domain_by_compose_path")
@@ -1645,7 +1794,6 @@ def _execute_refresh(
     created_compose_id = ""
     resolved_compose_id = ""
     domain_id = ""
-    deploy_triggered = False
     provider_effect_attempted = False
     module_install_update_status: Literal["pass", "fail", "skipped"] = "skipped"
     module_install_update_evidence: dict[str, str] = {}
@@ -1668,8 +1816,6 @@ def _execute_refresh(
         if restore_upstream or restore_clean_snapshot or preserve_existing_data:
             environment_values["ODOO_MAX_CRON_THREADS"] = "0"
             environment_values["ENV_OVERRIDE_DISABLE_CRON"] = "true"
-        if qualify_existing_preview and creating_compose:
-            raise click.ClickException("Existing-preview qualification cannot create a target.")
         if creating_compose and not plan.template_compose_id:
             raise click.ClickException("Odoo preview compose create requires template_compose_id.")
         source_compose_id = plan.template_compose_id if creating_compose else plan.compose_ref
@@ -1679,6 +1825,7 @@ def _execute_refresh(
             target_type="compose",
             target_id=source_compose_id,
         )
+        source_server_id = str(target_payload.get("serverId") or "").strip()
         compose_id, created_compose = _resolve_or_create_compose(
             database_url=database_url,
             host=host,
@@ -1697,6 +1844,58 @@ def _execute_refresh(
                 target_type="compose",
                 target_id=compose_id,
             )
+        from control_plane.preview_filestore import prepare_preview_filestore
+
+        def prepare_filestore(dispatch: Callable[[], None]) -> None:
+            with guard():
+                checkpoint_provider_effect("preview_filestore_prepare")
+                dispatch()
+
+        def inspect_filestore(dispatch: Callable[[], None]) -> None:
+            if provider_lease_check is not None:
+                provider_lease_check()
+            dispatch()
+
+        def filestore_for_mode(*, apply: bool) -> dict[str, object] | None:
+            return prepare_preview_filestore(
+                host=host,
+                token=token,
+                server_id=str(target_payload.get("serverId") or ""),
+                project=str(target_payload.get("appName") or ""),
+                data_volume=environment_values["ODOO_DATA_VOLUME"],
+                database_volume=environment_values["ODOO_DB_VOLUME"],
+                logs_volume=environment_values["ODOO_LOG_VOLUME"],
+                database_name=environment_values["ODOO_DB_NAME"],
+                snapshot=plan.clean_snapshot if restore_clean_snapshot else None,
+                apply=apply,
+                require_existing=retained_filestore,
+                dispatch_guard=prepare_filestore if apply else inspect_filestore,
+            )
+
+        filestore = None
+        current_compose = yaml.safe_load(str(target_payload.get("composeFile") or ""))
+        retained_filestore = isinstance(current_compose, dict) and "odoo_filestore" in (
+            current_compose.get("volumes") or {}
+        )
+        if restore_clean_snapshot or (
+            expected_runtime_identity is not None and not creating_compose and not restore_upstream
+        ):
+            memory_capacity.require_preview_host_memory_capacity(
+                host=host,
+                token=token,
+                server_id=str(target_payload.get("serverId") or ""),
+                database_url=database_url,
+                running_preview={
+                    "project": str(target_payload.get("appName") or ""),
+                    "identity": dokploy_api.parse_dokploy_env_text(
+                        str(target_payload.get("env") or "")
+                    ).get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
+                }
+                if not restore_clean_snapshot
+                else None,
+            )
+        if restore_clean_snapshot or retained_filestore:
+            filestore = filestore_for_mode(apply=False)
         compose_file = dokploy_compose.render_odoo_raw_compose_file(
             image_reference=request.image_reference,
             hold_web_until_integration_readback=web_held_until_integration_readback(
@@ -1708,10 +1907,12 @@ def _execute_refresh(
             mount_workflow_ssh=restore_upstream,
             protect_workflow_ssh=restore_upstream,
             domain_certificate_type=plan.domain_certificate_type,
+            preview_filestore=filestore,
+            preview_identity=expected_runtime_identity if not restore_upstream else None,
         )
 
         def qualify_resources() -> None:
-            if qualify_existing_preview or preserve_existing_data:
+            if qualify_existing_preview or preserve_existing_data or creating_compose:
                 from control_plane.odoo_preview_resources import require_existing_preview_resources
 
                 require_existing_preview_resources(
@@ -1723,6 +1924,9 @@ def _execute_refresh(
                     instance=plan.preview_slug,
                     environment=request.environment_values,
                     checkpoint=provider_lease_check or (lambda: None),
+                    pending_filestore=restore_clean_snapshot and filestore is not None,
+                    unstarted=creating_compose,
+                    expected_server_id=source_server_id,
                 )
 
         qualify_resources()
@@ -1776,8 +1980,14 @@ def _execute_refresh(
                 domain_host=plan.domain_host,
                 runtime_port=plan.runtime_port,
                 certificate_type=plan.domain_certificate_type,
+                service_name="preview-router"
+                if expected_runtime_identity is not None and not restore_upstream
+                else "web",
             )
         steps.append(_step("domain_create_or_update", plan.domain_host))
+
+        if filestore is not None and filestore_for_mode(apply=True) != filestore:
+            raise click.ClickException("Preview filestore changed after its preparation plan.")
 
         latest_before = dokploy_api.latest_deployment_for_target(
             host=host,
@@ -1788,7 +1998,6 @@ def _execute_refresh(
         qualify_resources()
         with guard():
             checkpoint_provider_effect("deploy_trigger")
-            deploy_triggered = True
             if provider_operation_title:
                 dokploy_api.trigger_deployment(
                     host=host,
@@ -1909,28 +2118,8 @@ def _execute_refresh(
         # caller release an unused attempt or retain earlier provider custody.
         raise
     except click.ClickException as exc:
-        rollback_errors: tuple[str, ...] = ()
         if isinstance(exc, dokploy_post_deploy.OdooPostDeployReadbackFailure):
             module_install_update_evidence = exc.evidence
-        if not deploy_triggered:
-            if created_compose_id and provider_effect_checkpoint is not None:
-                provider_effect_checkpoint("rollback_started")
-            elif provider_lease_check is not None:
-                provider_lease_check()
-            rollback_errors = _rollback_created_runtime(
-                host=host,
-                token=token,
-                domain_id=domain_id if created_compose_id else "",
-                compose_id=created_compose_id,
-                delete_volumes=plan.delete_volumes,
-                provider_effect_checkpoint=provider_effect_checkpoint,
-            )
-            if (
-                created_compose_id
-                and not rollback_errors
-                and provider_effect_checkpoint is not None
-            ):
-                provider_effect_checkpoint("rollback_complete")
         return _apply_result(
             request=request,
             status="fail",
@@ -1942,7 +2131,6 @@ def _execute_refresh(
             module_install_update_status=module_install_update_status,
             module_install_update_evidence=module_install_update_evidence,
             steps=tuple(steps),
-            rollback_errors=rollback_errors,
         )
 
 
@@ -2256,16 +2444,6 @@ def _compose_domains(*, host: str, token: str, compose_id: str) -> tuple[JsonObj
     return tuple(domains)
 
 
-def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
-    dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.delete",
-        method="POST",
-        payload={"domainId": domain_id},
-    )
-
-
 def _delete_compose(*, host: str, token: str, compose_id: str, delete_volumes: bool) -> None:
     dokploy_api.dokploy_request(
         host=host,
@@ -2274,38 +2452,6 @@ def _delete_compose(*, host: str, token: str, compose_id: str, delete_volumes: b
         method="POST",
         payload={"composeId": compose_id, "deleteVolumes": delete_volumes},
     )
-
-
-def _rollback_created_runtime(
-    *,
-    host: str,
-    token: str,
-    domain_id: str,
-    compose_id: str,
-    delete_volumes: bool,
-    provider_effect_checkpoint: Callable[[str], None] | None = None,
-) -> tuple[str, ...]:
-    errors: list[str] = []
-    if domain_id:
-        try:
-            if provider_effect_checkpoint is not None:
-                provider_effect_checkpoint("rollback_domain_delete")
-            _delete_domain(host=host, token=token, domain_id=domain_id)
-        except click.ClickException as exc:
-            errors.append(f"domain rollback failed: {exc}")
-    if compose_id:
-        try:
-            if provider_effect_checkpoint is not None:
-                provider_effect_checkpoint("rollback_compose_delete")
-            _delete_compose(
-                host=host,
-                token=token,
-                compose_id=compose_id,
-                delete_volumes=delete_volumes,
-            )
-        except click.ClickException as exc:
-            errors.append(f"compose rollback failed: {exc}")
-    return tuple(errors)
 
 
 def _wait_for_smoke_check(

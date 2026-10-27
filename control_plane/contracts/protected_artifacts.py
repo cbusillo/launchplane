@@ -21,6 +21,7 @@ ProtectedArtifactReason = Literal[
     "release-tuple",
     "active-preview-generation",
     "active-preview-feedback",
+    "cutover-host",
 ]
 
 
@@ -565,6 +566,31 @@ def build_protected_artifact_set(
         *release_tuple_entries,
         *preview_entries,
     ]
+    for profile in profiles:
+        if normalized_product and profile.product != normalized_product:
+            continue
+        for lane in profile.lanes:
+            if normalized_context and lane.context != normalized_context:
+                continue
+            runtime = lane.odoo_cutover.host_runtime if lane.odoo_cutover is not None else None
+            if runtime is None:
+                continue
+            for reference in (runtime.prepared_image, runtime.restore_image):
+                repository, digest = reference.split("@", 1)
+                entries.append(
+                    ProtectedArtifactEntry(
+                        product=profile.product,
+                        context=lane.context,
+                        instance=lane.instance,
+                        environment_kind="stable",
+                        image_references=(reference,),
+                        image_repository=repository,
+                        image_digest=digest,
+                        reason="cutover-host",
+                        source_record_type="product_profile",
+                        source_record_id=profile.product,
+                    )
+                )
     artifact_ids = _normalized_values([entry.artifact_id for entry in entries])
     image_references = _normalized_values(
         [image_reference for entry in entries for image_reference in entry.image_references]

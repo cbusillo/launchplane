@@ -1,7 +1,3 @@
-import base64
-import gzip
-import json
-
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
 from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
@@ -32,7 +28,7 @@ def build_preview_clean_snapshot_script(
         key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_")) for key in workflow_environment
     ):
         raise ValueError("A snapshot preview cannot receive an upstream connection or identity.")
-    spec = {
+    spec: dict[str, object] = {
         "snapshot": snapshot.model_dump(mode="json"),
         "copy_witness_parameter": TESTING_COPY_COMPLETION_PARAMETER,
         "compose_project": compose_project,
@@ -54,17 +50,9 @@ def build_preview_clean_snapshot_script(
             "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", ""
         ),
     }
-    encoded = base64.b64encode(gzip.compress(json.dumps(spec).encode(), mtime=0)).decode()
-    program = base64.b64encode(
-        gzip.compress(PREVIEW_CLEAN_SNAPSHOT_PROGRAM.encode(), mtime=0)
-    ).decode()
-    return (
-        "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_PREVIEW_SNAPSHOT'\n"
-        "import base64,gzip,json\n"
-        f"spec=json.loads(gzip.decompress(base64.b64decode({encoded!r})))\n"
-        f"exec(compile(gzip.decompress(base64.b64decode({program!r})), '<preview-clean-snapshot>', 'exec'))\n"
-        "LP_PREVIEW_SNAPSHOT\n"
-    )
+    from control_plane.host_package import host_schedule
+
+    return host_schedule("preview_snapshot", spec)
 
 
 PREVIEW_CLEAN_SNAPSHOT_PROGRAM = (
@@ -73,7 +61,6 @@ PREVIEW_CLEAN_SNAPSHOT_PROGRAM = (
     + STORAGE_MAINTENANCE_LIBRARY
     + r"""
 import base64
-import shutil
 import tempfile
 import time
 import uuid
@@ -114,58 +101,14 @@ def wait_for_idle_preview_runner(containers):
 def restore_preview_snapshot(containers, source_lock):
     wait_for_idle_preview_runner(containers)
     snapshot = spec['snapshot']
-    binding = {key: spec[key] for key in ('compose_project', 'database_name', 'preview_volumes')}
-    binding.update({key: snapshot[key] for key in ('server_id', 'product', 'context')})
-    binding['volume_backings'] = {}
-    for role, name in spec['preview_volumes'].items():
-        volume = json.loads(docker('volume', 'inspect', name))[0]
-        backing = Path(volume['Mountpoint'])
-        created = volume.get('CreatedAt')
-        if not isinstance(created, str) or not created:
-            raise RuntimeError('Preview storage creation identity is unavailable')
-        metadata = backing.stat()
-        binding['volume_backings'][role] = {'created_at': created, 'path': str(backing),
-            'device': metadata.st_dev, 'inode': metadata.st_ino}
-
-    attempt_id = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()
-    attempts = clean_snapshot_root(snapshot['snapshot_id']).parent / 'preview-attempts'
-    attempts.mkdir(mode=0o700, exist_ok=True)
-    attempt_path = attempts / (attempt_id + '.json')
-    previous_attempt = None
-    if attempt_path.exists():
-        if attempt_path.is_symlink() or attempt_path.stat().st_size > 8192:
-            raise RuntimeError('Preview snapshot attempt custody is invalid')
-        previous_attempt = json.loads(attempt_path.read_text())
-        if previous_attempt['binding'] != binding:
-            raise RuntimeError('Preview snapshot attempt belongs to another target')
-        snapshot = previous_attempt['snapshot']
-    witness = hashlib.sha256(json.dumps(['preview-restore-v1', attempt_id, snapshot['snapshot_id']]).encode()).hexdigest()
-    owned_unreleased = bool(previous_attempt and previous_attempt.get('restore_witness') == witness and previous_attempt.get('completed') is False)
+    attempt = preview_restore_attempt(spec['compose_project'], spec['database_name'],
+        spec['preview_volumes'], snapshot, clean_snapshot_root(snapshot['snapshot_id']).parent)
+    snapshot, witness = (attempt[key] for key in ('snapshot', 'witness'))
     database = spec['database_name']
-    if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}', database):
-        raise RuntimeError('Invalid preview database identity')
-    present = docker('exec', '-i', containers['database'][0], 'sh', '-c',
-        'psql -X -qAt -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
-        '_', database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
-    if present not in {'0', '1'} or (present == '1' and previous_attempt is None):
-        raise RuntimeError('An existing preview database cannot be overwritten by a snapshot')
-    restart = False
-    if present == '1':
-        probe = ['exec', '-i', containers['database'][0], 'sh', '-c',
-            'psql -X -qAt -v ON_ERROR_STOP=1 -v marker="$2" -U "$POSTGRES_USER" -d "$1"',
-            '_', database, spec['copy_witness_parameter']]
-        table = docker(*probe, stdin=b"SELECT to_regclass('public.ir_config_parameter') IS NOT NULL;\n").decode().strip()
-        if table not in {'t', 'f'}:
-            raise RuntimeError('Preview restore witness inspection is ambiguous')
-        stored = docker(*probe, stdin=b"SELECT value FROM ir_config_parameter WHERE key=:'marker';\n").decode().strip() if table == 't' else ''
-        if stored != witness:
-            if not owned_unreleased or stored not in {'', snapshot['snapshot_id']}:
-                raise RuntimeError('Preserve preview data without this attempt restore witness')
-            restart = True
+    present = preview_restore_database_custody(containers['database'][0], database,
+        spec['copy_witness_parameter'], attempt)
     path = clean_snapshot_root(snapshot['snapshot_id'])
-    if present == '0' or restart:
-        if previous_attempt is not None and previous_attempt.get('completed'):
-            raise RuntimeError('A completed preview lost its database; preserve its retained data')
+    if present == '0':
         path, receipt = verified_clean_snapshot(snapshot['snapshot_id'])
         if any(receipt[key] != snapshot[key] for key in ('database_sha256', 'filestore_sha256')):
             raise RuntimeError('The clean snapshot differs from its service receipt')
@@ -178,34 +121,28 @@ def restore_preview_snapshot(containers, source_lock):
     if (volume.get('Driver') != 'local' or volume.get('Options')
         or (volume.get('Labels') or {}).get('com.docker.compose.project') != spec['compose_project']):
         raise RuntimeError('Preview data volume is not exclusively owned')
-    clones = {}
-    if (present == '0' or restart) and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
-        containers, snapshot['storage_budget'], runner_staging_bytes=(path / 'database.dump').stat().st_size,
-        host_staging_bytes=0, filestore_clone_source=path.parent, clone_decisions=clones):
-        raise RuntimeError('Preview snapshot clone lacks reviewed storage headroom')
+    overlay_mounts = [mount for mount in containers['script-runner'][1]['Mounts']
+        if mount.get('Name') == mounts[0]['Name'] + '-filestore']
+    overlay = inspect_preview_filestore(mounts[0]['Name'], spec['compose_project']) if overlay_mounts else None
+    if overlay and overlay[2] != path / 'filestore':
+        raise RuntimeError('Preview overlay differs from its retained snapshot')
+    if present == '0' and overlay is None:
+        raise RuntimeError('A new snapshot preview requires its overlay filestore')
+    if present == '0':
+        require_unused_preview_backing(volume)
+        require_unused_preview_upper(overlay[3])
+    if present == '0' and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
+        containers, {**snapshot['storage_budget'], 'filestore_bytes': 0},
+        runner_staging_bytes=(path / 'database.dump').stat().st_size, host_staging_bytes=0):
+        raise RuntimeError('Preview overlay lacks reviewed storage headroom')
     mounted = docker('ps', '--all', '--filter', 'volume=' + mounts[0]['Name'],
         '--format', '{{.ID}}').decode().splitlines()
     if set(mounted) != {runner, containers['web'][0]}:
         raise RuntimeError('Preview data volume has another or unknown consumer')
     docker('stop', containers['web'][0])
     docker('exec', '-u', 'root', runner, 'rm', '-f', spec['web_gate_path'])
-    if restart:
-        docker('exec', containers['database'][0], 'sh', '-c', 'dropdb --if-exists --force -U "$POSTGRES_USER" -- "$1"', '_', database)
-        present = '0'
-    docker('pause', runner)
-    try:
-        destination = Path(volume['Mountpoint']) / 'filestore' / database
-        if destination.resolve() != destination.absolute():
-            raise RuntimeError('Preview filestore is aliased')
-        if present == '0':
-            if destination.exists():
-                if not owned_unreleased:
-                    raise RuntimeError('Preserve preview filestore without an owned unreleased attempt')
-                shutil.rmtree(destination)
-            write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': False})
-            copy_filestore(path / 'filestore', destination, clones.get('data', False))
-    finally:
-        docker('unpause', runner)
+    if present == '0':
+        write_preview_restore_attempt(attempt, completed=False)
     dump = '/tmp/preview-snapshot-' + uuid.uuid4().hex + '.dump'
     try:
         if present == '0':
@@ -214,7 +151,9 @@ def restore_preview_snapshot(containers, source_lock):
         gid = docker('exec', runner, 'id', '-g').decode().strip()
         if not uid.isdigit() or not gid.isdigit():
             raise RuntimeError('Preview workflow identity is unavailable')
-        docker('exec', '-u', 'root', runner, 'chown', '-R', uid + ':' + gid, '/volumes/data', *([dump] if present == '0' else []))
+        if overlay and (overlay[2].stat().st_uid, overlay[2].stat().st_gid) != (int(uid), int(gid)):
+            raise RuntimeError('Preview overlay ownership differs from its workflow identity')
+        docker('exec', '-u', 'root', runner, 'chown', uid + ':' + gid, '/volumes/data', *([dump] if present == '0' else []))
         fcntl.flock(source_lock, fcntl.LOCK_UN)
         arguments = ['exec', '-i']
         environment = {**spec['workflow_environment'], 'PLATFORM_INSTANCE': 'preview',
@@ -236,7 +175,7 @@ def restore_preview_snapshot(containers, source_lock):
             stdin=spec['readback_program'].encode()).decode()
         if 'integration_readback_ok=true' not in readback.splitlines():
             raise RuntimeError('Snapshot preview connection readback failed')
-        write_snapshot_receipt(attempt_path, {'binding': binding, 'snapshot': snapshot, 'restore_witness': witness, 'completed': True})
+        write_preview_restore_attempt(attempt, completed=True, overlay_filestore=overlay is not None)
         docker(*arguments, runner, 'python3', '-I', '-c',
             "import hashlib,os;from pathlib import Path;Path(" + repr(spec['web_gate_path']) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+chr(10)+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
         docker('start', containers['web'][0])

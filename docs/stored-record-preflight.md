@@ -94,6 +94,14 @@ Other free text always gets an ordinary pseudonym, which can hide some invalid
 history, such as a blank or too-long value, or two values that differ only in
 case. Arbitrary map values with those names receive no format exemption.
 
+The legacy preview `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` field is structured
+data: its scoped addon payload is validated, decoded, scrubbed with the same
+salt and encoded again. Literal values and binding identifiers are replaced;
+the preview instance and canonical secret transport relationships survive.
+The same key in an arbitrary map receives no exemption. A malformed or unsafe
+preview payload keeps its ordinary pseudonym so the candidate still refuses it
+when it migrates; releases that do not activate that migration remain deployable.
+
 ## Candidate rehearsal
 
 `scripts/deploy/stored-record-preflight.sh` takes an immutable candidate, the
@@ -142,6 +150,16 @@ unsupported revisions or candidates without the module refuse. There is no
 production-database, empty-fixture or coverage fallback.
 
 ## Activation order and recovery
+
+The managed-preview migration requires the structured exporter to be serving
+before activation. Its producer-first release retains the profile-archive
+startup target. After a fresh export passes the unchanged guarded migration,
+normal deployment advances to the idle-retirement target and removes the
+temporary legacy reader and write refusals. Preview settings then come from
+managed records; onboarding and configuration use their ordinary write paths.
+Migration validation, ownership, conflicts and atomicity remain enforced.
+Production-shaped PostgreSQL fixtures start before the migration, export both
+formats, restore them and check the migrated records and service startup.
 
 The exporter and candidate module must land and deploy first through the
 existing path. The Supervisor then dispatches this same deploy workflow on the

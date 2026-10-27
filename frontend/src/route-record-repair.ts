@@ -8,6 +8,7 @@ export type RepairKind = "domain" | "binding";
 export interface RepairScope { product: string; context: string; instance: string }
 export type RepairReview = DokployDomainRepairReview | RouteBindingRepairReview;
 export type RepairResponse = SetupDokployTargetResponse | ReconcileRouteBindingResponse;
+export type ExternalIngress = NonNullable<EnvironmentRouteBindingReadModel["external_ingress"]>;
 interface CommonRequest {
   mode: "dry-run" | "apply"; product: string; context: string; instance: string;
   reason: string; confirmation: string; browser_review: BrowserRouteRepairRequest;
@@ -15,14 +16,16 @@ interface CommonRequest {
 export interface DomainRepairRequest extends CommonRequest {
   product: "launchplane"; operation: "repair-domain-authority";
 }
-export interface BindingRepairRequest extends CommonRequest { expected_current: RouteBindingExpectedCurrent }
+export interface BindingRepairRequest extends CommonRequest { expected_current: RouteBindingExpectedCurrent; external_ingress?: ExternalIngress }
 export type RepairRequest = DomainRepairRequest | BindingRepairRequest;
 
 export function repairOperationScope(scope: RepairScope, kind: RepairKind): string {
   return JSON.stringify([scope.product, scope.context, scope.instance, "route-record-repair", kind]);
 }
 export function repairStorageKey(scope: string): string { return `launchplane:route-repair-request:${scope}`; }
-export function repairRequest(scope: RepairScope, kind: RepairKind, reason: string, review?: RepairReview): RepairRequest {
+export function repairRequest(scope: RepairScope, kind: RepairKind, reason: string, review?: RepairReview, externalIngress?: ExternalIngress): RepairRequest {
+  const external = review?.operation === "reconcile-route-binding" ? review.proposed_record?.external_ingress : externalIngress;
+  const reviewedExternal = external ? { domains: external.domains, custodian: external.custodian, evidence_url: external.evidence_url } : undefined;
   const common = {
     context: scope.context, instance: scope.instance, reason: reason.trim(),
     mode: review ? "apply" as const : "dry-run" as const,
@@ -30,7 +33,7 @@ export function repairRequest(scope: RepairScope, kind: RepairKind, reason: stri
     browser_review: { product: scope.product, reviewed_plan_sha256: review?.plan_sha256 ?? "" },
   };
   return kind === "domain" ? { ...common, product: "launchplane", operation: "repair-domain-authority" }
-    : { ...common, product: scope.product, expected_current: review?.operation === "reconcile-route-binding"
+    : { ...common, product: scope.product, ...(reviewedExternal || externalIngress ? { external_ingress: reviewedExternal ?? externalIngress } : {}), expected_current: review?.operation === "reconcile-route-binding"
       ? review.expected_current : { state: "absent", record_sha256: "" } };
 }
 
@@ -55,7 +58,7 @@ export function parseStoredRepairRequest(value: string | null, scope: RepairScop
   try {
     const request: unknown = JSON.parse(value ?? "null");
     if (!object(request) || !exactKeys(request, ["mode", "product", "context", "instance", "reason", "confirmation", "browser_review",
-      kind === "domain" ? "operation" : "expected_current"]) || request.mode !== "apply" ||
+      kind === "domain" ? "operation" : "expected_current", ...(kind === "binding" && Object.hasOwn(request, "external_ingress") ? ["external_ingress"] : [])]) || request.mode !== "apply" ||
       request.context !== scope.context || request.instance !== scope.instance ||
       typeof request.reason !== "string" || !request.reason.trim() || request.reason !== request.reason.trim() ||
       typeof request.confirmation !== "string" || !request.confirmation.trim() || !object(request.browser_review) ||
@@ -68,8 +71,14 @@ export function parseStoredRepairRequest(value: string | null, scope: RepairScop
         browser_review: { product: scope.product, reviewed_plan_sha256: request.browser_review.reviewed_plan_sha256 } };
     }
     if (request.product !== scope.product || !expectedCurrent(request.expected_current)) return null;
+    if (Object.hasOwn(request, "external_ingress") && (!object(request.external_ingress) ||
+        !exactKeys(request.external_ingress, ["domains", "custodian", "evidence_url"]) ||
+        !strings(request.external_ingress.domains) || !request.external_ingress.domains.length ||
+        typeof request.external_ingress.custodian !== "string" || !request.external_ingress.custodian.trim() ||
+        typeof request.external_ingress.evidence_url !== "string" || !request.external_ingress.evidence_url.startsWith("https://"))) return null;
     return { mode: "apply", product: scope.product, context: scope.context, instance: scope.instance, reason: request.reason,
       confirmation: request.confirmation, browser_review: { product: scope.product, reviewed_plan_sha256: request.browser_review.reviewed_plan_sha256 },
+      ...(request.external_ingress ? { external_ingress: request.external_ingress as ExternalIngress } : {}),
       expected_current: request.expected_current };
   } catch { return null; }
 }
@@ -100,6 +109,12 @@ export function checkedRepairReview(response: RepairResponse, scope: RepairScope
       value.findings.every(finding => object(finding) && typeof finding.code === "string" && typeof finding.detail === "string") &&
       (value.current_record == null ? value.current_record_sha256 === "" : recordValid(value.current_record, scope) && value.current_record.record_sha256 === value.current_record_sha256) &&
       (value.proposed_record == null || recordValid(value.proposed_record, scope))) {
+    if (value.status === "unchanged" && (!value.current_record || !value.proposed_record ||
+        value.expected_current.state !== "present" || value.binding_operation !== "none" ||
+        value.expected_current.record_sha256 !== value.current_record_sha256 ||
+        value.proposed_record.record_sha256 !== value.current_record_sha256)) {
+      throw new Error("The binding verdict disagrees with its current record. Refresh the evidence before deciding.");
+    }
     return response.review as RouteBindingRepairReview;
   }
   throw new Error("The service response does not verify the requested route-record operation.");

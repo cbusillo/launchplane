@@ -51,6 +51,31 @@ PUBLISHED_FIELDS = (
 )
 
 
+def completed_prepared_original(
+    record: OdooUpgradeRehearsalRecord, original: LaunchplaneIdempotencyRecord
+) -> bool:
+    if original.state != "completed" or record.state != "prepared" or record.copies:
+        return False
+    if original.reconciliation_key == canonical_json_sha256(
+        {"rehearsal": record.rehearsal_id, "action": "prepare"}
+    ):
+        result = original.response_payload.get("result")
+        published = OdooRehearsalAdapter.public(record)
+        return (
+            original.response_status_code == 202
+            and original.provider_effect_phase == "prepare"
+            and isinstance(result, dict)
+            and all(result.get(field) == published.get(field) for field in PUBLISHED_FIELDS)
+        )
+    return (
+        original.reconciliation_key
+        == canonical_json_sha256({"rehearsal": record.rehearsal_id, "action": "execute"})
+        and original.response_status_code == 409
+        and OdooRehearsalAdapter.stored_refusal_code(original.response_payload)
+        in {"rehearsal_storage_capacity_insufficient", "rehearsal_precheck_refused"}
+    )
+
+
 def later_phase_copies(record: OdooUpgradeRehearsalRecord, state: str) -> bool:
     prefix = record.rehearsal_id.replace("-", "_") + "_"
     return state in LATER_PHASE_ROLES and [copy.database for copy in record.copies] == [
@@ -247,15 +272,32 @@ class IncompleteRehearsalRetirement:
             ):
                 raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
             return completed
-        execute = replace(
-            self.adapter, request=self.adapter.request.model_copy(update={"action": "execute"})
-        )
-        execute.operation_readback(record, self.original_key)
         original = self.adapter.store.read_idempotency_record(
             scope=record.principal,
             route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=record.product),
             idempotency_key=self.original_key,
         )
+        if original is not None and original.state == "completed":
+            if any(
+                held.provider_target_key == record.rehearsal_id
+                for held in self.adapter.store.list_held_provider_target_reservations()
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+            if completed_prepared_original(
+                record, original
+            ) and original.reconciliation_key == canonical_json_sha256(
+                {"rehearsal": record.rehearsal_id, "action": "prepare"}
+            ):
+                return self.later_original(record, "prepared")
+        execute = replace(
+            self.adapter,
+            request=self.adapter.request.model_copy(
+                update={"action": "execute", "reviewed_plan_sha256": record.binding_sha256}
+            ),
+        )
+        execute.operation_readback(record, self.original_key)
+        if original is not None and completed_prepared_original(record, original):
+            return original
         if (
             original is None
             or not (
@@ -341,6 +383,7 @@ class IncompleteRehearsalRetirement:
             operation_key=self.original_key,
             abandoned_attempt_sha256=original_attempt,
             abandoned_action=self.original(record).provider_effect_phase if self.abandoning else "",
+            execute_never_started=not record.copies and self.original(record).state == "completed",
         )
         try:
             self.adapter.validate_apply_script(record, script)
@@ -642,6 +685,29 @@ class IncompleteRehearsalRetirement:
             idempotency_key=self.original_key,
         )
         result = original.response_payload.get("result") if original else None
+        progress = record.incomplete_retirement
+        if (
+            original is not None
+            and original.state == "completed"
+            and (not isinstance(result, dict) or result.get("action") != "retire-incomplete")
+            and progress is not None
+            and progress.record_updated_at is not None
+            and progress.host_disposal is not None
+            and record.state == "retired"
+            and progress.original_key_sha256
+            == canonical_json_sha256({"operation_key": self.original_key})
+            and record.intent_sha256 == canonical_json_sha256(adapter.request.intent())
+            and self.placement()
+        ):
+            prepared = record.model_copy(
+                update={"state": "prepared", "updated_at": progress.record_updated_at}
+            )
+            if (
+                prepared.binding_sha256 != progress.record_binding_sha256
+                or self.original(prepared) != original
+            ):
+                raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+            return self.receipt(record, progress.host_disposal.model_dump(mode="json"))
         if (
             record.state != "retired"
             or original is None
@@ -794,8 +860,8 @@ class IncompleteRehearsalRetirement:
                     reviewed_plan_sha256=digest,
                     host_binding_sha256=str(native["binding_sha256"]),
                     consumer_confirmation=adapter.request.consumer_confirmation,
-                    record_binding_sha256=record.binding_sha256 if self.reclaiming else "",
-                    record_updated_at=record.updated_at if self.reclaiming else None,
+                    record_binding_sha256=record.binding_sha256,
+                    record_updated_at=record.updated_at,
                 )
                 updated = record.model_copy(update={"incomplete_retirement": progress})
                 adapter.store.compare_and_write_odoo_upgrade_rehearsal(record, updated)

@@ -36,7 +36,7 @@ def main() -> int:
             query={},
             timeout=180,
         )
-        response = ShopifyIdentityResponse.model_validate(raw)
+        response = ShopifyIdentityResponse.model_validate(raw, extra="ignore")
         print(response.model_dump_json())
         return 0 if response.result.separation == "separate" else 1
     except urllib.error.HTTPError as error:

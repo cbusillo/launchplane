@@ -602,6 +602,10 @@ class WebCutoverDeploymentTests(unittest.TestCase):
         with TemporaryDirectory() as folder:
             store, intent, _ = self.seed(Path(folder), "compose")
             with (
+                patch(
+                    "control_plane.dokploy.service_cutover.installed_cutover_host",
+                    side_effect=ValueError("host is unavailable"),
+                ),
                 patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
                 patch.object(DokployGenericWebDeployProvider, "execute_artifact_deploy") as inplace,
             ):
@@ -1109,7 +1113,8 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                     patch.object(provider, "drain", side_effect=drain),
                     patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
                     patch(
-                        "control_plane.workflows.generic_web_promotion.require_release_approval"
+                        "control_plane.workflows.generic_web_promotion.require_release_approval",
+                        return_value=None,
                     ) as approval,
                 ):
                     result = execute_generic_web_prod_promotion(
@@ -1195,7 +1200,10 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
 
                 with (
                     patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
-                    patch("control_plane.workflows.generic_web_promotion.require_release_approval"),
+                    patch(
+                        "control_plane.workflows.generic_web_promotion.require_release_approval",
+                        return_value=None,
+                    ),
                 ):
                     with self.assertRaises(ValueError):
                         execute_generic_web_prod_promotion(
@@ -1249,7 +1257,10 @@ class WebCutoverReviewRecoveryTests(unittest.TestCase):
                 )
                 with (
                     patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
-                    patch("control_plane.workflows.generic_web_promotion.require_release_approval"),
+                    patch(
+                        "control_plane.workflows.generic_web_promotion.require_release_approval",
+                        return_value=None,
+                    ),
                 ):
                     if prior_dispatch:
                         prepare = provider.prepare_candidate

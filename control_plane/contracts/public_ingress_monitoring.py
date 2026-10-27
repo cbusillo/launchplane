@@ -320,6 +320,17 @@ class PublicIngressTargetObservation(BaseModel):
     http_status: int | None = Field(default=None, ge=100, le=599)
     final_url: str = ""
     redirect_count: int = Field(default=0, ge=0)
+    external_custody_sha256: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        pattern=r"^(?:[0-9a-f]{64})?$",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    visited_urls: tuple[str, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     runtime_identity_status: RuntimeIdentityStatus = "unchecked"
     runtime_identity_detail: str = ""
     observed_runtime_identity: RuntimeIdentity | None = None

@@ -139,7 +139,7 @@ class CopyReadbackDiagnosticsTests(unittest.TestCase):
                 "  *State.Running*) echo true ;;\n"
                 '  \'ps -aq\') if [ "$FIXTURE_OUTCOME" = changed ] && [ -f "$FIXTURE_POLL" ]; then echo changed; else touch "$FIXTURE_POLL"; echo runner; fi ;;\n'
                 "  'volume ls -q'|'network ls -q') exit 0 ;;\n"
-                "  *'python3 -I -c'*) case \"$FIXTURE_OUTCOME\" in\n"
+                "  *'python3 -I -c'*) cat >/dev/null; case \"$FIXTURE_OUTCOME\" in\n"
                 "    warning) echo harmless-warning >&2; printf '%s 172.18.0.2\\n' \"$FIXTURE_DIGEST\" ;;\n"
                 "    markerless) exit 1 ;;\n"
                 "    invalid) echo invalid-digest ;;\n"

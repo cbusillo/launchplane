@@ -49,6 +49,12 @@ be `shared_safe` with recorded read-only-source evidence. These classifications
 are prerequisites, never proof of permissions. Local database credentials, borrowed
 testing bindings, undeclared external hosts, and external database URLs refuse.
 
+Compose environment maps and explicit `KEY=value` lists use the same checks
+through preparation, upstream qualification and cutover. Cutover requires the
+managed API writer credential in the application and excludes its value from
+the database environment in either form. Parsing does not rewrite the reviewed
+source or its retained recovery evidence.
+
 Both the application and database images must be immutable before planning can
 pass. During leased preparation, a bounded MariaDB client from the database
 image connects with TLS verification from the recipient's own private default
@@ -93,6 +99,20 @@ port availability. Existing storage is never adopted or deleted. A partial
 provider effect retains the original key and custody. A matching complete
 configuration can be adopted by original-key apply/reconciliation after a lost reply; an uncertain create
 is fenced and never repeated with another key.
+
+Preparation also materializes the reviewed raw Compose file in the recipient's
+own Dokploy directory under that same host execution fence. Dokploy's converted
+Compose read requires this file even before deployment. Matching files replay;
+different files and symlink paths refuse. Preparation preserves other files,
+including the runtime environment file, and binds the compared source bytes into
+the resource evidence before requesting the actual provider render. A saved provider configuration alone never
+qualifies the recipient.
+
+Dokploy conversion may declare its standard external network without attaching
+a service. Verification ignores only that exact unused declaration when the
+reviewed source has no networks and every service omits network wiring.
+Service attachments, other network definitions
+and every other part of the render must still match the reviewed source.
 
 Before any provider effect, a rejected attempt may be replaced by a fresh reviewed
 plan and a new key only when its reservation is gone and it has no provider IDs.
@@ -361,8 +381,16 @@ every active backup policy's replacement source target, the existing managed
 application API writer binding, and a completed service-owned destination backup
 operation. Use `--cutover` with the terminal consumer, separate private request
 and evidence files, dry-run, then reviewed apply under a stable key. The saved
-intent binds all current authority, consumer bindings and managed versions. Before
-execution, a fresh reviewed intent can replace an expired destination capture;
+intent binds all current authority, consumer bindings and managed versions.
+Before arming and before a new execution, Launchplane checks TCP routing to every
+reviewed health and readiness host/port from its own process network. A cold
+listener's connection refusal proves only a responding host or rejecting hop; timeouts and
+other connection failures refuse the intent before writer dispatch. Use a
+destination address reachable from the API and release workers. This does not
+start the application or replace the later HTTP and exact-identity checks.
+The worker checks every health URL and readiness URL independently; a passing
+health response cannot stand in for readiness.
+Before execution, a fresh reviewed intent can replace an expired destination capture;
 every earlier intent stays in custody history. Once execution begins its admitted
 intent stays fixed, and recovery does not expire the already-admitted destination
 capture while resolving that admitted release, including its drill's resume of
@@ -409,7 +437,9 @@ without reopening an earlier released pause. Testing authorization uses the
 product profile's actual testing context, including when it differs from prod.
 Only the recorded application container is stopped or restored; the database and
 unrelated containers remain untouched. A resume restores the witnessed original
-running state. A stopped writer stays stopped. Host terminal witnesses support
+running state. Writer identity excludes the inventory's deployment timestamp;
+every other embedded identity field must still agree before a pause or resume.
+A stopped writer stays stopped. Host terminal witnesses support
 receipt/readback after a lost reply. Bounded custody lists the original writer
 operation and binding references, including carried pauses after supersession.
 Historical receipts read the retained host witness even if the provider target
@@ -424,6 +454,12 @@ survive. Any changed owned row refuses the whole inverse; no shared guest is
 restored and no data volume is deleted. Backup history receives a new inverse
 revision rather than being rewritten. The release worker and reviewed recovery
 path retain both recipients when a deploy or writer outcome remains uncertain.
+Terminal rollback results expose a fixed stage-specific qualification reason
+from the promotion record through the release read, including lost-reply recovery.
+On the promotion record, the reason names the unverified stage; the operation
+and custody state still determine certainty. Pre-dispatch refusals retain their
+existing fixed refusal message.
+Safe cause-site logs carry the original trace without provider or exception text.
 The worker inverse checks release authority before dispatching its replacement
 writer pause. After that pause is dispatched, the running operation finishes its
 bound restore or abort cleanup under its lease and owned-row checks; a later
@@ -433,6 +469,9 @@ acceptance requirement on a separate release-recovery Apply request.
 original decision, kind and attempt. Planning returns the existing original
 idempotency key; apply takes it from the saved review rather than minting a key. It cannot invent a
 step or bypass acceptance, backup gates, leases or terminal provider evidence.
+
+See [accepted-release reconciliation](release-review.md#interrupted-provider-operations)
+for worker-owned original-step recovery and the self-deploy drain boundary.
 
 ## Retained original-key continuation
 

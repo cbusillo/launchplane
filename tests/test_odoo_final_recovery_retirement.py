@@ -13,6 +13,10 @@ from control_plane.contracts.odoo_rehearsal_timing import RehearsalPhaseTiming
 from control_plane.contracts.canonical_json import canonical_json_sha256
 
 from tests import test_odoo_incomplete_rehearsal_retirement as retirement
+from tests.test_odoo_upgrade_rehearsal import (
+    with_passing_business_validation,
+    validated_final_copy,
+)
 
 
 class FinalRecoveryRetirementTests(unittest.TestCase):
@@ -33,9 +37,13 @@ class FinalRecoveryRetirementTests(unittest.TestCase):
                 )
             }
         )
+        switched = with_passing_business_validation(switched)
         self.store.compare_and_write_odoo_upgrade_rehearsal(self.later.switched, switched)
         self.later.switched = switched
-        self.copies = (*self.later.switched.copies, self.fixture.copy("final_upgrade"))
+        self.copies = (
+            *switched.copies,
+            validated_final_copy(switched, self.fixture.copy("final_upgrade")),
+        )
 
         def host(adapter: Any, record: Any, mode: str, check: Any, **_: Any) -> Any:
             check()

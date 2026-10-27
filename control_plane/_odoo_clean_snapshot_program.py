@@ -1,8 +1,10 @@
 from control_plane._odoo_snapshot_files import SNAPSHOT_FILES_LIBRARY
+from control_plane.preview_filestore import PREVIEW_FILESTORE_LIBRARY
 
 
 CLEAN_TESTING_SNAPSHOT_LIBRARY = (
     SNAPSHOT_FILES_LIBRARY
+    + PREVIEW_FILESTORE_LIBRARY
     + r"""
 import json
 from pathlib import Path
@@ -44,16 +46,22 @@ def snapshot_tree_digest(path, bound=None):
     return digest.hexdigest()
 
 
-def verified_clean_snapshot(snapshot_id):
-    path = clean_snapshot_root(snapshot_id)
+def clean_snapshot_receipt(snapshot_id):
+    path = clean_snapshot_root(snapshot_id, create=False)
     if path.is_symlink() or not path.is_dir():
         raise RuntimeError('The completed clean snapshot is unavailable')
     receipt_path = path / 'receipt.json'
     if receipt_path.is_symlink() or receipt_path.stat().st_size > 4096:
         raise RuntimeError('The clean snapshot receipt is invalid')
     receipt = json.loads(receipt_path.read_text())
-    if (receipt.get('snapshot_id') != snapshot_id
-        or (path / 'database.dump').is_symlink()
+    if receipt.get('snapshot_id') != snapshot_id:
+        raise RuntimeError('Clean snapshot receipt identity changed')
+    return path, receipt
+
+
+def verified_clean_snapshot(snapshot_id):
+    path, receipt = clean_snapshot_receipt(snapshot_id)
+    if ((path / 'database.dump').is_symlink()
         or snapshot_file_digest(path / 'database.dump') != receipt.get('database_sha256')
         or snapshot_tree_digest(path / 'filestore') != receipt.get('filestore_sha256')):
         raise RuntimeError('Clean snapshot integrity readback failed')
@@ -112,6 +120,13 @@ def retire_clean_snapshot_bytes(spec, root):
                 raise RuntimeError('Snapshot retirement custody is unavailable')
             shutil.rmtree(tombstone)
         pinned = set()
+        overlay_names = docker('volume', 'ls', '--filter', 'label=io.launchplane.preview-snapshot', '--format', '{{.Name}}').decode().splitlines()
+        for name in overlay_names:
+            volume = json.loads(docker('volume', 'inspect', name))[0]
+            snapshot_id = (volume.get('Labels') or {}).get('io.launchplane.preview-snapshot', '')
+            if not isinstance(snapshot_id, str) or not re.fullmatch(r'[a-f0-9]{64}', snapshot_id):
+                raise RuntimeError('Snapshot overlay reader identity is unavailable')
+            pinned.add(snapshot_id)
         attempts = root / 'preview-attempts'
         inventory = None
         inventory_read = False
@@ -126,7 +141,7 @@ def retire_clean_snapshot_bytes(spec, root):
                 if attempt.is_symlink() or not attempt.is_file() or attempt.stat().st_size > 8192:
                     raise RuntimeError('Snapshot reader custody is unavailable')
                 payload = json.loads(attempt.read_text())
-                if not isinstance(payload, dict) or not isinstance(payload.get('snapshot'), dict) or not isinstance(payload.get('binding'), dict) or not isinstance(payload.get('completed', False), bool):
+                if not isinstance(payload, dict) or not isinstance(payload.get('snapshot'), dict) or not isinstance(payload.get('binding'), dict) or not isinstance(payload.get('completed', False), bool) or not isinstance(payload.get('overlay_filestore', False), bool):
                     raise RuntimeError('Snapshot reader custody is unavailable')
                 binding = payload['binding']
                 expected_name = hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest() + '.json'
@@ -150,7 +165,7 @@ def retire_clean_snapshot_bytes(spec, root):
                     if retired:
                         attempt.unlink()
                         continue
-                if not payload.get('completed'):
+                if not payload.get('completed') or payload.get('overlay_filestore'):
                     pinned.add(payload['snapshot']['snapshot_id'])
         for snapshot in spec.get('clean_snapshot_retirements', []):
             snapshot_id = snapshot['snapshot_id']

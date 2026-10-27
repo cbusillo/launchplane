@@ -4,7 +4,7 @@ import atexit
 import asyncio
 import base64
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -26,12 +26,14 @@ from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_preparation_recovery as preparation_recovery
 from tests import test_testing_activation as testing_activation
 from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
+from tests import test_merge_train_repository_names as repository_name_tests
 from tests import test_application_state_volume as application_volume_tests
 from tests import test_application_allocation as application_allocation_tests
 from tests import test_testing_rebuild as testing_rebuild_tests
 from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
 from tests import test_release_review_http as release_review_http_tests
+from tests import test_generic_web_compose_refusal as compose_refusal_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
@@ -73,6 +75,7 @@ from tests.test_odoo_import_override_reconciliation import (
     runtime_record as _import_runtime_record,
 )
 from tests import test_preview_reservation_recovery as preview_reservation_tests
+from tests import test_discord_incident_alerts as discord_alert_tests
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
@@ -105,7 +108,6 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
-    EveryCodeWorkRequestStatusUpdate,
 )
 from control_plane.contracts.every_code_feedback_resume import (
     EveryCodeFeedbackAcceptanceRecord,
@@ -251,7 +253,6 @@ from control_plane.service_auth import (
 from control_plane.storage.postgres import (
     LaunchplaneMergeTrainBatchLandingPlanRow,
     DbOnlyMutationRequest,
-    LaunchplaneEveryCodeWorkRequestRow,
     LaunchplaneOwnerControlIssuedChallengeRow,
     MutationReservationResult,
     OrdinaryAgentPersistenceError,
@@ -559,6 +560,14 @@ def _store_for_fresh_head_database() -> Iterator[PostgresRecordStore]:
             yield store
         finally:
             store.close()
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresComposeRefusalTests(compose_refusal_tests.ComposeRefusalTests):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
 
 
 class RealPostgresRunnerAuditIdentityTests(unittest.TestCase):
@@ -938,44 +947,6 @@ def _idempotency_record(
         recorded_at="2026-07-01T00:00:00Z",
         response_payload={"status": "accepted", "trace_id": response_trace_id},
     )
-
-
-def _every_code_work_request() -> EveryCodeWorkRequestRecord:
-    return EveryCodeWorkRequestRecord(
-        request_id="every-code-cbusillo-code-1693-test",
-        source="manual",
-        state="queued",
-        repository="cbusillo/code",
-        issue_number=1693,
-        issue_url="https://github.com/cbusillo/code/issues/1693",
-        trigger_label="every-code",
-        queued_at="2026-07-13T09:00:00Z",
-        updated_at="2026-07-13T09:00:00Z",
-    )
-
-
-class _BlockingEveryCodeFinishStore(PostgresRecordStore):
-    def __init__(
-        self,
-        *,
-        database_url: str,
-        finish_row_synced: threading.Event,
-        release_finish: threading.Event,
-    ) -> None:
-        super().__init__(database_url=database_url)
-        self._finish_row_synced = finish_row_synced
-        self._release_finish = release_finish
-
-    def _sync_every_code_work_request_row(
-        self,
-        row: LaunchplaneEveryCodeWorkRequestRow,
-        record: EveryCodeWorkRequestRecord,
-    ) -> None:
-        super()._sync_every_code_work_request_row(row, record)
-        if record.state == "done":
-            self._finish_row_synced.set()
-            if not self._release_finish.wait(timeout=10):
-                raise TimeoutError("timed out waiting to release Every Code finish transaction")
 
 
 def _mutation_reservation(
@@ -1450,6 +1421,14 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
 )
+class RealPostgresRepositoryNameStorageTests(repository_name_tests.RepositoryNameSQLStorageTests):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
 class RealPostgresIntegratedProductRetirementTests(
     integrated_retirement_tests.IntegratedProductRetirementTests
 ):
@@ -1461,6 +1440,14 @@ class RealPostgresIntegratedProductRetirementTests(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
 )
 class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldRehearsalTests):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresDiscordAlertTests(discord_alert_tests.DiscordIncidentAlertTests):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
 
@@ -1572,6 +1559,10 @@ class RealPostgresApplicationTestingHoldTests(
         return self.enterContext(_head_postgres_database())
 
     test_original_application_allocation_can_lift_its_own_staging_hold = application_volume_tests.ApplicationStateVolumeTests.test_original_application_allocation_can_lift_its_own_staging_hold
+    test_serving_application_lifts_without_deploy_or_reconcile_and_replays = application_volume_tests.ApplicationStateVolumeTests.test_serving_application_lifts_without_deploy_or_reconcile_and_replays
+    test_serving_continuation_rechecks_current_deployment_after_host_read = application_volume_tests.ApplicationStateVolumeTests.test_serving_continuation_rechecks_current_deployment_after_host_read
+    test_unpublished_activation_retaining_current_recipient_keeps_interlock = application_volume_tests.ApplicationStateVolumeTests.test_unpublished_activation_retaining_current_recipient_keeps_interlock
+    test_serving_runtime_change_after_storage_read_keeps_hold = application_volume_tests.ApplicationStateVolumeTests.test_serving_runtime_change_after_storage_read_keeps_hold
     test_application_continuation_refuses_live_source_mount_placement_and_execution_drift = application_volume_tests.ApplicationStateVolumeTests.test_application_continuation_refuses_live_source_mount_placement_and_execution_drift
     test_application_continuation_rechecks_ownership_under_authority_lock = application_volume_tests.ApplicationStateVolumeTests.test_application_continuation_rechecks_ownership_under_authority_lock
     test_missing_physical_storage_proof_keeps_application_held = application_volume_tests.ApplicationStateVolumeTests.test_missing_physical_storage_proof_keeps_application_held
@@ -3110,6 +3101,16 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             self.assertEqual(store.list_authz_policy_records(), ())
 
     def test_scrubbed_snapshot_restores_in_postgres_and_rejects_stricter_policy(self) -> None:
+        import base64
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+        from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
+        from control_plane.preview_settings import validate_preview_scope
+        from control_plane.storage.migrations.versions import (
+            a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
+            b8f2c4d6e0a7_managed_preview_settings as preview_settings,
+        )
         from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
         from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
         from control_plane.stored_record_preflight import check_restored_records, restore_snapshot
@@ -3118,7 +3119,10 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         from tests.test_postgres_store import _merge_train_run_record
         from pydantic import ValidationError
 
-        with _store_for_fresh_head_database() as source:
+        with _isolated_postgres_database() as source_url:
+            migrate_schema(database_url=source_url, target_revision=profile_archive.revision)
+            source = PostgresRecordStore(database_url=source_url)
+            self.addCleanup(source.close)
             policy = LaunchplaneAuthzPolicy(
                 schema_version=2,
                 github_actions=(
@@ -3141,7 +3145,35 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             profile = product_profile_payload()
             preview = profile["preview"]
             assert isinstance(preview, dict)
-            preview["override_env"] = {"TOKEN": "plaintext-sentinel"}
+            addon = "private_connector"
+            setting = "api_token"
+            encoded_payload = {
+                "context": f" {str(preview['context']).upper()} ",
+                "instance": "preview",
+                "addon_settings": [
+                    {
+                        "addon": addon,
+                        "setting": "private_option",
+                        "value": {"source": "literal", "value": "plaintext-sentinel"},
+                    },
+                    {
+                        "addon": addon,
+                        "setting": setting,
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": "private-binding",
+                            "environment_variable": addon_setting_secret_env_key(
+                                addon_name=addon, setting_name=setting
+                            ),
+                        },
+                    },
+                ],
+            }
+            preview["override_env"] = {
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    json.dumps(encoded_payload).encode()
+                ).decode()
+            }
             source.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile)
             )
@@ -3188,9 +3220,25 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     engine = create_engine(target_url)
                     self.addCleanup(engine.dispose)
                     revision = restore_snapshot(engine, exported)
+                    migrate_schema(
+                        database_url=target_url, target_revision=preview_settings.revision
+                    )
                     target = PostgresRecordStore(database_url=target_url)
                     self.addCleanup(target.close)
-                    self.assertEqual(revision, target.schema_revision())
+                    self.assertEqual(revision, SCHEMA_MIGRATION_TARGET_REVISION)
+                    restored_profile = target.list_product_profile_records()[0]
+                    self.assertFalse(restored_profile.preview.override_env)
+                    restored_settings = target.list_runtime_environment_records()[0]
+                    decoded = validate_preview_scope(
+                        restored_settings.env, context=restored_profile.preview.context
+                    )
+                    self.assertIsNotNone(decoded)
+                    assert decoded is not None
+                    self.assertEqual(
+                        len(decoded.addon_settings), len(encoded_payload["addon_settings"])
+                    )
+                    for sentinel in ("plaintext-sentinel", "private-binding", addon):
+                        self.assertNotIn(sentinel, decoded.model_dump_json())
                     self.assertEqual(
                         len(target.list_authz_policy_records()),
                         len(source.list_authz_policy_records()),
@@ -4231,16 +4279,33 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         with _isolated_postgres_database() as url:
             assert_preview_enablement_drop(self, url)
 
+    def test_idle_reservation_retirement_rejects_late_old_writers(self) -> None:
+        from control_plane.storage.migrations.versions import (
+            b0a2c4e6f8d1_retire_preview_idle_reservations as migration,
+        )
+        from tests.test_preview_idle_migration import assert_idle_retirement
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), migration.down_revision)
+            assert_idle_retirement(self, url, migration.revision)
+
     def test_preview_drop_startup_joins_an_already_applied_delivery_drop(self) -> None:
         from control_plane.storage.migrations.versions import (
             e7c1d5e9a3b6_drop_retired_delivery_tables as held,
-            a5d9f1b3c7e4_join_archive_topics_retirement as archive_join,
         )
 
         with _isolated_postgres_database() as url:
             alembic_command.upgrade(_alembic_config(url), held.revision)
-            self.assertEqual(migrate_schema(database_url=url), archive_join.revision)
-            self.assertEqual(migrate_schema(database_url=url), archive_join.revision)
+            from control_plane.storage.schema_migration import (
+                SCHEMA_MIGRATION_TARGET_REVISION,
+                schema_migration_target,
+            )
+
+            expected = schema_migration_target(
+                current_revision=held.revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+            )
+            self.assertEqual(migrate_schema(database_url=url), expected)
+            self.assertEqual(migrate_schema(database_url=url), expected)
 
     def test_preview_drop_refuses_busy_table_and_retained_dependency(self) -> None:
         from control_plane.storage.migrations.versions import (
@@ -4295,6 +4360,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     )
                     self.assertEqual(_current_alembic_version(engine), migration.down_revision)
                 alembic_command.upgrade(config, migration.revision)
+                migrate_schema(database_url=url)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -4325,6 +4391,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 with engine.begin() as connection:
                     connection.execute(text("DROP VIEW retained_delivery_reader"))
                 alembic_command.upgrade(config, migration.revision)
+                migrate_schema(database_url=url)
                 verify_postgres_schema_invariants(engine)
             finally:
                 engine.dispose()
@@ -6071,42 +6138,36 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             original = managers[0].issue(_identity(), GitHubOAuthCredential("original-access"))
             csrf = managers[0].csrf_token(original)
             now += timedelta(seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS)
-            entered = threading.Event()
-            release = threading.Event()
             provider = Mock(spec=GitHubOAuthClient)
+            observations: list[tuple[Future[Any], bool]] = []
+            consumption: list[Future[Any]] = []
 
             def exchange(*args: object, **kwargs: object) -> GitHubOAuthLogin:
-                entered.set()
-                if not release.wait(10):
-                    raise TimeoutError("test provider wait")
-                return GitHubOAuthLogin(_identity(), GitHubOAuthCredential("rotated-access"))
-
-            provider.revalidate.side_effect = exchange
-            with ThreadPoolExecutor(max_workers=3) as workers:
-                first = workers.submit(
-                    managers[0].refresh_authorization_claims,
+                second = workers.submit(
+                    managers[1].refresh_authorization_claims,
                     original,
                     client=provider,
                     authz_policy=_policy(),
                 )
-                try:
-                    self.assertTrue(entered.wait(5))
-                    second = workers.submit(
-                        managers[1].refresh_authorization_claims,
-                        original,
-                        client=provider,
-                        authz_policy=_policy(),
-                    )
-                    # An in-progress exchange must not queue dashboard reads.
-                    other = second.result(timeout=2)
-                    assert other is not None
-                    self.assertEqual(other.claims_verified_at, original.claims_verified_at)
-                    consume = workers.submit(managers[2].consume_csrf_token, original, csrf)
-                finally:
-                    release.set()
-                refreshed = first.result(timeout=5)
+                completed, _ = wait((second,), timeout=60)
+                observations.append((second, bool(completed)))
+                consumption.append(workers.submit(managers[2].consume_csrf_token, original, csrf))
+                return GitHubOAuthLogin(_identity(), GitHubOAuthCredential("rotated-access"))
+
+            provider.revalidate.side_effect = exchange
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                refreshed = managers[0].refresh_authorization_claims(
+                    original,
+                    client=provider,
+                    authz_policy=_policy(),
+                )
+                self.assertEqual(len(observations), 1)
+                second, completed_before_provider_returned = observations[0]
+                self.assertTrue(completed_before_provider_returned)
                 other = second.result(timeout=5)
-                consumed = consume.result(timeout=5)
+                assert other is not None
+                self.assertEqual(other.claims_verified_at, original.claims_verified_at)
+                consumed = consumption[0].result(timeout=5)
             self.assertIsNotNone(refreshed)
             self.assertIsNotNone(other)
             self.assertIsNotNone(consumed)
@@ -8159,271 +8220,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         self.assertFalse(reader_thread.is_alive())
         self.assertEqual(errors, [])
 
-    def test_every_code_two_workers_claim_exactly_once(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            record = _every_code_work_request()
-            store.write_every_code_work_request_record(record)
-            second_store = PostgresRecordStore(database_url=store.database_url)
-            barrier = threading.Barrier(2)
-
-            def claim(
-                active_store: PostgresRecordStore, host: str
-            ) -> EveryCodeWorkRequestRecord | None:
-                barrier.wait(timeout=5)
-                return active_store.claim_every_code_work_request_record(
-                    request_id=record.request_id,
-                    host=host,
-                    claimed_at="2026-07-13T09:01:00Z",
-                )
-
-            try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    futures = (
-                        executor.submit(claim, store, "worker-a"),
-                        executor.submit(claim, second_store, "worker-b"),
-                    )
-                    results = tuple(future.result(timeout=10) for future in futures)
-                loaded = store.read_every_code_work_request_record(record.request_id)
-            finally:
-                second_store.close()
-
-        claims = tuple(result for result in results if result is not None)
-        self.assertEqual(len(claims), 1)
-        self.assertEqual(loaded.claimed_by_host, claims[0].claimed_by_host)
-        self.assertEqual(loaded.fencing_token, 1)
-        self.assertEqual(loaded.attempt, 1)
-
-    def test_every_code_heartbeat_and_stale_recovery_are_fenced(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            record = _every_code_work_request()
-            store.write_every_code_work_request_record(record)
-            claimed = store.claim_every_code_work_request_record(
-                request_id=record.request_id,
-                host="worker-a",
-                claimed_at="2026-07-13T09:01:00Z",
-                lease_seconds=60,
-            )
-            assert claimed is not None
-            stale_snapshot = store.list_stale_every_code_work_request_records(
-                as_of="2026-07-13T09:03:00Z"
-            )[0]
-            second_store = PostgresRecordStore(database_url=store.database_url)
-            barrier = threading.Barrier(2)
-
-            def heartbeat() -> bool:
-                barrier.wait(timeout=5)
-                return store.heartbeat_every_code_work_request_record(
-                    request_id=record.request_id,
-                    host="worker-a",
-                    fencing_token=claimed.fencing_token,
-                    heartbeat_at="2026-07-13T09:02:30Z",
-                    lease_expires_at="2026-07-13T09:12:30Z",
-                )
-
-            def recover() -> EveryCodeWorkRequestRecord | None:
-                barrier.wait(timeout=5)
-                return second_store.recover_stale_every_code_work_request_record(
-                    expected_record=stale_snapshot,
-                    recovered_at="2026-07-13T09:03:00Z",
-                )
-
-            try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    heartbeat_future = executor.submit(heartbeat)
-                    recover_future = executor.submit(recover)
-                    heartbeat_result = heartbeat_future.result(timeout=10)
-                    recovery_result = recover_future.result(timeout=10)
-                loaded = store.read_every_code_work_request_record(record.request_id)
-            finally:
-                second_store.close()
-
-        self.assertNotEqual(heartbeat_result, recovery_result is not None)
-        if heartbeat_result:
-            self.assertIsNone(recovery_result)
-            self.assertEqual(loaded.state, "claimed")
-            self.assertEqual(loaded.lease_expires_at, "2026-07-13T09:12:30Z")
-        else:
-            self.assertIsNotNone(recovery_result)
-            self.assertEqual(loaded.state, "queued")
-
-    def test_every_code_status_update_rejects_stale_fencing_token(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            record = _every_code_work_request()
-            store.write_every_code_work_request_record(record)
-            claimed = store.claim_every_code_work_request_record(
-                request_id=record.request_id,
-                host="worker-a",
-                claimed_at="2026-07-13T09:01:00Z",
-            )
-            assert claimed is not None
-            second_store = PostgresRecordStore(database_url=store.database_url)
-            try:
-                with self.assertRaisesRegex(ValueError, "fencing token"):
-                    second_store.update_every_code_work_request_status_record(
-                        request_id=record.request_id,
-                        update=EveryCodeWorkRequestStatusUpdate(
-                            state="done",
-                            host="worker-a",
-                            fencing_token=claimed.fencing_token + 1,
-                            updated_at="2026-07-13T09:02:00Z",
-                            result_summary="stale completion",
-                        ),
-                    )
-                completed = store.update_every_code_work_request_status_record(
-                    request_id=record.request_id,
-                    update=EveryCodeWorkRequestStatusUpdate(
-                        state="done",
-                        host="worker-a",
-                        fencing_token=claimed.fencing_token,
-                        updated_at="2026-07-13T09:02:00Z",
-                        result_summary="completed",
-                    ),
-                )
-            finally:
-                second_store.close()
-
-        self.assertEqual(completed.state, "done")
-
-    def test_every_code_pr_close_waits_for_fresh_finish_and_preserves_higher_fence(
-        self,
-    ) -> None:
-        with _store_for_fresh_head_database() as store:
-            record = _every_code_work_request()
-            store.write_every_code_work_request_record(record)
-            stale_claim = store.claim_every_code_work_request_record(
-                request_id=record.request_id,
-                host="worker-old",
-                claimed_at="2026-07-13T09:01:00Z",
-                lease_seconds=60,
-            )
-            assert stale_claim is not None
-            recovered = store.recover_stale_every_code_work_request_record(
-                expected_record=stale_claim,
-                recovered_at="2026-07-13T09:03:00Z",
-            )
-            assert recovered is not None
-            fresh_claim = store.claim_every_code_work_request_record(
-                request_id=record.request_id,
-                host="worker-new",
-                claimed_at="2026-07-13T09:04:00Z",
-            )
-            assert fresh_claim is not None
-
-            finish_row_synced = threading.Event()
-            release_finish = threading.Event()
-            close_started = threading.Event()
-            close_finished = threading.Event()
-            finish_store = _BlockingEveryCodeFinishStore(
-                database_url=store.database_url,
-                finish_row_synced=finish_row_synced,
-                release_finish=release_finish,
-            )
-            close_store = PostgresRecordStore(database_url=store.database_url)
-
-            def finish_fresh_claim() -> EveryCodeWorkRequestRecord:
-                return finish_store.update_every_code_work_request_status_record(
-                    request_id=record.request_id,
-                    update=EveryCodeWorkRequestStatusUpdate(
-                        state="done",
-                        host="worker-new",
-                        fencing_token=fresh_claim.fencing_token,
-                        updated_at="2026-07-13T09:05:00Z",
-                        result_pr_url="https://github.com/cbusillo/code/pull/1700",
-                        result_summary="Worker completed from the newer claim.",
-                    ),
-                )
-
-            def close_pull_request() -> EveryCodeWorkRequestRecord | None:
-                close_started.set()
-                try:
-                    return close_store.close_every_code_work_request_for_pull_request_record(
-                        request_id=stale_claim.request_id,
-                        expected_lifecycle_id=fresh_claim.lifecycle_id,
-                        pr_url="https://github.com/cbusillo/code/pull/1700",
-                        merged=True,
-                        closed_at="2026-07-13T09:06:00Z",
-                    )
-                finally:
-                    close_finished.set()
-
-            executor = ThreadPoolExecutor(max_workers=2)
-            try:
-                finish_future = executor.submit(finish_fresh_claim)
-                self.assertTrue(finish_row_synced.wait(timeout=5))
-                close_future = executor.submit(close_pull_request)
-                self.assertTrue(close_started.wait(timeout=5))
-                self.assertFalse(close_finished.wait(timeout=0.1))
-                release_finish.set()
-                finished = finish_future.result(timeout=10)
-                closed = close_future.result(timeout=10)
-            finally:
-                release_finish.set()
-                executor.shutdown(wait=True)
-                finish_store.close()
-                close_store.close()
-
-            loaded = store.read_every_code_work_request_record(record.request_id)
-
-        self.assertEqual(stale_claim.fencing_token, 1)
-        self.assertNotEqual(stale_claim.lifecycle_id, fresh_claim.lifecycle_id)
-        self.assertEqual(finished.fencing_token, 2)
-        self.assertIsNotNone(closed)
-        assert closed is not None
-        self.assertEqual(closed.state, "done")
-        self.assertEqual(closed.lifecycle_id, fresh_claim.lifecycle_id)
-        self.assertEqual(closed.fencing_token, 2)
-        self.assertEqual(closed.claimed_by_host, "worker-new")
-        self.assertEqual(
-            closed.result_summary,
-            "Linked pull request merged: https://github.com/cbusillo/code/pull/1700\n"
-            "Worker completed from the newer claim.",
-        )
-        self.assertEqual(loaded, closed)
-
-    def test_every_code_claim_commits_replay_evidence_atomically(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            record = _every_code_work_request()
-            store.write_every_code_work_request_record(record)
-
-            def idempotency_record_factory(
-                claimed_record: EveryCodeWorkRequestRecord,
-            ) -> LaunchplaneIdempotencyRecord:
-                return LaunchplaneIdempotencyRecord(
-                    record_id=build_launchplane_idempotency_record_id(
-                        response_trace_id="trace-every-code-claim"
-                    ),
-                    scope="terminal-agent:every-code-worker",
-                    route_path="/v1/every-code/work-requests/claim",
-                    idempotency_key="every-code-claim-1693",
-                    request_fingerprint="every-code-claim-fingerprint",
-                    response_status_code=202,
-                    response_trace_id="trace-every-code-claim",
-                    recorded_at="2026-07-13T09:01:00Z",
-                    response_payload={
-                        "status": "accepted",
-                        "result": {"request": claimed_record.model_dump(mode="json")},
-                    },
-                )
-
-            claimed = store.claim_every_code_work_request_record(
-                request_id=record.request_id,
-                host="worker-a",
-                claimed_at="2026-07-13T09:01:00Z",
-                idempotency_record_factory=idempotency_record_factory,
-            )
-            replay_evidence = store.read_idempotency_record(
-                scope="terminal-agent:every-code-worker",
-                route_path="/v1/every-code/work-requests/claim",
-                idempotency_key="every-code-claim-1693",
-            )
-            loaded = store.read_every_code_work_request_record(record.request_id)
-
-        self.assertIsNotNone(claimed)
-        self.assertIsNotNone(replay_evidence)
-        self.assertEqual(loaded.state, "claimed")
-        assert replay_evidence is not None
-        self.assertEqual(replay_evidence.state, "completed")
-
     def test_outbox_claim_skips_locked_pending_row_and_claims_next_delivery(self) -> None:
         with _store_for_fresh_head_database() as store:
             first = _outbox_delivery(suffix="first").model_copy(
@@ -8478,6 +8274,65 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         assert first_claim.record is not None
         self.assertEqual(first_claim.record.delivery_id, first.delivery_id)
         self.assertEqual(first_claim.record.lease_owner, "worker-a")
+
+    def test_recovery_claim_waits_for_locked_failure_but_not_other_destinations(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            self.assertEqual(
+                store.claim_next_outbox_delivery_record(lease_owner="startup").status, "empty"
+            )
+
+            def notification(suffix: str, event: str, destination: str) -> OutboxDeliveryRecord:
+                return _outbox_delivery(suffix=suffix).model_copy(
+                    update={
+                        "kind": "public_ingress_notification",
+                        "aggregate_type": "public_ingress_incident",
+                        "aggregate_id": "incident-test",
+                        "payload": {
+                            "attempt": {"event": event, "policy_id": "policy-test"},
+                            "destination": {"destination_id": destination, "kind": "email"},
+                        },
+                    }
+                )
+
+            failure = notification("first", "opened", "ops")
+            recovery = notification("second", "resolved", "ops")
+            unrelated = notification("third", "resolved", "other")
+            store.write_outbox_delivery_record(failure)
+            store.write_outbox_delivery_record(recovery)
+            store.write_outbox_delivery_record(unrelated)
+            blocker = create_engine(store.database_url)
+            self.addCleanup(blocker.dispose)
+            with blocker.connect() as connection:
+                transaction = connection.begin()
+                try:
+                    connection.execute(
+                        text(
+                            "select delivery_id from launchplane_outbox_deliveries where delivery_id = :delivery_id for update"
+                        ),
+                        {"delivery_id": failure.delivery_id},
+                    )
+                    claimed = store.claim_next_outbox_delivery_record(lease_owner="worker-b")
+                    self.assertIsNotNone(claimed.record)
+                    assert claimed.record is not None
+                    self.assertEqual(claimed.record.delivery_id, unrelated.delivery_id)
+                    waiting = store.read_outbox_delivery_record(recovery.delivery_id)
+                    self.assertEqual(waiting.attempt, 0)
+                finally:
+                    transaction.rollback()
+            opened = store.claim_next_outbox_delivery_record(lease_owner="worker-a")
+            assert opened.record is not None
+            self.assertEqual(opened.record.delivery_id, failure.delivery_id)
+            self.assertEqual(
+                store.claim_next_outbox_delivery_record(lease_owner="worker-b").status, "empty"
+            )
+            completed = store.complete_outbox_delivery_record(
+                record=opened.record.model_copy(update={"state": "delivered", "action": "sent"}),
+                lease_owner="worker-a",
+            )
+            self.assertEqual(completed.status, "updated")
+            resolved = store.claim_next_outbox_delivery_record(lease_owner="worker-b")
+            assert resolved.record is not None
+            self.assertEqual(resolved.record.delivery_id, recovery.delivery_id)
 
     def test_outbox_enqueue_with_idempotency_is_atomic_on_validation_failure(self) -> None:
         with _store_for_fresh_head_database() as store:
@@ -9951,6 +9806,23 @@ def _run_integration_provider_operation(
 
 
 class RealPostgresProviderOperationTests(unittest.TestCase):
+    def test_executor_exit_drain_proof_and_live_reconciliation_on_postgres(self) -> None:
+        from tests.test_event_deploy_redeploy import EventDeployRedeployTests
+
+        for scenario in (
+            "test_stopped_executor_keeps_unknown_product_outcome_without_blocking_replacement",
+            "test_reconciliation_during_live_executor_still_drains_until_executor_exits",
+            "test_executor_exit_receipt_cannot_exclude_a_later_attempt_with_the_same_owner",
+            "test_repair_drain_polls_its_own_fence_until_admitted_work_finishes",
+        ):
+            with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
+                case = EventDeployRedeployTests(scenario)
+                case.store = store
+                try:
+                    getattr(case, scenario)()
+                finally:
+                    case.doCleanups()
+
     def test_connection_isolation_original_key_recovery_on_postgres(self) -> None:
         from tests import test_odoo_connection_isolation_authority as fixtures
 
@@ -10706,607 +10578,6 @@ class RealPostgresFeedbackResumeEvidenceTests(unittest.TestCase):
                 self.assertEqual(store.list_every_code_feedback_acceptance_records(), ())
             finally:
                 store.close()
-
-
-class RealPostgresFeedbackIntentMintTests(unittest.TestCase):
-    @staticmethod
-    def seed(
-        store: PostgresRecordStore,
-    ) -> tuple[Any, EveryCodeWorkRequestRecord, LaunchplaneAuthzPolicyRecord]:
-        from control_plane.service_auth import GitHubHumanPolicyRule, LaunchplaneAuthzPolicy
-        from tests.test_every_code_feedback_resume_intent import request_fixture
-        from control_plane.contracts.every_code_feedback_resume import (
-            every_code_feedback_eligible_until,
-        )
-
-        now = (
-            (datetime.now(timezone.utc) - timedelta(seconds=60))
-            .isoformat(timespec="microseconds")
-            .replace("+00:00", "Z")
-        )
-        original = _feedback_acceptance()
-        revision = original.revision.model_dump()
-        revision.update(provider_updated_at=now, revision_digest="")
-        acceptance = type(original).model_validate(
-            {
-                **original.model_dump(),
-                "revision": revision,
-                "received_at": now,
-                "created_at": now,
-                "eligible_until": every_code_feedback_eligible_until(
-                    first_received_at=now, provider_updated_at=now
-                ),
-                "acceptance_digest": "",
-            }
-        )
-        request = request_fixture()
-        store.write_every_code_work_request_record(request)
-        store.write_every_code_feedback_acceptance_record(acceptance)
-        policy = LaunchplaneAuthzPolicyRecord(
-            record_id="policy-mint",
-            source="test",
-            updated_at=now,
-            policy=LaunchplaneAuthzPolicy(
-                schema_version=2,
-                github_humans=(
-                    GitHubHumanPolicyRule(
-                        managed_set_id="feedback-test",
-                        managed_rule_id="human",
-                        github_ids=(90,),
-                        products=("launchplane",),
-                        contexts=("launchplane",),
-                        actions=("every_code_feedback_resume.request",),
-                        instances=("github-repository:34",),
-                    ),
-                ),
-            ),
-        )
-        return acceptance, request, store.seed_authz_policy_if_absent(policy)
-
-    @staticmethod
-    def observation() -> Any:
-        from tests.test_every_code_feedback_resume_intent import observation_fixture
-
-        return observation_fixture(
-            datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-        )
-
-    def test_concurrent_mint_replays_one_immutable_record_without_request_mutation(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            acceptance, request, _ = self.seed(store)
-            barrier = threading.Barrier(2)
-            observation = self.observation()
-
-            def mint() -> Any:
-                barrier.wait(timeout=5)
-                return store.mint_every_code_feedback_resume_intent(
-                    acceptance_id=acceptance.acceptance_id, open_observation=observation
-                )
-
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                results = [
-                    future.result(timeout=15) for future in [pool.submit(mint), pool.submit(mint)]
-                ]
-            self.assertEqual(sorted(result.status for result in results), ["mint", "replay"])
-            self.assertEqual(results[0].record, results[1].record)
-            self.assertEqual(
-                len(
-                    store.list_every_code_feedback_resume_intent_records(
-                        request_id=request.request_id
-                    )
-                ),
-                1,
-            )
-            self.assertEqual(store.read_every_code_work_request_record(request.request_id), request)
-            replay = store.mint_every_code_feedback_resume_intent(
-                acceptance_id=acceptance.acceptance_id, open_observation=None
-            )
-            self.assertEqual(replay.record, results[0].record)
-            self.assertEqual(replay.status, "replay")
-
-    def test_replay_denies_revoked_policy_and_same_fence_state_mismatch(self) -> None:
-        from control_plane.service_auth import LaunchplaneAuthzPolicy
-
-        with _store_for_fresh_head_database() as store:
-            acceptance, request, policy = self.seed(store)
-            result = store.mint_every_code_feedback_resume_intent(
-                acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
-            )
-            self.assertEqual(result.status, "mint")
-            store.write_every_code_work_request_record(
-                request.model_copy(update={"state": "blocked", "error_message": "stopped"})
-            )
-            self.assertEqual(
-                store.mint_every_code_feedback_resume_intent(
-                    acceptance_id=acceptance.acceptance_id, open_observation=None
-                ).status,
-                "terminal_snapshot_mismatch",
-            )
-            replacement = LaunchplaneAuthzPolicyRecord(
-                record_id="policy-revoked",
-                revision=policy.revision + 1,
-                source="test",
-                updated_at=policy.updated_at,
-                policy=LaunchplaneAuthzPolicy(schema_version=2),
-            )
-            written = store.compare_and_write_authz_policy_record(
-                expected_record=policy, replacement_record=replacement
-            )
-            self.assertEqual(written.status, "written")
-            self.assertEqual(
-                store.mint_every_code_feedback_resume_intent(
-                    acceptance_id=acceptance.acceptance_id, open_observation=None
-                ).status,
-                "authority_denied",
-            )
-
-    def test_new_lifecycle_mints_new_intent_preserving_old_record(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            acceptance, request, _ = self.seed(store)
-            first = store.mint_every_code_feedback_resume_intent(
-                acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
-            )
-            updated = request.model_copy(update={"lifecycle_id": "lifecycle-2", "fencing_token": 3})
-            store.write_every_code_work_request_record(updated)
-            second = store.mint_every_code_feedback_resume_intent(
-                acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
-            )
-            self.assertEqual((first.status, second.status), ("mint", "mint"))
-            assert first.record is not None and second.record is not None
-            self.assertNotEqual(first.record.intent_id, second.record.intent_id)
-            self.assertEqual(
-                store.read_every_code_feedback_resume_intent_record(first.record.intent_id),
-                first.record,
-            )
-            self.assertEqual(
-                store.mint_every_code_feedback_resume_intent(
-                    acceptance_id=acceptance.acceptance_id, open_observation=None
-                ).record,
-                second.record,
-            )
-            self.assertEqual(
-                len(
-                    store.list_every_code_feedback_resume_intent_records(
-                        request_id=request.request_id
-                    )
-                ),
-                2,
-            )
-
-    def test_advisory_contention_times_out_without_minting(self) -> None:
-        with _store_for_fresh_head_database() as store:
-            acceptance, request, _ = self.seed(store)
-            with store._engine.begin() as connection:
-                connection.execute(
-                    text(
-                        "SELECT pg_advisory_xact_lock(hashtextextended('launchplane:active-authz-policy', 0))"
-                    )
-                )
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    result = pool.submit(
-                        store.mint_every_code_feedback_resume_intent,
-                        acceptance_id=acceptance.acceptance_id,
-                        open_observation=self.observation(),
-                    ).result(timeout=12)
-            self.assertEqual(result.status, "contention")
-            self.assertEqual(
-                store.list_every_code_feedback_resume_intent_records(request_id=request.request_id),
-                (),
-            )
-
-    def test_row_wait_consumes_observation_freshness_before_mint(self) -> None:
-        from tests.test_every_code_feedback_resume_intent import observation_fixture
-
-        with _store_for_fresh_head_database() as store:
-            acceptance, request, _ = self.seed(store)
-            reached_lock = threading.Event()
-
-            def before_query(
-                conn: Any,
-                cursor: Any,
-                statement: str,
-                parameters: Any,
-                context: Any,
-                executemany: bool,
-            ) -> None:
-                if (
-                    "launchplane_every_code_work_requests" in statement
-                    and "FOR UPDATE" in statement
-                ):
-                    reached_lock.set()
-
-            event.listen(store._engine, "before_cursor_execute", before_query)
-            try:
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    with store._engine.begin() as connection:
-                        connection.execute(
-                            text(
-                                "SELECT request_id FROM launchplane_every_code_work_requests WHERE request_id = :id FOR UPDATE"
-                            ),
-                            {"id": request.request_id},
-                        )
-                        reached_lock.clear()
-                        observation = observation_fixture(
-                            (datetime.now(timezone.utc) - timedelta(seconds=29))
-                            .isoformat(timespec="microseconds")
-                            .replace("+00:00", "Z")
-                        )
-                        future = pool.submit(
-                            store.mint_every_code_feedback_resume_intent,
-                            acceptance_id=acceptance.acceptance_id,
-                            open_observation=observation,
-                        )
-                        self.assertTrue(reached_lock.wait(timeout=5))
-                        time.sleep(2.2)
-                    result = future.result(timeout=10)
-                self.assertEqual(result.status, "pull_request_observation_stale")
-                self.assertEqual(
-                    store.list_every_code_feedback_resume_intent_records(
-                        request_id=request.request_id
-                    ),
-                    (),
-                )
-            finally:
-                event.remove(store._engine, "before_cursor_execute", before_query)
-
-    def test_closure_wins_and_legacy_intent_is_never_promoted(self) -> None:
-        from tests.test_every_code_feedback_resume_storage import _intent
-
-        with _store_for_fresh_head_database() as store:
-            acceptance, request, _ = self.seed(store)
-            legacy = _intent(_feedback_acceptance())
-            # Use eligible contemporary time while preserving the legacy proof version.
-            legacy = type(legacy).model_validate(
-                {
-                    **legacy.model_dump(),
-                    "issued_at": acceptance.created_at,
-                    "eligible_until": acceptance.eligible_until,
-                    "acceptance_digest": acceptance.acceptance_digest,
-                    "intent_digest": "",
-                }
-            )
-            store._write_every_code_feedback_resume_intent_fixture_record(legacy)
-            self.assertEqual(
-                store.mint_every_code_feedback_resume_intent(
-                    acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
-                ).status,
-                "legacy_unverified",
-            )
-            closure = EveryCodeLinkedPullRequestClosureRecord(
-                closure_id="closure-mint",
-                request_id=request.request_id,
-                repository_id=34,
-                pull_request_number=1,
-                pull_request_node_id="PR_node",
-                merged=False,
-                closed_at=acceptance.created_at,
-                github_delivery_id="closed",
-            )
-            store.write_every_code_linked_pull_request_closure_record(closure)
-            self.assertEqual(
-                store.mint_every_code_feedback_resume_intent(
-                    acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
-                ).status,
-                "pull_request_closed",
-            )
-
-    def test_policy_replacement_and_mint_serialize_in_both_orders(self) -> None:
-        from control_plane.service_auth import LaunchplaneAuthzPolicy
-
-        for mint_first in (True, False):
-            with self.subTest(mint_first=mint_first), _store_for_fresh_head_database() as store:
-                acceptance, request, policy = self.seed(store)
-                replacement = LaunchplaneAuthzPolicyRecord(
-                    record_id="policy-after-mint",
-                    revision=policy.revision + 1,
-                    source="test",
-                    updated_at=policy.updated_at,
-                    policy=LaunchplaneAuthzPolicy(schema_version=2),
-                )
-                acquired, attempted, release = (
-                    threading.Event(),
-                    threading.Event(),
-                    threading.Event(),
-                )
-                local = threading.local()
-                original = store._lock_active_authz_policy
-
-                def locked(session: Any) -> None:
-                    if not getattr(local, "hold", False):
-                        attempted.set()
-                    original(session)
-                    if getattr(local, "hold", False):
-                        acquired.set()
-                        if not release.wait(timeout=10):
-                            raise TimeoutError("test failed to release policy lock")
-
-                def perform(mint: bool, hold: bool) -> Any:
-                    local.hold = hold
-                    if mint:
-                        return store.mint_every_code_feedback_resume_intent(
-                            acceptance_id=acceptance.acceptance_id,
-                            open_observation=self.observation(),
-                        )
-                    return store.compare_and_write_authz_policy_record(
-                        expected_record=policy, replacement_record=replacement
-                    )
-
-                with patch.object(store, "_lock_active_authz_policy", side_effect=locked):
-                    with ThreadPoolExecutor(max_workers=2) as pool:
-                        first = pool.submit(perform, mint_first, True)
-                        try:
-                            self.assertTrue(acquired.wait(timeout=5))
-                            second = pool.submit(perform, not mint_first, False)
-                            self.assertTrue(attempted.wait(timeout=5))
-                            self.assertFalse(second.done())
-                        finally:
-                            release.set()
-                        first_result, second_result = (
-                            first.result(timeout=10),
-                            second.result(timeout=10),
-                        )
-                minted = first_result if mint_first else second_result
-                self.assertEqual(minted.status, "mint" if mint_first else "authority_denied")
-                self.assertEqual(
-                    len(
-                        store.list_every_code_feedback_resume_intent_records(
-                            request_id=request.request_id
-                        )
-                    ),
-                    int(mint_first),
-                )
-
-    def test_closure_and_mint_serialize_in_both_orders(self) -> None:
-        for mint_first in (True, False):
-            with self.subTest(mint_first=mint_first), _store_for_fresh_head_database() as store:
-                acceptance, request, _ = self.seed(store)
-                closure = EveryCodeLinkedPullRequestClosureRecord(
-                    closure_id="closure-interleaved",
-                    request_id=request.request_id,
-                    repository_id=34,
-                    pull_request_number=1,
-                    pull_request_node_id="PR_node",
-                    merged=False,
-                    closed_at=acceptance.created_at,
-                    github_delivery_id="closed-interleaved",
-                )
-                acquired, attempted, release = (
-                    threading.Event(),
-                    threading.Event(),
-                    threading.Event(),
-                )
-                local = threading.local()
-
-                def before(
-                    conn: Any,
-                    cursor: Any,
-                    statement: str,
-                    parameters: Any,
-                    context: Any,
-                    executemany: bool,
-                ) -> None:
-                    if (
-                        "launchplane_every_code_work_requests" in statement
-                        and "FOR UPDATE" in statement
-                        and not getattr(local, "hold", False)
-                    ):
-                        attempted.set()
-
-                def after(
-                    conn: Any,
-                    cursor: Any,
-                    statement: str,
-                    parameters: Any,
-                    context: Any,
-                    executemany: bool,
-                ) -> None:
-                    if (
-                        "launchplane_every_code_work_requests" in statement
-                        and "FOR UPDATE" in statement
-                        and getattr(local, "hold", False)
-                    ):
-                        acquired.set()
-                        if not release.wait(timeout=10):
-                            raise TimeoutError("test failed to release request lock")
-
-                def perform(mint: bool, hold: bool) -> Any:
-                    local.hold = hold
-                    if mint:
-                        return store.mint_every_code_feedback_resume_intent(
-                            acceptance_id=acceptance.acceptance_id,
-                            open_observation=self.observation(),
-                        )
-                    return store.write_every_code_linked_pull_request_closure_record(closure)
-
-                event.listen(store._engine, "before_cursor_execute", before)
-                event.listen(store._engine, "after_cursor_execute", after)
-                try:
-                    with ThreadPoolExecutor(max_workers=2) as pool:
-                        first = pool.submit(perform, mint_first, True)
-                        try:
-                            self.assertTrue(acquired.wait(timeout=5))
-                            second = pool.submit(perform, not mint_first, False)
-                            self.assertTrue(attempted.wait(timeout=5))
-                            self.assertFalse(second.done())
-                        finally:
-                            release.set()
-                        first_result, second_result = (
-                            first.result(timeout=10),
-                            second.result(timeout=10),
-                        )
-                    minted = first_result if mint_first else second_result
-                    self.assertEqual(minted.status, "mint" if mint_first else "pull_request_closed")
-                    self.assertEqual(
-                        store.mint_every_code_feedback_resume_intent(
-                            acceptance_id=acceptance.acceptance_id, open_observation=None
-                        ).status,
-                        "pull_request_closed",
-                    )
-                finally:
-                    event.remove(store._engine, "before_cursor_execute", before)
-                    event.remove(store._engine, "after_cursor_execute", after)
-
-    def test_newer_acceptance_and_mint_serialize_in_both_orders(self) -> None:
-        from control_plane.contracts.every_code_feedback_resume import (
-            every_code_feedback_eligible_until,
-        )
-
-        for mint_first in (True, False):
-            with self.subTest(mint_first=mint_first), _store_for_fresh_head_database() as store:
-                acceptance, request, _ = self.seed(store)
-                newer_at = (
-                    datetime.now(timezone.utc)
-                    .isoformat(timespec="microseconds")
-                    .replace("+00:00", "Z")
-                )
-                revision = acceptance.revision.model_dump()
-                revision.update(
-                    feedback_id="feedback-newer",
-                    provider_updated_at=newer_at,
-                    body_sha256="b" * 64,
-                    revision_digest="",
-                )
-                newer = type(acceptance).model_validate(
-                    {
-                        **acceptance.model_dump(),
-                        "acceptance_id": "acceptance-newer",
-                        "revision": revision,
-                        "github_delivery_id": "delivery-newer",
-                        "received_at": newer_at,
-                        "created_at": newer_at,
-                        "eligible_until": every_code_feedback_eligible_until(
-                            first_received_at=newer_at,
-                            provider_updated_at=newer_at,
-                        ),
-                        "acceptance_digest": "",
-                    }
-                )
-                acquired, attempted, release = (
-                    threading.Event(),
-                    threading.Event(),
-                    threading.Event(),
-                )
-                local = threading.local()
-
-                def before(
-                    conn: Any,
-                    cursor: Any,
-                    statement: str,
-                    parameters: Any,
-                    context: Any,
-                    executemany: bool,
-                ) -> None:
-                    if (
-                        "launchplane_every_code_work_requests" in statement
-                        and "FOR UPDATE" in statement
-                        and not getattr(local, "hold", False)
-                    ):
-                        attempted.set()
-
-                def after(
-                    conn: Any,
-                    cursor: Any,
-                    statement: str,
-                    parameters: Any,
-                    context: Any,
-                    executemany: bool,
-                ) -> None:
-                    if (
-                        "launchplane_every_code_work_requests" in statement
-                        and "FOR UPDATE" in statement
-                        and getattr(local, "hold", False)
-                    ):
-                        acquired.set()
-                        if not release.wait(timeout=10):
-                            raise TimeoutError("test failed to release request lock")
-
-                def perform(mint: bool, hold: bool) -> Any:
-                    local.hold = hold
-                    if mint:
-                        return store.mint_every_code_feedback_resume_intent(
-                            acceptance_id=acceptance.acceptance_id,
-                            open_observation=self.observation(),
-                        )
-                    return store.write_every_code_feedback_acceptance_record(newer)
-
-                event.listen(store._engine, "before_cursor_execute", before)
-                event.listen(store._engine, "after_cursor_execute", after)
-                try:
-                    with ThreadPoolExecutor(max_workers=2) as pool:
-                        first = pool.submit(perform, mint_first, True)
-                        try:
-                            self.assertTrue(acquired.wait(timeout=5))
-                            second = pool.submit(perform, not mint_first, False)
-                            self.assertTrue(attempted.wait(timeout=5))
-                            self.assertFalse(second.done())
-                        finally:
-                            release.set()
-                        first_result, second_result = (
-                            first.result(timeout=10),
-                            second.result(timeout=10),
-                        )
-                    minted = first_result if mint_first else second_result
-                    self.assertEqual(
-                        minted.status,
-                        "mint" if mint_first else "acceptance_superseded",
-                    )
-                    self.assertEqual(
-                        len(
-                            store.list_every_code_feedback_resume_intent_records(
-                                request_id=request.request_id
-                            )
-                        ),
-                        int(mint_first),
-                    )
-                finally:
-                    event.remove(store._engine, "before_cursor_execute", before)
-                    event.remove(store._engine, "after_cursor_execute", after)
-
-    def test_unique_constraint_backstop_reselects_exact_snapshot(self) -> None:
-        from sqlalchemy.orm import Session
-
-        for changed_state in (False, True):
-            with (
-                self.subTest(changed_state=changed_state),
-                _store_for_fresh_head_database() as store,
-            ):
-                acceptance, request, _ = self.seed(store)
-                first = store.mint_every_code_feedback_resume_intent(
-                    acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
-                )
-                if changed_state:
-                    store.write_every_code_work_request_record(
-                        request.model_copy(update={"state": "blocked", "error_message": "stopped"})
-                    )
-                original_scalar = Session.scalar
-                missed = False
-
-                def miss_once(session: Any, statement: Any, *args: Any, **kwargs: Any) -> Any:
-                    nonlocal missed
-                    sql = str(statement)
-                    if not missed and "FROM launchplane_every_code_feedback_resume_intents" in sql:
-                        missed = True
-                        return None
-                    return original_scalar(session, statement, *args, **kwargs)
-
-                with patch.object(Session, "scalar", new=miss_once):
-                    result = store.mint_every_code_feedback_resume_intent(
-                        acceptance_id=acceptance.acceptance_id, open_observation=self.observation()
-                    )
-                self.assertTrue(missed)
-                self.assertEqual(
-                    result.status, "terminal_snapshot_mismatch" if changed_state else "replay"
-                )
-                if not changed_state:
-                    self.assertEqual(result.record, first.record)
-                self.assertEqual(
-                    len(
-                        store.list_every_code_feedback_resume_intent_records(
-                            request_id=request.request_id
-                        )
-                    ),
-                    1,
-                )
 
 
 class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
@@ -13198,6 +12469,9 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = _application_testing_fixture(self)
 
+    def test_publication_refuses_stale_route_readiness_without_changing_custody(self) -> None:
+        self.fixture.test_publication_refuses_stale_route_readiness_without_changing_custody()
+
     def test_external_admission_persists_once_across_original_restart(self) -> None:
         self.fixture.test_external_admission_persists_once_across_original_restart()
 
@@ -13419,6 +12693,24 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
 
     def test_supported_application_route_original_intent_and_key_replay(self) -> None:
         self.fixture.assert_supported_http_activation(native_apply=True)
+
+    def test_unanswered_mount_refusal_original_request_and_receipt(self) -> None:
+        self.fixture.assert_http_unanswered_refusal()
+
+    def test_late_mount_after_durable_refusal_remains_recovery_only(self) -> None:
+        self.fixture.test_late_mount_after_durable_refusal_cannot_resume_forward_apply()
+
+    def test_unanswered_refusal_cannot_replace_live_original_execution(self) -> None:
+        self.fixture.test_unanswered_refusal_cannot_replace_a_live_original_lease()
+
+    def test_unanswered_refusal_fences_forward_storage_progress(self) -> None:
+        self.fixture.test_unanswered_refusal_rejects_stale_forward_progress_in_storage()
+
+    def test_plain_apply_cannot_select_unanswered_mount_abandonment(self) -> None:
+        self.fixture.test_plain_authority_changed_apply_cannot_abandon_an_unanswered_mount()
+
+    def test_lost_refusal_completion_adopts_only_the_negative_result(self) -> None:
+        self.fixture.test_lost_negative_completion_adopts_the_refusal_without_forward_work()
 
     def test_interrupted_http_apply_reuses_immutable_original_intent(self) -> None:
         self.fixture.assert_supported_http_activation(native_apply=True, interrupted=True)
@@ -14687,72 +13979,50 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         assert operation is not None
         second = PostgresRecordStore(database_url=scenario.store.database_url)
         self.addCleanup(second.close)
-        entered = threading.Event()
-        release = threading.Event()
-        waiting_remotely = threading.Event()
-        finish_remote = threading.Event()
 
         def execute(*arguments: Any) -> dict[str, object]:
-            def send() -> None:
-                entered.set()
-                if not release.wait(10):
-                    raise TimeoutError("fixture cleanup dispatch")
+            writer: Future[Any] | None = None
+            admission: Future[Any] | None = None
+            with ThreadPoolExecutor(max_workers=2) as pool:
 
-            arguments[3](send)
-            waiting_remotely.set()
-            if not finish_remote.wait(10):
-                raise TimeoutError("fixture remote completion")
-            return {"capacity": True, "disposals": []}
-
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            maintenance = pool.submit(
-                prepare_drill_storage,
-                scenario.store,
-                operation,
-                Path("."),
-                execute=execute,
-                now=scenario.now,
-                checkpoint=lambda: None,
-            )
-            self.assertTrue(entered.wait(5))
-            writer = pool.submit(
-                second.write_runtime_environment_record,
-                RuntimeEnvironmentRecord(
-                    scope="global",
-                    env={"EXAMPLE_INSERT": "changed"},
-                    updated_at=scenario.profile.updated_at,
-                ),
-            )
-            admission = pool.submit(
-                second.enqueue_odoo_testing_drill,
-                scenario.profile.product,
-                scenario.context,
-                lane_key(scenario.profile.product, scenario.context) + ":competing",
-                scenario.now,
-            )
-            try:
-                deadline = time.monotonic() + 5
-                waiting = 0
-                while time.monotonic() < deadline:
-                    with scenario.store._engine.connect() as observer:
-                        waiting = int(
-                            observer.scalar(
-                                text(
-                                    "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'"
+                def send() -> None:
+                    nonlocal writer, admission
+                    writer = pool.submit(
+                        second.write_runtime_environment_record,
+                        RuntimeEnvironmentRecord(
+                            scope="global",
+                            env={"EXAMPLE_INSERT": "changed"},
+                            updated_at=scenario.profile.updated_at,
+                        ),
+                    )
+                    admission = pool.submit(
+                        second.enqueue_odoo_testing_drill,
+                        scenario.profile.product,
+                        scenario.context,
+                        lane_key(scenario.profile.product, scenario.context) + ":competing",
+                        scenario.now,
+                    )
+                    deadline = time.monotonic() + 5
+                    waiting = 0
+                    while time.monotonic() < deadline:
+                        with scenario.store._engine.connect() as observer:
+                            waiting = int(
+                                observer.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'"
+                                    )
                                 )
+                                or 0
                             )
-                            or 0
-                        )
-                    if waiting >= 2:
-                        break
-                    time.sleep(0.01)
-                self.assertGreaterEqual(waiting, 2)
-                self.assertFalse(writer.done())
-                self.assertFalse(admission.done())
-            finally:
-                release.set()
-            self.assertTrue(waiting_remotely.wait(5))
-            try:
+                        if waiting >= 2:
+                            break
+                        time.sleep(0.01)
+                    self.assertGreaterEqual(waiting, 2)
+                    self.assertFalse(writer.done())
+                    self.assertFalse(admission.done())
+
+                arguments[3](send)
+                assert writer is not None and admission is not None
                 writer.result(timeout=5)
                 admission.result(timeout=5)
                 second.write_runtime_environment_record(
@@ -14762,16 +14032,19 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                         }
                     )
                 )
-            finally:
-                finish_remote.set()
-            from control_plane.odoo_testing_drill import DrillPrerequisite
+            return {"capacity": True, "disposals": []}
 
-            with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_authority_changed"):
-                maintenance.result(timeout=10)
-        # The competing authority insert invalidates the completed capacity
-        # snapshot, so its old result cannot activate the worker's new database.
         from control_plane.odoo_testing_drill import DrillPrerequisite
 
+        with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_authority_changed"):
+            prepare_drill_storage(
+                scenario.store,
+                operation,
+                Path("."),
+                execute=execute,
+                now=scenario.now,
+                checkpoint=lambda: None,
+            )
         with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_capacity_unverified"):
             scenario.store.activate_odoo_testing_drill(operation, scenario.now)
 
@@ -15408,6 +14681,31 @@ class RealPostgresTestingCandidateTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         fixture.test_lost_creation_reply_preserves_old_copy_and_never_repeats_effect()
+
+
+class RealPostgresTestingAddressTests(unittest.TestCase):
+    def test_canonical_publication_and_original_key_recovery(self) -> None:
+        from tests import test_testing_address as address_tests
+
+        cases = (
+            address_tests.TestingAddressTests.test_canonical_amendment_preserves_copy_and_original_receipts,
+            address_tests.TestingAddressTests.test_health_refusal_rolls_back_every_canonical_record,
+            address_tests.TestingAddressTests.test_expiry_during_canonical_transaction_rolls_back_every_record,
+            address_tests.TestingAddressTests.test_lost_metadata_reply_completes_from_committed_receipt,
+            address_tests.TestingAddressTests.test_lost_route_reply_recovers_original_attempt_before_canonical_publication,
+            address_tests.TestingAddressTests.test_original_key_cancellation_restores_route_after_profile_changes,
+            address_tests.TestingAddressTests.test_lost_inverse_reply_settles_before_cancellation_completes,
+            address_tests.TestingAddressTests.test_http_original_key_cancellation,
+        )
+        for case in cases:
+            with self.subTest(case=case.__name__), _head_postgres_database() as url:
+                fixture = address_tests.TestingAddressTests()
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    case(fixture)
+                finally:
+                    fixture.doCleanups()
 
 
 class RealPostgresTestingPublicationTests(unittest.TestCase):
@@ -16866,6 +16164,7 @@ class RealPostgresGenericSiblingOwnershipTests(
 
     async def test_http_ownership_receipt_contention_refuses_and_recovers(self) -> None:
         from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+        from tests.support.http import lifespan_client
 
         runtime = await self.produced_sibling()
         receipt = self.store.find_generic_preview_refresh_receipts(runtime.deployment_record_id)[0]
@@ -16873,20 +16172,21 @@ class RealPostgresGenericSiblingOwnershipTests(
         self.addCleanup(peer.close)
         with self.provider_inventory():
             plan = await self.plan()
-            with peer._session_factory() as session:
-                session.scalar(
-                    select(LaunchplaneIdempotencyRow)
-                    .where(LaunchplaneIdempotencyRow.record_id == receipt.record_id)
-                    .with_for_update()
-                )
-                blocked = await asyncio.wait_for(self.apply(plan), 5)
-                self.assertEqual(blocked.status_code, 409, blocked.text)
-                self.assertEqual(
-                    self.store.read_preview_record(self.preview.preview_id), self.preview
-                )
-                peer.write_preview_record(self.preview)
-                session.rollback()
-            self.assertEqual((await self.apply(plan)).status_code, 202)
+            async with lifespan_client(self.app) as client:
+                with peer._session_factory() as session:
+                    session.scalar(
+                        select(LaunchplaneIdempotencyRow)
+                        .where(LaunchplaneIdempotencyRow.record_id == receipt.record_id)
+                        .with_for_update()
+                    )
+                    blocked = await asyncio.wait_for(self.apply(plan, app=client), 5)
+                    self.assertEqual(blocked.status_code, 409, blocked.text)
+                    self.assertEqual(
+                        self.store.read_preview_record(self.preview.preview_id), self.preview
+                    )
+                    peer.write_preview_record(self.preview)
+                    session.rollback()
+                self.assertEqual((await self.apply(plan, app=client)).status_code, 202)
 
 
 class RealPostgresLegacyOdooPreviewReconciliationTests(
@@ -16901,6 +16201,7 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
             LegacyPreviewReconciliationRequest,
         )
         from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+        from tests.support.http import lifespan_client
 
         runtime = self.produced_sibling()
         self.compose(name=runtime.instance, image=self.profile.image.repository + ":current")
@@ -16912,23 +16213,22 @@ class RealPostgresLegacyOdooPreviewReconciliationTests(
         self.assertIn(runtime.deployment_record_id, bound.sibling_receipt_ids)
         peer = PostgresRecordStore(database_url=self.store.database_url)
         self.addCleanup(peer.close)
-        for identifier in bound.sibling_receipt_ids:
-            with self.subTest(receipt=identifier), peer._session_factory() as session:
-                session.scalar(
-                    select(LaunchplaneIdempotencyRow)
-                    .where(LaunchplaneIdempotencyRow.record_id == identifier)
-                    .with_for_update()
-                )
-                # A writer that owns the receipt can need authority next. Apply
-                # must fail immediately rather than waiting in the inverse order.
-                blocked = await asyncio.wait_for(self.apply(plan), 5)
-                self.assertEqual(blocked.status_code, 409, blocked.text)
-                self.assertEqual(
-                    self.store.read_preview_record(self.preview.preview_id), self.preview
-                )
-                peer.write_preview_record(self.preview)
-                session.rollback()
-        response = await self.apply(plan)
+        async with lifespan_client(self.app) as client:
+            for identifier in bound.sibling_receipt_ids:
+                with self.subTest(receipt=identifier), peer._session_factory() as session:
+                    session.scalar(
+                        select(LaunchplaneIdempotencyRow)
+                        .where(LaunchplaneIdempotencyRow.record_id == identifier)
+                        .with_for_update()
+                    )
+                    blocked = await asyncio.wait_for(self.apply(plan, app=client), 5)
+                    self.assertEqual(blocked.status_code, 409, blocked.text)
+                    self.assertEqual(
+                        self.store.read_preview_record(self.preview.preview_id), self.preview
+                    )
+                    peer.write_preview_record(self.preview)
+                    session.rollback()
+            response = await self.apply(plan, app=client)
         self.assertEqual(response.status_code, 202, response.text)
 
     async def test_pointed_legacy_verifying_history_is_retained_under_actual_exclusion(

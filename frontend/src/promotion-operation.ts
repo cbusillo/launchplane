@@ -1,4 +1,4 @@
-import { LaunchplaneApiError } from "./api";
+import { isLaunchplaneHttpError, LaunchplaneApiError } from "./api";
 import type {
   BrowserOperationFailure,
   BrowserOperationStorage,
@@ -62,7 +62,7 @@ export function promotionLiveConfirmation(
 }
 
 export function promotionOperationFailure(error: unknown): BrowserOperationFailure {
-  if (error instanceof LaunchplaneApiError) {
+  if (isLaunchplaneHttpError(error)) {
     return {
       code: error.code || "request_failed",
       message: error.message,

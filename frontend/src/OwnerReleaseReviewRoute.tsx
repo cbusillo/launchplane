@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
-import { openUrgentReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
+import { requestReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
-import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem, OdooWebsiteSettings } from "./generated/openapi.ts";
+import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem, OdooWebsiteSettings, ReleaseVersion } from "./generated/openapi.ts";
 import { groupReleaseItems, untestedReason } from "./release-review-model";
 import { safeExternalUrl } from "./url";
+
+function runtimeSettingsIdentity(settings: ReleaseVersion["runtime_settings"]): string {
+  return JSON.stringify(settings ? [Object.entries(settings.values).sort(([left], [right]) => left.localeCompare(right)), [...settings.absent_keys].sort()] : null);
+}
 
 const RELEASE_STEP_LABELS: Record<ClientReleaseRunView["steps"][number]["kind"], string> = {
   backup: "Verified backup",
@@ -127,8 +131,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   const [reason, setReason] = useState("");
   const [overrideReason, setOverrideReason] = useState("");
   const [hotfixReason, setHotfixReason] = useState("");
-  const [urgentReason, setUrgentReason] = useState("");
-  const [urgentSent, setUrgentSent] = useState(false);
+  const [requestReason, setRequestReason] = useState("");
+  const [requestSent, setRequestSent] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [recorded, setRecorded] = useState(false);
@@ -142,8 +146,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     setReason("");
     setOverrideReason("");
     setHotfixReason("");
-    setUrgentReason("");
-    setUrgentSent(false);
+    setRequestReason("");
+    setRequestSent(false);
     setRecorded(false);
     setRefreshFailed(false);
     const request = fixtureMode
@@ -204,12 +208,12 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
     if (!response?.review.checklist || busy) return;
     setBusy(true);
     setError("");
-    setUrgentSent(false);
+    setRequestSent(false);
     try {
       if (!fixtureMode) {
-        setResponse(await openUrgentReleaseReview({ product, checklist_digest: response.review.checklist_digest, reason: urgentReason }));
+        setResponse(await requestReleaseReview({ product, checklist_digest: response.review.checklist_digest, reason: requestReason }));
       }
-      setUrgentSent(true);
+      setRequestSent(true);
     } catch {
       setError("The release review could not be confirmed. Reload this page before trying again; a request may already be open.");
     } finally {
@@ -229,12 +233,17 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
   // The Director keeps the current testing checklist so a further hotfix can
   // bind it; other viewers review the already-live fix's saved checklist.
   const reviewingHotfix = activeHotfix && !response?.can_start_temporary_hotfix;
-  const incomplete = !checklist || !(reviewingHotfix || testingUrl) || response?.review.checklist_complete !== true;
-  const hasChanges = !!checklist && (
+  const incomplete = !checklist || response?.review.checklist_complete !== true;
+  const hasChanges = !!checklist && !noNewRelease && (
     checklist.production.artifact_id !== checklist.candidate.artifact_id
     || checklist.production.source_commit !== checklist.candidate.source_commit
     || (checklist.production.shared_addons_digest ?? "") !== (checklist.candidate.shared_addons_digest ?? "")
+    || runtimeSettingsIdentity(checklist.production.runtime_settings) !== runtimeSettingsIdentity(checklist.candidate.runtime_settings)
   );
+  const changedSettings = Object.entries(checklist?.candidate.runtime_settings?.values ?? {})
+    .filter(([key, value]) => checklist?.production.runtime_settings?.values[key] !== value);
+  const removedSettings = (checklist?.candidate.runtime_settings?.absent_keys ?? [])
+    .filter(key => !checklist?.production.runtime_settings?.absent_keys.includes(key));
   const client = response?.owner_github_login ?? "";
   // A viewer who is not the Client learns first who the Client is and that their
   // own decision cannot start the release.
@@ -318,12 +327,12 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && hasChanges && !activeHotfix && response.can_override && client && !latestDecision ? <section className="owner-review-action" aria-label="Ask the Client now">
         <h3>Ask {client} to review this release now</h3>
-        <p>Launchplane automatically asks {client} to review every qualified release, including engineering changes. You can also send a request now with a reason in plain words; nothing goes live until {client} accepts it. If {client} was already asked about this release, the existing request and its reason stay unchanged.</p>
-        <label><span>Why this release cannot wait</span><textarea value={urgentReason} maxLength={1000} disabled={busy} onChange={event => setUrgentReason(event.target.value)} /></label>
+        <p>Ask {client} to review when you decide this release is needed. Include your reason in plain words; nothing goes live until {client} accepts it. If this review is unchanged, the existing request and its reason stay unchanged.</p>
+        <label><span>Why this release is needed</span><textarea value={requestReason} maxLength={1000} disabled={busy} onChange={event => setRequestReason(event.target.value)} /></label>
         <div className="owner-review-action-buttons">
-          <button className="button" type="button" disabled={busy || incomplete || !urgentReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
+          <button className="button" type="button" disabled={busy || incomplete || !requestReason.trim()} onClick={() => void askClientNow()}>Ask {client} to review now</button>
         </div>
-        {urgentSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
+        {requestSent ? <p role="status" className="owner-review-success">A release review request is open for {client}. Nothing has been deployed.</p> : null}
       </section> : null}
       {checklist && !noNewRelease && response.can_override && !activeHotfix ? <section className="owner-review-action release-review-override" aria-label="Admin Approval Override">
         <h3>Admin Approval Override</h3>
@@ -343,6 +352,18 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && !noNewRelease && (response.viewer_is_owner || response.can_override) ? <p className="owner-review-state">Each new decision is saved and published as a separate release record. {releaseStarts ? "Only the Client's acceptance starts the release; an admin override does not, and an admin can hold releases." : "Recording a decision does not deploy anything."} Production deployment still requires the release and backup checks.</p> : null}
       {recorded ? <p role="status" className="owner-review-success">{latestDecision?.decision === "temporary_hotfix" ? "Temporary hotfix recorded. Launchplane is putting it live; this page shows its progress." : latestDecision?.release_start === "rollback" ? "Changes requested. Launchplane is rolling the site back to your last accepted release." : latestDecision?.release_start ? "Release accepted. This page shows when Launchplane can start and its progress." : "Decision recorded. Nothing has been deployed."}</p> : null}
+      {(changedSettings.length > 0 || removedSettings.length > 0) && !noNewRelease ? <details className="release-review-technical" data-production-settings>
+        <summary>Production settings</summary>
+        <p>Accepting this release applies these saved settings to the live site. Rollback restores the previous settings with the previous version.</p>
+        <dl>
+          {changedSettings.map(([key, value]) => <div key={key}>
+            <dt>{key}</dt><dd><code>{value}</code></dd>
+          </div>)}
+          {removedSettings.map(key => <div key={key}>
+            <dt>{key}</dt><dd>Removed</dd>
+          </div>)}
+        </dl>
+      </details> : null}
       {checklist ? <details className="release-review-technical">
         <summary>Technical details</summary>
         <dl>

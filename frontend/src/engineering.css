@@ -414,8 +414,6 @@
 }
 
 .engineering-evidence-strip span,
-.engineering-work-columns span,
-.engineering-provenance-row span,
 .engineering-policy-card span,
 .engineering-merge-targets span,
 .engineering-controller-state span,
@@ -470,7 +468,6 @@
   padding: 0 10px;
 }
 
-.engineering-every-code-list,
 .engineering-dry-run ul,
 .engineering-controller-records ul {
   display: grid;
@@ -480,7 +477,6 @@
   list-style: none;
 }
 
-.engineering-every-code-item > header,
 .engineering-controller-summary,
 .engineering-dry-run > header,
 .engineering-controller-records > header {
@@ -490,17 +486,12 @@
   gap: 16px;
 }
 
-.engineering-every-code-item > header > div,
 .engineering-controller-summary > div,
 .engineering-dry-run > header > div,
 .engineering-controller-records > header > div {
   display: grid;
   min-width: 0;
   gap: 3px;
-}
-
-.engineering-every-code-item h2 {
-  overflow-wrap: anywhere;
 }
 
 .engineering-status-chip {
@@ -539,8 +530,7 @@
   gap: 6px;
 }
 
-.engineering-chip-row > span,
-.engineering-passive-action {
+.engineering-chip-row > span {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -557,8 +547,6 @@
   color: var(--warning);
 }
 
-.engineering-work-columns,
-.engineering-provenance-row,
 .engineering-policy-card,
 .engineering-controller-state {
   display: grid;
@@ -566,8 +554,6 @@
   gap: 8px;
 }
 
-.engineering-work-columns > div,
-.engineering-provenance-row > div,
 .engineering-policy-card > div,
 .engineering-controller-state > div {
   display: grid;
@@ -579,57 +565,12 @@
   padding: 11px 12px;
 }
 
-.engineering-work-columns p,
-.engineering-provenance-row small,
 .engineering-policy-card small,
 .engineering-controller-state small {
   overflow-wrap: anywhere;
   color: var(--muted);
 }
 
-.engineering-evidence-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-}
-
-.engineering-evidence-list > span {
-  display: grid;
-  gap: 2px;
-  max-width: 320px;
-  border-left: 2px solid var(--unknown);
-  background: var(--surface-raised);
-  color: var(--muted);
-  font-size: 10px;
-  padding: 7px 9px;
-}
-
-.engineering-evidence-list > span[data-trust="verified"] {
-  border-left-color: var(--prod);
-}
-
-.engineering-evidence-list > span[data-trust="recorded"] {
-  border-left-color: var(--preview);
-}
-
-.engineering-evidence-list > span[data-trust="stale"],
-.engineering-evidence-list > span[data-trust="missing"] {
-  border-left-color: var(--warning);
-}
-
-.engineering-evidence-list strong {
-  color: var(--text);
-  text-transform: capitalize;
-}
-
-.engineering-link-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 9px;
-}
-
-.engineering-link-row a,
 .engineering-dry-run a {
   display: inline-flex;
   align-items: center;
@@ -639,7 +580,6 @@
   font-weight: 650;
 }
 
-.engineering-every-code-item,
 .engineering-merge-targets,
 .engineering-policy-card,
 .engineering-controller-summary,
@@ -650,24 +590,6 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--surface);
-}
-
-.engineering-every-code-list {
-  gap: 12px;
-}
-
-.engineering-every-code-item {
-  display: grid;
-  gap: 13px;
-  padding: 17px 18px;
-}
-
-.engineering-provenance-row {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.engineering-passive-action {
-  color: var(--faint);
 }
 
 .engineering-merge-targets {
@@ -1298,8 +1220,6 @@
   }
 
   .engineering-hub-grid,
-  .engineering-work-columns,
-  .engineering-provenance-row,
   .engineering-policy-card,
   .engineering-controller-state,
   .tenant-admission-action-grid,
@@ -2033,7 +1953,6 @@
     font-size: 19px;
   }
 
-  .engineering-every-code-item > header,
   .engineering-controller-summary,
   .engineering-dry-run > header,
   .engineering-controller-records > header {

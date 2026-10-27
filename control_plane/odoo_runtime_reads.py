@@ -20,6 +20,7 @@ from urllib.request import (
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from control_plane.contracts.odoo_cutover import ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -207,7 +208,7 @@ def select_stable_runtime(
         )
     if any(
         record.odoo_cutover is not None
-        and record.odoo_cutover.step not in {"complete", "rolled_back"}
+        and record.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
         for record in store.list_deployment_records(
             context_name=lane.context, instance_name=lane.instance
         )

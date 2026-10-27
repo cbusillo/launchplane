@@ -549,22 +549,64 @@ existing reviewed-baseline operational policy route above; this source change
 does not change live policy. Recovery is an ordinary source revert through the
 train; explicit-label admission remains supported for the prior service.
 
-`dependency_update_github_user_ids` names dependency-update bots, for example
-Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
-request from one of them enqueues without the enqueue label only when every
-change commit on it is authored by that bot and signed by GitHub (committer
-`web-flow`, verified), nobody else force-pushed the branch, the commits match the
-pull request head the train read, and every dependency the update names stays
-within one major version. Transitive lockfile changes are not classified; the
-pull request's required checks still gate them. The adapter derives that from Dependabot's
-`updated-dependencies` commit trailer and the "from X to Y" lines, because the
-trailer often omits `update-type`. Balanced single- or double-quoted dependency
-names match the unquoted names in those version lines. A major version, a `0.x`
-minor bump, a changed version suffix, a non-version reference such as a commit SHA, an
-unparseable message, or a commit by anyone else leaves the pull request
-ineligible with `dependency update needs agent review`. The label still
-enqueues any trusted pull request as before. An empty list, the default, changes
-nothing and is omitted from the policy digest.
+`enqueue.dependency_update_bots` is the policy table for automatic dependency
+admission. Each row selects an immutable `github_user_id`, a `metadata_format`
+(`dependabot_trailer` or `renovate_metadata`) and nonempty
+`allowed_update_types` from `patch`, `minor` and `digest`. IDs must be unique
+and already belong to `trusted_automation_github_user_ids`. Bot type is still
+required. No login, ID or enabled update type is inferred in code. Adding or
+removing a bot that uses a supported format is a policy proposal for the
+signed-in admin, with no code change. Multiple identities can share a parser.
+
+For example, this illustrative row enables an already trusted test identity:
+
+```json
+{
+  "github_user_id": 711,
+  "metadata_format": "renovate_metadata",
+  "allowed_update_types": ["patch", "minor", "digest"]
+}
+```
+
+The legacy `dependency_update_github_user_ids` field stays readable for retained
+record and digest compatibility. It supplies no parser or admission authority.
+The managed proposal planner refuses new legacy ID entries while allowing
+existing ones to be preserved or removed. Existing records require an approved migration into the explicit table; an
+absent table withholds automatic admission. Ordinary checked Ready and trusted
+label admission remain supported while an admin reviews that migration.
+
+Every change commit must be authored by the configured bot and GitHub-signed
+(`web-flow`, verified), match the observed PR head and have no foreign
+force-push. The configured parser extracts all named updates. Dependabot uses
+its `updated-dependencies` trailer and the "from X to Y" lines; an omitted
+update-type is derived from those versions. Renovate uses one `Renovate-Updates`
+JSON array per commit, emitted by the shared preset's supported
+[`commitBody`](https://docs.renovatebot.com/configuration-options/#commitbody)
+and [`toJSON`/`toObject`](https://docs.renovatebot.com/templates/) helpers.
+
+Every update must have an allowed type and satisfy the same generic safety
+rule. Patch/minor metadata must agree with the version movement and stay within
+one major with an unchanged suffix; a `0.x` minor bump needs review. Digest
+updates need full old/new digests and identical nonempty branch/tag values.
+Majors, unknown types and incomplete evidence remain for agent review even
+when a bot is configured. Transitive lockfile changes are not classified;
+required checks still gate the PR.
+
+The train and Client-note consumers resolve the same repository/base policy.
+Removing a bot also removes its automatic dependency-only Client exemption.
+Release checklist readers use the current policy too; recorded engineering notes
+remain readable, but a removed bot cannot supply a new inferred exemption.
+Both formats require a complete immutable same-repository dependency-only diff.
+`workspace.toml` qualifies only when complete immutable TOML documents differ
+solely in exact devkit/runtime ref pins; shared-addon and other changes keep
+review. Workflows, application code, renames from code and unavailable evidence
+withhold admission. Explicit Client-review overrides remain enforced.
+
+Renovate automerge stays disabled; only the train lands changes. The empty table
+is omitted from policy serialization so it does not alter historical digests.
+After the schema deploys, use the existing managed merge-train policy proposal
+flow to migrate current bot identities and select their formats/types. The
+proposer cannot approve or apply; post its review URL for Chris as admin.
 
 The train's own base-refresh merge commits do not count as dependency changes
 when a persisted branch-refresh record binds the exact commit, repository, PR,
@@ -801,6 +843,13 @@ sorts, waits for the next candidate. A failed candidate keeps the whole-queue
 comparison described under Blocker Isolation. `max_batch_size` caps each new
 candidate.
 
+Configured dependency-bot PRs each occupy one candidate. Ordinary work before
+one can form its own batch; work after it waits for the next candidate. Both
+the explicit bot table and retained legacy dependency IDs impose this boundary,
+independently of update classification or an explicit enqueue label. This does
+not mark dependency PRs for original-PR landing: merge-method singletons keep
+the protected candidate PR and its full build checks.
+
 At a new candidate boundary, pending or unknown engineering heads step aside
 when another eligible head has passing checks and known mergeability. Their
 queue entries report the deferred head and its check/mergeability reason;
@@ -845,6 +894,16 @@ passed on the exact head with the required App bindings. PR identity/head/base
 and the base branch are confirmed after those reads. Missing, pending, failed,
 stale or unreadable evidence selects the normal publication and candidate CI;
 multiple queued PRs always take that path, even if a tree happens to match.
+Reuse also requires the repository/base identity policy, a same-repository PR,
+and a complete commit list ending at the recorded head. The PR author and every
+commit author and committer must have readable user identities; bots must be
+trusted automation. Configured dependency identities, including retained legacy
+IDs, never qualify, even after a trusted refresh. Forks, unknown identities,
+missing policy and unreadable or truncated commit evidence take full candidate
+CI. Construction, controller revalidation and live landing admission share this
+source check. This guard precedes the tenant rollout of secretless source-only
+checks; it neither enables those checks nor retires existing credentials.
+
 PRs with recorded retargets or base force pushes also run full candidate CI:
 their historical head checks may have tested another merge-ref tree. Incomplete
 or unreadable timeline history cannot qualify reuse. The filtered
@@ -921,7 +980,40 @@ screening evidence, but they do not prove the combined tree is safe to land.
 Launchplane must fail closed when candidate check evidence is missing, pending,
 failed, stale, or attached to a different commit SHA.
 
-The single-entry tree-identity proof above is the only exception. Before planning
+Active products whose stored profile selects the Odoo driver always require
+full Build on the constructed candidate, including trusted equal-tree singletons.
+They cannot use the single-entry head-check shortcut. The controller creates the
+existing generated candidate PR before observing checks even when CODEOWNERS or
+the merge method requires landing through the original PR. This triggers the
+repository's existing trusted PR Build without changing its workflow, secrets,
+grants or branch settings. The generated PR remains a validation carrier on
+an original-PR route; it is closed during completed-landing cleanup before the
+candidate ref is deleted. Protected batch routes still merge the generated PR.
+
+For these Odoo candidates, a GitHub Actions `build` check must report `success`
+on the exact constructed SHA. Missing, pending, skipped, neutral or unbound
+checks cannot qualify it. A failed Build fails the candidate even when branch
+protection does not require Build. A source-head Build or a later main Build
+cannot substitute for this evidence. Candidate observation, passed-record
+revalidation and fresh landing admission enforce this rule. The profile is
+read from runtime records; there is no checked-in repository list or additional
+gate for other drivers or repositories.
+
+Odoo landings use `POST /v1/work-graph/merge-train/controller/run-once`.
+The Level 1 ordered worker and direct tenant-admission controller do not
+construct candidates; for Odoo they return a wait or blocked result pointing
+to that supported controller, without merging. Other repositories retain
+their existing routes. Generated Odoo candidate PRs do not allocate product
+previews; source PR previews keep their existing behavior.
+
+Missing Build diagnostics use the existing candidate observation and PR feedback.
+Failed Builds participate in the existing failure classifier, base attribution
+and retry/isolation path. A candidate waiting for Build remains visible to the
+existing stall monitor; the monitor still reports progress failures and never
+supplies missing validation or authorizes landing. An optional Build outside
+the candidate verdict cannot produce those wait/failure signals.
+
+Other repositories retain the single-entry tree-identity exception. Before planning
 its landing, the controller calls observation, which
 re-reads its head checks and live required-check policy rather than treating the
 recorded pass as current authority. If reuse stops being provable, it publishes
@@ -935,8 +1027,9 @@ and the protected expected-head merge; no
 checks are copied to a new SHA and no provider requirement is changed.
 
 Head screening, candidate observation, base verification, head-check reuse and
-native/tenant admission share one required-check evaluator. Only signals matching
-a live required name and its App binding determine the required-check verdict.
+native/tenant admission share one required-check evaluator. Signals matching
+a live required name and its App binding determine the branch-required verdict;
+Odoo candidate validation additionally requires full Build as described above.
 Same-name commit statuses and check runs both participate when they match that
 requirement; one source's pass cannot erase another matching failure or pending
 signal. A required check with no matching evidence remains pending. Optional
@@ -991,14 +1084,24 @@ Launchplane's own CI runs its full validation on that candidate push once. A
 same-repository PR headed by `launchplane/train/**`, when routing succeeds, skips the validation jobs
 and reports only `candidate-ci-delegated`, identifying its head SHA and branch.
 That routing check supplies no validation evidence and never publishes a
-`ci-gate`, even when the push is missing, pending or failed. The push remains
-the only producer of the candidate's required `ci-gate`; an informational PR
-check cannot satisfy or supersede it. Observation and protected landing still
-require the actual candidate's required checks. A new candidate SHA requires
-its own push validation. Ordinary PRs, including forks using the same branch
+`ci-gate`, even when the push is missing, pending or failed. The full workflow
+produces the candidate's required `ci-gate`; an informational PR check cannot
+satisfy or supersede it. Candidate observation and head-check reuse require a
+successful full gate, never a skipped or neutral one. A new candidate SHA requires its own
+full validation. Ordinary PRs, including forks using the same branch
 spelling, keep their full CI path. Security, CodeQL and the required-check policy
-are unchanged. Actions still records two workflow events for a batch candidate,
-but only the push executes the full CI suite.
+are unchanged. Normally Actions records two workflow events for a batch
+candidate, and only the push executes the full CI suite.
+
+If a complete execution inventory and verified canonical ref show that the push
+execution is missing, use the existing manual full CI route in
+[testing style](style/testing.md#local-test-loop). It runs the same gates and
+verified first-parent contribution on that exact candidate. It grants no merge
+authority; the controller still checks the result and current lineage. A
+candidate must contain the supported workflow; a later repair on main cannot
+change an older candidate's file. Let the controller replace a stale candidate
+before running its new ref. Reconcile an uncertain dispatch through the original
+run, not a new dispatch. Missing-event recovery adds no credential or access.
 
 Shared check readers load the target branch's live requirements as the union of
 enforced classic protection and effective active branch rules, preserving each
@@ -1681,10 +1784,12 @@ The deployed merge train resolves the policy's `github_app` source instead.
 See the [configuration boundary](config-boundary.md#bootstrap-env-only) for
 retired chooser-source settings and self-deploy cleanup.
 
-Passing `--mutate` applies exactly one ordered-queue worker transition from that
-fresh snapshot. Use it only from the intended admin environment for the smoke
-or configured target; the command is a narrow bootstrap surface, not the full
-batch train scheduler.
+Local `--mutate` refuses before reading credentials or creating a provider
+transport. Mutations use the deployed service's
+`POST /v1/work-graph/merge-train/run-once`; Odoo uses
+`POST /v1/work-graph/merge-train/controller/run-once` for full candidate Build.
+This removes the token-only local mutation carrier for every repository, while
+leaving non-Odoo service admission and required checks unchanged.
 
 The dry-run orders eligible pull requests by `created_at` and then PR number. It
 excludes draft, closed, unlabeled, or unauthorized entries and fails closed when

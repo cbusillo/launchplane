@@ -206,6 +206,136 @@ class RehearsalTimingTests(unittest.TestCase):
             with self.subTest(changed=changed.phase_timings):
                 self.assertIsNone(measured_rehearsal_window(changed)["upper_bound_seconds"])
 
+    def test_complete_window_requires_same_candidate_t4_business_proof_before_switch(self) -> None:
+        record = self.measured_record()
+        simulation, business = record.phase_timings
+        validation = record.business_validations[0].model_copy(
+            update={"attempt_sha256": simulation.attempt_sha256}
+        )
+        pre_switch = (self.started + timedelta(seconds=4.5)).isoformat()
+        timing = RehearsalPhaseTiming.model_validate(
+            {
+                **simulation.model_dump(mode="json"),
+                "pre_switch_validation": validation.model_dump(mode="json"),
+                "observed": {**simulation.observed, "pre_switch_verified": pre_switch},
+            }
+        )
+        measured = record.model_copy(update={"phase_timings": (timing, business)})
+        window = measured_rehearsal_window(measured)
+        self.assertTrue(window["complete"])
+        self.assertFalse(window["unavailable"])
+        self.assertEqual(window["upper_bound_seconds"], 12)
+        for changes in (
+            {"pre_switch_validation": validation.model_copy(update={"artifact_id": "other"})},
+            {"pre_switch_validation": None},
+            {
+                "observed": {
+                    **timing.observed,
+                    "pre_switch_verified": business.observed["receipt_observed"],
+                }
+            },
+        ):
+            with self.subTest(changes=changes):
+                changed = measured.model_copy(
+                    update={"phase_timings": (timing.model_copy(update=changes), business)}
+                )
+                self.assertFalse(measured_rehearsal_window(changed)["complete"])
+
+    def test_pre_switch_receipt_requires_its_own_attempt_and_passing_commit(self) -> None:
+        record = self.measured_record()
+        simulation = record.phase_timings[0]
+        base = {
+            **simulation.model_dump(mode="json"),
+            "observed": {**simulation.observed, "pre_switch_verified": self.started.isoformat()},
+        }
+        validation = record.business_validations[0].model_copy(
+            update={"attempt_sha256": simulation.attempt_sha256}
+        )
+        for changes in ({"passed": False}, {"attempt_sha256": "d" * 64}):
+            with self.subTest(changes=changes), self.assertRaises(ValidationError):
+                RehearsalPhaseTiming.model_validate(
+                    {
+                        **base,
+                        "pre_switch_validation": validation.model_copy(update=changes).model_dump(
+                            mode="json"
+                        ),
+                    }
+                )
+
+    def test_publication_retains_t4_under_original_attempt_and_rejects_another_candidate(
+        self,
+    ) -> None:
+        measured = self.measured_record()
+        simulation = measured.phase_timings[0]
+        validation = measured.business_validations[0].model_copy(
+            update={"attempt_sha256": simulation.attempt_sha256}
+        )
+        timing = {
+            **simulation.model_dump(mode="json"),
+            "observed": {
+                **simulation.observed,
+                "pre_switch_verified": (self.started + timedelta(seconds=4.5)).isoformat(),
+            },
+            "pre_switch_validation": validation.model_dump(mode="json"),
+        }
+        result: dict[str, Any] = {
+            "state": "switched",
+            "copies": [item.model_dump(mode="json") for item in measured.copies],
+            "elapsed_seconds": {},
+            "phase_timing": timing,
+        }
+        adapter = self.fixture.adapter("simulate-final")
+        adapter.publish(self.fixture.record, result)
+        current = self.fixture.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert current is not None
+        self.assertEqual(current.phase_timings[0].pre_switch_validation, validation)
+        self.assertFalse(current.business_validations)
+        adapter.publish(current, result)
+        repeated = self.fixture.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert repeated is not None
+        self.assertEqual(repeated.phase_timings, current.phase_timings)
+        for field, changed in (
+            ("artifact_id", "other"),
+            ("source_commit", "f" * 40),
+            ("product", "other"),
+        ):
+            with self.subTest(field=field), self.assertRaises(RehearsalRefused):
+                adapter.publish(
+                    current,
+                    {
+                        **result,
+                        "phase_timing": {
+                            **timing,
+                            "pre_switch_validation": {
+                                **validation.model_dump(mode="json"),
+                                field: changed,
+                            },
+                        },
+                    },
+                )
+        from control_plane._odoo_rehearsal_business_validation import business_validation_history
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        current = repeated
+        final = self.fixture.copy("final_upgrade")
+        verification: dict[str, Any] = {
+            "state": "verified",
+            "copies": [item.model_dump(mode="json") for item in (*current.copies, final)],
+            "elapsed_seconds": {},
+        }
+        verifier = self.fixture.adapter("verify")
+        with self.assertRaises(RehearsalRefused):
+            verifier.publish(current, verification)
+        history = business_validation_history(current.model_dump(mode="json"))
+        verification["copies"][-1]["business_validation_sha256"] = canonical_json_sha256(history)
+        with self.assertRaises(RehearsalRefused):
+            verifier.publish(current, verification)
+        validated = rehearsal_tests.with_passing_business_validation(current)
+        self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(current, validated)
+        history = business_validation_history(validated.model_dump(mode="json"))
+        verification["copies"][-1]["business_validation_sha256"] = canonical_json_sha256(history)
+        self.assertEqual(verifier.publish(validated, verification)["state"], "verified")
+
 
 class HostTimingTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -19,7 +20,7 @@ from contextlib import closing, contextmanager, nullcontext
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event, current_thread, main_thread
+from threading import Event, Thread, current_thread, main_thread
 from typing import Any, Literal, cast
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -6118,6 +6119,15 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             self.assertEqual(self.store.list_preview_records()[0].state, "active")
             self.assertEqual(self.provider.applied, [("refresh", 5)])
 
+    def test_recorded_train_candidate_does_not_allocate_a_preview(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch("control_plane.product_reconcile.recorded_train_candidate", return_value=True):
+            plan = self.reconcile()
+        self.assertEqual(plan["action"], "none")
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.store.list_preview_records())
+
     def test_memory_refusal_reports_headroom_and_retries_without_a_new_build(self) -> None:
         from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 
@@ -7663,6 +7673,157 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 )
                 self.assertFalse(self.sweep_preview())
 
+    def seed_preview_failure(self, *, state: PreviewState = "destroyed") -> None:
+        self.request("preview", 5)
+        request = self.store.claim_next_product_reconcile_request("seed", 600)
+        assert request is not None
+        self.store.complete_product_reconcile_request(
+            request.target_key,
+            "seed",
+            "failed",
+            {
+                "action": "wait",
+                "last_failed_error_summary": record_failure_summary("preview_reconcile_failed"),
+                "pr_feedback": {"status": "failed", "delivery_status": "delivered"},
+            },
+            "preview_reconcile_failed",
+        )
+        self.write_preview(state=state)
+        self.github.pull_request["state"] = "closed"
+
+    def test_retirement_recovers_stale_failure_without_another_pr_event(self) -> None:
+        from control_plane.contracts.product_environment_read_model import (
+            build_product_site_overview,
+        )
+
+        self.seed_preview_failure()
+        preview = self.store.list_preview_records()[0]
+        warning_prefix = f"PR #{preview.anchor_pr_number}:"
+        before = build_product_site_overview(
+            record_store=self.store, product="site", action_allowed=lambda *_: False
+        )
+        self.assertTrue(any(warning.startswith(warning_prefix) for warning in before.warnings))
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+
+        after = build_product_site_overview(
+            record_store=self.store, product="site", action_allowed=lambda *_: False
+        )
+        self.assertEqual(recovered.last_plan["reason"], "pull_request_not_open")
+        self.assertFalse(any(warning.startswith(warning_prefix) for warning in after.warnings))
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_retired_failure_recovery_keeps_unknown_reads_bounded(self) -> None:
+        self.seed_preview_failure()
+        attempts = 0
+        with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+            while self.sweep_preview():
+                failed = self.run_swept_preview()
+                attempts += 1
+                self.assertLessEqual(attempts, PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS)
+        self.assertGreater(attempts, 0)
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_failed_feedback_requires_a_completed_retirement(self) -> None:
+        self.seed_preview_failure()
+        self.write_preview(state="teardown_pending")
+
+        self.assertFalse(self.sweep_preview())
+        self.assertEqual(self.provider.applied, [])
+
+    def test_failed_feedback_does_not_borrow_another_contexts_retirement(self) -> None:
+        self.seed_preview_failure()
+        preview = self.store.list_preview_records()[0]
+        self.store.write_preview_record(preview.model_copy(update={"context": "other"}))
+
+        self.assertFalse(self.sweep_preview())
+        self.assertEqual(self.provider.applied, [])
+
+    def test_pre_retirement_failures_do_not_spend_the_later_recovery_budget(self) -> None:
+        self.seed_preview_failure(state="active")
+        self.github.pull_request["state"] = "open"
+        for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+            self.request("preview", 5)
+            with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+                failed = self.run_once()
+            self.assertEqual(failed.state, "failed")
+            self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
+            self.assertNotIn("feedback_recovery_stop_reason", failed.last_plan)
+
+        self.write_preview(state="destroyed")
+        self.github.pull_request["state"] = "closed"
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+        self.assertEqual(recovered.last_plan["reason"], "pull_request_not_open")
+        self.assertFalse(self.sweep_preview())
+
+    def test_retired_failure_with_unknown_pr_state_stays_bounded(self) -> None:
+        self.seed_preview_failure()
+        self.github.pull_request["state"] = "unknown"
+        attempts = 0
+        while self.sweep_preview():
+            unresolved = self.run_swept_preview()
+            attempts += 1
+            self.assertLessEqual(attempts, PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS)
+        self.assertGreater(attempts, 0)
+        self.assertEqual(unresolved.last_plan["reason"], "preview_cleanup_pr_state_unknown")
+        self.assertIn("last_failed_error_summary", unresolved.last_plan)
+        self.assertIn("feedback_recovery_stop_reason", unresolved.last_plan)
+        self.assertEqual(self.provider.applied, [])
+
+    def test_retirement_metadata_failure_does_not_block_the_failed_result(self) -> None:
+        self.seed_preview_failure()
+        self.request("preview", 5)
+        with (
+            patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")),
+            patch.object(
+                self.store, "list_preview_records", side_effect=OSError("metadata unavailable")
+            ),
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("last_failed_error_summary", failed.last_plan)
+        self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
+
+    def test_new_runtime_failure_does_not_spend_retirement_recovery_budget(self) -> None:
+        self.seed_preview_failure()
+        self.github.pull_request["state"] = "open"
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(
+            self.provider,
+            "execute_apply",
+            return_value={"status": "fail", "provider_effect_attempted": True},
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["action"], "apply")
+        self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
+
+    def test_unknown_live_pr_state_does_not_spend_pending_feedback_budget(self) -> None:
+        self.reconcile_preview()
+        self.write_preview(state="active")
+        self.github.pull_request["state"] = "unknown"
+        for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+            self.request("preview", 5)
+            unresolved = self.run_once()
+            self.assertEqual(unresolved.last_plan["reason"], "preview_cleanup_pr_state_unknown")
+            self.assertNotIn("feedback_recovery_failed_attempts", unresolved.last_plan)
+            self.assertNotIn("feedback_recovery_stop_reason", unresolved.last_plan)
+
+        self.write_preview(state="destroyed")
+        self.github.pull_request["state"] = "closed"
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+        self.assertEqual(recovered.last_plan["reason"], "pull_request_not_open")
+        self.assertFalse(self.sweep_preview())
+
     def test_recovery_discovers_feedback_beyond_the_default_history_limit(self) -> None:
         for number in range(10, 120):
             self.store.request_product_reconcile(
@@ -7982,13 +8143,17 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertIn("An admin needs to set one", self.comment_body())
 
     def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
         self.github.add_run(50, PR_HEAD, event="pull_request")
-        self.github.pull_request["body"] = "## Client test notes\nTry the changed price list."
+        self.github.pull_request["body"] = (
+            f"## Client test notes\nTry the changed price list.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the business address?"
+        )
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["action"], "apply")
@@ -8004,6 +8169,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         )
 
     def test_pure_dependabot_without_build_requests_no_client_review(self) -> None:
+        seed_dependency_policy(self.store, repository=REPOSITORY)
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         self.store.write_product_profile_record(
@@ -8012,9 +8178,9 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.github.pull_request.update(
             {
                 "body": "Bumps a dependency.",
-                "user": {"login": "dependabot[bot]", "type": "Bot"},
+                "user": {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
                 "head": {"sha": PR_HEAD, "repo": {"full_name": REPOSITORY}},
-                "base": {"sha": DEPLOYABLE, "repo": {"full_name": REPOSITORY}},
+                "base": {"ref": "main", "sha": DEPLOYABLE, "repo": {"full_name": REPOSITORY}},
             }
         )
         read = self.github.get_json
@@ -9224,6 +9390,47 @@ class _ClaimOrderStore:
 
 
 class ProductReconcileWorkerTests(ProductReconcileTestCase):
+    def test_persists_queue_planning_and_feedback_boundaries(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        target = self.request()
+        requested = self.store.read_product_reconcile_request(target).requested_at
+        queue_wait, planning, publication = (timedelta(seconds=value) for value in (20, 7, 3))
+        clock = [datetime.fromisoformat(requested) + queue_wait]
+
+        def reconcile(**_kwargs: object) -> ReconcileOutcome:
+            clock[0] += planning
+            return ReconcileOutcome({"target": "testing", "action": "none"})
+
+        def feedback(**_kwargs: object) -> None:
+            clock[0] += publication
+
+        with (
+            patch(
+                "control_plane.product_reconcile._utc_now", side_effect=lambda: clock[0].isoformat()
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request", side_effect=reconcile
+            ),
+            patch("control_plane.product_reconcile.post_reconcile_feedback", side_effect=feedback),
+        ):
+            completed = self.run_once()
+
+        timing = cast(dict[str, str], completed.last_plan["timing"])
+        boundaries = [
+            datetime.fromisoformat(timing[key])
+            for key in (
+                "requested_at",
+                "started_at",
+                "planning_finished_at",
+                "feedback_finished_at",
+            )
+        ]
+        self.assertEqual(
+            [end - start for start, end in zip(boundaries, boundaries[1:])],
+            [queue_wait, planning, publication],
+        )
+
     def test_worker_tries_reconcile_only_after_every_operation_kind(self) -> None:
         store = _ClaimOrderStore()
 
@@ -9267,9 +9474,21 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
 
     def test_worker_loop_sweeps_at_most_every_thirty_minutes(self) -> None:
         clock = [0.0]
+        interval = 1800
+        swept = Event()
+        sweep_threads: list[Thread] = []
+
+        def discover(*_args: object, **_kwargs: object) -> None:
+            sweep_threads.append(current_thread())
+            swept.set()
 
         def advance(_result: OdooStableOperationWorkerResult) -> None:
-            clock[0] += 900
+            if clock[0] % interval == 0:
+                self.assertTrue(swept.wait(10))
+                sweep_threads[-1].join(10)
+                self.assertFalse(sweep_threads[-1].is_alive())
+                swept.clear()
+            clock[0] += interval / 2
 
         with (
             patch(
@@ -9277,7 +9496,8 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
                 return_value=OdooStableOperationWorkerResult(status="worked"),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep"
+                "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep",
+                side_effect=discover,
             ) as sweep,
         ):
             run_odoo_stable_operation_worker_loop(
@@ -9285,6 +9505,7 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
                 control_plane_root_path=Path("."),
                 lease_owner="worker-a",
                 max_iterations=4,
+                reconcile_sweep_seconds=interval,
                 iteration_callback=advance,
                 monotonic=lambda: clock[0],
             )

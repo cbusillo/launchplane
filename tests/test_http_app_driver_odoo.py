@@ -2316,7 +2316,7 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied_request.dry_run_plan.operation, "destroy")
         self.assertEqual(applied_request.image_reference, "")
 
-    async def test_odoo_preview_recovers_abandoned_refresh_only_after_grace(
+    async def test_odoo_preview_operations_recover_after_grace_without_a_lifecycle_record(
         self,
     ) -> None:
         operations: tuple[Literal["refresh", "destroy"], ...] = ("refresh", "destroy")

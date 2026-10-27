@@ -8,10 +8,8 @@ from datetime import datetime, timezone
 import hashlib
 import logging
 import re
-from typing import Literal
 from urllib.parse import parse_qs, urlencode, urlsplit
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from starlette.requests import Request
 from starlette.concurrency import run_in_threadpool
 
@@ -47,6 +45,11 @@ from control_plane.lane_runtime_verification import (
     read_lane_runtime_verification,
 )
 from control_plane.source_control_change import read_branch_revision
+from control_plane.split_ingress import (
+    read_split_ingress_binding,
+    split_ingress_monitoring_lane,
+    split_ingress_advisory_check,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
@@ -87,17 +90,6 @@ class DeliveryFailureReference:
     failed_at: str
 
 
-class RefusedProductionRequestReconciliation(BaseModel):
-    """An admin attests caller retirement; the service verifies refusal and health."""
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    incident_id: str = Field(min_length=1)
-    caller_retired: Literal[True]
-    caller_retired_at: AwareDatetime
-    caller_retirement_evidence: str = Field(min_length=1, max_length=2000)
-
-
 def is_guard_refusal_incident(incident: PublicIngressIncidentRecord) -> bool:
     return bool(
         incident.instance == "prod"
@@ -123,80 +115,6 @@ def _is_refusal_only_incident(store: Store, incident: PublicIngressIncidentRecor
     )
 
 
-def reconcile_refused_production_requests(
-    store: Store,
-    *,
-    requests: tuple[RefusedProductionRequestReconciliation, ...],
-    observed_at: str,
-) -> tuple[str, ...]:
-    """One-time supported disposition; never infer caller retirement from runtime health."""
-    now = _time(observed_at)
-    resolved: list[str] = []
-    for request in requests:
-        incident = store.read_public_ingress_incident_record(request.incident_id)
-        with (
-            store.delivery_evidence_index() as index,
-            index.lane_lock(incident.context, incident.product) as acquired,
-        ):
-            if not acquired:
-                raise ValueError(
-                    "Delivery monitoring is active; retry reconciliation after it finishes."
-                )
-            refusals = store.list_public_ingress_observation_records(
-                product=incident.product,
-                context_name=incident.context,
-                instance_name="prod",
-                check_kind="provider",
-                check_name_prefix=REFUSED_REQUEST_CHECK_PREFIX,
-                limit=1,
-            )
-            resolved.append(
-                _reconcile_refused_production_request(
-                    store,
-                    request=request,
-                    now=now,
-                    latest_refusal_at=_time(refusals[0].observed_at) if refusals else None,
-                )
-            )
-    return tuple(resolved)
-
-
-def _reconcile_refused_production_request(
-    store: Store,
-    *,
-    request: RefusedProductionRequestReconciliation,
-    now: datetime,
-    latest_refusal_at: datetime | None,
-) -> str:
-    incident = store.read_public_ingress_incident_record(request.incident_id)
-    if not is_guard_refusal_incident(incident):
-        raise ValueError("Only a promotion guard refusal can be reconciled as refused.")
-    if incident.status == "resolved":
-        if incident.resolution_reason == PRODUCTION_REQUEST_REFUSED:
-            return incident.incident_id
-        raise ValueError(
-            "This incident already resolved by another outcome; retain that disposition."
-        )
-    if not _time(incident.opened_at) <= request.caller_retired_at <= now:
-        raise ValueError("Caller retirement must follow the refused request and precede now.")
-    profile = store.read_product_profile_record(incident.product)
-    lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
-    if lane is None or not profile.is_active or lane.context != incident.context:
-        raise ValueError("The production lane has changed; inspect its current evidence.")
-    if latest_refusal_at is not None and latest_refusal_at >= request.caller_retired_at:
-        raise ValueError("A production caller is still making refused requests.")
-    return _resolve_guard_refusal(
-        store,
-        incident=incident,
-        profile=profile,
-        lane=lane,
-        now=now,
-        health_after=request.caller_retired_at,
-        summary="Production request refused, nothing changed. Caller retired at "
-        f"{request.caller_retired_at.isoformat()}; evidence: {request.caller_retirement_evidence}. ",
-    )
-
-
 def _resolve_guard_refusal(
     store: Store,
     *,
@@ -207,10 +125,13 @@ def _resolve_guard_refusal(
     health_after: datetime,
     summary: str,
 ) -> str:
+    binding = read_split_ingress_binding(store, profile, lane)
+    lane = split_ingress_monitoring_lane(profile, lane, binding)
     checks = tuple(
         check
         for check in lane.health_monitoring.checks
         if check.enabled
+        and not split_ingress_advisory_check(profile, lane, binding, check)
         and product_lane_monitoring_probe_effective(
             monitoring_intent=lane.health_monitoring.monitoring_intent,
             check_kind=check.kind,
@@ -234,9 +155,7 @@ def _resolve_guard_refusal(
             or monitor_observation_provenance(observations[0], now=now).freshness_status
             != "verified"
         ):
-            raise ValueError(
-                "Production health must pass freshly after the last refusal or retirement."
-            )
+            raise ValueError("Production health must pass freshly after the last refusal.")
     _require_verified_production_runtime(store, profile, lane, now)
     if not _is_refusal_only_incident(store, incident):
         raise ValueError("Incident history includes a failure or uncertain outcome beyond refusal.")

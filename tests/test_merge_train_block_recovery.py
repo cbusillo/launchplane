@@ -561,6 +561,28 @@ class CandidateBlockRecoveryTests(unittest.TestCase):
             )
             self.assertEqual(len(self.mutations), 1)
 
+    def test_changed_setup_evidence_during_recheck_preserves_block(self) -> None:
+        from control_plane import merge_train_github_setup_failure_recovery as recovery
+
+        self.setup_missing_store_failure()
+        original = recovery.read_setup_failure_recovery
+        reads = 0
+
+        def changed(*args: Any, **kwargs: Any) -> Any:
+            nonlocal reads
+            proof = original(*args, **kwargs)
+            assert proof is not None
+            reads += 1
+            return proof if reads == 1 else proof.model_copy(update={"job_id": proof.job_id + 1})
+
+        with patch.object(recovery, "read_setup_failure_recovery", side_effect=changed):
+            self.assertNotEqual(
+                self.advance(mutate=True)["controller_action"], "recover_candidate_block"
+            )
+        self.assertGreaterEqual(reads, 2)
+        self.assertEqual(self.mutations, [])
+        self.assertEqual(self.advance(mutate=True)["controller_action"], "recover_candidate_block")
+
     def test_unreviewed_or_spent_recovery_does_not_fetch_causal_evidence(self) -> None:
         self.setup_missing_store_failure()
         read = Mock(wraps=self.client.read_setup_failure_recovery)

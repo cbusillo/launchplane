@@ -295,7 +295,7 @@ class FastApiPreviewLifecycleCleanupTests(unittest.IsolatedAsyncioTestCase):
                     "product": "verireel",
                     "context": "verireel-testing",
                     "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
-                    "apply": False,
+                    "apply": True,
                 },
             )
 

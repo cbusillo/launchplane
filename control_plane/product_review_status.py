@@ -33,7 +33,7 @@ from control_plane.github_app_identity import (
     revoke_installation_token,
 )
 from control_plane.client_test_notes import change_client_review
-from control_plane.dependency_update_review import pure_dependabot_update
+from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
 from control_plane.product_review import (
     ProductReviewStore,
@@ -131,6 +131,8 @@ def owner_review_status(
                 if decision.carried_from.reason == "merge_train_base_refresh"
                 else "no Client-visible changes"
                 if decision.carried_from.reason == "client_impact_none"
+                else "integrating base changes"
+                if decision.carried_from.reason == "accepted_base_integration"
                 else "an unchanged-feature base update"
             )
             description += f" (carried from {decision.carried_from.head_sha[:7]} after {update})"
@@ -185,7 +187,10 @@ class OwnerReviewStatusPublisher:
                     )
                     return None
                 facts = self._pull_request_facts(
-                    repository=repository, pull_request_number=pull_request_number, token=token
+                    repository=repository,
+                    pull_request_number=pull_request_number,
+                    token=token,
+                    policy_store=store,
                 )
             except Exception:
                 _LOGGER.warning(
@@ -317,7 +322,7 @@ class OwnerReviewStatusPublisher:
                 )
 
     def _pull_request_facts(
-        self, *, repository: str, pull_request_number: int, token: str
+        self, *, repository: str, pull_request_number: int, token: str, policy_store: object = None
     ) -> _PullRequestFacts:
         payload = self.api_request(
             path=f"/repos/{_repository_path(repository)}/pulls/{pull_request_number}",
@@ -345,8 +350,10 @@ class OwnerReviewStatusPublisher:
             if isinstance(raw_repository_id, int) and not isinstance(raw_repository_id, bool)
             else ""
         )
-        dependency_only = pure_dependabot_update(
-            payload, read=lambda path: self.api_request(path=path, token=token)
+        dependency_only = pure_dependency_update(
+            payload,
+            read=lambda path: self.api_request(path=path, token=token),
+            store=policy_store,
         )
         return _PullRequestFacts(
             state=str(payload.get("state") or ""),

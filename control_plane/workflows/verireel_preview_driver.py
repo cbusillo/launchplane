@@ -40,6 +40,7 @@ from control_plane.dokploy import memory_capacity
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 
 from control_plane.dokploy import api as dokploy_api
+from control_plane.dokploy.application_endpoint import application_endpoint_spec
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.api import JsonObject
@@ -588,7 +589,6 @@ def _configure_application(
         current_env_text=str(application.get("env") or ""),
         target=f"preview application {application_id}",
     )
-    endpoint_spec = template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
     dokploy_api.dokploy_request(
         host=host,
         token=token,
@@ -600,7 +600,7 @@ def _configure_application(
             "sourceType": "docker",
             "autoDeploy": True,
             "replicas": template_application.get("replicas"),
-            "endpointSpecSwarm": endpoint_spec,
+            "endpointSpecSwarm": application_endpoint_spec(template_application),
             "createEnvFile": template_application.get("createEnvFile"),
             "triggerType": template_application.get("triggerType"),
             "enabled": template_application.get("enabled"),

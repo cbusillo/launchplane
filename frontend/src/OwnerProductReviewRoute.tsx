@@ -215,11 +215,7 @@ function OwnerPreviewReviewRoute({
           historical={Boolean(decisionId)}
           fixtureMode={fixtureMode}
           review={review}
-          onDecided={(decided) => setReview((current) => ({
-            ...decided,
-            pull_request_title: current?.pull_request_title ?? "",
-            client_test_notes: current?.client_test_notes ?? "",
-          }))}
+          onDecided={setReview}
           onRefresh={() => loadReview()}
         />
         </>
@@ -334,7 +330,7 @@ function ProductReviewNotes({ review }: { review: ProductReviewResponse }) {
   return (
     <section aria-label="What to check">
       <h4>What to check</h4>
-      {needsNothingFromClient(review.client_test_notes) ? (
+      {needsNothingFromClient(review.client_test_notes) && !review.client_test_notes_error ? (
         <p>{reason ? `Nothing for you to test: ${reason}` : "Nothing for you to test."}</p>
       ) : (
         <ClientTestNotes notes={review.client_test_notes} />
@@ -366,13 +362,13 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
     setFailure("");
     try {
       const response = fixtureMode
-        ? { ...review, latest_decision: { ...decision, feedback_requested: true, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
+        ? { ...review, pull_request_title: "", client_test_notes: "", client_test_notes_error: "Notes were not included in this response.", latest_decision: { ...decision, feedback_requested: true, feedback_url: `${review.pull_request_url}#issuecomment-1` } }
         : await retryProductReviewFeedback({
             repository: review.repository,
             pull_request: review.pull_request_number,
             decision_id: decision.record_id,
           });
-      onDecided(response);
+      onDecided({ ...response, pull_request_title: review.pull_request_title, client_test_notes: review.client_test_notes, client_test_notes_error: review.client_test_notes_error });
       if (!response.latest_decision?.feedback_url) {
         setFailure("Delivery is still pending. Your saved decision has not changed.");
       }
@@ -403,6 +399,8 @@ function LatestDecision({ decision, review, fixtureMode, onDecided }: {
         <p data-carry-reason={decision.carried_from.reason}>
           Carried from version {decision.carried_from.head_sha.slice(0, 7)}: {decision.carried_from.reason === "client_impact_none"
             ? "later commits were marked as having no Client-visible changes."
+            : decision.carried_from.reason === "accepted_base_integration"
+              ? "accepted or engineering-only base changes were integrated, with no new Client-visible change."
             : "the base was updated, and the change itself was identical."}
         </p>
       ) : null}
@@ -511,7 +509,7 @@ function ProductReviewDecisionForm({
         <button
           className="button button-primary"
           type="button"
-          disabled={busy || stale}
+          disabled={busy || stale || Boolean(review.client_test_notes_error)}
           onClick={() => void record("accepted")}
         >
           Accept
@@ -525,6 +523,7 @@ function ProductReviewDecisionForm({
           Request changes
         </button>
       </div>
+      {review.client_test_notes_error ? <p className="owner-review-alert" role="alert">{review.client_test_notes_error}</p> : null}
       {busy ? <p className="owner-review-state" role="status">Recording…</p> : null}
       {failure ? <p className="owner-review-alert" role="alert">{failure}</p> : null}
       {stale ? <button className="button" type="button" disabled={busy} onClick={async () => {

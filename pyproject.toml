@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Launchplane control-plane contracts and workflows for deployment truth and promotion"
 requires-python = ">=3.13"
 dependencies = [
-    "codex-skills-plan-status @ https://github.com/cbusillo/codex-skills/archive/91acb9ea69a401980e2917e0d91705634aec2ff9.tar.gz#subdirectory=skills/github/scripts",
+    "codex-skills-plan-status @ https://github.com/cbusillo/codex-skills/archive/9e72d42ca6e268522f53a1dde8509dedc21c9888.tar.gz#subdirectory=skills/github/scripts",
     "pyyaml>=6.0.3",
     "Authlib>=1.7.2",
     "click>=8.4.2",
@@ -42,6 +42,9 @@ dev = [
 
 [project.scripts]
 launchplane = "control_plane.cli:main"
+
+[project.entry-points."launchplane.cutover_hosts"]
+dokploy = "control_plane.dokploy.cutover_host:DokployCutoverHost"
 
 [tool.hatch.build.targets.wheel]
 packages = ["control_plane"]

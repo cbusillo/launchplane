@@ -31,8 +31,9 @@ intent, `reviewed_plan_sha256` and an `Idempotency-Key` header. The service
 rechecks the plan and product/lane ownership, uses the existing atomic override
 compare-and-swap, and reads the record back. Concurrent changes require a fresh
 plan. The apply response's readback is intent readback; it is not Odoo readback
-or live activation. This operation is exposed through the service API; it has
-no protected workflow or installed helper binding.
+or live activation. The supported agent route uses the installed
+`launchplane-write-action.py` helper commands `odoo-website-settings-dry-run`
+and `odoo-website-settings-apply` through the service API.
 
 To withdraw pending intent, send `website_settings: null` through the same
 dry-run/reviewed-apply path. This preserves the applied/attempted snapshot and
@@ -126,6 +127,16 @@ Git-blob metadata in `artifacts.json` with the generated module. Values still
 come only from the accepted runtime payload. The runtime must provide the native
 startup shell/config functions covered by the legacy fixture; qualify the actual
 testing and retained rollback images before live activation.
+
+The canonical consumer supports legacy and typed string-parameter APIs. Copied
+websites remain excluded while their addon is scheduled for upgrade or removal;
+Odoo's base-only website model does not enable website settings. The generated
+program and immutable source fixture must advance together.
+
+Odoo 20 defaults its HTTP listener to loopback. The runtime environment record
+must supply `ODOO_HTTP_INTERFACE` for the container listener that the private
+proxy reaches. Verify readiness from that private proxy, not only from inside
+the web container. This is a runtime input, not an artifact build setting.
 
 Native Odoo consent behavior remains Essential only / Accept all. These fields
 are an application contract, not proof of Client consent acceptance, personal-

@@ -51,6 +51,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 )
 from control_plane.workflows.odoo_stable_operation_worker import (
     OdooStableOperationWorkerLoopResult,
+    OdooStableOperationWorkerResult,
     OdooStableOperationWorkerStore,
     _unexpected_error_code,
     build_odoo_stable_operation_worker_status,
@@ -248,6 +249,56 @@ def _restore_operation(
 
 
 class OdooStableOperationWorkerTests(unittest.TestCase):
+    def test_slow_catchup_sweep_does_not_block_operation_polls_or_overlap(self) -> None:
+        with TemporaryDirectory() as directory:
+            sweep_started, polls_finished, sweep_finished = Event(), Event(), Event()
+            clock = [0.0]
+            polls_during_sweep = []
+
+            def sweep(*_args: object, **_kwargs: object) -> None:
+                sweep_started.set()
+                polls_finished.wait(10)
+                sweep_finished.set()
+
+            def poll(**_kwargs: object) -> OdooStableOperationWorkerResult:
+                self.assertTrue(sweep_started.wait(10))
+                polls_during_sweep.append(not sweep_finished.is_set())
+                clock[0] += 1
+                if len(polls_during_sweep) == 3:
+                    polls_finished.set()
+                return OdooStableOperationWorkerResult(status="worked")
+
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            with (
+                patch.object(store, "request_product_reconcile", create=True),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.advance_client_releases"
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.advance_release_invitations"
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep",
+                    side_effect=sweep,
+                ) as catchup,
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                    side_effect=poll,
+                ),
+            ):
+                run_odoo_stable_operation_worker_loop(
+                    record_store=store,
+                    control_plane_root_path=Path(directory),
+                    lease_owner="worker",
+                    max_iterations=3,
+                    reconcile_sweep_seconds=1,
+                    monotonic=lambda: clock[0],
+                )
+
+            self.assertTrue(all(polls_during_sweep))
+            catchup.assert_called_once()
+            self.assertTrue(sweep_finished.is_set())
+
     def test_reconcile_wait_does_not_delay_next_accepted_release_pass(self) -> None:
         for blocked_step in ("operation", "sweep"):
             with self.subTest(blocked_step=blocked_step), TemporaryDirectory() as directory:

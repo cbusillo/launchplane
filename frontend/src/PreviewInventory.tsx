@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LaunchplaneApiError, readPreviewHistory, readProductReconcileRequests } from "./api";
+import { isLaunchplaneHttpError, readPreviewHistory, readProductReconcileRequests } from "./api";
 import { formatTime } from "./format";
 import type { PreviewGenerationRecord, ProductReconcileRequestView, ProductSiteOverview } from "./generated/openapi.ts";
 import { emptyResource, type ResourceState } from "./resource";
@@ -25,10 +25,10 @@ function useReadEvidence<T extends { trace_id: string }>(
       if (active) setResource({ status: "ready", data: payload, error: "", traceId: payload.trace_id, statusCode: 200 });
     }).catch((error: unknown) => {
       if (!active || controller.signal.aborted) return;
-      const statusCode = error instanceof LaunchplaneApiError ? error.statusCode : 503;
+      const statusCode = isLaunchplaneHttpError(error) ? error.statusCode : 503;
       setResource(current => ({ status: "error", data: [401, 403].includes(statusCode) ? null : current.data,
         error: error instanceof Error ? error.message : "Recorded evidence is unavailable.",
-        traceId: error instanceof LaunchplaneApiError ? error.traceId : "", statusCode }));
+        traceId: isLaunchplaneHttpError(error) ? error.traceId : "", statusCode }));
     });
     return () => { active = false; controller.abort(); };
   }, [enabled, key, read, refreshToken, retry]);
@@ -40,11 +40,25 @@ export function PreviewInventory({ product, refreshToken }: { product: ProductSi
   const preview = product.preview;
   const records = preview.records ?? [];
   const selected = records.find(record => record.preview_id === selectedId);
+  const inventory = preview.inventory;
   const reconcile = useReadEvidence(product.product, Boolean(selected), refreshToken, readProductReconcileRequests);
   if (!preview.enabled) return null;
   return <section className="preview-records" aria-labelledby="preview-records-title">
     <p className="eyebrow">Recorded previews</p>
     <h2 id="preview-records-title">Inspect individual previews</h2>
+    {preview.records_status === "available" && inventory?.observed_slugs.length ? <section aria-label="Observed preview sleep state">
+      <h3>Preview sleep</h3>
+      <p>Observed {formatTime(inventory.provenance.refreshed_at)}. Sleep state does not prove current availability.</p>
+      <ul>{inventory.observed_slugs.map(slug => {
+        const observation = inventory.sleep_observations?.find(item => item.slug === slug);
+        const fresh = preview.trust_state === "verified" && inventory.provenance.freshness_status === "verified"
+          && (inventory.status === "empty" || inventory.status === "nonempty");
+        return <li key={slug}><strong>{slug}</strong>: {fresh && observation?.state === "asleep" ? "Asleep"
+          : fresh && observation?.state === "awake" ? "Awake"
+          : fresh && observation?.state === "cannot_sleep" ? `Cannot sleep: ${observation.reason}`
+          : `Sleep status unknown: ${fresh && observation?.reason ? observation.reason : "a fresh observation is needed."}`}</li>;
+      })}</ul>
+    </section> : null}
     <p>Identity and lifecycle records do not prove current provider presence. Select a change to read its history.</p>
     {preview.records_status === "authorization_denied" ? <p role="status">Individual preview reads need the existing preview.read grant for this context. Product access alone does not supply it.</p>
       : preview.records_status !== "available" ? <p role="status">Individual preview inventory is unavailable in this response.</p>

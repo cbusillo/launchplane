@@ -7,7 +7,7 @@ from typing import Annotated, Literal, NoReturn
 
 import click
 
-from fastapi import Depends, Header, Path, Query
+from fastapi import Depends, Header, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from control_plane.build_provenance import BuildProvenanceError, record_verified_build_artifact
@@ -43,7 +43,12 @@ from control_plane.odoo_target_replacement_plan_http import (
     resolve_odoo_target_replacement_plan_lane,
 )
 from control_plane.product_reconcile import ProductReconcileError, latest_verified_testing_build
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneIdentity
+from control_plane.service_auth import (
+    GitHubHumanIdentity,
+    LaunchplaneIdentity,
+    director_agent_identity,
+    launchplane_identity_actor,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_rebuild_preflight import TestingRebuildPreflight, inspect_testing_rebuild
 from control_plane.testing_rebuild_service import TestingRebuildRefused
@@ -127,6 +132,7 @@ class TestingRebuildSettlementResponse(BaseModel):
 class TestingRebuildRouteDependencies:
     common: ReadRouteDependencies
     mutation_identity: Callable[..., LaunchplaneIdentity]
+    lookup_identity: Callable[..., LaunchplaneIdentity]
     root: FilePath
 
 
@@ -152,8 +158,24 @@ def register_testing_rebuild_routes(
             {"product": product, **payload.model_dump(mode="json", exclude={"original_scope"})}
         )
 
+    async def lookup_request_fingerprint(request: Request) -> str:
+        try:
+            payload = await request.json()
+        except ValueError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=common.next_trace_id(),
+                code="invalid_request",
+                message="Request payload failed JSON validation.",
+            ) from error
+        return request_fingerprint(payload)
+
     def require_admin(
-        identity: LaunchplaneIdentity, record_store: object, trace_id: str
+        identity: LaunchplaneIdentity,
+        record_store: object,
+        trace_id: str,
+        *,
+        read_only: bool = False,
     ) -> PostgresRecordStore:
         if not isinstance(record_store, PostgresRecordStore):
             raise common.http_error(
@@ -171,8 +193,9 @@ def register_testing_rebuild_routes(
                 code="authorization_provenance_unavailable",
                 message="The current administrator policy is unavailable.",
             ) from error
-        if not isinstance(identity, GitHubHumanIdentity) or not policy.names_administrator(
-            identity
+        if not (
+            (isinstance(identity, GitHubHumanIdentity) and policy.names_administrator(identity))
+            or (read_only and director_agent_identity(identity))
         ):
             raise common.http_error(
                 status_code=403,
@@ -233,7 +256,11 @@ def register_testing_rebuild_routes(
                 "Testing rebuild was not admitted. Refresh the lane evidence before another request.",
             )
         raise common.http_error(
-            status_code=status, trace_id=trace_id, code=code, message=message
+            status_code=status,
+            trace_id=trace_id,
+            code=code,
+            message=message,
+            reason=error.code if isinstance(error, TestingRebuildRefused) else None,
         ) from error
 
     def inspect(
@@ -243,7 +270,7 @@ def register_testing_rebuild_routes(
         data_source_mode: Annotated[TestingRebuildSource, Query()] = "empty",
     ) -> TestingRebuildInspection:
         trace_id = common.next_trace_id()
-        store = require_admin(identity, record_store, trace_id)
+        store = require_admin(identity, record_store, trace_id, read_only=True)
         try:
             profile = store.read_product_profile_record(product)
             lane = resolve_odoo_target_replacement_plan_lane(
@@ -264,6 +291,7 @@ def register_testing_rebuild_routes(
                 store=store,
                 request=request,
                 verified_manifest=verified.manifest,
+                actor=launchplane_identity_actor(identity),
             )
             return TestingRebuildInspection(
                 **inspection.model_dump(mode="python"), original_scope=idempotency_scope(identity)
@@ -343,6 +371,7 @@ def register_testing_rebuild_routes(
                 store=store,
                 request=request,
                 verified_manifest=verified.manifest,
+                actor=launchplane_identity_actor(identity),
             )
             record_verified_build_artifact(record_store=store, verified=verified)
         except (
@@ -398,7 +427,7 @@ def register_testing_rebuild_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> TestingRebuildResponse:
         trace_id = common.next_trace_id()
-        store = require_admin(identity, record_store, trace_id)
+        store = require_admin(identity, record_store, trace_id, read_only=True)
         try:
             operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
             if operation.product != product or not operation.is_native_testing_rebuild:
@@ -414,8 +443,9 @@ def register_testing_rebuild_routes(
 
     def lookup_original(
         product: Annotated[str, Path(min_length=1)],
-        payload: TestingRebuildSubmit,
-        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.mutation_identity)],
+        payload: TestingRebuildSubmit | OdooTargetReplacementApplyEnvelope,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.lookup_identity)],
+        raw_request_fingerprint: Annotated[str, Depends(lookup_request_fingerprint)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         idempotency_key: Annotated[
             str, Header(alias="Idempotency-Key", min_length=1, max_length=256)
@@ -423,8 +453,23 @@ def register_testing_rebuild_routes(
     ) -> TestingRebuildResponse:
         """Read the original request after a denied recovery; never admit or retry it."""
         trace_id = common.next_trace_id()
-        store = require_admin(identity, record_store, trace_id)
-        require_original_scope(identity, payload, trace_id)
+        store = require_admin(identity, record_store, trace_id, read_only=True)
+        if director_agent_identity(identity) and isinstance(
+            payload, OdooTargetReplacementApplyEnvelope
+        ):
+            requested_product = payload.product
+            requested_fingerprint = raw_request_fingerprint
+        elif not director_agent_identity(identity) and isinstance(payload, TestingRebuildSubmit):
+            require_original_scope(identity, payload, trace_id)
+            requested_product = product
+            requested_fingerprint = fingerprint(product, payload)
+        else:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Keep the original request body for this caller's testing lookup.",
+            )
         if not idempotency_key.strip():
             raise common.http_error(
                 status_code=400,
@@ -446,8 +491,9 @@ def register_testing_rebuild_routes(
             )
         if (
             original.product != product
+            or requested_product != product
             or not original.is_native_testing_rebuild
-            or original.request_fingerprint != fingerprint(product, payload)
+            or original.request_fingerprint != requested_fingerprint
         ):
             raise common.http_error(
                 status_code=409,

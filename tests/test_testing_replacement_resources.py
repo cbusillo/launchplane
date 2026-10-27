@@ -1,9 +1,10 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, PropertyMock
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -11,11 +12,16 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, LaunchplaneTestingCandidateRow
+from control_plane.contracts.testing_candidate import (
+    TestingCandidateAllocation,
+    testing_candidate_namespace,
+)
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.testing_replacement_resources import (
     ROUTE,
     TestingReplacementResourcesRequest,
+    NativeTestingRebuildRequired,
     resource_request_payload,
     resource_wire_payload,
 )
@@ -125,6 +131,124 @@ class TestingReplacementResourceHttpTests(
 ):
     def setUp(self) -> None:
         TestingReplacementResourceFixture.__init__(self, self)
+
+    async def test_native_lane_keeps_its_address_before_legacy_resource_allocation(self) -> None:
+        original = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        for attribution in ("source_label", "candidate_custody"):
+            with self.subTest(attribution=attribution):
+                target = (
+                    original.model_copy(update={"source_label": "service:testing-rebuild"})
+                    if attribution == "source_label"
+                    else original
+                )
+                self.store.write_dokploy_target_record(target)
+                if attribution == "candidate_custody":
+                    identity = self.store.read_dokploy_target_id_record(
+                        context_name=self.context, instance_name="testing"
+                    )
+                    operation_id = "original-native-copy"
+                    candidate = TestingCandidateAllocation(
+                        namespace=testing_candidate_namespace(
+                            self.profile.product, self.context, operation_id
+                        ),
+                        product=self.profile.product,
+                        context=self.context,
+                        operation_id=operation_id,
+                        intent_sha256=canonical_json_sha256({"fixture": operation_id}),
+                        serving_target_id="former-testing-copy",
+                        server_id="fixture-server",
+                        project_id="native-project",
+                        environment_id="native-environment",
+                        compose_id=identity.target_id,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                    with self.store._session_factory() as session:
+                        session.add(
+                            LaunchplaneTestingCandidateRow(
+                                namespace=candidate.namespace,
+                                payload=candidate.model_dump(mode="json"),
+                            )
+                        )
+                        session.commit()
+                with patch(
+                    "control_plane.testing_replacement_resources.source.read_dokploy_config"
+                ) as provider:
+                    response = await self.post()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], NativeTestingRebuildRequired.code
+                )
+                provider.assert_not_called()
+                preparation = self.store.read_disposable_resource_preparation(
+                    self.operation.operation_id
+                )
+                assert preparation is not None
+                self.assertFalse(preparation.replacement_target_id)
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ),
+                    target,
+                )
+
+    async def test_native_refusal_keeps_its_actionable_code_across_continuation_routes(
+        self,
+    ) -> None:
+        from control_plane.testing_replacement_bootstrap import ROUTE as BOOTSTRAP_ROUTE
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
+
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="fixture-active-policy",
+                revision=1,
+                source="test",
+                updated_at=self.profile.updated_at,
+                policy=LaunchplaneAuthzPolicy(),
+            )
+        )
+        with (
+            patch.object(
+                PostgresRecordStore,
+                "database_dialect_name",
+                new_callable=PropertyMock,
+                return_value="postgresql",
+            ),
+            patch(
+                "control_plane.http_app.run_durable_provider_operation",
+                side_effect=NativeTestingRebuildRequired(),
+            ),
+            patch(
+                "control_plane.http_routes.testing_replacement_resources.TestingReplacementResourceAdapter.readback",
+                side_effect=NativeTestingRebuildRequired(),
+            ),
+        ):
+            for route, mode in ((ROUTE, "apply"), (ROUTE, "readback"), (BOOTSTRAP_ROUTE, "apply")):
+                with self.subTest(route=route, mode=mode):
+                    payload = {
+                        "context": self.context,
+                        "operation_id": self.operation.operation_id,
+                        "reason": "Continue the original reviewed request",
+                        "mode": mode,
+                        "reviewed_plan_sha256": canonical_json_sha256({"fixture": "review"}),
+                    }
+                    if route == BOOTSTRAP_ROUTE:
+                        payload["domain_host"] = "fresh.example.invalid"
+                    response = await request(
+                        self.app,
+                        "POST",
+                        route.format(product=self.profile.product),
+                        headers={
+                            "Authorization": "Bearer local-operator-token",
+                            "Idempotency-Key": "original-key",
+                        },
+                        payload=payload,
+                    )
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(
+                        response.json()["error"]["code"], NativeTestingRebuildRequired.code
+                    )
 
     async def test_unused_capacity_read_refusal_is_rejected_before_a_provider_checkpoint(
         self,

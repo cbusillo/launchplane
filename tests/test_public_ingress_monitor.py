@@ -2814,7 +2814,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
 
         self.assertEqual([event.event for event in store.incident_events], ["opened", "reminder"])
         self.assertEqual(len(store.notification_attempts), 2)
-        self.assertEqual(len(discord_posts), 2)
+        self.assertEqual(len(discord_posts), 1)
+        self.assertEqual(store.notification_attempts[-1].delivery_status, "skipped")
         reminder_state = store.reminder_states[0]
         self.assertEqual(reminder_state.last_window_index, 1)
         self.assertEqual(reminder_state.next_reminder_at, "2026-05-29T12:30:00Z")
@@ -3450,7 +3451,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         delivered = deliver_public_ingress_notification_outbox_delivery(
             record=reminder_record,
             drivers=PublicIngressNotificationDriverSet(github_client=github_client),
-            mark_provider_started=lambda _key, _provider: None,
+            mark_provider_started=lambda _record, _key, _provider: None,
         )
 
         self.assertEqual([action for action, _payload in calls], ["find_marker", "comment"])
@@ -3830,7 +3831,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         result = deliver_public_ingress_notification_outbox_delivery(
             record=record,
             drivers=PublicIngressNotificationDriverSet(github_client=github_client),
-            mark_provider_started=lambda _provider_operation_key, _provider_id: self.fail(
+            mark_provider_started=lambda _record, _provider_operation_key, _provider_id: self.fail(
                 "existing provider marker must not be replaced"
             ),
         )
@@ -3886,7 +3887,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     "resolution without a prior issue must not call GitHub"
                 )
             ),
-            mark_provider_started=lambda _key, _provider: self.fail(
+            mark_provider_started=lambda _record, _key, _provider: self.fail(
                 "skipped resolution must not start a provider operation"
             ),
         )
