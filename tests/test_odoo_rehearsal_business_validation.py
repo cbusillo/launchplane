@@ -404,6 +404,9 @@ class BusinessValidationAdapterTests(unittest.TestCase):
     def test_verify_refuses_business_receipt_for_another_candidate(self) -> None:
         verify = self.fixture.adapter("verify")
         validation = BusinessValidationReceipt.model_validate(receipt(self.plan))
+        valid = self.record.model_copy(update={"business_validations": (validation,)})
+        self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.record, valid)
+        self.assertEqual(verify.inputs()[0], valid)
         for field, changed in (
             ("product", "another-product"),
             ("artifact_id", "another-artifact"),
@@ -659,7 +662,11 @@ class BusinessValidationHostTests(unittest.TestCase):
         }
         self.spec.update(action="validate-business", business_validation_identity=self.plan)
         self.spec["record"].update(
-            target_artifact={"source_commit": self.plan["source_commit"]}, source_odoo_version="1.0"
+            target_artifact={
+                "artifact_id": self.plan["artifact_id"],
+                "source_commit": self.plan["source_commit"],
+            },
+            source_odoo_version="1.0",
         )
         self.host["inspection"] = lambda *args: self.containers
         self.host["private_health"] = Mock()
@@ -775,9 +782,7 @@ class BusinessValidationHostTests(unittest.TestCase):
         self.spec["versions"] = {self.spec["target_image"]: "19.0"}
         self.host["sql"] = lambda *args: "19.0"
         (self.root / "capture.json").write_text("{}")
-        history = [
-            {"passed": True, "steps": [{"key": "order", "record_ids": [31], "passed": True}]}
-        ]
+        history = [receipt(self.plan)]
         self.spec["record"]["business_validations"] = history
 
         def capture(args: list[str], path: Any, bound: int) -> None:
@@ -799,9 +804,9 @@ class BusinessValidationHostTests(unittest.TestCase):
             result["business_validation_sha256"], canonical_json_sha256([pre_switch, *history])
         )
         shutil.rmtree(self.root / self.plan["database"])
-        history.append({"passed": False})
+        history.append({**receipt(self.plan), "passed": False})
         self.host["bounded_capture"].reset_mock()
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(ValueError):
             self.host["snapshot"](self.spec, self.root, self.containers, self.plan["database"])
         self.host["bounded_capture"].assert_not_called()
         self.assertFalse((self.root / self.plan["database"]).exists())
