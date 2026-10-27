@@ -98,7 +98,7 @@ comparison used by a train push; construction refs remain refused. The candidate
 must contain this workflow support. A repair on main makes an older candidate
 stale; let the controller replace it before dispatching its new exact ref.
 Keep and watch the original dispatched run on uncertainty rather than dispatching
-again. A skipped or neutral full `ci-gate` never qualifies validation.
+again. Candidate observation follows [the full-gate policy](../merge-train-policy.md#candidate-validation).
 
 `control_plane.ci_selection` reads only committed comparison and merge trees.
 For a same-repository PR targeting the default branch, it follows Python imports
