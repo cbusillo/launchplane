@@ -177,6 +177,35 @@ multiline commands remain denied. Storage commands follow the
 
 ## Evidence and rollout
 
+### Recorded lane qualification, October 27, 2026
+
+This dated checkpoint covers the six production lanes in the
+[backup rollout](https://github.com/cbusillo/launchplane/issues/2309), not an
+independent product census. Runtime policy and target records remain authoritative.
+The [saved authority/preflight receipt](https://github.com/cbusillo/launchplane/issues/2309#issuecomment-6441602342)
+records the read traces; it changes no policy and starts no capture.
+
+| Product / production context | Active policy record at this checkpoint | Capture-free check | Latest successful release proof located |
+| --- | --- | --- | --- |
+| Odoo CM / `cm` | `production-backup-policy-13f1d4fd2a4c6fffd247faaa-r1` | pass | None; [production adoption](https://github.com/cbusillo/odoo-tenant-cm/issues/120) remains open. |
+| CM Website / `cm_website` | `production-backup-policy-15bd25c68be9c9e207119680-r1` | pass | [October 9 readback](https://github.com/cbusillo/launchplane/issues/2309#issuecomment-6089008871): two verified shared captures and the accepted release drill. |
+| Discord Blue / `discord-blue` | `production-backup-policy-f70bc94fd11c229b2ba2207c-r1` | pass | [October 25 release](https://github.com/cbusillo/discord-blue/issues/266): both snapshot/PBS captures, both promotions and rollback passed. |
+| Odoo OPW / `opw` | `production-backup-policy-67d079f819830cf7126461d1-r1` | unavailable | None; [accepted release/drill](https://github.com/cbusillo/launchplane/issues/3756) remains open. |
+| SellYourOutboard / `sellyouroutboard` | `production-backup-policy-844dc7aae19824e03fc33465-r1` | pass | [October 9 readback](https://github.com/cbusillo/launchplane/issues/2309#issuecomment-6089008871): separate verified shared captures and the accepted release drill. |
+| VeriReel / `verireel` | `production-backup-policy-9a7231acf58794fc57ed5e29-r1` | pass | [October 24 release](https://github.com/cbusillo/launchplane/issues/4718#issuecomment-6392338729): both verified backups, both promotions and rollback passed. |
+
+All six authority reads were ready, with active revision-1 source/destination
+targets. Each passing preflight reported `match_capture_only`, `active_pbs` and
+`capture_started=false`. OPW returned HTTP 409 `backup_preflight_unavailable`;
+the missing prerequisite remains unknown. This is not proof that a new key is
+needed. The linked release proofs are historical receipts freshly read from
+GitHub; no release or capture-operation read ran during this checkpoint.
+VeriReel's [ten-setting retirement readback](https://github.com/cbusillo/launchplane/issues/4760#issuecomment-6418971270)
+also preserves its worker references and passing preflight. Legacy caller
+retirement remains on [its owning plan](https://github.com/cbusillo/launchplane/issues/3019).
+
+### Capture evidence
+
 Capture creates and reads back the named snapshot, then requires successful
 `vzdump` completion and the exact reported archive in the bound storage's backup
 listing. This proves capture and presence; it is not a full restore test or a
