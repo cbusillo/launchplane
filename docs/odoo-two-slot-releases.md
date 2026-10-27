@@ -81,6 +81,8 @@ available `linux/amd64` or `linux/arm64` child; inspection, graph/version probes
 wheel selection and builds use that same platform. A missing or unsupported
 selection refuses without guessing the host architecture or another child.
 Concrete single-platform images keep the existing default inspection path.
+The rehearsal treats response header names case-insensitively while still
+requiring HTML and exact served-mode/public-copy evidence.
 
 A compatible release runs the full planned credential/settings/readback
 sequence with no install or update, warms the candidate, and obtains fresh
