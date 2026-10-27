@@ -54,6 +54,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_profile_record_sha256,
 )
+from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
 from control_plane.artifact_retention import (
     ArtifactRetentionPlan,
     ArtifactRetentionProductMissingError,
@@ -88,6 +89,7 @@ from control_plane.http_routes.support import (
     ReadRouteDependencies,
 )
 from control_plane.service_auth import (
+    director_agent_identity,
     AuthorizationTarget,
     LaunchplaneIdentity,
     TerminalAgentIdentity,
@@ -260,6 +262,7 @@ class ProductProfileListResponse(BaseModel):
     trace_id: str
     driver_id: str
     profiles: tuple[LaunchplaneProductProfileRecord, ...]
+    coverage: ReadCoverage
 
 
 class ProductProfileResponse(BaseModel):
@@ -1573,6 +1576,15 @@ def register_product_environment_read_routes(
             trace_id=trace_id,
             driver_id=str(product_profile_payload["driver_id"]),
             profiles=profiles,
+            coverage=read_coverage(
+                profile_store,
+                collections=("product_profiles",),
+                population="active_product_profiles",
+                authorization_complete=(
+                    service_reader or (identity is not None and director_agent_identity(identity))
+                ),
+                exclusions=("inactive_products",),
+            ),
         )
 
     error_responses: dict[int | str, dict[str, object]] = {

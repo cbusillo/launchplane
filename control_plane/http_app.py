@@ -29810,7 +29810,11 @@ def create_launchplane_fastapi_app(
             error_response_model=LaunchplaneErrorResponse,
         ),
     )
-    register_managed_secret_read_routes(app, dependencies=read_route_dependencies)
+    register_managed_secret_read_routes(
+        app,
+        dependencies=read_route_dependencies,
+        policy_reader=lambda: resolved_authz_policy_runtime.policy,
+    )
     from control_plane.http_routes.testing_local_credentials import (
         register_testing_credential_routes,
     )
