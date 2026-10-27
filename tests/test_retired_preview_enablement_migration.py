@@ -11,7 +11,7 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as held,
     e8d2f6a0b4c7_drop_preview_enablement as migration,
     da72490fce13_join_topics_retirement as topics_join,
-    b9a3d5e7f1b8_join_preview_retirement as preview_retirement_join,
+    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.schema_migration import (
@@ -101,10 +101,10 @@ class RetiredPreviewEnablementMigrationTests(unittest.TestCase):
                         connection.execute(text("SELECT version_num FROM alembic_version"))
                         .scalars()
                         .all(),
-                        [preview_retirement_join.revision],
+                        [archive_retirement_join.revision],
                     )
                 self.assertEqual(
-                    schema_migration_action(current_revision=preview_retirement_join.revision),
+                    schema_migration_action(current_revision=archive_retirement_join.revision),
                     "compatible_ahead",
                 )
             finally:

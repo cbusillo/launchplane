@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
+import base64
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -31,6 +32,10 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
 )
 from control_plane.contracts.public_dns import public_dns_addresses, public_dns_name
+from control_plane.contracts.odoo_post_deploy_payload import (
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+    OdooPostDeployPayload,
+)
 from control_plane.contracts.stored_record_snapshot import (
     SNAPSHOT_MAX_BYTES,
     SNAPSHOT_MAX_ROWS,
@@ -39,6 +44,7 @@ from control_plane.contracts.stored_record_snapshot import (
 )
 from control_plane.cron import validate_cron_expression
 from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.preview_settings import validate_preview_scope
 from control_plane.stored_record_snapshot_codec import SnapshotRowEncoder
 from control_plane.merge_train import MergeTrainDryRunResult, MergeTrainDryRunSnapshot
 from control_plane.workflows.merge_train_worker import MergeTrainWorkerStepResult
@@ -132,6 +138,32 @@ class _Scrubber:
 
     def _digest(self, value: str) -> str:
         return hmac.new(self._salt, value.encode(), hashlib.sha256).hexdigest()
+
+    def scrub_preview_payload(self, original: dict[str, Any], scrubbed: dict[str, Any]) -> None:
+        preview = original.get("preview") or {}
+        values = preview.get("override_env") or {}
+        if ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY not in values:
+            return
+        validate_preview_scope(values, context=preview["context"])
+        raw = json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
+        schema = OdooPostDeployPayload.model_json_schema()
+        payload = self.scrub(raw, schema, schema)
+        payload["instance"] = raw["instance"]
+        from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
+
+        for source, item in zip(raw.get("addon_settings", ()), payload.get("addon_settings", ())):
+            value = item["value"]
+            if source["value"]["source"] == "literal":
+                value["value"] = self.scrub(source["value"]["value"], {}, {})
+            else:
+                value["environment_variable"] = addon_setting_secret_env_key(
+                    addon_name=item["addon"], setting_name=item["setting"]
+                )
+        encoded = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
+        scrubbed["preview"]["override_env"][ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY] = encoded
+        validate_preview_scope(
+            scrubbed["preview"]["override_env"], context=scrubbed["preview"]["context"]
+        )
 
     def number(self, value: str) -> int:
         # History may contain large decimal audit strings. Retain fixed-size
@@ -510,6 +542,8 @@ def export_stored_record_snapshot(
                         elif model_type is EnvironmentInventory:
                             inventory.append(EnvironmentInventory.model_validate(raw["payload"]))
                     payload = scrubber.scrub(raw["payload"], schema, schema)
+                    if model_type is LaunchplaneProductProfileRecord:
+                        scrubber.scrub_preview_payload(raw["payload"], payload)
                     if model_type is MergeTrainRunRecord:
                         for key, nested_schema in nested_schemas.items():
                             if key in raw["payload"]:

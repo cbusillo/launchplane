@@ -34,6 +34,7 @@ class PreviewSettingsTests(unittest.TestCase):
                 record_store=store,
                 context_name="site",
                 template_values={"COLOR": "template", "TEMPLATE_ONLY": "kept"},
+                legacy_values={"COLOR": "legacy", "LEGACY_ONLY": "preserved"},
             )
             self.assertEqual(
                 preview.values,
@@ -41,6 +42,7 @@ class PreviewSettingsTests(unittest.TestCase):
                     "COLOR": "preview",
                     "TEMPLATE_ONLY": "kept",
                     "PREVIEW_ONLY": "isolated",
+                    "LEGACY_ONLY": "preserved",
                 },
             )
             self.assertEqual(store.list_runtime_environment_records(), before)

@@ -320,6 +320,7 @@ def resolve_preview_runtime_environment_from_store(
     record_store: SiteRuntimeEnvironmentStore,
     context_name: str,
     template_values: dict[str, str],
+    legacy_values: dict[str, str] | None = None,
 ) -> SiteRuntimeEnvironment:
     bindings = control_plane_secrets.resolve_effective_secret_bindings_from_store(
         record_store=record_store,
@@ -328,16 +329,19 @@ def resolve_preview_runtime_environment_from_store(
         instance_name="preview",
         scopes=site_secret_scopes("preview"),
     )
-    instance_values = {
-        key: value
-        for record in record_store.list_runtime_environment_records(
-            context_name=context_name, instance_name="preview"
-        )
-        if record.scope == "instance"
-        and record.context == context_name
-        and record.instance == "preview"
-        for key, value in record.env.items()
-    }
+    instance_values: dict[str, ScalarValue] = dict(legacy_values or {})
+    instance_values.update(
+        {
+            key: value
+            for record in record_store.list_runtime_environment_records(
+                context_name=context_name, instance_name="preview"
+            )
+            if record.scope == "instance"
+            and record.context == context_name
+            and record.instance == "preview"
+            for key, value in record.env.items()
+        }
+    )
     try:
         validate_preview_scope(
             instance_values, context=context_name, secret_keys=frozenset(bindings)
@@ -368,9 +372,12 @@ def resolve_preview_runtime_environment_from_store(
         target_environment={},
     )
     overrides = {
-        key: value
-        for key, value in preview.values.items()
-        if key in instance_values or key in preview.secret_keys
+        **(legacy_values or {}),
+        **{
+            key: value
+            for key, value in preview.values.items()
+            if key in instance_values or key in preview.secret_keys
+        },
     }
     return SiteRuntimeEnvironment(
         values={

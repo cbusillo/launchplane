@@ -106,7 +106,10 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                             select(LaunchplaneDokployTargetRow.payload)
                         )
 
-                self.assertEqual(migrate_schema(database_url=url), expected)
+                self.assertEqual(
+                    migrate_schema(database_url=url, target_revision=preview_settings.revision),
+                    expected,
+                )
                 store.verify_schema()
                 self.assertEqual(
                     store.list_discussion_topics("public-site", include_closed=True),
@@ -212,7 +215,7 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
 
     def test_explicit_delivery_request_keeps_its_historical_join(self) -> None:
         with _isolated_postgres_database() as url:
-            migrate_schema(database_url=url)
+            migrate_schema(database_url=url, target_revision=preview_settings.revision)
             self.assertEqual(
                 migrate_schema(database_url=url, target_revision=held.revision),
                 preview_retirement_join.revision,

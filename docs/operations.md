@@ -5748,8 +5748,13 @@ image above is no longer a rollback target once the archive has run.
 
 ### Managed preview settings migration
 
-The release migration target is now `b8f2c4d6e0a7`, immediately after the
-non-runtime profile archive. It moves profile preview overrides into each
+The compatibility release retains the non-runtime profile archive target
+`a4c8e0f2b6d3` while deploying the structured stored-record exporter. Its preview
+reader preserves existing legacy values below managed settings and applies the
+same validator; the retired legacy writer remains unavailable. Activate
+`b8f2c4d6e0a7` only after this exporter is serving and a fresh exported snapshot
+passes that migration. The activation release removes the transitional reader.
+The prepared migration moves profile preview overrides into each
 product's existing runtime-environment records at instance `preview`, and removes
 the old profile values atomically. Existing testing and production records stay
 unchanged. See [shared preview settings](preview-settings.md) for

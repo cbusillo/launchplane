@@ -33,6 +33,7 @@ from control_plane.storage.migrations.versions import (
     b9a3d5e7f1b8_join_preview_retirement as preview_retirement_join,
     c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
     c1c5f7a9b3d0_join_preview_compatibility as preview_compatibility_join,
+    b8f2c4d6e0a7_managed_preview_settings as preview_settings,
 )
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_REVISION,
@@ -85,14 +86,19 @@ class SchemaMigrationTests(unittest.TestCase):
             (topics_hostnames.revision, preview_hostnames_join.revision),
             (public_host_join.revision, preview_compatibility_join.revision),
             (compatibility_join.revision, preview_compatibility_join.revision),
-            (discussion_topics.revision, SCHEMA_MIGRATION_TARGET_REVISION),
-            (retired_preview.revision, SCHEMA_MIGRATION_TARGET_REVISION),
+            (discussion_topics.revision, preview_settings.revision),
+            (retired_preview.revision, preview_settings.revision),
         ):
             with self.subTest(revision=revision):
-                self.assertEqual(schema_migration_action(current_revision=revision), "upgrade")
+                self.assertEqual(
+                    schema_migration_action(
+                        current_revision=revision, target_revision=preview_settings.revision
+                    ),
+                    "upgrade",
+                )
                 self.assertEqual(
                     schema_migration_target(
-                        current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+                        current_revision=revision, target_revision=preview_settings.revision
                     ),
                     target,
                 )
@@ -111,7 +117,7 @@ class SchemaMigrationTests(unittest.TestCase):
             with self.subTest(target=target):
                 self.assertEqual(
                     schema_migration_target(
-                        current_revision=SCHEMA_MIGRATION_TARGET_REVISION, target_revision=target
+                        current_revision=preview_settings.revision, target_revision=target
                     ),
                     preview_retirement_join.revision,
                 )
