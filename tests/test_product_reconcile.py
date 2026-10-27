@@ -6028,6 +6028,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         execute = self.provider.execute_apply
         changed = False
         finished = False
+        dispatches = 0
 
         def inputs(**kwargs: Any) -> dict[str, object]:
             result = build(**kwargs)
@@ -6036,6 +6037,8 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             return result
 
         def apply(**kwargs: Any) -> dict[str, object]:
+            nonlocal dispatches
+            dispatches += 1
             if finished:
                 return execute(**kwargs)
             return {"status": "fail", "provider_effect_attempted": True}
@@ -6078,6 +6081,8 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         ):
             self.request("preview", 5)
             first = self.run_once().last_plan
+            original = self.store.list_held_odoo_preview_reservations(product="site")[0]
+            original_intent = self.store.read_original_mutation_intent(original)
             expire(first)
             changed = True
             self.request("preview", 5)
@@ -6085,21 +6090,24 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             self.assertEqual(successor["preview_operation_status"], "reconcile_required")
             self.assertNotEqual(successor["preview_plan_id"], first["preview_plan_id"], successor)
             expire(successor)
+            successor_dispatches = dispatches
             self.request("preview", 5)
             observed = self.run_once().last_plan
             self.assertEqual(observed["preview_operation_status"], "reconcile_required")
             self.assertEqual(observed["preview_plan_id"], successor["preview_plan_id"])
-            self.assertEqual(self.provider.applied, [])
+            self.assertEqual(dispatches, successor_dispatches)
             _MinuteClock.ticks += ODOO_PREVIEW_PLAN_TTL_SECONDS // 60 + 1
             self.request("preview", 5)
             renewed = self.run_once().last_plan
             self.assertEqual(renewed["preview_operation_status"], "reconcile_required")
             self.assertNotEqual(renewed["preview_plan_id"], successor["preview_plan_id"])
             expire(renewed)
+            renewal_dispatches = dispatches
             self.request("preview", 5)
             observed_renewal = self.run_once().last_plan
             self.assertEqual(observed_renewal["preview_operation_status"], "reconcile_required")
             self.assertEqual(observed_renewal["preview_plan_id"], renewed["preview_plan_id"])
+            self.assertEqual(dispatches, renewal_dispatches)
             changed = False
             self.request("preview", 5)
             restored_binding = self.run_once().last_plan
@@ -6118,6 +6126,7 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             self.assertEqual(completed["preview_result_status"], "pass")
             self.assertEqual(self.store.list_preview_records()[0].state, "active")
             self.assertEqual(self.provider.applied, [("refresh", 5)])
+            self.assertEqual(self.store.read_original_mutation_intent(original), original_intent)
 
     def test_recorded_train_candidate_does_not_allocate_a_preview(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
