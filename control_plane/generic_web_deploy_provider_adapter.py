@@ -2180,13 +2180,7 @@ class GenericWebDeployProviderMutationAdapter:
                 resolved_deploy_target=resolved_target,
                 provider_effect_checkpoint=checkpoint,
                 before_records_commit=lambda: checkpoint("records_commit"),
-                # Publishing a refusal checks ownership without inventing a
-                # provider effect or replacing the last recoverable phase.
-                before_failure_records_commit=(
-                    (lambda: checkpoint("provider_dispatch_prepared"))
-                    if recorder is not None or resolved_target.testing_runtime_digest
-                    else None
-                ),
+                before_failure_records_commit=lambda: checkpoint("provider_dispatch_prepared"),
                 recorded_artifact=self._recorded_artifact,
                 proved_pre_image_retry=proved_pre_image_retry,
                 proved_no_effect_retry=proved_no_effect_retry,
@@ -2215,7 +2209,9 @@ class GenericWebDeployProviderMutationAdapter:
         except click.ClickException as error:
             from control_plane.lane_movement import LaneMovementRefused
 
-            if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
+            if isinstance(error, LaneMovementRefused) and (
+                error.code == "source_order_unavailable" or not effect_started
+            ):
                 raise ProviderMutationRejectedError(error) from error
             raise ProviderMutationUnknownError(str(error)) from error
         provider_effect_attempted = result.pop("provider_effect_attempted", False) is True

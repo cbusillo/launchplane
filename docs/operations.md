@@ -854,6 +854,22 @@ deployment record id and finish time, and it writes no deployment or inventory
 record because no provider deployment was observed. The target is then free for
 the next normal deploy, which records fresh deployment evidence.
 
+The same `close_out_observed` disposition can retain an exact failed testing
+Compose attempt that was refused before dispatch but whose failure publication
+incorrectly checkpointed `records_commit`. It requires the original first
+attempt's expired lease, matching original request and current target bindings,
+and its attributable `lane_movement.ancestor_build` or
+`lane_movement.older_artifact` record. The record must have the unobserved
+deployment sentinel and no runtime identity, bootstrap, post-deploy, dispatch,
+execution, lifecycle or delivered-input evidence. Its start cannot predate the
+original reservation's creation second. Provider absence and `records_commit`
+alone never qualify it; conflicting provider observation retains the hold.
+Apply takes product and testing execution exclusion, compares the original
+intent and evidence rows transactionally, and preserves the typed failure as
+the terminal HTTP 409 result. No provider deploy, inventory update or record
+rewrite occurs. Ordinary pre-effect refusals check lease ownership without
+creating an effect checkpoint; earlier real effects remain fenced.
+
 The bounded provider-evidence route reports failed correlation invariants as
 `provider_status_unknown`; provider request failures remain `provider_read_failed`
 with only the existing bounded read-error class.

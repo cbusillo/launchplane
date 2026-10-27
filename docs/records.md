@@ -1453,6 +1453,18 @@ locations, provider details and free-text diagnostics are omitted. Artifact,
 deployment and source references accompany the expected and observed identity
 result. A stored `match` is rechecked against its own expected/observed payloads.
 
+Health history and the incident list/detail routes accept `historical_context`
+to read a retired context retained in the active product's `historical_contexts`.
+Use the exact `testing` or `prod` instance and its existing
+`product_environment.read` permission on that product, historical context and
+instance. Without the selector, reads still address the current lane. Confirm
+the deployed OpenAPI exposes the selector before using it; older services ignore
+unknown query parameters. Responses retain the selected context, and incident
+detail also checks the stored product and instance. This reads retained evidence
+without reactivating the context or editing incidents. A historical context
+declaration alone supplies no past lane, check-policy or Live-roster timeline;
+empty or bounded reads do not establish that timeline or deleted-record coverage.
+
 The read includes up to two hours of lookback for evidence covering the start
 of the requested window. Save every response in cursor order and run:
 

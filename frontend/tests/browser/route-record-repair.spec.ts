@@ -152,13 +152,17 @@ test("binding card refuses an unchanged verdict with no stored binding", async (
   expect(calls.map(call => call.body.mode)).toEqual(["dry-run"]);
 });
 
-test("split ingress review preserves both custodians through save and readback @responsive", async ({ page }) => {
-  const { panel, calls } = await fixture(page, "binding", "split");
-  await panel.getByLabel("Route binding reason", { exact: true }).fill("Record both existing ingress paths.");
+async function enterExternalCustody(panel: ReturnType<Page["getByRole"]>) {
   await panel.getByRole("button", { name: "Edit external custody", exact: true }).click();
   await panel.getByLabel("External domains", { exact: true }).fill(proposedDomains[0]);
   await panel.getByLabel("Proxy custodian", { exact: true }).fill("Office proxy operator");
   await panel.getByLabel("Configuration evidence URL", { exact: true }).fill("https://example.test/proxy-report");
+}
+
+test("split ingress review preserves both custodians through save and readback @responsive @webkit", async ({ page }) => {
+  const { panel, calls } = await fixture(page, "binding", "split");
+  await panel.getByLabel("Route binding reason", { exact: true }).fill("Record both existing ingress paths.");
+  await enterExternalCustody(panel);
   await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
   await expect(panel.getByLabel("Route binding review", { exact: true })).toContainText("Office proxy operator");
   await panel.getByRole("checkbox").check();
@@ -168,6 +172,55 @@ test("split ingress review preserves both custodians through save and readback @
   const bodies = calls.map(call => call.body as unknown as { external_ingress: { domains: string[]; custodian: string; evidence_url: string; attested_at?: string } });
   for (const body of bodies) expect(body.external_ingress).toMatchObject(bodies[0].external_ingress);
   expect(bodies.at(-1)?.external_ingress).toEqual(bodies[1].external_ingress);
+});
+
+for (const stage of ["session", "review"] as const) {
+  test(`split custody review explains an unreadable ${stage} response and permits a fresh review @responsive @webkit`, async ({ page }) => {
+    const { panel, calls } = await fixture(page, "binding", "split");
+    const review = panel.getByRole("button", { name: "Review route binding", exact: true });
+    await panel.getByLabel("Route binding reason", { exact: true }).fill("Record the existing split custody.");
+    await expect(review).toBeEnabled();
+    await enterExternalCustody(panel);
+    let interrupted = false;
+    await page.route(stage === "session" ? "**/v1/auth/session" : "**/v1/route-bindings/reconcile", route => {
+      if (interrupted) return route.fallback();
+      interrupted = true;
+      return route.fulfill({ status: 502, contentType: "text/html", body: "<h1>Bad Gateway</h1>" });
+    });
+    await review.click();
+    await expect(panel.getByRole("alert")).toContainText(/HTTP 502/);
+    await expect(panel.getByRole("alert")).not.toContainText(/Bad Gateway|expected pattern|not valid JSON/);
+    await expect(panel.getByRole("button", { name: "Apply reviewed route binding", exact: true })).toHaveCount(0);
+    expect(calls).toHaveLength(0);
+    await review.click();
+    await expect(panel.getByLabel("Route binding review", { exact: true })).toContainText("Office proxy operator");
+    expect(calls.map(call => call.body.mode)).toEqual(["dry-run"]);
+    await expect(panel.getByRole("checkbox")).not.toBeChecked();
+  });
+}
+
+test("an unreadable apply keeps original-key recovery without automatic replay @responsive @webkit", async ({ page }) => {
+  const { panel } = await fixture(page, "binding", "split");
+  await panel.getByLabel("Route binding reason", { exact: true }).fill("Record the existing route custody.");
+  await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
+  await panel.getByRole("checkbox").check();
+  const applies: Array<{ key: string; body: unknown }> = [];
+  await page.route("**/v1/route-bindings/reconcile", route => {
+    if (route.request().postDataJSON().mode !== "apply") return route.fallback();
+    applies.push({ key: route.request().headers()["idempotency-key"], body: route.request().postDataJSON() });
+    return applies.length === 1
+      ? route.fulfill({ status: 200, contentType: "text/html", body: "<h1>Unexpected proxy page</h1>" })
+      : route.fallback();
+  });
+  await panel.getByRole("button", { name: "Apply reviewed route binding", exact: true }).click();
+  await expect(panel).toHaveAttribute("data-recovery", "true");
+  await expect(panel.getByRole("alert")).toContainText(/HTTP 200/);
+  await expect(panel.getByRole("alert")).not.toContainText("Unexpected proxy page");
+  expect(applies).toHaveLength(1);
+  await panel.getByRole("button", { name: "Resume original route binding", exact: true }).click();
+  await expect(panel).toHaveAttribute("data-readback", "verified");
+  expect(applies).toHaveLength(2);
+  expect(applies[1]).toEqual(applies[0]);
 });
 
 for (const mode of ["pristine", "dirty", "uncertain", "refused"] as const) {

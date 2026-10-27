@@ -42,6 +42,11 @@ export default defineConfig({
         viewport: { width: 390, height: 844 },
       },
     },
+    {
+      name: "mobile-safari",
+      grep: /@webkit\b/,
+      use: { ...devices["iPhone 13"] },
+    },
   ],
   webServer: {
     command: "pnpm exec vite --mode browser-smoke --host 127.0.0.1 --port 0 --strictPort",

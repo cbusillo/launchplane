@@ -33,6 +33,7 @@ from tests import test_testing_rebuild as testing_rebuild_tests
 from tests import test_testing_retry as testing_retry_tests
 from tests import test_browser_route_repair as browser_repair_tests
 from tests import test_release_review_http as release_review_http_tests
+from tests import test_generic_web_compose_refusal as compose_refusal_tests
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
@@ -559,6 +560,14 @@ def _store_for_fresh_head_database() -> Iterator[PostgresRecordStore]:
             yield store
         finally:
             store.close()
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresComposeRefusalTests(compose_refusal_tests.ComposeRefusalTests):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
 
 
 class RealPostgresRunnerAuditIdentityTests(unittest.TestCase):

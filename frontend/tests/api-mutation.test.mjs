@@ -6,7 +6,12 @@ import {
   dispatchProductPromotionWorkflow,
   dryRunProductPromotion,
   LaunchplaneApiError,
+  LaunchplaneResponseError,
+  readAuthSession,
 } from "../src/api.ts";
+import { productConfigFailureCertainty, productConfigOperationFailure } from "../src/product-config-operation.ts";
+import { promotionFailureCertainty, promotionOperationFailure } from "../src/promotion-operation.ts";
+import { odooReleaseFailure, odooReleaseFailureCertainty } from "../src/odoo-release-operation.ts";
 
 const originalFetch = globalThis.fetch;
 
@@ -257,4 +262,30 @@ test("Launchplane errors retain code, trace, and status", async () => {
       return true;
     },
   );
+});
+
+test("unreadable responses retain HTTP evidence without claiming an apply settled", async () => {
+  for (const [status, body] of [[502, "<h1>Private proxy detail</h1>"], [200, ""], [400, "{truncated"], [401, "null"]]) {
+    globalThis.fetch = async () => new Response(body, { status });
+    await assert.rejects(readAuthSession(), error => {
+      assert.ok(error instanceof LaunchplaneResponseError);
+      assert.equal(error.statusCode, status);
+      assert.match(error.message, new RegExp(`HTTP ${status}`));
+      assert.doesNotMatch(error.message, /Private proxy detail|truncated|SyntaxError/);
+      assert.equal(productConfigFailureCertainty(error, true), "uncertain");
+      assert.equal(productConfigFailureCertainty(error, false), "definitive");
+      assert.equal(productConfigOperationFailure(error).statusCode, status);
+      assert.equal(promotionOperationFailure(error).statusCode, status);
+      assert.equal(odooReleaseFailure(error).statusCode, status);
+      assert.equal(promotionFailureCertainty(error, true), "uncertain");
+      assert.equal(odooReleaseFailureCertainty(error), "uncertain");
+      return true;
+    });
+  }
+});
+
+test("cancelling a response body read keeps the abort failure", async () => {
+  const aborted = new DOMException("Cancelled response body", "AbortError");
+  globalThis.fetch = async () => ({ json: async () => { throw aborted; } });
+  await assert.rejects(readAuthSession(), error => error === aborted);
 });

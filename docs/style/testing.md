@@ -387,7 +387,7 @@ Run the deterministic admin-journey smoke separately from the frontend unit,
 type, OpenAPI, and production-build gate:
 
 ```bash
-(cd frontend && pnpm exec playwright install chromium)
+(cd frontend && pnpm exec playwright install chromium webkit)
 (cd frontend && pnpm test:browser)
 (cd frontend && pnpm exec node --test tests/browser-support/server-isolation.test.mjs)
 ```

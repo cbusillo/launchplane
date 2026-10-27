@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LaunchplaneApiError, readPreviewHistory, readProductReconcileRequests } from "./api";
+import { isLaunchplaneHttpError, readPreviewHistory, readProductReconcileRequests } from "./api";
 import { formatTime } from "./format";
 import type { PreviewGenerationRecord, ProductReconcileRequestView, ProductSiteOverview } from "./generated/openapi.ts";
 import { emptyResource, type ResourceState } from "./resource";
@@ -25,10 +25,10 @@ function useReadEvidence<T extends { trace_id: string }>(
       if (active) setResource({ status: "ready", data: payload, error: "", traceId: payload.trace_id, statusCode: 200 });
     }).catch((error: unknown) => {
       if (!active || controller.signal.aborted) return;
-      const statusCode = error instanceof LaunchplaneApiError ? error.statusCode : 503;
+      const statusCode = isLaunchplaneHttpError(error) ? error.statusCode : 503;
       setResource(current => ({ status: "error", data: [401, 403].includes(statusCode) ? null : current.data,
         error: error instanceof Error ? error.message : "Recorded evidence is unavailable.",
-        traceId: error instanceof LaunchplaneApiError ? error.traceId : "", statusCode }));
+        traceId: isLaunchplaneHttpError(error) ? error.traceId : "", statusCode }));
     });
     return () => { active = false; controller.abort(); };
   }, [enabled, key, read, refreshToken, retry]);

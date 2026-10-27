@@ -16,7 +16,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ProviderHoldAttention, useProviderHoldAttention } from "./ProviderHoldAttention";
 import { providerAttentionQualifier } from "./provider-hold-attention";
 
-import { LaunchplaneApiError, readProduct } from "./api";
+import { isLaunchplaneHttpError, readProduct } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import { ProductGenericWebTransitionPanel } from "./ProductGenericWebTransitionPanel";
@@ -240,8 +240,8 @@ export function ProductWorkspaceRoute({
             error instanceof Error
               ? error.message
               : "Launchplane could not load this product workspace.",
-          traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
-          statusCode: error instanceof LaunchplaneApiError ? error.statusCode : 503,
+          traceId: isLaunchplaneHttpError(error) ? error.traceId : "",
+          statusCode: isLaunchplaneHttpError(error) ? error.statusCode : 503,
         }));
       });
     return () => {
