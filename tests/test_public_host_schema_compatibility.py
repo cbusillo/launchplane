@@ -34,10 +34,10 @@ from control_plane.storage.migrations.versions import (
     f1b5d9a3c7e0_join_public_host_fences as hostname_join,
     f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
     f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
-    a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
-    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
-    a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
-    a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
+    b8f2c4d6e0a7_managed_preview_settings as preview_settings,
+    b9a3d5e7f1b8_join_preview_retirement as preview_retirement_join,
+    c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
+    c1c5f7a9b3d0_join_preview_compatibility as preview_compatibility_join,
 )
 from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_host_fences import (
     PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,
@@ -69,18 +69,18 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
         self,
     ) -> None:
         for revision, expected in (
-            ("", profile_archive.revision),
-            (AUTHZ_COMPATIBILITY_FLOOR_REVISION, profile_archive.revision),
-            (PRE_RETIREMENT_ALEMBIC_REVISION, profile_archive.revision),
-            (previous_release.revision, profile_archive.revision),
-            (topics.revision, profile_archive.revision),
-            (held.revision, archive_retirement_join.revision),
-            (previous_join.revision, archive_retirement_join.revision),
-            (topics_join.revision, archive_retirement_join.revision),
-            (hostnames.revision, archive_hostnames_join.revision),
-            (hostname_join.revision, archive_compatibility_join.revision),
-            (topics_hostnames.revision, archive_hostnames_join.revision),
-            (compatibility_join.revision, archive_compatibility_join.revision),
+            ("", preview_settings.revision),
+            (AUTHZ_COMPATIBILITY_FLOOR_REVISION, preview_settings.revision),
+            (PRE_RETIREMENT_ALEMBIC_REVISION, preview_settings.revision),
+            (previous_release.revision, preview_settings.revision),
+            (topics.revision, preview_settings.revision),
+            (held.revision, preview_retirement_join.revision),
+            (previous_join.revision, preview_retirement_join.revision),
+            (topics_join.revision, preview_retirement_join.revision),
+            (hostnames.revision, preview_hostnames_join.revision),
+            (hostname_join.revision, preview_compatibility_join.revision),
+            (topics_hostnames.revision, preview_hostnames_join.revision),
+            (compatibility_join.revision, preview_compatibility_join.revision),
         ):
             with self.subTest(revision=revision), _isolated_postgres_database() as url:
                 if revision:
@@ -215,7 +215,7 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
             migrate_schema(database_url=url)
             self.assertEqual(
                 migrate_schema(database_url=url, target_revision=held.revision),
-                archive_retirement_join.revision,
+                preview_retirement_join.revision,
             )
             store = PostgresRecordStore(database_url=url)
             self.addCleanup(store.close)
