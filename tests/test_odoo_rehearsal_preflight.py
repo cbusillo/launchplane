@@ -188,6 +188,16 @@ class SourceMeasurementTests(unittest.TestCase):
             database.assert_called_once()
 
 
+class PreflightContractTests(unittest.TestCase):
+    def test_each_backing_role_belongs_to_one_group(self) -> None:
+        payload = observation()
+        RehearsalPreflightObservation.model_validate(payload)
+        group = payload["backing_groups"][0]
+        group["roles"].append(group["roles"][0])
+        with self.assertRaises(ValueError):
+            RehearsalPreflightObservation.model_validate(payload)
+
+
 class PreflightHostTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = TemporaryDirectory()

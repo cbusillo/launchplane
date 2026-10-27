@@ -396,6 +396,28 @@ class HygieneQualificationTests(unittest.TestCase):
             qualified = qualify_runner_host_hygiene(envelope, as_of=as_of, maximum_age_seconds=1)
             self.assertTrue(qualified["qualified"])
             self.assertFalse(qualified["maintenance_completed"])
+            missing_cache = envelope.planned_audit.pre_apply_report.model_copy(
+                update={"builder_cache_usage": (), "require_builder_cache_evidence": False}
+            )
+            for changed in (
+                envelope.model_copy(update={"planned_delivery_state": "pending"}),
+                envelope.model_copy(
+                    update={
+                        "planned_audit": envelope.planned_audit.model_copy(
+                            update={"pre_apply_report": missing_cache}
+                        )
+                    }
+                ),
+            ):
+                with self.subTest(
+                    delivery=changed.planned_delivery_state,
+                    retained=bool(changed.planned_audit.pre_apply_report.builder_cache_usage),
+                ):
+                    self.assertFalse(
+                        qualify_runner_host_hygiene(changed, as_of=as_of, maximum_age_seconds=1)[
+                            "qualified"
+                        ]
+                    )
             args = [
                 "runner-host-hygiene-qualify",
                 "--audit-file",

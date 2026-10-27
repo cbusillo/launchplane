@@ -455,6 +455,33 @@ class TestingOverrideSanitizationTests(TestingOverrideSanitizationScenario):
         )
         self.assert_planning_refused()
 
+    def test_lane_origin_cannot_disagree_with_retained_generation(self) -> None:
+        from control_plane.testing_override_sanitization import sanitization_snapshot
+
+        body, _ = self.reviewed()
+        changed = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"base_url": "https://different-origin.invalid"})
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(changed)
+        before = self.store.read_odoo_instance_override_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        with self.assertRaises(ValueError):
+            sanitization_snapshot(self.store, self.profile.product, body)
+        self.assertEqual(
+            self.store.read_odoo_instance_override_record(
+                context_name=self.fixture.context, instance_name="testing"
+            ),
+            before,
+        )
+
     def test_wrong_target_refuses_planning(self) -> None:
         target_id = self.store.read_dokploy_target_id_record(
             context_name=self.fixture.context, instance_name="testing"
