@@ -14,6 +14,7 @@ from httpx2 import Response
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.route_binding_record import route_binding_record_sha256
 from control_plane.contracts.product_profile_record import ProductLaneProfile
+from control_plane.contracts.testing_route_refresh import testing_route_domains
 from control_plane.route_binding_reconcile import (
     _EVIDENCE_FRESHNESS_WINDOW,
     _EVIDENCE_REFRESH_THRESHOLD,
@@ -33,8 +34,8 @@ from control_plane.dokploy.native_copy_stream import (
 from control_plane.http_app import create_launchplane_fastapi_app, _DB_ONLY_MUTATION_LEASE
 from control_plane.storage import postgres as db
 from control_plane.service_auth import LaunchplaneAuthzPolicy
-from tests.http_app_test_support import _asgi_request
-from tests.support.auth import _StubVerifier, _identity
+from tests.http_app_test_support import _asgi_request, _local_operator_bearer_config
+from tests.support.auth import _StubVerifier, _identity, scoped_agent_transport
 from tests.test_route_binding_refresh_controller import _controller_policy, _refresh_payload
 from tests import test_testing_publication as publication_tests
 from tests import test_testing_route as route_tests
@@ -51,6 +52,7 @@ async def refresh_testing_binding_http(
     *,
     allowed: bool = True,
     mode: str = "apply",
+    director: bool = False,
 ) -> Response:
     policy = _controller_policy(
         mode="apply" if mode == "apply" else "plan",
@@ -60,7 +62,8 @@ async def refresh_testing_binding_http(
     )
     app = create_launchplane_fastapi_app(
         verifier=_StubVerifier(_identity()),
-        authz_policy=policy,
+        authz_policy=LaunchplaneAuthzPolicy(schema_version=2) if director else policy,
+        bearer_identity_config=_local_operator_bearer_config() if director else None,
         record_store_factory=lambda: store,
         control_plane_root_path=root,
     )
@@ -69,7 +72,12 @@ async def refresh_testing_binding_http(
             app,
             "POST",
             "/v1/route-bindings/odoo-testing/controller/run-once",
-            headers={"Authorization": "Bearer valid-token", "Idempotency-Key": key},
+            headers={
+                "Authorization": "Bearer local-operator-token"
+                if director
+                else "Bearer valid-token",
+                "Idempotency-Key": key,
+            },
             payload=_refresh_payload(mode=mode),
         )
 
@@ -157,6 +165,62 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
         self.assertEqual(self.binding().domains, before.domains)
         self.read.assert_called()
+
+    async def test_director_renews_only_observed_native_authority_without_a_grant(self) -> None:
+        before = self.binding()
+        response = await refresh_testing_binding_http(
+            self.store,
+            self.fixture.fixture.root,
+            self.candidate.product,
+            self.candidate.context,
+            self.now,
+            director=True,
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
+        refreshed = self.binding()
+        self.assertEqual(refreshed.domains, before.domains)
+        self.assertEqual(refreshed.provider_target, before.provider_target)
+        self.assertNotEqual(refreshed.source, before.source)
+        self.read.reset_mock()
+        replay = await refresh_testing_binding_http(
+            self.store,
+            self.fixture.fixture.root,
+            self.candidate.product,
+            self.candidate.context,
+            self.now,
+            director=True,
+        )
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.read.assert_not_called()
+        with scoped_agent_transport():
+            denied = await refresh_testing_binding_http(
+                self.store,
+                self.fixture.fixture.root,
+                self.candidate.product,
+                self.candidate.context,
+                self.now,
+                "scoped",
+                director=True,
+            )
+        self.assertEqual(denied.status_code, 403, denied.text)
+        self.assertEqual(self.binding(), refreshed)
+        self.frame["raw"]["services"][self.fixture.route.route_id + "@file"]["loadBalancer"][
+            "servers"
+        ] = [{"url": "http://foreign-copy:8069"}]
+        drift = await refresh_testing_binding_http(
+            self.store,
+            self.fixture.fixture.root,
+            self.candidate.product,
+            self.candidate.context,
+            self.now,
+            "drift",
+            director=True,
+        )
+        self.assertEqual(drift.status_code, 202, drift.text)
+        self.assertEqual(drift.json()["result"]["blocked_count"], 1, drift.text)
+        self.assertEqual(self.binding(), refreshed)
 
     async def test_later_ordinary_deploy_keeps_the_original_route_custody_refreshable(self) -> None:
         exercise_published_copy_maintenance(self, self.fixture)
@@ -345,9 +409,12 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             fixture.candidate.context,
             self.now,
             "refresh-retained-alias",
+            director=True,
         )
         self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
         current = fixture.current()
+        assert current.binding is not None
+        self.assertEqual(current.binding.domains, testing_route_domains(fixture.route))
         self.assertTrue(serving_snapshot_matches(current, expected, store=fixture.store))
         self.assertTrue(
             testing_binding_matches_retained_publication(

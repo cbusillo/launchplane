@@ -1463,6 +1463,18 @@ reusable workflow accepts only mode, reason, and an idempotency key, preserves a
 requires attention. Production enrollment is a separate change and cannot be
 selected through this endpoint.
 
+The authenticated Director agent using the `local_operator` credential may also
+apply this testing-only controller through its declared standing action, without a
+controller grant. The Director's standing read authority is evaluated and audited
+for each native published binding. Renewal requires original publication custody and a fresh
+matching managed-route and running-backend observation before the atomic evidence
+write. Recorded host and alias roles follow that observed owned publication;
+immutable publication/address receipts and provider routes do not change. Drift
+or missing custody stays blocked. This
+alternative neither admits legacy bindings without their existing apply authority
+nor applies to the production-capable stable controller, scoped agents or terminal
+mutations. It changes no provider route or access policy and adds no renewal clock.
+
 The [record contract](records.md) documents the separate remaining-stable
 controller for bindings outside this testing-only slice.
 
