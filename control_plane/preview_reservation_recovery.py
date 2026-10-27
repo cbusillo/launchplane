@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 import hashlib
 import json
+import click
 from pathlib import Path
 from typing import Callable
 
@@ -35,6 +36,7 @@ from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
     OdooPreviewApplyInputsResult,
 )
+from control_plane.workflows.launchplane import find_preview_record
 
 
 @dataclass(frozen=True)
@@ -159,6 +161,128 @@ def held_preview_reservations(
     if not isinstance(store, PostgresRecordStore):
         return ()
     return store.list_held_odoo_preview_reservations(product=product, limit=limit)
+
+
+def interrupted_preview_restore(
+    *,
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    reservation: LaunchplaneIdempotencyRecord,
+    root: Path,
+) -> bool:
+    from control_plane.dokploy import api, source
+    from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+    from control_plane.odoo_preview_resources import preview_resource_environment
+    from control_plane.preview_filestore import (
+        PreviewRestoreDisposalRequired,
+        prepare_preview_filestore,
+    )
+    from control_plane.workflows.odoo_preview_runtime import resolve_original_preview_compose_id
+
+    if not profile.preview.clean_testing_snapshot:
+        return False
+    try:
+        original = original_preview_intent(reservation, profile=profile, store=store)
+    except ValueError:
+        return False
+    plan = original.issued_plan.dry_run_plan
+    if original.issued_plan.operation != "refresh" or plan.clean_snapshot is None:
+        return False
+    try:
+        compose_id = resolve_original_preview_compose_id(
+            control_plane_root=root,
+            request=original.apply_request.apply,
+            database_url=store.database_url,
+        )
+        if not compose_id:
+            return False
+        host, token = source.read_dokploy_config(
+            control_plane_root=root, database_url=store.database_url
+        )
+        target = api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=compose_id
+        )
+        environment = preview_resource_environment(plan.compose_name)
+        prepare_preview_filestore(
+            host=host,
+            token=token,
+            server_id=str(target.get("serverId") or ""),
+            project=str(target.get("appName") or ""),
+            data_volume=environment["ODOO_DATA_VOLUME"],
+            database_volume=environment["ODOO_DB_VOLUME"],
+            logs_volume=environment["ODOO_LOG_VOLUME"],
+            database_name=environment["ODOO_DB_NAME"],
+            snapshot=plan.clean_snapshot,
+            apply=False,
+            dispatch_guard=lambda dispatch: dispatch(),
+        )
+    except PreviewRestoreDisposalRequired:
+        return True
+    except NativeSourceAuthorizationDenied:
+        raise
+    except (OSError, ValueError, click.ClickException):
+        return False
+    return False
+
+
+def require_interrupted_preview_disposal(
+    store: PostgresRecordStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
+    original_reservation_id: str,
+) -> None:
+    from control_plane.disposable_lanes import require_disposable_lane
+
+    if store.read_product_profile_record(profile.product) != profile:
+        raise ValueError("The preview profile changed before disposal.")
+    original = store.read_idempotency_record_by_id(original_reservation_id)
+    if original is None:
+        raise ValueError("Interrupted preview original proof is unavailable.")
+    retained = original_preview_intent(original, profile=profile, store=store).issued_plan
+    if (
+        not profile.preview.clean_testing_snapshot
+        or retained.operation != "refresh"
+        or retained.plan_request.pr_number != number
+        or retained.dry_run_plan.clean_snapshot is None
+    ):
+        raise ValueError("Interrupted preview original proof differs.")
+    instance = profile.preview.slug_template.format(number=number)
+    preview = find_preview_record(
+        record_store=store,
+        context_name=profile.preview.context,
+        anchor_repo=profile.repository.partition("/")[2],
+        anchor_pr_number=number,
+    )
+    if preview is None:
+        require_unrecorded_preview_original(
+            store, profile=profile, number=number, reservation_id=original_reservation_id
+        )
+    else:
+        require_disposable_lane(
+            store,
+            product=profile.product,
+            context=profile.preview.context,
+            instance=instance,
+            preview=preview,
+            preview_operation="destroy",
+        )
+    report = store.read_disposable_lane_safety(profile.product, profile.preview.context, instance)
+    try:
+        target = store.read_dokploy_target_record(
+            context_name=profile.preview.context, instance_name=instance
+        )
+    except FileNotFoundError:
+        target = None
+    if (target is not None and target.policies.staff_testing_hold is not None) or (
+        report is not None
+        and (
+            report.usage == "in_use"
+            or report.data == "only_copy"
+            or report.production_resources in {"shared", "separation_ready"}
+        )
+    ):
+        raise ValueError("Interrupted preview disposal is held by use, data or shared resources.")
 
 
 def require_unrecorded_preview_original(

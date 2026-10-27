@@ -30,7 +30,10 @@ from control_plane.dokploy.source import (
 )
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY, render_odoo_raw_compose_file
 from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
-from control_plane.preview_filestore import PREPARE_PREVIEW_FILESTORE_PROGRAM
+from control_plane.preview_filestore import (
+    PREPARE_PREVIEW_FILESTORE_PROGRAM,
+    PREVIEW_RESTORE_DISPOSAL_REQUIRED,
+)
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 
 
@@ -135,6 +138,8 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             "device": "overlay",
             "o": f"lowerdir={self.source}/filestore,upperdir={self.private}/upper,workdir={self.private}/work,userxattr",
         }
+        self.mounted_filestore = self.root / "runner-filestore"
+        (self.data / "filestore").mkdir()
         self.remount_filestore()
         self.volume_options = {"preview-data-filestore": self.overlay_options}
         self.volume_labels = {
@@ -155,7 +160,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             )
 
     def remount_filestore(self) -> None:
-        destination = self.data / "filestore" / self.database
+        destination = self.mounted_filestore
         if destination.exists():
             shutil.rmtree(destination)
         shutil.copytree(self.source / "filestore", destination)
@@ -392,7 +397,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         output = self.run_script()
         self.assertIn("clean_preview_snapshot_restored=true", output.splitlines())
         self.assertEqual(
-            (self.data / "filestore" / self.database / "attachment").read_bytes(),
+            (self.mounted_filestore / "attachment").read_bytes(),
             (self.source / "filestore/attachment").read_bytes(),
         )
         self.assertIn(["docker", "start", "web"], self.calls)
@@ -415,10 +420,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(reused, created)
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
         self.volumes.pop("preview-data-filestore")
-        self.assertEqual(
-            self.prepare_filestore(snapshot=newer, require_existing=True)["type"], "failed"
-        )
-        self.assertNotIn("preview-data-filestore", self.volumes)
+        self.assertEqual(self.prepare_filestore(snapshot=newer, require_existing=True), created)
         library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
         exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
         with patch("pathlib.Path.home", return_value=self.root):
@@ -429,6 +431,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 }
             )
             self.assertTrue(self.source.is_dir())
+            self.volumes.pop("preview-data-filestore")
             for path in self.volumes.values():
                 shutil.rmtree(path)
             self.volumes.clear()
@@ -516,6 +519,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_preparation_preserves_legacy_database_and_filestore(self) -> None:
         self.volumes.pop("preview-data-filestore")
+        legacy = self.data / "filestore" / self.database / "legacy-attachment"
+        legacy.parent.mkdir()
+        legacy.write_bytes(b"needed legacy data")
         self.present = True
         result = self.prepare_filestore(snapshot=self.snapshot)
         self.assertEqual(result["type"], "failed")
@@ -527,11 +533,22 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.present = False
         result = self.prepare_filestore(snapshot=self.snapshot)
         self.assertEqual(result["type"], "failed")
-        self.assertTrue((self.data / "filestore" / self.database / "attachment").is_file())
+        self.assertEqual(legacy.read_bytes(), b"needed legacy data")
+
+    def test_hidden_legacy_filestore_cannot_become_disposable_restore_evidence(self) -> None:
+        legacy = self.data / "filestore" / self.database / "legacy-attachment"
+        legacy.parent.mkdir()
+        legacy.write_bytes(b"only retained legacy attachment")
+        self.assertEqual(self.prepare_filestore(snapshot=self.snapshot)["type"], "failed")
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertEqual(legacy.read_bytes(), b"only retained legacy attachment")
+        self.assertFalse((self.source.parent / "preview-attempts").exists())
+        self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
 
     def test_overlay_declaration_does_not_admit_an_unknown_database(self) -> None:
         self.present = True
-        attachment = self.data / "filestore" / self.database / "attachment"
+        attachment = self.mounted_filestore / "attachment"
         original = attachment.read_bytes()
         result = self.prepare_filestore(snapshot=self.snapshot, apply=False)
         self.assertEqual(result["type"], "failed")
@@ -541,7 +558,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_completed_native_custody_preserves_edits_with_a_newer_snapshot(self) -> None:
         self.run_script()
-        attachment = self.data / "filestore" / self.database / "staff-attachment"
+        attachment = self.mounted_filestore / "staff-attachment"
         attachment.write_bytes(b"staff edits after native completion")
         newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
         self.calls.clear()
@@ -558,6 +575,17 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_script()
         self.killed_during_restore = False
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False),
+            {"type": "failed", "reason": PREVIEW_RESTORE_DISPOSAL_REQUIRED},
+        )
+        attempt = next((self.source.parent / "preview-attempts").glob("*.json"))
+        legacy = json.loads(attempt.read_text())
+        legacy.pop("started")
+        attempt.write_text(json.dumps(legacy))
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False), {"type": "failed"}
+        )
         newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
         self.calls.clear()
         self.assertEqual(self.prepare_filestore(snapshot=newer, apply=False)["type"], "failed")
@@ -652,6 +680,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_missing_retained_overlay_refuses_instead_of_hiding_attachments(self) -> None:
         self.volumes.pop("preview-data-filestore")
+        legacy = self.data / "filestore" / self.database / "legacy-attachment"
+        legacy.parent.mkdir()
+        legacy.write_bytes(b"needed legacy data")
         for snapshot in (None, self.snapshot):
             with self.subTest(snapshot=snapshot):
                 self.assertEqual(
@@ -686,7 +717,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.volumes.pop("preview-data-filestore")
         for role in ("web", "script-runner"):
             self.containers[role]["Mounts"].pop()
-        attachment = self.data / "filestore" / self.database / "attempt-attachment"
+        attachment = self.mounted_filestore / "attempt-attachment"
         attachment.write_bytes(b"attachment created during module update")
         self.calls.clear()
         result = self.prepare_filestore(snapshot=self.snapshot)
@@ -874,7 +905,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(evidence["clean_preview_snapshot_restored"], "true")
         self.assertTrue(self.ready_before_web)
 
-    def test_retry_records_actual_and_requested_snapshot_provenance(self) -> None:
+    def test_completed_restore_retry_records_actual_and_requested_snapshot_provenance(self) -> None:
         self.run_script()
         requested = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
         evidence = self.service_schedule(requested)
@@ -899,7 +930,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_ready_data_without_a_witness_is_preserved(self) -> None:
         self.run_script()
-        attachment = self.data / "filestore" / self.database / "attachment"
+        attachment = self.mounted_filestore / "attachment"
         attachment.write_bytes(b"Client edit")
         self.database_witness = ""
         self.calls.clear()
@@ -1167,7 +1198,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.runner_failure = True
         with self.assertRaises(RuntimeError):
             self.run_script()
-        legacy = self.data / "filestore" / self.database / "failed-module-attachment"
+        legacy = self.mounted_filestore / "failed-module-attachment"
         upper = self.private / "upper" / "attempt-attachment"
         for attachment in (legacy, upper):
             attachment.write_bytes(b"preserve interrupted writes")
@@ -1181,7 +1212,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
 
     def test_qualified_copy_preserves_edits_after_api_completion_failure(self) -> None:
         self.run_script()
-        attachment = self.data / "filestore" / self.database / "attachment"
+        attachment = self.mounted_filestore / "attachment"
         attachment.write_bytes(b"preview edit")
         self.calls.clear()
         self.sanitized = True

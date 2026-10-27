@@ -1854,11 +1854,15 @@ def reconcile_preview_target(
     from control_plane.preview_reservation_recovery import (
         classify_preview_reservation,
         held_preview_reservations,
+        interrupted_preview_restore,
         original_preview_intent,
         recover_held_preview,
     )
 
     held = held_preview_reservations(record_store, product=profile.product)
+    disposal_original = str((previous_plan or {}).get("disposal_original_reservation_id") or "")
+    if (previous_plan or {}).get("preview_result_status") == "pass":
+        disposal_original = ""
     recovery: list[dict[str, object]] = []
     retained_intent_invalid = False
     for reservation in held[:100]:
@@ -1880,16 +1884,36 @@ def reconcile_preview_target(
         if control_plane_root is None or not isinstance(record_store, PostgresRecordStore):
             recovery.append(classified)
             continue
-        recovery.append(
-            recover_held_preview(
-                store=record_store,
-                reservation=reservation,
-                profile=profile,
-                root=control_plane_root,
-                observe=preview_hooks.observe_apply,
-                quiescence=preview_hooks.quiescence_check,
-            )
+        recovered = recover_held_preview(
+            store=record_store,
+            reservation=reservation,
+            profile=profile,
+            root=control_plane_root,
+            observe=preview_hooks.observe_apply,
+            quiescence=preview_hooks.quiescence_check,
         )
+        recovery.append(recovered)
+        if (
+            recovered.get("action") == "destroy"
+            and recovered.get("result_status") == "pass"
+            and recovered.get("settlement") in {"adopted", "completed", "replayed"}
+        ):
+            disposal_original = ""
+        if recovered.get("settlement") == "reconcile_required" and interrupted_preview_restore(
+            store=record_store, profile=profile, reservation=reservation, root=control_plane_root
+        ):
+            disposal_original = reservation.record_id
+    if isinstance(record_store, PostgresRecordStore) and control_plane_root is not None:
+        for candidate_original in record_store.list_odoo_preview_cleanup_originals(
+            product=profile.product, number=pull_request_number
+        ):
+            if candidate_original.state == "completed" and interrupted_preview_restore(
+                store=record_store,
+                profile=profile,
+                reservation=candidate_original,
+                root=control_plane_root,
+            ):
+                disposal_original = candidate_original.record_id
     unresolved = [
         entry
         for entry in recovery
@@ -1906,6 +1930,13 @@ def reconcile_preview_target(
         transport=transport,
         pull_request_number=pull_request_number,
     )
+    if disposal_original and decision.observed.get("state") in {"open", "closed"}:
+        decision.plan.update(
+            action="destroy",
+            reason="interrupted_preview_restore",
+            held=False,
+            disposal_original_reservation_id=disposal_original,
+        )
     cleanup = (
         decision.plan.get("action") == "destroy"
         and decision.plan.get("reason") == "pull_request_not_open"
@@ -1954,14 +1985,6 @@ def reconcile_preview_target(
         for entry in recovery
         if entry.get("settlement") in {"adopted", "completed", "replayed"}
     ]
-    if settled:
-        decision = _plan_preview_target(
-            record_store=record_store,
-            profile=profile,
-            repository_id=repository_id,
-            transport=transport,
-            pull_request_number=pull_request_number,
-        )
     plan = decision.plan
     plan["held_reservations"] = recovery
     if settled:
@@ -2028,7 +2051,7 @@ def reconcile_preview_target(
             )
     except Exception as error:
         if (
-            cleanup
+            (cleanup or disposal_original)
             and isinstance(error, ProductReconcileError)
             and error.code.startswith("preview_cleanup_")
         ):
@@ -2332,6 +2355,9 @@ def _run_preview_operation(
     )
     if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
         operation_key += ":disposable-cleanup"
+    disposal_original = str(plan.get("disposal_original_reservation_id") or "")
+    if disposal_original:
+        operation_key += f":interrupted-{disposal_original}"
     reservation_scope = reconcile_reservation_scope(profile.product)
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
@@ -2351,8 +2377,10 @@ def _run_preview_operation(
     if operation == "destroy" and not allow_retry and not unknown_destroy:
         return _hold_preview_destroy(plan, previous_plan, failed_attempts)
     database_url = getattr(record_store, "database_url", None)
+    disposal_qualified = False
 
     def pre_mutation_guard() -> None:
+        nonlocal disposal_qualified
         # Holding the reservation, just before the provider apply: a PR that closed,
         # or moved its head since the plan releases with no effect.
         if decision.observed and _pull_request_moved(
@@ -2369,6 +2397,34 @@ def _run_preview_operation(
                 pull_request_number,
                 str(plan.get("unrecorded_original_reservation_id") or ""),
             )
+        if disposal_original:
+            from control_plane.preview_reservation_recovery import (
+                interrupted_preview_restore,
+                require_interrupted_preview_disposal,
+            )
+
+            store = cast(PostgresRecordStore, record_store)
+            try:
+                require_interrupted_preview_disposal(
+                    store,
+                    profile=profile,
+                    number=pull_request_number,
+                    original_reservation_id=disposal_original,
+                )
+            except ValueError as error:
+                raise ProductReconcileError(
+                    str(error), code=PREVIEW_CLEANUP_SAFETY_UNKNOWN
+                ) from error
+            if not disposal_qualified:
+                original = store.read_idempotency_record_by_id(disposal_original)
+                if original is None or not interrupted_preview_restore(
+                    store=store, profile=profile, reservation=original, root=control_plane_root
+                ):
+                    raise ProductReconcileError(
+                        "Interrupted preview custody changed before disposal.",
+                        code=PREVIEW_CLEANUP_SAFETY_UNKNOWN,
+                    )
+                disposal_qualified = True
 
     def execute_apply(**kwargs: object) -> dict[str, object]:
         checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
@@ -2432,6 +2488,7 @@ def _run_preview_operation(
             observe_apply=preview_hooks.observe_apply,
             supersession_is_quiescent=preview_hooks.quiescence_check,
             pre_mutation_guard=pre_mutation_guard,
+            qualify_existing_preview=bool(disposal_original),
             disposable_cleanup=operation == "destroy"
             and plan.get("reason") == "pull_request_not_open",
             allow_mutation=allow_mutation,

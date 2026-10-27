@@ -503,22 +503,22 @@ expired grace and original data-schedule quiescence remain separate recovery
 requirements.
 
 An interrupted clean-snapshot restore is replaced through those same service-issued
-destroy and refresh operations. Its host retry does not drop the database, clear
-private overlay writes, or reconstruct a missing overlay. First verify current
-usage, needed-data custody, target ownership and the original operation. Dispose
-only when the preview is unused and its data is reproducible. In-use previews,
-needed working copies, unknown custody and unavailable original intent remain
-held; a failed restore receipt alone never qualifies disposal.
+destroy and refresh operations. Its host retry does not drop the database or clear
+private overlay writes. The reconciler observes the retained original and inspects
+its exact physical volume bindings and snapshot. Only a native receipt that records
+the start of this never-served restore returns the distinct disposal result.
+Historical incomplete receipts without that proof remain held. The native start
+is recorded only after verifying the empty database and private upper, with web
+held behind its gate; its writes can be reproduced from the bound snapshot/build.
 
-Request `operation="destroy"` through `POST /v1/drivers/odoo/preview-apply-inputs`
-and apply that exact issued plan through `POST /v1/drivers/odoo/preview-apply`,
-using its returned plan id as the key. The existing executor exclusion, expired
-lease, original schedule quiescence, resource inspection and first-effect guards
-still apply. Observe the original destroy until provider absence and the destroyed
-lifecycle are verified before requesting the new refresh. The ordinary reconciler
-then rebuilds the open PR on new storage from the qualified clean snapshot.
-An unknown destroy outcome retains its original key; it does not permit a new
-refresh. This sequence adds no grant or provider-direct cleanup path.
+For that qualified case, the reconciler issues the ordinary destroy plan/apply and
+rechecks native custody under the execution lock. Current usage, needed-copy,
+staff-testing and shared-resource protections are checked at every provider effect.
+The existing expired lease, original schedule quiescence, target ownership and
+resource inspection remain mandatory. An uncertain destroy is observed on its
+original key until provider absence and the destroyed lifecycle are verified.
+Only then does ordinary reconciliation rebuild an open PR on new storage.
+There is no new grant, caller assertion or provider-direct cleanup path.
 
 Preparation pins the source before first restore and records that restore has
 not started. Restore records its start before dispatching database work. Only

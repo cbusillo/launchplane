@@ -129,6 +129,7 @@ def restore_preview_snapshot(containers, source_lock):
     if present == '0' and overlay is None:
         raise RuntimeError('A new snapshot preview requires its overlay filestore')
     if present == '0':
+        require_unused_preview_backing(volume)
         require_unused_preview_upper(overlay[3])
     if present == '0' and not storage_capacity({**spec, 'staging_directory': str(path.parent)},
         containers, {**snapshot['storage_budget'], 'filestore_bytes': 0},
