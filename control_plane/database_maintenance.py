@@ -56,7 +56,9 @@ def locked_database(connection: Connection, *, expires_at: datetime) -> Iterator
         connection.commit()
         with connection.execution_options(isolation_level="REPEATABLE READ").begin():
             connection.execute(text("SET LOCAL lock_timeout='1s'"))
-            names = ", ".join(connection.dialect.identifier_preparer.quote(name) for name in tables)
+            names = ", ".join(
+                "public." + connection.dialect.identifier_preparer.quote(name) for name in tables
+            )
             if not names:
                 raise RuntimeError("No application tables were found.")
             connection.execute(text(f"LOCK TABLE {names} IN EXCLUSIVE MODE NOWAIT"))
@@ -87,7 +89,7 @@ def locked_database(connection: Connection, *, expires_at: datetime) -> Iterator
             unsupported = connection.scalar(
                 text(
                     "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-                    "WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema' "
+                    "WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' "
                     "AND c.relkind IN ('r','p','f','m') "
                     "AND (n.nspname<>'public' OR c.relkind IN ('f','m'))"
                 )
@@ -131,7 +133,10 @@ def database_snapshot(connection: Connection) -> dict[str, Any]:
         ).all()
         digest = hashlib.sha256()
         count = 0
-        primary_key = inspect(connection).get_pk_constraint(name).get("constrained_columns") or []
+        primary_key = (
+            inspect(connection).get_pk_constraint(name, schema="public").get("constrained_columns")
+            or []
+        )
         ordering = (
             ", ".join(
                 connection.dialect.identifier_preparer.quote(key) + '::text COLLATE "C"'
