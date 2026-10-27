@@ -177,6 +177,32 @@ multiline commands remain denied. Storage commands follow the
 
 ## Evidence and rollout
 
+### Reading lane readiness
+
+The installed Launchplane skill exposes the current policy/target read and
+capture-free qualification as bounded commands. Replace the skill path and
+scope placeholders with the installed skill location and recorded lane:
+
+```bash
+uv run <launchplane-skill>/scripts/launchplane-write-action.py \
+  production-backup-authority-read --product PRODUCT --context CONTEXT \
+  --instance prod --promotion-action ACTION
+uv run <launchplane-skill>/scripts/launchplane-write-action.py \
+  production-backup-preflight-read --product PRODUCT --context CONTEXT \
+  --instance prod --promotion-action ACTION
+```
+
+The [qualification contract](#reusing-stored-worker-credentials-and-checking-without-capture)
+below describes the result fields. Neither command enumerates products or
+supplies real backup/release proof. A
+`backup_preflight_unavailable` response does not identify the missing
+prerequisite or establish that a new credential is needed. The
+[rollout evidence](https://github.com/cbusillo/launchplane/issues/2309)
+keeps dated qualification receipts and links to actual capture/release proof;
+it does not replace current service records or a complete lane inventory.
+
+### Capture evidence
+
 Capture creates and reads back the named snapshot, then requires successful
 `vzdump` completion and the exact reported archive in the bound storage's backup
 listing. This proves capture and presence; it is not a full restore test or a
@@ -214,10 +240,11 @@ until promotion runs from Launchplane itself (#2682 for the CM website, #2792
 for generic-web) and #2606 deletes the call-in path; the gate itself stays.
 
 The Launchplane reusable Odoo and generic-web promotion workflows first enforce
-the current release-review requirement, then enqueue the shared capture and poll the same
-idempotent request until it completes. The service checks release approval again
-before deployment. A prelaunch product whose review explicitly says `required=false`
-follows the service's existing exemption; absent review metadata does not grant it.
+the current release-review requirement, then enqueue the shared capture and
+poll the same idempotent request until it completes. The service checks release
+approval again before deployment. A prelaunch product whose review explicitly
+says `required=false` follows the service's existing exemption; absent review
+metadata does not grant it.
 Failure or cancellation stops the workflow before promotion. Generic-web reads
 the production context from the current product profile. Odoo's thin workflow
 then sends `run.infrastructure_backup_record_id`; Launchplane resolves the
@@ -331,6 +358,10 @@ Authority and credential metadata are rechecked after the reads. It creates no
 capture operation, snapshot, archive, retention change or promotion evidence.
 This checks the service execution surface using the shared resolver/provider;
 separately confirm the installed backup worker's revision before real capture.
+In helper output, policy readiness requires `result.ready=true`; capture-free
+qualification requires `result.status=pass`, `result.boundary_status=match_capture_only`,
+`result.storage_status=active_pbs` and `result.capture_started=false`.
+A successful helper invocation alone does not establish readiness.
 
 The typed policy and targets already supply the host/login/guest/storage tuple,
 snapshot prefix and retention. Do not create generic topology environment keys
