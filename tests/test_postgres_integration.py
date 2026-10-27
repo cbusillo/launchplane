@@ -13375,6 +13375,37 @@ class RealPostgresRecipientCutoverTests(unittest.TestCase):
         self.assertEqual(f.actions, [])
 
 
+class RealPostgresRecipientReleaseAdmissionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.test_production_recipient_release_recovery import RecipientReleaseRecoveryTests
+
+        self.fixture = RecipientReleaseRecoveryTests()
+        self.fixture.database_url = self.enterContext(_head_postgres_database())
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_same_key_continuation_stays_on_recipient_path(self) -> None:
+        self.fixture.test_unarmed_recipient_never_uses_the_ordinary_production_adapter()
+
+    def test_native_status_matches_worker_refusal(self) -> None:
+        self.fixture.test_native_release_reports_the_same_unarmed_custody_refusal_as_worker()
+
+    def test_mismatched_continuation_is_held(self) -> None:
+        self.fixture.test_unarmed_different_candidate_remains_on_recipient_path()
+
+    def test_custody_is_rechecked_at_atomic_first_effect(self) -> None:
+        self.fixture.test_ordinary_promotion_rechecks_new_custody_at_its_atomic_first_effect()
+
+    def test_stale_preflight_original_does_not_fence_replacement(self) -> None:
+        self.fixture.test_superseded_preflight_retry_releases_without_touching_replacement()
+
+    def test_admitted_ordinary_work_keeps_its_authority(self) -> None:
+        self.fixture.test_admitted_ordinary_promotion_finishes_after_custody_creation()
+
+    def test_automatic_rollback_keeps_its_authority(self) -> None:
+        self.fixture.test_ordinary_automatic_rollback_survives_custody_creation()
+
+
 class RealPostgresRecipientWriterTests(unittest.TestCase):
     def test_repeatable_writer_cycles_use_real_custody(self) -> None:
         from tests.test_production_recipient_writer_control import RecipientWriterControlTests

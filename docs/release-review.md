@@ -207,6 +207,17 @@ tracked in [#4236](https://github.com/cbusillo/launchplane/issues/4236).
 The source check does not impose testing qualification on production baselines
 or replace Odoo's release-tuple contract.
 
+An active unpublished production recipient keeps the accepted release on its
+recipient path, including after a same-key continuation replaces its custody.
+A different candidate or an unarmed cutover holds promotion with the same
+reason in native release status and worker execution. Ordinary promotion checks
+for newly created recipient custody at its first effect checkpoint under the
+existing authority lock. Already admitted work and automatic rollback retain
+their original recovery authority; later updates to a published or retired
+recipient use the ordinary production path. A superseded preflight retry that
+has no effects releases its original reservation without changing replacement
+custody or inventing provider evidence.
+
 Checklist reads retry an individual GitHub GET once after a transport failure,
 invalid JSON response, timeout, or HTTP 408/500/502/503/504. Authorization,
 not-found, and rate-limit responses are not retried. Each failed attempt logs

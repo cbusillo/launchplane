@@ -1393,6 +1393,16 @@ class RecipientCutoverAdapter:
         except Exception as error:
             log_handled_error_cause(error, self.trace_id)
             if (
+                not started
+                and isinstance(lease, ProviderEvidenceLease)
+                and not attempt_has_effects()
+            ):
+                committed = custody(self.store, record.product, record.context)
+                if committed is None or committed.plan_sha256 != record.plan_sha256:
+                    raise ProviderMutationRejectedError(
+                        ValueError("Production recipient custody changed before dispatch.")
+                    ) from error
+            if (
                 isinstance(error, GenericWebPromotionSourceRefused)
                 and not started
                 and isinstance(lease, ProviderEvidenceLease)

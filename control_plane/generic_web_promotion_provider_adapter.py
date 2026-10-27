@@ -214,12 +214,33 @@ class GenericWebProdPromotionProviderMutationAdapter:
             isinstance(lease, ProviderEvidenceLease)
             and lease.evidence_reservation().provider_effect_started_at
         )
+        recipient_refusal: PromotionTargetChanged | None = None
 
         def validate_current_authority() -> None:
+            nonlocal recipient_refusal
             if not automatic_rollback:
                 if self._validate_before_checkpoint is not None:
                     self._validate_before_checkpoint()
                 if not effects_admitted:
+                    from control_plane.production_recipient import custody
+
+                    if isinstance(self._record_store, PostgresRecordStore):
+                        recipient = custody(
+                            self._record_store, self._profile.product, self._lane.context
+                        )
+                        if recipient is not None and recipient.phase not in {
+                            "published",
+                            "retired",
+                        }:
+                            recipient_refusal = PromotionTargetChanged(
+                                "Production recipient custody is active and unpublished for this lane."
+                            )
+                            raise recipient_refusal
+                        require_generic_web_promotion_target(
+                            record_store=self._record_store,
+                            lane=self._lane,
+                            resolved_deploy_target=target,
+                        )
                     resolve_generic_web_promotion_inputs(
                         record_store=cast(GenericWebPromotionStore, self._record_store),
                         request=promotion_request.promotion,
@@ -259,6 +280,8 @@ class GenericWebProdPromotionProviderMutationAdapter:
                     deployment_record_id=self._deployment_record_id(provider_operation_key),
                     provider_effect_checkpoint=checkpoint_provider_effect,
                 )
+            if recipient_refusal is not None and not effects_admitted:
+                raise recipient_refusal
         except StarletteHTTPException as error:
             raise ProviderMutationRejectedError(error) from error
         except (FileNotFoundError, ValueError, click.ClickException) as error:
@@ -268,7 +291,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 raise ProviderMutationRejectedError(error) from error
             if provider_effect_attempted:
                 raise ProviderMutationUnknownError(str(error)) from error
-            if isinstance(error, GenericWebPromotionSourceRefused):
+            if isinstance(error, GenericWebPromotionSourceRefused) or error is recipient_refusal:
                 # The shared runner alone releases a reservation, and only when
                 # its authoritative effect checkpoint proves nothing dispatched.
                 raise ProviderMutationRejectedError(error) from error
