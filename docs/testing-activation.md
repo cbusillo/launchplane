@@ -467,6 +467,13 @@ unresolved activations remain unchanged; an unpublished activation retaining
 this exact recipient keeps its own interlock, even with no retained target
 reservations. This continuation never settles that operation. Independent
 original recipients and their custody remain preserved.
+Original deployment receipts use the provider deployment ID. Reads also recognize
+an exact historical successful wait receipt from that same operation; malformed
+receipts remain unproved. Recognition changes no stored bytes and supplies no
+custody by itself: complete singular history, original title, terminal status,
+placement, unchanged hold and original-operation guards still apply. Image
+evidence and candidate inspection use the same deployment-ID interpretation.
+
 A refusal or failure flag alone does not prove original effects settled. That
 proof belongs to the original operation's supported custody continuation.
 After a qualified lift, resume the original blocked operation through its own

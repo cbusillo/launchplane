@@ -68,6 +68,8 @@ def candidate_domains(live: api.JsonObject) -> CandidateDomains:
 def inspect_application_candidate(
     adapter: "ApplicationActivationAdapter", record: TestingActivationRecord, operation_key: str
 ) -> ApplicationCandidateInspection:
+    from control_plane.testing_application_activation import activation_deployment_key
+
     observed = ApplicationCandidateInspection(
         placement="not_created" if not record.target_id else "unavailable",
         stored_deployment_recorded=bool(record.state_recipient.get("application_deployment_id")),
@@ -106,7 +108,9 @@ def inspect_application_candidate(
                 update={
                     "sole_deployment_id_matches": bool(api.deployment_key(rows[0]))
                     and api.deployment_key(rows[0])
-                    == record.state_recipient.get("application_deployment_id"),
+                    == activation_deployment_key(
+                        record.state_recipient.get("application_deployment_id")
+                    ),
                     "sole_deployment_title_matches": rows[0].get("title")
                     == provider_operation_title(operation_key) + " application",
                     "sole_deployment_status": candidate_deployment_status(rows[0]),
