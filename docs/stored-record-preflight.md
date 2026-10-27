@@ -161,6 +161,10 @@ conflict and atomicity guards remain unchanged in both releases.
 While legacy entries remain, the existing profile-write guard stays enforced
 and new preview configuration writes report `preview_settings_migration_pending`.
 The normal activation deployment clears those entries and enables the writes.
+Reapplying onboarding also waits for activation so it cannot replace the legacy
+values with manifest defaults. Idle-reservation retirement waits for the same
+activation; a held retired reservation can keep its disposable preview waiting
+in the meantime. Inspect those holds read-only and never remove them by hand.
 
 The exporter and candidate module must land and deploy first through the
 existing path. The Supervisor then dispatches this same deploy workflow on the

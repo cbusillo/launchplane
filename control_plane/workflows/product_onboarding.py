@@ -424,6 +424,10 @@ def plan_product_onboarding_authority_bundle(
         record_store=record_store,
         product=manifest.product,
     )
+    if existing_product_profile is not None and existing_product_profile.preview.override_env:
+        raise ValueError(
+            "Reapply onboarding after the normal Launchplane activation deployment migrates preview settings."
+        )
     product_profile = build_product_profile_record(
         manifest=manifest,
         updated_at=recorded_at,
