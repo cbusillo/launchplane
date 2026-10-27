@@ -190,24 +190,33 @@ The form explains that new decisions and feedback are shared on the pull request
 Per-change Client acceptance remains required. Release acceptance is a separate
 final check; it does not replace the decision about each change.
 
-For a later descendant head, acceptance carries only when every intervening
-commit has one `Client-impact: none` git trailer in its final trailer paragraph.
-`Client-impact: visible`, missing or ambiguous trailers need a new decision,
-even when the final patch happens to match. Agents declare the impact and the
-second-model review checks it against the actual changes. A test-only follow-up
-can therefore carry without asking the Client to accept the same feature twice.
-Launchplane requires a complete, ordered single-parent history from the accepted
-head to the new head (at most 250 commits); incomplete history never carries.
-A merge trailer alone cannot prove it was conflict-free, so unproven merges,
-including conflict-resolving merges, need a new decision. The existing clean
-merge-train refresh proof below continues to apply.
-If recorded train refreshes and invisible commits are mixed between status
-publishes, neither proof covers the whole history and a new decision is needed.
+For a later descendant head, acceptance carries when every PR-side commit has
+one `Client-impact: none` git trailer in its final trailer paragraph. A merge
+from the recorded base branch may resolve conflicts between accepted changes:
+the Client does not have to accept either change again. The merge's `none`
+trailer declares that its resolution only combines those changes, without new
+Client-visible behavior on the PR's side. Agents declare the impact and the
+second-model review checks it against the actual changes. A new Client-visible
+change requires `Client-impact: visible` and the Client's decision.
 
-This carry records reason `client_impact_none` and every commit SHA with its
-`client_impact` trailer value in `carried_from.commits`, in order. The recorded
-Client, original acceptance and delivered feedback remain the source, rather
-than inventing a new decision.
+Launchplane requires the complete descendant history (at most 250 commits),
+walks the PR's first-parent path back to its accepted head, and pins the recorded
+base branch's current commit. Every merge's other parent and every imported
+commit must belong to that immutable base. Each imported change must be merged
+onto the same base and either have valid engineering-only notes or a delivered
+acceptance by the same current Client for its exact merged head. For a recorded
+train batch, the recorded member heads receive that check individually. Missing,
+ambiguous or incomplete evidence, a foreign parent, or a visible or missing
+PR-side trailer leaves acceptance waiting. A test-only follow-up or a sequence
+of such commits mixed with qualified base merges can carry without another
+Client decision. Release acceptance remains the check of how the combined
+changes work together.
+
+This carry records reason `client_impact_none` and the PR-side commit SHAs and
+trailers in `carried_from.commits`, in order. For integration it also records the
+pinned base in `comparison_base_sha`. Imported base commits are checked against
+their own changes rather than treated as new PR-side work. The recorded Client,
+original acceptance and delivered feedback remain the source.
 The same-current-Client, delivered-feedback and unchanged-base checks below apply.
 
 The Client accepts a feature, seen on its preview. A base update or rebase may
@@ -242,9 +251,10 @@ when all of these hold:
   base edits or relocating a hunk to an identical-looking XML block needs a new
   Accept. Tree modes are read only after the text and position proofs match.
 
-Changed feature patches, including conflict resolutions that change added or
-removed lines, require a new Accept. Missing base evidence or incomplete
-comparisons leave the new head waiting for the Client. A carried acceptance
+For the unchanged-patch proof, changed feature patches require a new Accept.
+Conflict-resolving descendant integrations use the qualified history proof above,
+which permits combined patches from separately accepted changes. Missing base
+evidence or incomplete comparisons leave the new head waiting for the Client. A carried acceptance
 also stops applying if the pull request is later retargeted to another base, even
 without a new commit. The carry is saved
 as a new decision record with `carried_from` naming the decision and head it came

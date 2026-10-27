@@ -1,39 +1,17 @@
-"""Carry a Client's acceptance across unchanged patches or declared invisible commits.
-
-The Client accepts a change, seen on its preview. When the merge train only merges
-the base branch into the pull request, the change is the same, so asking again
-protects nothing. The acceptance carries to the new head only when all hold:
-
-1. The pull request still targets the base branch recorded on the acceptance.
-   Train refresh records supply an immutable base when available; other updates,
-   including rebases, use a pinned commit read from that same base branch.
-2. The pull request's change against its base is the same at both heads: every
-   changed file has the same name, status, and added and removed lines, in order.
-   Outside the train, context, section names and file modes must also match, and
-   each hunk's position must follow the base's own line shifts. Recorded train
-   refreshes can incorporate base context edits.
-3. The carry is saved as its own decision record naming the decision and head it
-   came from and the comparison base, so it reads as carried, not re-decided.
-
-A linear descendant instead carries when every commit after the acceptance has
-one `Client-impact: none` trailer. Save those commits and trailers as evidence.
-Visible or missing trailers and unproven merges need a new decision, even if the
-final feature patch matches. Recorded train-only refreshes retain the patch proof
-above. Rewritten history still needs the strict unchanged-patch rebase proof.
-A different base, a new Client, or unreadable or truncated evidence never carries.
-"""
-
 from collections.abc import Callable
 from datetime import datetime, timezone
+from functools import cache
 import logging
 import re
-from typing import Final
+from typing import Final, cast
 from urllib.parse import quote
 from uuid import uuid4
 
+from control_plane.client_test_notes import change_client_review
 from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
 )
+from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import (
     ProductReviewCarry,
@@ -113,9 +91,20 @@ def carry_owner_acceptance(
         refresh_record_ids = ()
         if comparison.get("status") == "ahead":
             commits = _client_impact_commits(comparison, accepted_head, head)
-            if not commits:
-                return None
             base_commit = ""
+            if not commits:
+                integration = _accepted_base_integration(
+                    comparison=comparison,
+                    accepted_head=accepted_head,
+                    head=head,
+                    base_branch=base_branch.strip(),
+                    store=store,
+                    profile=profile,
+                    read=read,
+                )
+                if integration is None:
+                    return None
+                commits, base_commit = integration
             reason = "client_impact_none"
         elif comparison.get("status") == "diverged":
             branch = quote(base_branch.strip(), safe="")
@@ -236,12 +225,29 @@ def carry_owner_acceptance(
 def _client_impact_commits(
     comparison: dict[str, object], accepted_head: str, head: str
 ) -> tuple[ProductReviewCarryCommit, ...]:
-    """Require the complete, ordered single-parent chain, not a truncated compare.
+    commits = _complete_commits(comparison, accepted_head)
+    previous = accepted_head
+    evidence: list[ProductReviewCarryCommit] = []
+    for value in commits:
+        commit = _object(value)
+        sha = _text(commit.get("sha"))
+        parents = commit.get("parents")
+        message = _object(commit.get("commit")).get("message")
+        if (
+            not isinstance(parents, list)
+            or len(parents) != 1
+            or _object(parents[0]).get("sha") != previous
+            or not _has_none_trailer(message)
+        ):
+            return ()
+        evidence.append(ProductReviewCarryCommit(sha=sha, client_impact="none"))
+        previous = sha
+    return tuple(evidence) if previous == head else ()
 
-    A merge's message cannot prove it did not resolve conflicts. Only the existing
-    recorded train refresh and patch proof can carry such a base merge.
-    """
 
+def _complete_commits(
+    comparison: dict[str, object], accepted_head: str
+) -> tuple[dict[str, object], ...]:
     commits = comparison.get("commits")
     if not isinstance(commits, list) or not 0 < len(commits) <= 250:
         return ()
@@ -257,27 +263,166 @@ def _client_impact_commits(
         or _object(comparison.get("merge_base_commit")).get("sha") != accepted_head
     ):
         return ()
-    previous = accepted_head
-    evidence: list[ProductReviewCarryCommit] = []
-    seen = {accepted_head}
-    for value in commits:
-        commit = _object(value)
-        sha = _text(commit.get("sha"))
+    values = tuple(_object(value) for value in commits)
+    shas = [_text(value.get("sha")) for value in values]
+    if len(set(shas)) != len(shas) or any(
+        re.fullmatch(r"[0-9a-f]{40}", sha) is None or sha == accepted_head for sha in shas
+    ):
+        return ()
+    return values
+
+
+def _accepted_base_integration(
+    *,
+    comparison: dict[str, object],
+    accepted_head: str,
+    head: str,
+    base_branch: str,
+    store: ProductReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    read: SourceControlRead,
+) -> tuple[tuple[ProductReviewCarryCommit, ...], str] | None:
+    read = cache(read)
+    commits = {str(value["sha"]): value for value in _complete_commits(comparison, accepted_head)}
+    if not commits:
+        return None
+    prefix = f"/repos/{_path(profile.repository)}"
+    base = _text(
+        _object(read(f"{prefix}/branches/{quote(base_branch, safe='')}"), "commit").get("sha")
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", base) is None:
+        return None
+    side: list[ProductReviewCarryCommit] = []
+    current = head
+    merged = False
+    while current != accepted_head:
+        commit = commits.get(current)
+        if commit is None or any(item.sha == current for item in side):
+            return None
         parents = commit.get("parents")
-        message = _object(commit.get("commit")).get("message")
         if (
-            re.fullmatch(r"[0-9a-f]{40}", sha) is None
-            or sha in seen
-            or not isinstance(parents, list)
-            or len(parents) != 1
-            or _object(parents[0]).get("sha") != previous
-            or not _has_none_trailer(message)
+            not isinstance(parents, list)
+            or len(parents) not in {1, 2}
+            or not _has_none_trailer(_object(commit.get("commit")).get("message"))
         ):
-            return ()
-        evidence.append(ProductReviewCarryCommit(sha=sha, client_impact="none"))
-        seen.add(sha)
-        previous = sha
-    return tuple(evidence) if previous == head else ()
+            return None
+        if len(parents) == 2:
+            imported = _text(_object(parents[1]).get("sha"))
+            if re.fullmatch(r"[0-9a-f]{40}", imported) is None or not _on_base_branch(
+                repository=profile.repository, commit=imported, base_branch=base, read=read
+            ):
+                return None
+            merged = True
+        side.append(ProductReviewCarryCommit(sha=current, client_impact="none"))
+        current = _text(_object(parents[0]).get("sha"))
+    if not merged:
+        return None
+    side_shas = {commit.sha for commit in side}
+    for sha in commits.keys() - side_shas:
+        if not _on_base_branch(
+            repository=profile.repository, commit=sha, base_branch=base, read=read
+        ) or not _integrated_change_reviewed(
+            sha=sha, base_branch=base_branch, store=store, profile=profile, read=read
+        ):
+            return None
+    return tuple(reversed(side)), base
+
+
+def _integrated_change_reviewed(
+    *,
+    sha: str,
+    base_branch: str,
+    store: ProductReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    read: SourceControlRead,
+) -> bool:
+    prefix = f"/repos/{_path(profile.repository)}"
+    changes = read(f"{prefix}/commits/{sha}/pulls?per_page=100")
+    if not isinstance(changes, list) or not changes or len(changes) >= 100:
+        return False
+    for value in changes:
+        number = _object(value).get("number")
+        if type(number) is not int or number <= 0:
+            return False
+        if _merged_change_reviewed(
+            number=number, base_branch=base_branch, store=store, profile=profile, read=read
+        ):
+            return True
+    return False
+
+
+def _merged_change_reviewed(
+    *,
+    number: int,
+    base_branch: str,
+    store: ProductReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    read: SourceControlRead,
+    expected_head: str = "",
+    ancestors: tuple[int, ...] = (),
+) -> bool:
+    if number in ancestors or len(ancestors) >= MAX_REFRESHES:
+        return False
+    change = _object(read(f"/repos/{_path(profile.repository)}/pulls/{number}"))
+    base = _object(change.get("base"))
+    head = _object(change.get("head"))
+    if (
+        change.get("merged") is not True
+        or base.get("ref") != base_branch
+        or _object(base.get("repo")).get("full_name") != profile.repository
+        or (expected_head and head.get("sha") != expected_head)
+    ):
+        return False
+    if _text(head.get("ref")).startswith("launchplane/train/"):
+        reader = getattr(store, "list_merge_train_batch_candidate_records", None)
+        if not callable(reader) or _object(head.get("repo")).get("full_name") != profile.repository:
+            return False
+        records = cast(
+            tuple[MergeTrainBatchCandidateRecord, ...],
+            reader(repository=profile.repository, base_branch=base_branch),
+        )
+        return any(
+            record.candidate.candidate_sha == head.get("sha")
+            and record.candidate.candidate_ref.removeprefix("refs/heads/") == head.get("ref")
+            and all(
+                _merged_change_reviewed(
+                    number=entry.pull_request_number,
+                    expected_head=entry.head_sha,
+                    base_branch=base_branch,
+                    store=store,
+                    profile=profile,
+                    read=read,
+                    ancestors=(*ancestors, number),
+                )
+                for entry in record.candidate.entries
+            )
+            for record in records
+        )
+    labels = change.get("labels")
+    if not isinstance(labels, list) or not isinstance(change.get("body"), str):
+        return False
+    intent = change_client_review(
+        body=str(change["body"]),
+        labels=[_text(_object(label).get("name")) for label in labels],
+        review_label=profile.owner.review_label,
+    )
+    if intent.error:
+        return False
+    decisions = applicable_product_review_decisions(
+        decisions=store.list_product_review_decision_records(
+            repository=profile.repository, pull_request_number=number
+        ),
+        profile=profile,
+        pull_request_number=number,
+    )
+    if decisions and decisions[0].decision == "changes_requested":
+        return False
+    return not intent.review_required or bool(
+        decisions
+        and _carryable(decisions[0])
+        and decisions[0].head_sha == head.get("sha")
+        and decisions[0].base_branch == base_branch
+    )
 
 
 def _has_none_trailer(message: object) -> bool:
