@@ -317,12 +317,6 @@ class ApplicationFlowTests(unittest.TestCase):
                 ),
             )
         )
-        self.enterContext(
-            patch(
-                "control_plane.dokploy.api.wait_for_target_deployment",
-                side_effect=lambda **kw: self.deployments[kw["target_id"]][-1]["deploymentId"],
-            )
-        )
         self.schedule_runner = api.run_dokploy_schedule
         self.enterContext(
             patch("control_plane.dokploy.api.run_dokploy_schedule", side_effect=self.command)
@@ -4696,6 +4690,79 @@ class ApplicationFlowTests(unittest.TestCase):
 
     def test_supported_http_dry_run_and_original_receipt(self) -> None:
         self.assert_supported_http_activation(native_apply=False)
+
+    def test_historical_wait_receipt_preserves_original_candidate_custody_without_rewriting_state(
+        self,
+    ) -> None:
+        from control_plane.testing_application_activation import activation_image_record
+        from control_plane.testing_application_inspection import inspect_application_candidate
+        from control_plane.provider_operations import build_provider_operation_key
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+
+        self.prepare()
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed")
+        assert completed.record is not None
+        row = completed.record
+        operation_key = build_provider_operation_key(
+            scope=row.scope,
+            route_path=row.route_path,
+            idempotency_key=row.idempotency_key,
+            request_fingerprint=row.request_fingerprint,
+            reconciliation_key=row.reconciliation_key,
+        )
+        current = self.adapter.current()
+        job = self.deployments[current.target_id][0]
+        receipt = api._wait_for_deployment_status(
+            fetch_latest_deployment=lambda: deepcopy(job),
+            before_key="",
+            timeout_seconds=1,
+            failure_message_prefix="Fixture deployment",
+        )
+        self.assertEqual(
+            current.state_recipient["application_deployment_id"], api.deployment_key(job)
+        )
+        record = current.model_copy(
+            update={
+                "state_recipient": {**current.state_recipient, "application_deployment_id": receipt}
+            }
+        )
+        before = deepcopy((self.writes, self.schedules, self.schedule_history))
+        self.adapter.require_terminal_candidate(record, operation_key)
+        self.assertEqual(
+            activation_image_record(record).deploy.deployment_id, api.deployment_key(job)
+        )
+        self.assertTrue(
+            inspect_application_candidate(
+                self.adapter, record, operation_key
+            ).sole_deployment_id_matches
+        )
+        for invalid in (
+            "",
+            receipt + " extra",
+            receipt + " deployment=other",
+            receipt.replace("status=", "unknown="),
+            "foreign-job",
+        ):
+            with self.subTest(receipt=invalid):
+                changed = record.model_copy(
+                    update={
+                        "state_recipient": {
+                            **record.state_recipient,
+                            "application_deployment_id": invalid,
+                        }
+                    }
+                )
+                with self.assertRaises(TestingActivationRefusal):
+                    self.adapter.require_terminal_candidate(changed, operation_key)
+                self.assertFalse(
+                    inspect_application_candidate(
+                        self.adapter, changed, operation_key
+                    ).sole_deployment_id_matches
+                )
+        self.assertEqual(self.adapter.current(), current)
+        self.assertEqual(record.state_recipient["application_deployment_id"], receipt)
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
 
     def test_original_candidate_inspection_identifies_terminal_predicates_without_values_or_writes(
         self,
