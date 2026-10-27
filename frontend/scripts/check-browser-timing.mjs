@@ -5,8 +5,7 @@ import ts from "typescript";
 
 const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sharedStatePath = resolve(frontendRoot, "tests/browser/state.ts");
-const contextDeadlines = new Set(["setDefaultTimeout", "setDefaultNavigationTimeout"]);
-const timers = new Set(["setTimeout", "setInterval", "waitForTimeout", "sleep", ...contextDeadlines]);
+const timers = new Set(["setTimeout", "setInterval", "waitForTimeout", "sleep", "setDefaultTimeout", "setDefaultNavigationTimeout"]);
 
 export function checkBrowserTiming(source, filename) {
   const file = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
@@ -66,7 +65,7 @@ export function checkBrowserTiming(source, filename) {
     if (ts.isCallExpression(node)) {
       const name = memberName(node.expression);
       const receiver = (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) ? node.expression.expression : undefined;
-      if ((aliases.has(name) && !(shared && contextDeadlines.has(name))) || name === "slow") report(node, "Wait on observable state or advance the controlled clock; no sleeps or per-test budgets.");
+      if (aliases.has(name) || name === "slow") report(node, "Wait on observable state or advance the controlled clock; no sleeps or per-test budgets.");
       if (receiver && ["bind", "call", "apply"].includes(name) && aliases.has(memberName(receiver))) report(node, "Timer aliases still depend on host time; use state waits or the controlled clock.");
       if (receiver && name === "wait" && schedulers.has(memberName(receiver))) report(node, "Scheduler waits depend on host time; use observable state.");
       if (name === "toPass") report(node, "Poll observable state instead of retrying an assertion block.");

@@ -1,13 +1,13 @@
 import { defineConfig, devices } from "@playwright/test";
 import { smokeArtifact } from "./browser-smoke-paths.mjs";
-import { browserDeadlines, browserWorkers } from "./playwright-deadlines.mjs";
+import { browserDeadlines } from "./playwright-deadlines.mjs";
 
 export default defineConfig({
   testDir: "./tests/browser",
   testMatch: "**/*.spec.ts",
   outputDir: smokeArtifact("test-results"),
   fullyParallel: true,
-  workers: browserWorkers,
+  workers: 2,
   retries: 0,
   forbidOnly: Boolean(process.env.CI),
   timeout: browserDeadlines.test,
@@ -17,8 +17,6 @@ export default defineConfig({
     timeout: browserDeadlines.assertion,
   },
   use: {
-    actionTimeout: browserDeadlines.assertion,
-    navigationTimeout: browserDeadlines.assertion,
     baseURL: process.env.BROWSER_SMOKE_URL,
     colorScheme: "dark",
     locale: "en-US",

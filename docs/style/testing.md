@@ -405,7 +405,7 @@ diagnosis. Its scratch folders live under the OS temp directory and are removed
 after the run.
 
 Local runs and CI shards use the same two-worker budget in
-`frontend/playwright-deadlines.mjs`, including self-hosted candidate lanes.
+`frontend/playwright.config.ts`, including self-hosted candidate lanes.
 Shared-host CPU count is not a per-job browser budget. Use `--workers=1` to
 reduce a diagnostic run further; do not increase concurrency on a shared host.
 
@@ -462,13 +462,11 @@ failure deadlines live in `playwright-deadlines.mjs`: they bound a broken test,
 not successful synchronization. Do not add a sleep, retry or larger timeout
 to hide a flake.
 
-Assertions, actions and navigation have a 10-second watchdog, each test has a
-30-second watchdog, and each Playwright run has a 15-minute watchdog. Server
-startup retains its separate two-minute watchdog. These limits fail incomplete
-work; they never turn it into a pass. Local and CI configuration are checked
-through Playwright's actual config loader without launching browsers.
-The shared persistent-profile helper applies the same action and navigation
-deadlines to the contexts it creates.
+Assertions retain their 10-second watchdog and each test its 30-second
+watchdog, including actions and navigation. Each Playwright run has a 10-minute
+watchdog, leaving setup and teardown room inside CI's 15-minute browser job.
+Server startup retains its separate two-minute watchdog. These limits fail
+incomplete work; they never turn it into a pass.
 
 The server-isolation harness uses a watchdog derived from the shared server
 startup and test deadlines. Its peer wait includes the peer's cold server

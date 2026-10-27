@@ -1,5 +1,4 @@
 import { PROVIDER_HOLD_ATTENTION_ROUTE } from "../../src/api";
-import { browserDeadlines } from "../../playwright-deadlines.mjs";
 
 import { chromium, expect, test as base, type BrowserContext, type Page } from "@playwright/test";
 
@@ -32,8 +31,6 @@ async function freezeClock(context: BrowserContext) {
 export async function launchControlledProfile(...args: Parameters<typeof chromium.launchPersistentContext>) {
   const context = await chromium.launchPersistentContext(...args);
   try {
-    context.setDefaultTimeout(browserDeadlines.assertion);
-    context.setDefaultNavigationTimeout(browserDeadlines.assertion);
     await freezeClock(context);
     return context;
   } catch (error) {
