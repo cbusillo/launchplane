@@ -5,7 +5,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ProductReviewDecision = Literal["accepted", "changes_requested"]
 ProductReviewCarryReason = Literal[
-    "merge_train_base_refresh", "unchanged_patch_base_update", "client_impact_none"
+    "merge_train_base_refresh",
+    "unchanged_patch_base_update",
+    "client_impact_none",
+    "accepted_base_integration",
 ]
 PRODUCT_REVIEW_REASON_MAX_LENGTH = 4000
 
@@ -17,6 +20,21 @@ class ProductReviewCarryCommit(BaseModel):
 
     sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     client_impact: Literal["none"]
+
+
+class ProductReviewIntegratedChange(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pull_request_number: int = Field(gt=0)
+    head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    decision_record_id: str = ""
+    engineering_basis: str = ""
+
+    @model_validator(mode="after")
+    def _validate_basis(self) -> "ProductReviewIntegratedChange":
+        if bool(self.decision_record_id.strip()) == bool(self.engineering_basis.strip()):
+            raise ValueError("an integrated change names its decision or engineering basis")
+        return self
 
 
 class ProductReviewCarry(BaseModel):
@@ -31,6 +49,8 @@ class ProductReviewCarry(BaseModel):
     refresh_record_ids: tuple[str, ...] = ()
     comparison_base_sha: str = ""
     commits: tuple[ProductReviewCarryCommit, ...] = ()
+    integrated_changes: tuple[ProductReviewIntegratedChange, ...] = ()
+    batch_record_ids: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_carry(self) -> "ProductReviewCarry":
@@ -38,15 +58,19 @@ class ProductReviewCarry(BaseModel):
             raise ValueError("a carried decision names the decision and head it came from")
         if self.reason == "merge_train_base_refresh" and not self.refresh_record_ids:
             raise ValueError("a train refresh carry names its refresh records")
-        if self.reason == "unchanged_patch_base_update" and (
+        if self.reason in {"unchanged_patch_base_update", "accepted_base_integration"} and (
             len(self.comparison_base_sha) != 40
             or any(character not in "0123456789abcdef" for character in self.comparison_base_sha)
         ):
-            raise ValueError("an unchanged-patch carry names its immutable comparison base")
+            raise ValueError("a base-update carry names its immutable comparison base")
         if self.reason == "client_impact_none" and (
             not self.commits or len({commit.sha for commit in self.commits}) != len(self.commits)
         ):
             raise ValueError("a Client-impact carry names each distinct commit and its trailer")
+        if self.reason == "accepted_base_integration" and not (
+            self.commits or self.refresh_record_ids
+        ):
+            raise ValueError("a base integration names its PR-side commits or recorded refreshes")
         return self
 
 

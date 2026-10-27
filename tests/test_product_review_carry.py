@@ -23,6 +23,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import product_profile_payload
 from tests.support.stores import sqlite_database_url
 from tests.test_product_review_status import _app_token
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 
 _REPOSITORY = "every/example-site"
 _PULL_REQUEST = 92
@@ -347,6 +348,12 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         assert carried.carried_from is not None
         self.assertEqual(carried.carried_from.comparison_base_sha, _BASE_COMMIT)
         self.assertEqual([commit.sha for commit in carried.carried_from.commits], [_REFRESHED_HEAD])
+        (imported,) = carried.carried_from.integrated_changes
+        (decision,) = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=imported.pull_request_number
+        )
+        self.assertEqual(imported.decision_record_id, decision.record_id)
+        self.assertEqual(imported.head_sha, decision.head_sha)
         self.assertEqual(self._publish()["state"], "success")
         self.assertEqual(len(self._decisions()), 2)
 
@@ -419,6 +426,56 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             "## Client test notes\nNothing for the Client to test: Test fixture cleanup only."
         )
         self.assertEqual(self._publish()["state"], "success")
+        carry = self._decisions()[0].carried_from
+        assert carry is not None
+        self.assertEqual(carry.integrated_changes[0].engineering_basis, pull["body"])
+
+    def test_dependency_only_base_change_uses_the_same_engineering_classification(self) -> None:
+        self._integrate_accepted_billing_change()
+        seed_dependency_policy(self.store, repository=_REPOSITORY)
+        pull = self.github.responses[f"/repos/{_REPOSITORY}/pulls/{_PULL_REQUEST + 1}"]
+        assert isinstance(pull, dict)
+        pull.update(
+            body="Bumps a dependency.",
+            user={"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
+            head={"sha": _SECOND_REFRESH_HEAD, "repo": {"full_name": _REPOSITORY}},
+            base={"ref": "main", "sha": _NEWER_BASE_COMMIT, "repo": {"full_name": _REPOSITORY}},
+        )
+        self.github.responses[
+            f"/repos/{_REPOSITORY}/compare/{_NEWER_BASE_COMMIT}...{_SECOND_REFRESH_HEAD}"
+        ] = {"files": [{"filename": "uv.lock", "status": "modified"}]}
+        self.assertEqual(self._publish()["state"], "success")
+
+    def test_recorded_train_refresh_and_conflict_merge_carry_in_either_order(self) -> None:
+        for train_first in (True, False):
+            with self.subTest(train_first=train_first):
+                self.setUp()
+                self._integrate_accepted_billing_change()
+                commits = self.github.commit_comparison["commits"]
+                assert isinstance(commits, list)
+                merge = commits[-1]
+                if train_first:
+                    merge["parents"][0]["sha"] = _OTHER_MERGE_HEAD
+                    train = {
+                        "sha": _OTHER_MERGE_HEAD,
+                        "parents": [{"sha": _ACCEPTED_HEAD}, {"sha": _NEWER_BASE_COMMIT}],
+                        "commit": {"message": "Merge branch main"},
+                    }
+                    commits.insert(-1, train)
+                    self._train_refreshed(_ACCEPTED_HEAD, _OTHER_MERGE_HEAD, _NEWER_BASE_COMMIT)
+                else:
+                    self.github.head_sha = _OTHER_MERGE_HEAD
+                    train = {
+                        "sha": _OTHER_MERGE_HEAD,
+                        "parents": [{"sha": _REFRESHED_HEAD}, {"sha": _BASE_COMMIT}],
+                        "commit": {"message": "Merge branch main"},
+                    }
+                    commits.append(train)
+                    self._train_refreshed(_REFRESHED_HEAD, _OTHER_MERGE_HEAD, _BASE_COMMIT)
+                self.github.commit_comparison.update(
+                    total_commits=len(commits), ahead_by=len(commits)
+                )
+                self.assertEqual(self._publish()["state"], "success")
 
     def test_accepted_change_delivered_in_a_train_batch_can_integrate(self) -> None:
         self._integrate_accepted_billing_change()
@@ -460,6 +517,9 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         )
         self.store.write_merge_train_batch_candidate_record(record)
         self.assertEqual(self._publish()["state"], "success")
+        carry = self._decisions()[0].carried_from
+        assert carry is not None
+        self.assertEqual(carry.batch_record_ids, (record.record_id,))
 
     def test_base_integration_cannot_hide_visible_side_work_or_foreign_parents(self) -> None:
         for mutation in ("visible", "missing", "foreign", "truncated", "wrong-base", "unmerged"):
@@ -859,7 +919,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(self._decisions()), 2)
 
     def test_carry_provenance_round_trips_through_database_storage(self) -> None:
-        self._later_commits("Adjust tests\n\nClient-impact: none")
+        self._integrate_accepted_billing_change()
         with TemporaryDirectory() as directory:
             database = PostgresRecordStore(
                 database_url=sqlite_database_url(Path(directory) / "records.sqlite")
@@ -867,6 +927,10 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             self.addCleanup(database.close)
             database.ensure_schema()
             database.write_product_review_decision_record(self.accepted)
+            for decision in self.store.list_product_review_decision_records(
+                repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
+            ):
+                database.write_product_review_decision_record(decision)
             carried = carry_owner_acceptance(
                 store=require_product_review_store(database),
                 profile=self.profile,

@@ -207,16 +207,24 @@ onto the same base and either have valid engineering-only notes or a delivered
 acceptance by the same current Client for its exact merged head. For a recorded
 train batch, the recorded member heads receive that check individually. Missing,
 ambiguous or incomplete evidence, a foreign parent, or a visible or missing
-PR-side trailer leaves acceptance waiting. A test-only follow-up or a sequence
+PR-side trailer leaves acceptance waiting, unless that merge exactly matches a
+recorded train refresh's result and both parents. Recorded refreshes need no
+trailer and can appear before or after declared invisible commits or conflict
+merges. A test-only follow-up or a sequence
 of such commits mixed with qualified base merges can carry without another
 Client decision. Release acceptance remains the check of how the combined
 changes work together.
 
-This carry records reason `client_impact_none` and the PR-side commit SHAs and
-trailers in `carried_from.commits`, in order. For integration it also records the
-pinned base in `comparison_base_sha`. Imported base commits are checked against
-their own changes rather than treated as new PR-side work. The recorded Client,
-original acceptance and delivered feedback remain the source.
+A linear invisible follow-up records reason `client_impact_none`. Base integration
+records `accepted_base_integration`, the pinned `comparison_base_sha`, each
+PR-side `none` commit in order, and any recorded train refresh IDs. It also
+saves `integrated_changes`: each imported change's number, exact head and
+acceptance record ID or its engineering basis (the notes snapshot or the shared
+verified-dependency explanation). `batch_record_ids` names the train batches
+whose exact members were checked. These persisted facts explain the carry even
+if a PR's notes or labels later change. Imported base commits are checked
+against their own changes rather than treated as new PR-side work. The recorded
+Client, original acceptance and delivered feedback remain the source.
 The same-current-Client, delivered-feedback and unchanged-base checks below apply.
 
 The Client accepts a feature, seen on its preview. A base update or rebase may
