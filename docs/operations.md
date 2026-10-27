@@ -1908,9 +1908,11 @@ material change clears acknowledgement and is immediately eligible for delivery.
 A bounded silence preserves all observations/events but suppresses material
 updates and reminders until `silenced_until`; after expiry the next unresolved
 failure can emit the current reminder. Resolution remains a durable incident
-event; the outbox supersedes delivery once the incident is resolved. External
-GitHub issues are therefore not automatically closed by durable recovery
-delivery. Public, private, and provider checks use the configured consecutive-pass recovery
+event. The outbox supersedes queued failure alerts after resolution. A matching
+recovery event can close an existing GitHub issue or send recovery feedback to
+the same policy and destination that received a failure. Recovery waits for
+earlier in-flight delivery to settle; a GitHub provider-start marker can recover
+an existing issue without creating a new one. Public, private, and provider checks use the configured consecutive-pass recovery
 threshold; only the threshold-crossing pass creates the single recovery event.
 
 Inspect active incident state from Product Ops before following an external
@@ -2200,9 +2202,8 @@ or receipt evidence keeps the incident open. The monitor locks and rechecks the
 proof with the existing provider-source gate before publication. This changes no
 provider resource, replays no executor, invents no nonce and supplies no deployment
 verification; health, identity, TLS and freshness retain their separate gates.
-The outbox worker sends email and Discord as well as GitHub notifications for
-still-open incidents. Recovery does not manufacture another notification to
-resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;
+The outbox worker sends email and Discord as well as GitHub notifications.
+Each delivery keeps the original event and rendered body;
 email/Discord payloads reference the policy destination without copying credentials
 or secret references. The worker resolves that destination from current enabled
 policy and the existing managed-secret resolver at send time.
@@ -2224,8 +2225,7 @@ stable incident marker for issue recovery. Updates and reminders
 search the incident marker when their queued payload predates the committed
 opening attempt record, then comment on the recovered issue rather than
 creating a duplicate. File-backed rehearsals retain synchronous resolution
-delivery and issue closure. Durable deliveries for resolved incidents are
-superseded instead. Do not clear provider markers or outbox rows to force a retry.
+delivery and issue closure. Do not clear provider markers or outbox rows to force a retry.
 GitHub issue notification delivery uses the managed automation token projected
 as `LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN`; it does not fall back to active
 local `gh` authentication. Verify the configured actor with a token-scoped
