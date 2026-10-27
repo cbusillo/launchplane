@@ -15,6 +15,14 @@ class PreviewSettingsTests(unittest.TestCase):
             store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/records.db")
             store.ensure_schema()
             self.addCleanup(store.close)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="site",
+                    env={"COLOR": "context", "CONTEXT_ONLY": "isolated"},
+                    updated_at="2026-10-26T00:00:00Z",
+                )
+            )
             for instance, values in (
                 ("testing", {"COLOR": "testing", "TEMPLATE_ONLY": "kept"}),
                 ("prod", {"COLOR": "prod"}),
