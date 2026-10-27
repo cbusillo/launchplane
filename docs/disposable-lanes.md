@@ -76,7 +76,11 @@ activation and its original completed allocation. It reuses the activation's
 recipient-custody, retained-reservation, safe-input and provider-render checks, with
 the artifact from current deployment inventory. Current qualification binds
 current managed configuration across inspection; the frozen activation
-configuration remains a guard on the original operation. The provider's pending
+configuration remains a guard on the original operation. Target policies are
+read and hashed from current authority, separately from the
+published recipient identity. Original activation replay still requires its
+historical target policies. Policy changes after collection invalidate its proof
+and must be requalified before a provider effect. The provider's pending
 runtime identity must agree with the completed inventory apart from its completion time;
 provider image inputs retain the Compose deploy writer's artifact value.
 Changed delivered inputs must match their supported runtime sync before collection;
