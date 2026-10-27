@@ -24,7 +24,7 @@ from control_plane.contracts.production_backup_authority import (
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     PromotionRecord,
-    RecordFailure,
+    promotion_failure,
 )
 from control_plane.contracts.verireel_prod_backup_gate_operation import (
     VeriReelProdBackupGateOperationRecord,
@@ -349,10 +349,7 @@ def production_promotion_backup_guard(
             ):
                 failed.failure = error.record_failure()
             elif isinstance(error, GenericWebPromotionAdmissionRefused) and not effects_started:
-                failed.failure = RecordFailure(
-                    code=error.failure_code,
-                    description=error.failure_description,
-                )
+                failed.failure = promotion_failure(error.failure_code)
             failed.backup_gate.evidence.update(protection_evidence)
             record_store.write_promotion_record(failed)
             raise

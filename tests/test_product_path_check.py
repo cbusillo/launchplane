@@ -411,9 +411,16 @@ class ProductPathCheckTests(unittest.TestCase):
         )
 
     def test_previous_failure_text_comes_from_its_code_never_the_record(self) -> None:
+        from control_plane.generic_web_source_qualification import (
+            GenericWebPromotionAdmissionRefused,
+            GenericWebPromotionSourceRefused,
+        )
+
         for code, expected_code in (
             ("destination_deploy_failed", "destination_deploy_failed"),
             ("imported_failure", "previous_promotion_failed"),
+            (GenericWebPromotionAdmissionRefused.failure_code,) * 2,
+            (GenericWebPromotionSourceRefused.failure_code,) * 2,
         ):
             with self.subTest(code=code):
                 promotion = _promotion("promotion-20261002T000000Z-a").model_copy(

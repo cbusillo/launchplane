@@ -14,7 +14,6 @@ from control_plane.contracts.product_environment_read_model import (
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
-    RecordFailure,
     DeploymentEvidence,
     HealthcheckEvidence,
     PromotionRecord,
@@ -185,6 +184,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         from control_plane.generic_web_source_qualification import (
             GenericWebPromotionAdmissionRefused,
         )
+        from control_plane.contracts.promotion_record import promotion_failure
 
         reference = self.store.list_deployment_records()[0]
         backup = "unused-fixture-backup"
@@ -206,10 +206,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
                 deploy=reference.deploy.model_copy(
                     update={"status": "fail", "finished_at": self.timestamp()}
                 ),
-                failure=RecordFailure(
-                    code=GenericWebPromotionAdmissionRefused.failure_code,
-                    description=GenericWebPromotionAdmissionRefused.failure_description,
-                ),
+                failure=promotion_failure(GenericWebPromotionAdmissionRefused.failure_code),
             )
         )
 

@@ -33,7 +33,6 @@ from control_plane.provider_operations import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.generic_web_source_qualification import (
     GenericWebPromotionAdmissionRefused,
-    GenericWebPromotionSourceRefused,
 )
 
 from control_plane.workflows.generic_web_deploy import normalize_generic_web_artifact_id
@@ -288,7 +287,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
 
             if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable":
                 raise ProviderMutationRejectedError(
-                    GenericWebPromotionSourceRefused(str(error))
+                    GenericWebPromotionAdmissionRefused(str(error))
                 ) from error
             if provider_effect_attempted:
                 raise ProviderMutationUnknownError(str(error)) from error

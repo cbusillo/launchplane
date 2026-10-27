@@ -23,6 +23,7 @@ from control_plane.contracts.generic_web_deploy_recovery import (
     GenericWebDeployRecoveryDryRunResponse,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.promotion_record import promotion_failure
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -340,11 +341,12 @@ def build_generic_web_write_route_handlers(
     def promotion_admission_error(
         error: GenericWebPromotionAdmissionRefused, trace_id: str
     ) -> StarletteHTTPException:
+        _log_masked_promotion_error(error, trace_id=trace_id)
         return dependencies.http_error(
             status_code=409,
             trace_id=trace_id,
             code=error.failure_code,
-            message=error.failure_description,
+            message=promotion_failure(error.failure_code).description,
         )
 
     def require_product_promotion_target_snapshot(

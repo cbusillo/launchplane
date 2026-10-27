@@ -787,6 +787,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             control_plane_root_path=f.fixture.root,
         )
         with (
+            self.assertLogs("control_plane.http_routes.generic_web", level="ERROR") as refusal_logs,
             patch(
                 "control_plane.http_routes.generic_web.build_product_promotion_status",
                 return_value=(profile, lane, SimpleNamespace(release_review=review)),
@@ -814,6 +815,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
                 },
             )
         self.assertEqual(status, 409, response)
+        self.assertTrue(any(response["trace_id"] in entry for entry in refusal_logs.output))
         self.assertEqual(
             response["error"]["code"], GenericWebPromotionAdmissionRefused.failure_code
         )
