@@ -57,7 +57,7 @@ def main() -> int:
             saved = json.loads(evidence_path.read_text())
             if saved["request"] != review_request:
                 raise ValueError("Review evidence belongs to another request.")
-            plan = TestingRestorePolicyPlan.model_validate(saved["plan"])
+            plan = TestingRestorePolicyPlan.model_validate(saved["plan"], extra="ignore")
         else:
             response = transport["request_launchplane"](
                 service_url=settings["service_url"],
@@ -68,7 +68,7 @@ def main() -> int:
             )
             if response["status"] != "accepted":
                 raise ValueError("Planning was not accepted.")
-            plan = TestingRestorePolicyPlan.model_validate(response["result"])
+            plan = TestingRestorePolicyPlan.model_validate(response["result"], extra="ignore")
         if (plan.product, plan.context) != (args.product, draft.context) or plan.applied:
             raise ValueError("The plan does not match the testing request.")
         if args.mode == "dry-run":
@@ -95,7 +95,7 @@ def main() -> int:
             accepted_trace = transport["public_trace_id"](response["trace_id"])
             if response["status"] != "accepted":
                 raise ValueError("Apply was not accepted.")
-            applied = TestingRestorePolicyPlan.model_validate(response["result"])
+            applied = TestingRestorePolicyPlan.model_validate(response["result"], extra="ignore")
             if applied != plan.model_copy(update={"applied": True}):
                 raise ValueError("The accepted policy differs from the review.")
             readback = transport["request_launchplane_read"](

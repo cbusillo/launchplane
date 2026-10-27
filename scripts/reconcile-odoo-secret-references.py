@@ -61,7 +61,8 @@ def main() -> int:
                     settings=settings,
                     query={},
                     timeout=120,
-                )
+                ),
+                extra="ignore",
             )
 
         report = read()
@@ -76,7 +77,7 @@ def main() -> int:
         elif args.mode == "apply":
             assert evidence is not None
             saved = json.loads(evidence.read_text())
-            review = SecretReferenceResponse.model_validate(saved["response"])
+            review = SecretReferenceResponse.model_validate(saved["response"], extra="ignore")
             if (review.result.product, review.result.instance) != (
                 args.product,
                 args.environment,
@@ -98,7 +99,8 @@ def main() -> int:
                     settings=settings,
                     body=payload,
                     timeout=120,
-                )
+                ),
+                extra="ignore",
             )
             trace = transport["public_trace_id"](response.trace_id)
             accepted = submitted

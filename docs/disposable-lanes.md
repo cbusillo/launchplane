@@ -3516,6 +3516,26 @@ post-write recovery tuple. The web writer must be stopped. Verified, actively ru
 unbound or production-aliased operations refuse. Ordinary `retire` still requires both
 verified final recovery tuples; incomplete retirement produces neither tuple.
 
+The same `retire-incomplete` action also disposes a prepared rehearsal whose
+execute never started. Use the completed prepare key if execute was never
+submitted or was refused before dispatch, or the original execute key for a
+completed capacity or read-only precheck refusal. Keep the original intent.
+Any running or held operation on the rehearsal refuses, even with an expired
+lease. Under the host lock, no execute marker, capture, snapshot or other
+started effect may exist, and the idle runtime must still select the source
+database. The existing storage ownership, consumer and absence proofs apply.
+Publication checks executor exclusion again and preserves the completed
+prepare or refusal journal. Readback reconstructs disposal from its persisted
+checkpoint and placement absence.
+
+Every original-key rehearsal readback requires the original saved review
+through `--evidence-file`. It sends the original reviewed binding, including
+after publication changes the rehearsal record; readback never replays effects.
+The command-line clients ignore response fields their checkout does not know while
+retaining the existing identity, action, completion and custody validation.
+Request validation remains strict. A keyless status read does not require
+saved review evidence and does not bind or reconcile an original operation.
+
 A completed later phase that cannot reach `verified`, for example a superseded
 `switched` rehearsal whose candidate cannot run business validation, uses the
 same `retire-incomplete` action to recover its capacity. Supply the unchanged

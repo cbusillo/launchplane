@@ -694,7 +694,6 @@ class OdooRehearsalAdapter:
     def operation_readback(
         self, record: OdooUpgradeRehearsalRecord, idempotency_key: str
     ) -> dict[str, object]:
-        """Read a journal bound to the original request and unchanged partial record."""
         from control_plane.http_routes.mutation_support import request_fingerprint
         from control_plane.provider_operations import build_provider_operation_key
 
@@ -705,18 +704,12 @@ class OdooRehearsalAdapter:
         )
         if not idempotency_key or reservation is None:
             raise RehearsalRefused(RehearsalPrerequisite.OPERATION_UNAVAILABLE)
-        original = self.request.model_copy(
-            update={
-                "mode": "apply",
-                "reviewed_plan_sha256": self.initial_prepare_binding(record)
-                if self.request.action == "prepare"
-                else self.request.reviewed_plan_sha256
-                if self.request.action in {"validate-business", "rebuild-final"}
-                else record.binding_sha256,
-            }
-        )
+        original = self.request.model_copy(update={"mode": "apply"})
         if (
-            reservation.provider_target_key != record.rehearsal_id
+            record.product != self.product
+            or record.principal != self.principal
+            or record.rehearsal_id != self.request.rehearsal_id
+            or reservation.provider_target_key != record.rehearsal_id
             or reservation.reconciliation_key != self.reconciliation_key()
             or reservation.request_fingerprint
             != request_fingerprint(
@@ -1254,6 +1247,7 @@ class OdooRehearsalAdapter:
         inspect_capture: bool = False,
         abandoned_attempt_sha256: str = "",
         abandoned_action: str = "",
+        execute_never_started: bool = False,
     ) -> str:
         if mode == "observe" or self.request.action in {
             "validate-business",
@@ -1274,6 +1268,8 @@ class OdooRehearsalAdapter:
         spec["attempt_sha256"] = canonical_json_sha256({"operation_key": operation_key})
         spec["record_binding_sha256"] = record.binding_sha256
         spec["inspect_capture"] = mode == "observe" and inspect_capture
+        if execute_never_started:
+            spec["execute_never_started"] = True
         if self.request.action == "retire" and self.request.consumer_confirmation is not None:
             spec["retain_final_recovery"] = True
             progress = record.incomplete_retirement
