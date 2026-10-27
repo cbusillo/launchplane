@@ -362,6 +362,7 @@ def run_preview_preservation(
     from control_plane.dokploy.memory_capacity import preview_host_memory_floor
     from control_plane.dokploy.native_copy_stream import _read_remote
     from control_plane.odoo_preview_resources import require_existing_preview_resources
+    from control_plane.preview_reservation_recovery import original_preview_intent
 
     authority = read_preview_preservation_authority(
         store=store,
@@ -370,6 +371,12 @@ def run_preview_preservation(
         original_reservation_id=original_reservation_id,
         operation_record_id=operation_record_id,
     )
+    original = store.read_idempotency_record_by_id(original_reservation_id)
+    if original is None:
+        raise ValueError("Original preview preservation authority disappeared.")
+    snapshot = original_preview_intent(
+        original, profile=profile, store=store
+    ).issued_plan.dry_run_plan.clean_snapshot
     current_source = read_preview_preservation_source(
         authority=authority, control_plane_root=control_plane_root, database_url=store.database_url
     )
@@ -431,6 +438,7 @@ def run_preview_preservation(
             "authority": authority.model_dump(mode="json"),
             "preservation_id": authority.preservation_id,
             "source": current_source,
+            "snapshot": snapshot.model_dump(mode="json") if snapshot else None,
             "storage_budget": budget.model_dump(mode="json") if budget else {},
             "memory_floor": preview_host_memory_floor(
                 server_id=authority.server_id, record_store=store

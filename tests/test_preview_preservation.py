@@ -1537,6 +1537,11 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
 
         def remote(**kwargs: Any) -> None:
             self.assertFalse(guarded)
+            retained = self.store.read_original_mutation_intent(self.original)
+            self.assertEqual(
+                kwargs["payload"]["snapshot"],
+                retained["issued_plan"]["dry_run_plan"]["clean_snapshot"],
+            )
             kwargs["dispatch_guard"](lambda: self.assertTrue(guarded))
             self.assertFalse(guarded)
             kwargs["receive"](

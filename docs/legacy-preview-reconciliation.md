@@ -256,6 +256,23 @@ restore verification. Copies have no automatic expiry. They preserve unknown
 legacy data; this operation does not qualify that data for later disposal.
 No runtime environment, license or credential file is exported.
 
+The same original-bound operation also handles an empty four-service overlay
+recipient. Its web and runner must already be stopped, its database must be
+running and idle, and a read-only transaction must positively establish that
+only the empty `postgres` database remains, with no other client connections
+or prepared transactions. Additional databases or private files in the data,
+addon, log, overlay upper or work directories refuse qualification. Exact
+mounts, exclusive consumers, volume creation/backing identities and the
+original snapshot pin must agree. The shared lower and its matching snapshot
+receipt remain in place. This case publishes an empty-recipient custody
+receipt rather than copying the shared lower or claiming a database restore.
+Every later destructive checkpoint rechecks that custody while the provider
+target exists; after provider absence the retained receipt and original
+snapshot pin remain verifiable. Interrupted receipt publication resumes only
+under its matching pending ownership and the existing same-key recovery path.
+It neither repairs historical restore-start evidence nor writes a disposable
+safety report or a preview lifecycle record before successful destruction.
+
 Every subsequent destructive checkpoint and lifecycle adoption verifies the
 retained copy. Reopened applications, changed storage or changed original
 filestore block deletion. Only preservation phases with positive source and
