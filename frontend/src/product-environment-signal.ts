@@ -129,14 +129,16 @@ function productionDeliveryWarning(environment: ProductEnvironmentSummary, incid
     incident.severity === "warning";
 }
 
-function runtimeVerificationGap(environment: ProductEnvironmentSummary): string | null {
+function runtimeVerificationGap(environment: ProductEnvironmentSummary, now: number, { requireChecks = true } = {}): string | null {
   const placement = environment.topology.observed.placement;
   if (placement.runtime_identity_status !== "match" || placement.trust_state !== "verified")
     return "The running production release is not verified";
   const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
-  if (!checks.length || checks.some(check => check.status !== "pass" || check.trust_state !== "verified"))
+  if (requireChecks && !checks.length || checks.some(check =>
+    check.status !== "pass" || check.trust_state !== "verified" || Date.parse(check.provenance.stale_after) < now))
     return "Current production health is not verified";
-  return environment.provenance.freshness_status === "verified" ? null : "Current production evidence is not verified";
+  return checks.length && environment.provenance.freshness_status !== "verified"
+    ? "Current production evidence is not verified" : null;
 }
 
 export function operationalWarningReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
@@ -168,7 +170,7 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
   environment.topology.observed.tls_domains.filter(domain => negativeTlsStates.has(domain.status))
     .forEach(domain => reasons.add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
   const runtimeTone = environmentRuntimeTone(environment, now);
-  const runtimeGap = runtimeVerificationGap(environment);
+  const runtimeGap = runtimeVerificationGap(environment, now);
   if (environment.environment === "prod" && environment.health_monitoring.monitoring_intent !== "prelaunch" && runtimeGap)
     reasons.add(runtimeGap);
   const deliveryOnly = incidents.length > 0 && reasons.size === 0 && runtimeTone === "verified" &&
@@ -210,14 +212,15 @@ function environmentRuntimeTone(environment: ProductEnvironmentSummary, now: num
   if (!checks.length && environment.provenance.freshness_status === "missing") return "missing";
   if (
     otherWarnings.length || warnings.some(warning => warning.severity !== "info") ||
-    runtimeVerificationGap(environment) !== null ||
+    runtimeVerificationGap(environment, now, { requireChecks: false }) !== null ||
     publicObservationGap(environment.topology) !== null ||
     publicTopologyApplicable(environment.topology) && (
       !checks.some(check => check.kind === "public_http") ||
       environment.topology.observed.ingress.trust_state === "stale" ||
       environment.topology.observed.tls_domains.some(domain => domain.trust_state === "stale")
     ) ||
-    Date.parse(environment.provenance.stale_after) < now
+    Date.parse(environment.provenance.stale_after) < now ||
+    environment.provenance.freshness_status === "stale"
   ) return "warning";
   // Lane provenance is verified only after health and current deployment identity both pass.
   if (checks.length && environment.provenance.freshness_status === "verified") return "verified";

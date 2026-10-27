@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, operationalWarningReasons, publicObservationGap } from "../src/product-environment-signal.ts";
+import { sidebarStatus } from "../src/sidebar-status.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 Object.defineProperty(globalThis, "window", { configurable: true, value: { location: { search: "" } } });
@@ -53,6 +54,7 @@ test("monitored production cannot hide unknown runtime behind an empty incident 
     update(lane);
     assert.equal(environmentOperationalTone(lane), "danger");
     assert.ok(operationalAttentionReasons(lane).length);
+    for (const reason of operationalAttentionReasons(lane)) assert.ok(sidebarStatus(lane, "Production").description.includes(reason));
     assert.deepEqual(operationalWarningReasons(lane), []);
     lane.health_monitoring.monitoring_intent = "prelaunch";
     assert.notEqual(environmentOperationalTone(lane), "danger");
@@ -60,6 +62,20 @@ test("monitored production cannot hide unknown runtime behind an empty incident 
     assert.equal(environmentOperationalTone(lane), "danger");
     lane.environment = "testing";
     assert.notEqual(environmentOperationalTone(lane), "danger");
+  }
+});
+
+test("unmonitored private-only testing and prelaunch lanes retain recorded state", () => {
+  for (const name of ["testing", "prod"]) {
+    const lane = environment();
+    lane.environment = name;
+    lane.topology.desired.public_website = "none";
+    lane.health_monitoring.monitoring_intent = "prelaunch";
+    lane.health_monitoring.checks = [];
+    for (const freshness of ["verified", "recorded"]) {
+      lane.provenance.freshness_status = freshness;
+      assert.equal(environmentOperationalTone(lane), "recorded");
+    }
   }
 });
 
