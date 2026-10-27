@@ -70,6 +70,32 @@ test("recovery failures stay yellow while business failures stay red", () => {
   assert.equal(sidebarStatus(lane, "Production").tone, "danger");
 });
 
+test("recovery and delivery warnings stay yellow together", () => {
+  const lane = environment();
+  lane.environment = "prod";
+  const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+  Object.assign(incident, { severity: "warning", check_kind: "provider", check_name: "production-delivery-example", failure_layer: "provider" });
+  lane.health_monitoring.open_incidents = [incident];
+  const recovery = { ...structuredClone(lane.topology.observed.tls_domains[0]), domain_name: "recovery.example.test", advisory: true };
+  lane.topology.observed.tls_domains.push(recovery);
+  lane.topology.warnings = [{ code: "public_ingress_failure", severity: "warning", scope: "observation", domain_name: recovery.domain_name, detail: "Recovery route unavailable" }];
+  for (const status of ["expired", "unknown", "valid"]) {
+    recovery.status = status;
+    recovery.trust_state = status === "valid" ? "stale" : "verified";
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.equal(sidebarStatus(lane, "Production").tone, "warning");
+    assert.deepEqual(operationalAttentionReasons(lane), []);
+  }
+  lane.health_monitoring.checks[0].status = "fail";
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.environment = "testing";
+  lane.health_monitoring.checks = [];
+  lane.health_monitoring.open_incidents = [];
+  lane.provenance.freshness_status = "missing";
+  recovery.status = "expired";
+  assert.equal(environmentOperationalTone(lane), "missing");
+});
+
 test("monitored production cannot hide unknown runtime behind an empty incident list", () => {
   const updates = [
     lane => { lane.topology.observed.placement.runtime_identity_status = "unchecked"; },

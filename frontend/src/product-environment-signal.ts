@@ -188,7 +188,8 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
     if (recovery) warnings.add(`Recovery path: ${readable(incident.failure_code)}`);
     return !recovery;
   });
-  const deliveryOnly = blockingIncidents.length > 0 && reasons.size === 0 && runtimeTone === "verified" &&
+  const deliveryOnly = blockingIncidents.length > 0 && reasons.size === 0 && runtimeGap === null &&
+    environment.topology.observed.trust_state === "verified" &&
     blockingIncidents.every(incident => productionDeliveryWarning(environment, incident));
   if (!deliveryOnly) {
     for (const incident of blockingIncidents) {
@@ -197,7 +198,8 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
     }
   }
   return {
-    tone: reasons.size ? "danger" : deliveryOnly || warnings.size ? "warning" : runtimeTone,
+    tone: reasons.size ? "danger" : ["missing", "stale"].includes(runtimeTone) ? runtimeTone
+      : deliveryOnly || warnings.size ? "warning" : runtimeTone,
     attentionReasons: [...reasons],
     warningReasons: reasons.size ? [] : [...warnings, ...(deliveryOnly
       ? blockingIncidents.map(incident => `${readable(incident.failure_code)}; the current production release is healthy`)
