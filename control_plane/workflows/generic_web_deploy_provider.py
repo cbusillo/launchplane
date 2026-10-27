@@ -76,9 +76,7 @@ class GenericWebResolvedDeployTarget(BaseModel):
     deployed_target: DeployedTargetReference | None = None
     deploy_timeout_seconds: int = Field(ge=1)
     provider_dispatch_evidence: dict[str, object] = Field(default_factory=dict)
-    release_settings: GenericWebReleaseSettings | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
+    release_settings: GenericWebReleaseSettings | None = Field(default=None, exclude=True)
     testing_runtime_digest: str = Field(default="", exclude_if=lambda value: not value)
     testing_runtime_verified_digest: str = Field(default="", exclude=True)
     testing_runtime_values: dict[str, str] = Field(default_factory=dict, exclude=True, repr=False)
@@ -93,9 +91,6 @@ class GenericWebProviderReconciliationTarget(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     original_event_deploy: dict[str, object] | None = None
     qualification_authority_digest: str = Field(default="", exclude_if=lambda value: not value)
-    release_settings: GenericWebReleaseSettings | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
     testing_runtime_digest: str = Field(default="", exclude_if=lambda value: not value)
     product: str = ""
     context: str
@@ -181,7 +176,6 @@ def build_generic_web_provider_reconciliation_key(
         original_event_deploy=original_event_deploy,
         qualification_authority_digest=qualification_authority_digest,
         testing_runtime_digest=resolved_deploy_target.testing_runtime_digest,
-        release_settings=resolved_deploy_target.release_settings,
         context=ship_request.context,
         instance=ship_request.instance,
         provider_id=ship_request.provider_id,
@@ -274,7 +268,6 @@ def resolve_generic_web_provider_reconciliation_target(
         ),
         deploy_timeout_seconds=snapshot.deploy_timeout_seconds,
         testing_runtime_digest=snapshot.testing_runtime_digest,
-        release_settings=snapshot.release_settings,
     )
 
 
@@ -1142,6 +1135,8 @@ class DokployGenericWebDeployProvider:
                     else resolved_deploy_target.testing_runtime_retired_keys
                 ),
                 runtime_verified=runtime_verified,
+                strict_runtime_environment=resolved_deploy_target.ship_request.instance
+                == "testing",
                 dispatch_evidence_checkpoint=retain_dispatch,
                 accept_sole_new_deployment=(
                     resolved_deploy_target.resolved_target.target_type == "compose"

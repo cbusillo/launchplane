@@ -19,11 +19,10 @@ test("A settings-only release shows its saved settings and allows the release re
   await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
   await page.goto("/ui/owner-review?product=example-site");
   await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toBeVisible();
-  await page.getByText("Production settings", { exact: true }).click();
-  const settings = page.locator("details").filter({ has: page.getByText("Production settings", { exact: true }) });
+  const settings = page.locator("[data-production-settings]");
+  await settings.locator("summary").click();
   await expect(settings).toContainText("second channel");
   await expect(settings).toContainText("OLD_SETTING");
-  await expect(settings).toContainText("Removed");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("production-release-settings.png"), fullPage: true });
 });

@@ -50,7 +50,6 @@ from control_plane.contracts.generic_web_release_settings import GenericWebRelea
 from control_plane.generic_web_release_settings import (
     RELEASE_SETTINGS_KEY,
     ROLLBACK_SETTINGS_KEY,
-    recorded_release_settings,
     prepare_release_settings,
 )
 from control_plane.contracts.ship_request import ShipRequest
@@ -933,28 +932,17 @@ def _execute_generic_web_deploy_unserialized(
         )
 
         if resolved_lane.instance == "prod":
-            applied_settings = prepare_release_settings(
+            prepare_release_settings(
                 store=record_store,
                 provider=resolved_deploy_provider,
                 control_plane_root=control_plane_root,
                 target=prepared_deploy_target,
                 context=resolved_lane.context,
                 settings=release_settings,
+                evidence=verified_build_evidence,
                 rollback_target=rollback_target_deployment_record_id if rollback else "",
+                rollback_source=rollback_source_deployment_record_id,
             )
-            if applied_settings is not None:
-                encoded_settings = applied_settings.model_dump_json()
-                delivery_key = ROLLBACK_SETTINGS_KEY if rollback else RELEASE_SETTINGS_KEY
-                previous_settings = verified_build_evidence.get(delivery_key)
-                if previous_settings is not None and previous_settings != encoded_settings:
-                    raise ValueError("Deployment retry must retain its original release settings.")
-                verified_build_evidence[delivery_key] = encoded_settings
-                if rollback:
-                    reviewed = recorded_release_settings(
-                        record_store.read_deployment_record(rollback_target_deployment_record_id)
-                    )
-                    if reviewed is not None:
-                        verified_build_evidence[RELEASE_SETTINGS_KEY] = reviewed.model_dump_json()
         # Recovered targets carry captured authority, never serialized values.
         # Legacy snapshots deliberately have no authority to backfill.
         prepare_generic_web_testing_runtime(

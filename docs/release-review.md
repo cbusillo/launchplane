@@ -15,18 +15,29 @@ backup and deployment gates, then checks production health and runtime identity.
 Settings changes during the backup wait refuse the first forward effect. No
 product build input, workflow, grant or direct production runtime sync is added.
 
-Deployment records retain the reviewed snapshot in `runtime_source`. Before
-changing a setting for the first time, promotion captures its previous provider
-value or absence in the predecessor's rollback baseline. That observation does
-not rewrite the predecessor's accepted release identity. Recovery restores that
-baseline with its artifact, including removed values and newly added keys that
-must disappear. A rollback without retained settings for the current release's
-keys refuses before deployment. The release drill uses the promotion's pinned
+Deployment records retain the reviewed snapshot in `runtime_source`. Each new
+release captures its predecessor's setting values or absences in that new record,
+without rewriting the predecessor. Known accepted settings take precedence over
+provider drift. Recovery reads that pinned baseline with its artifact, including
+removed values and newly added keys that must disappear. A rollback without
+retained settings for the current release's keys refuses before deployment. The release drill uses the promotion's pinned
 predecessor and reapplies the same accepted snapshot after its second backup.
 
-The Dokploy application and Compose adapter supplies this delivery/readback
-capability. Two-slot lanes keep their separate qualified slot-settings contract;
-a settings-aware release refuses there before effects rather than bypassing it.
+Dokploy application and Compose targets both save and read back the snapshot
+before deployment. Production retains existing provider substitutions; testing's
+stricter input checks remain unchanged. Ordinary production redeploys retain and
+redeliver their recorded release settings, rather than applying staged changes.
+Two-slot lanes keep their separate qualified slot-settings contract and do not
+enter this conventional-target settings path.
+
+Automatically starting the first settings-only release on a legacy
+Director-standing product needs an
+explicit existing release request (`POST /v1/release-review/requests`) bound to
+that exact checklist. Deploying this source capability alone therefore starts no
+legacy settings-only activation. The product's owning session records that
+request, and existing standing acceptance starts the gated release. No extra
+profile switch or grant is needed. Client invitations remain disabled for
+Director-standing products.
 
 An Odoo testing copy published by a native rebuild must match its ordinary
 testing release tuple before candidate review, website-settings preparation or

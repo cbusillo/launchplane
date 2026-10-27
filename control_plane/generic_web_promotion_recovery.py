@@ -37,6 +37,7 @@ from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
     build_generic_web_rollback_plan,
 )
+from control_plane.generic_web_release_settings import verify_recorded_release_settings
 from control_plane.generic_web_promotion_provider_adapter import (
     require_generic_web_promotion_target,
     generic_web_promotion_deployment_id,
@@ -358,6 +359,13 @@ def inspect_promotion(
                 )
             }
         )
+        settings_digest = verify_recorded_release_settings(
+            store=store,
+            provider=provider,
+            control_plane_root=root,
+            target=effective_target,
+            record=effective,
+        )
         runtime = provider.observe_runtime_artifact(
             control_plane_root=root, resolved_deploy_target=effective_target
         )
@@ -379,6 +387,7 @@ def inspect_promotion(
         if checked.status != "pass" or checked.runtime_identity_status != "match":
             return inspection
         inspection.provider_evidence = {
+            **({"runtime_settings_sha256": settings_digest} if settings_digest else {}),
             "runtime": runtime.model_dump(mode="json"),
             "health_status": checked.status,
             "runtime_identity_status": checked.runtime_identity_status,
@@ -642,6 +651,13 @@ def inspect_rollback_drill(
         provider = default_generic_web_deploy_provider(record_store=store, control_plane_root=root)
         if not isinstance(provider, GenericWebDeployRuntimeArtifactProvider):
             return inspection
+        settings_digest = verify_recorded_release_settings(
+            store=store,
+            provider=provider,
+            control_plane_root=root,
+            target=target,
+            record=deployed,
+        )
         runtime = provider.observe_runtime_artifact(
             control_plane_root=root, resolved_deploy_target=target
         )
@@ -667,6 +683,7 @@ def inspect_rollback_drill(
         if checked.status != "pass" or checked.runtime_identity_status != "match":
             return inspection
         inspection.provider_evidence = {
+            **({"runtime_settings_sha256": settings_digest} if settings_digest else {}),
             "runtime": runtime.model_dump(mode="json"),
             "health": checked.model_dump(mode="json"),
         }

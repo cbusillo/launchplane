@@ -39,7 +39,7 @@ function websiteSettingValue(value: boolean | string | null | undefined): string
   return value == null ? "Not recorded" : typeof value === "boolean" ? value ? "enabled" : "disabled" : value || "disabled";
 }
 
-function WebsiteSettingsComparison({ candidate, production }: { candidate: OdooWebsiteSettings; production?: OdooWebsiteSettings, ReleaseVersion }) {
+function WebsiteSettingsComparison({ candidate, production }: { candidate: OdooWebsiteSettings; production?: OdooWebsiteSettings }) {
   return <table className="owner-review-settings">
     <thead><tr><th scope="col">Setting</th><th scope="col">Current</th><th scope="col">This release</th></tr></thead>
     <tbody>{WEBSITE_SETTING_FIELDS.map(([key, label]) => {
@@ -348,7 +348,7 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {checklist && !noNewRelease && (response.viewer_is_owner || response.can_override) ? <p className="owner-review-state">Each new decision is saved and published as a separate release record. {releaseStarts ? "Only the Client's acceptance starts the release; an admin override does not, and an admin can hold releases." : "Recording a decision does not deploy anything."} Production deployment still requires the release and backup checks.</p> : null}
       {recorded ? <p role="status" className="owner-review-success">{latestDecision?.decision === "temporary_hotfix" ? "Temporary hotfix recorded. Launchplane is putting it live; this page shows its progress." : latestDecision?.release_start === "rollback" ? "Changes requested. Launchplane is rolling the site back to your last accepted release." : latestDecision?.release_start ? "Release accepted. This page shows when Launchplane can start and its progress." : "Decision recorded. Nothing has been deployed."}</p> : null}
-      {checklist?.candidate.runtime_settings && !noNewRelease ? <details className="release-review-technical">
+      {checklist?.candidate.runtime_settings && !noNewRelease ? <details className="release-review-technical" data-production-settings>
         <summary>Production settings</summary>
         <p>Accepting this release applies these saved settings to the live site. Rollback restores the previous settings with the previous version.</p>
         <dl>

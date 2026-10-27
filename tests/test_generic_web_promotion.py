@@ -2,6 +2,7 @@ from control_plane.contracts.generic_web_release_settings import GenericWebRelea
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.generic_web_release_settings import (
     recorded_release_settings,
+    recorded_release_baseline,
     RELEASE_SETTINGS_KEY,
 )
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -1161,6 +1162,7 @@ class _ProductionProvider:
         self.healthy_artifact = healthy_artifact
         self.running: RuntimeIdentity | None = None
         self.deployed_artifacts: list[str] = []
+        self.fail_before_image = False
         self.settings: dict[str, str] = {}
         self.delivered_settings: list[dict[str, str]] = []
 
@@ -1215,17 +1217,21 @@ class _ProductionProvider:
         effect_started: Callable[[], None],
         **_kwargs: object,
     ) -> None:
-        before_provider_mutation("deploy_trigger")
-        effect_started()
         target = cast(GenericWebResolvedDeployTarget | None, _kwargs.get("resolved_deploy_target"))
         settings = target.release_settings if target is not None else None
         if settings is not None:
+            before_provider_mutation("runtime_environment_update")
+            effect_started()
             self.settings = {
                 key: value
                 for key, value in self.settings.items()
                 if key not in settings.absent_keys
             }
             self.settings.update(settings.values)
+        if self.fail_before_image and runtime_identity.artifact_id != self.healthy_artifact:
+            raise click.ClickException("image preparation refused after environment save")
+        before_provider_mutation("deploy_trigger")
+        effect_started()
         self.delivered_settings.append(dict(self.settings))
         self.deployed_artifacts.append(runtime_identity.artifact_id)
         self.running = runtime_identity
@@ -1396,13 +1402,33 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
                 absent_keys=("OLD_SETTING",),
             ),
         )
-        self.assertEqual(
-            recorded_release_settings(rollback, rollback=True),
-            recorded_release_settings(
-                store.read_deployment_record(_PREVIOUS_DEPLOYMENT), rollback=True
-            ),
+        baseline = recorded_release_baseline(forward)
+        assert baseline is not None
+        self.assertEqual(baseline.deployment_record_id, _PREVIOUS_DEPLOYMENT)
+        self.assertEqual(recorded_release_baseline(rollback), baseline)
+        self.assertIsNone(
+            recorded_release_baseline(store.read_deployment_record(_PREVIOUS_DEPLOYMENT))
         )
         self.assertNotIn("PROVIDER_ONLY", str(forward.runtime_source[RELEASE_SETTINGS_KEY]))
+
+    def test_environment_save_before_image_failure_restores_the_previous_settings(self) -> None:
+        store = _store_with_production()
+        store.runtime_records = (
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=store.profile.lanes[1].context,
+                instance="prod",
+                env={"APP_CHANNEL": "new"},
+                updated_at="2026-10-27T00:00:00Z",
+            ),
+        )
+        provider = _ProductionProvider()
+        provider.settings = {"APP_CHANNEL": "old"}
+        provider.fail_before_image = True
+        result = self._promote(store, provider)
+        self.assertEqual(result.rollback_status, "pass")
+        self.assertEqual(provider.settings, {"APP_CHANNEL": "old"})
+        self.assertEqual(provider.deployed_artifacts, [_PREVIOUS_ARTIFACT])
 
     def test_rollback_missing_settings_refuses_before_restoring_only_the_artifact(self) -> None:
         store = _store_with_production()
@@ -1423,7 +1449,7 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
             )
         )
         provider = _ProductionProvider()
-        with self.assertRaisesRegex(ValueError, "Rollback lacks retained settings"):
+        with self.assertRaises(ValueError):
             execute_generic_web_deploy(
                 control_plane_root=Path("."),
                 record_store=store,

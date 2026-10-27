@@ -9,6 +9,7 @@ from control_plane.contracts.release_request import (
     ReleaseRequestSource,
 )
 from control_plane.contracts.release_review import ReleaseReviewStatus
+from control_plane.generic_web_release_settings import requires_initial_settings_request
 from control_plane.release_invitation import (
     _accepted_release_in_progress,
     _client_release_requests_enabled,
@@ -51,7 +52,16 @@ def record_release_request(
 ) -> LaunchplaneProductProfileRecord:
     from control_plane.client_release import live_temporary_hotfix
 
-    if not _client_release_requests_enabled(profile):
+    standing_settings_request = (
+        profile.release_on_acceptance == "director_standing"
+        and review.checklist is not None
+        and requires_initial_settings_request(
+            review.checklist.production, review.checklist.candidate
+        )
+    )
+    if not _client_release_requests_enabled(
+        profile, include_director_standing=standing_settings_request
+    ):
         raise ValueError("This product does not request Client releases.")
     if not _ready(review, profile):
         raise ValueError("The release is not ready for a Client request.")

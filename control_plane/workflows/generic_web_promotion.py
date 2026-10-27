@@ -600,10 +600,13 @@ def _execute_generic_web_prod_promotion_unserialized(
             request=request,
             rollback_target=rollback_target,
             production_changed=deploy_result.deploy_status == "pass"
-            or deploy_result.image_effect_attempted,
+            or deploy_result.image_effect_attempted
+            or release_settings is not None
+            and deploy_result.provider_effect_attempted,
             deploy_provider=deploy_provider,
             provider_operation_title=provider_operation_title,
             deployment_record_id=deploy_result.deployment_record_id,
+            source_deployment_record_id=deploy_result.deployment_record_id,
             provider_effect_checkpoint=provider_effect_checkpoint,
         )
     deployment_record = _write_deployment_health(
@@ -785,6 +788,7 @@ def _roll_back_production(
     deployment_record_id: str,
     provider_effect_checkpoint: Callable[[str], None] | None,
     resolved_deploy_target: GenericWebResolvedDeployTarget | None = None,
+    source_deployment_record_id: str = "",
 ) -> _RollbackOutcome:
     target_id = rollback_target.deployment_record_id
     planned_deploy = rollback_target.planned_deploy
@@ -827,7 +831,7 @@ def _roll_back_production(
             deployment_record_id=f"{deployment_record_id}-rollback",
             recorded_artifact=True,
             rollback=True,
-            rollback_source_deployment_record_id=deployment_record_id,
+            rollback_source_deployment_record_id=source_deployment_record_id,
             rollback_target_deployment_record_id=target_id,
             provider_effect_checkpoint=_rollback_phase_checkpoint(provider_effect_checkpoint),
         )

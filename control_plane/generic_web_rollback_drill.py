@@ -139,6 +139,9 @@ def run_generic_web_rollback_drill(
                             previous_inventory=previous_inventory,
                         ),
                         production_changed=True,
+                        source_deployment_record_id=store.read_environment_inventory(
+                            context_name=lane.context, instance_name=lane.instance
+                        ).deployment_record_id,
                         deploy_provider=self._deploy_provider,
                         provider_operation_title=provider_operation_title(provider_operation_key),
                         deployment_record_id=self._deployment_record_id(provider_operation_key),

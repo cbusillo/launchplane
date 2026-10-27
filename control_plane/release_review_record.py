@@ -106,7 +106,6 @@ def release_decision_issue_body(
             + f"Checklist digest: {decision.checklist_digest}"
         ),
         "",
-        "## Client checklist",
     ]
     if checklist.candidate.runtime_settings is not None:
         settings = checklist.candidate.runtime_settings
@@ -122,6 +121,7 @@ def release_decision_issue_body(
                 ),
             ]
         )
+    lines.extend(["", "## Client checklist"])
     for item in checklist.items:
         lines.extend(
             [

@@ -28,8 +28,6 @@ Client-accepted release with a passing production deployment, under the Client's
 
 from __future__ import annotations
 
-from control_plane.generic_web_release_settings import recorded_release_settings
-
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -91,6 +89,10 @@ from control_plane.contracts.production_recipient import ProductionRecipientReco
 from control_plane.contracts.production_backup_gate import (
     PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
     ProductionBackupGateRequest,
+)
+from control_plane.generic_web_release_settings import (
+    recorded_release_settings,
+    requires_initial_settings_request,
 )
 from control_plane.contracts.release_review import (
     AcceptanceReleaseStart,
@@ -417,11 +419,6 @@ def rejection_rollback_target(
                     or (
                         deployment.source_git_ref == version.source_commit
                         and recorded_release_settings(deployment) == version.runtime_settings
-                        and (
-                            before_decision is None
-                            or before_decision.checklist.candidate.runtime_settings is None
-                            or recorded_release_settings(deployment, rollback=True) is not None
-                        )
                     )
                 )
                 and deployment_record_passed(deployment)
@@ -1195,6 +1192,10 @@ def _record_standing_acceptance(
     candidate = release_version(store=store, profile=profile, instance="testing")
     if production == candidate:
         return
+    if requires_initial_settings_request(production, candidate):
+        request = profile.release_request
+        if request is None or request.production != production or request.candidate != candidate:
+            return
     latest = store.list_release_review_decision_records(product=profile.product, limit=1)
     if latest:
         previous = latest[0]

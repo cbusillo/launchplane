@@ -59,12 +59,14 @@ class ReleaseInvitationBackoff:
     release_waits: dict[str, tuple[str, float]] = field(default_factory=dict)
 
 
-def _client_release_requests_enabled(profile: LaunchplaneProductProfileRecord) -> bool:
+def _client_release_requests_enabled(
+    profile: LaunchplaneProductProfileRecord, *, include_director_standing: bool = False
+) -> bool:
     return (
         profile.is_active
         and profile.production_use != "prelaunch"
-        and profile.release_on_acceptance != "director_standing"
         and profile.owner.is_set
+        and (include_director_standing or profile.release_on_acceptance != "director_standing")
     )
 
 
