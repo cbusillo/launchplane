@@ -875,8 +875,8 @@ prove absence outside that access. Binding metadata is a record like the rest of
 a product environment, and reading is never a stop, so the Director's agents
 read it through the same standing environment read across products
 (cbusillo/repairshopr_api#103). Preview
-and removed-lane bindings and contexts shared ambiguously between products are
-excluded.
+configuration scopes are included; removed-lane bindings and contexts shared
+ambiguously between products are excluded.
 
 ### Read coverage and binding selection
 
@@ -889,8 +889,10 @@ product identities or counts.
 
 Binding `coverage` describes the copy metadata population above. `complete`
 means unbounded source enumeration and authorized records within that stated
-population, not every effective secret or every historical lane. The storage
-adapter's `collection_read_coverage` attests unbounded profile, secret-record and
+population, not every effective secret or every historical lane. The coverage
+proof includes every configuration target, including the managed preview scope;
+stable-lane authority alone cannot certify complete copy metadata coverage.
+The storage adapter's `collection_read_coverage` attests unbounded profile, secret-record and
 binding enumeration; a limited, unsupported or unknown collection keeps that
 limitation in the response. Adapters without the capability report `unknown`.
 These are current read observations, not an atomic snapshot or runtime proof.

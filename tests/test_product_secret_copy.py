@@ -574,10 +574,20 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     @scoped_agent_test
-    async def test_explicit_context_and_instance_reads_prove_complete_copy_coverage(self) -> None:
+    async def test_copy_coverage_requires_authority_over_every_configuration_target(self) -> None:
+        self.write_binding(
+            name="PREVIEW_TOKEN", key="PREVIEW_KEY", scope="context_instance", instance="preview"
+        )
         profile_rule = _local_operator_policy(actions=("product_profile.read",)).local_operators[0]
-        for actions in (("secret.list",), ("product_environment.read",)):
-            with self.subTest(actions=actions):
+        for actions, instances, expected in (
+            ((action,), instances, expected)
+            for action in ("secret.list", "product_environment.read")
+            for instances, expected in (
+                (("prod", "testing"), "scoped"),
+                (("prod", "testing", "preview"), "complete"),
+            )
+        ):
+            with self.subTest(actions=actions, instances=instances):
                 read_rule = _local_operator_policy(actions=actions).local_operators[0]
                 app = create_launchplane_fastapi_app(
                     verifier=_RejectingVerifier(),
@@ -586,7 +596,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                         local_operators=(
                             profile_rule,
                             read_rule,
-                            read_rule.model_copy(update={"instances": ("prod", "testing")}),
+                            read_rule.model_copy(update={"instances": instances}),
                         ),
                     ),
                     record_store_factory=lambda: self.store,
@@ -603,8 +613,14 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                     headers={"Authorization": "Bearer test-operator-token"},
                 )
                 self.assertEqual(response.status_code, 200, response.text)
-                self.assertEqual(response.json()["coverage"]["status"], "complete")
-                self.assertTrue(response.json()["bindings"])
+                self.assertEqual(response.json()["coverage"]["status"], expected)
+                self.assertIn(
+                    self.source.name, {row["name"] for row in response.json()["bindings"]}
+                )
+                self.assertEqual(
+                    "PREVIEW_TOKEN" in {row["name"] for row in response.json()["bindings"]},
+                    "preview" in instances,
+                )
 
     @scoped_agent_test
     async def test_environment_read_on_another_product_neither_lists_nor_copies(self) -> None:
@@ -887,16 +903,24 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["bindings"][0]["name"], self.source.name)
 
     async def test_coverage_preserves_unknown_and_limited_source_bounds(self) -> None:
-        for capability, expected in (
-            (None, "unknown"),
-            (lambda _: "limited", "limited"),
-            (lambda collection: None if collection == "secret_records" else "complete", "unknown"),
-            (lambda _: {}, "unknown"),
-            (lambda _: "unsupported", "unsupported"),
+        for capability, expected, catalog_expected in (
+            (None, "unknown", "unknown"),
+            (lambda _: "limited", "limited", "limited"),
+            (
+                lambda collection: None if collection == "secret_records" else "complete",
+                "unknown",
+                "complete",
+            ),
+            (lambda _: {}, "unknown", "unknown"),
+            (lambda _: "unsupported", "unsupported", "unsupported"),
         ):
             with (
                 self.subTest(expected=expected),
                 patch.object(self.store, "collection_read_coverage", capability),
+                patch.object(self.store, "list_secret_records", return_value=()),
+                patch.object(
+                    self.store, "read_secret_version", side_effect=AssertionError("No values")
+                ),
             ):
                 response = await _asgi_request(
                     self.app,
@@ -906,9 +930,21 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(response.status_code, 200, response.text)
                 self.assertEqual(response.json()["coverage"]["status"], expected)
+                self.assertEqual(response.json()["bindings"], [])
                 self.assertEqual(
                     response.json()["lane_binding_resolution"]["coverage"]["status"], expected
                 )
+                for lane in response.json()["lane_binding_resolution"]["lanes"]:
+                    self.assertEqual(lane["coverage"]["status"], expected)
+                    self.assertEqual(lane["bindings"], [])
+                catalog = await _asgi_request(
+                    self.app,
+                    "GET",
+                    "/v1/product-profiles",
+                    headers={"Authorization": "Bearer test-operator-token"},
+                )
+                self.assertEqual(catalog.status_code, 200, catalog.text)
+                self.assertEqual(catalog.json()["coverage"]["status"], catalog_expected)
 
     @scoped_agent_test
     async def test_catalog_reports_scoped_coverage_without_hidden_product_metadata(self) -> None:

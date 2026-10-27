@@ -20,6 +20,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.product_profile_record import product_config_targets
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentRecord,
     RuntimeEnvironmentScope,
@@ -866,7 +867,7 @@ def register_managed_secret_read_routes(
 
             copy_authorization_complete = universal_secret_reader or all(
                 metadata_scope_read_allowed(lane.context, instance, environment_read=True)
-                for lane in profile.lanes
+                for lane in product_config_targets(profile)
                 for instance in ("", lane.instance)
             )
             bindings = product_secret_copy.product_secret_binding_metadata(store, product=product)
