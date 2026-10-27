@@ -2119,7 +2119,14 @@ class NativeTestingWorkerTests(unittest.TestCase):
         self.assertFalse(self.retained["stopped"])
         self.assertEqual(self.current(), self.fixture.before)
 
-    def apply_staff_hold(self, held: bool, reason: str) -> Any:
+    def apply_staff_hold(
+        self,
+        held: bool,
+        reason: str,
+        *,
+        purpose: Literal["staff_testing", "isolation_staging"] = "staff_testing",
+        actor: str = "fixture-admin",
+    ) -> Any:
         from control_plane.testing_lane_hold import (
             TestingHoldApplyRequest,
             apply_testing_hold_plan,
@@ -2132,19 +2139,52 @@ class NativeTestingWorkerTests(unittest.TestCase):
             instance="testing",
             hold=held,
             reason=reason,
+            purpose=purpose,
         )
-        plan, _ = build_testing_hold_plan(
-            record_store=self.store, request=request, actor="fixture-admin"
-        )
+        plan, _ = build_testing_hold_plan(record_store=self.store, request=request, actor=actor)
         apply_testing_hold_plan(
             record_store=self.store,
             request=request.model_copy(
                 update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
             ),
-            actor="fixture-admin",
+            actor=actor,
             required_context_owner=(self.operation.product, self.operation.context),
         )
         return self.current().target.policies.staff_testing_hold
+
+    def test_empty_rebuild_preserves_its_staging_hold_through_completion_and_replay(self) -> None:
+        from control_plane.contracts.durable_operation_authorization import (
+            DurableOperationAuthorization,
+            DurableOperationCallerIdentity,
+        )
+
+        self.operation.authorization = DurableOperationAuthorization(
+            action="odoo_target_replacement_apply.execute",
+            product=self.operation.product,
+            context=self.operation.context,
+            instances=("testing",),
+            authorized_at=self.operation.created_at,
+            caller=DurableOperationCallerIdentity(
+                identity_type="local_operator", subject="fixture-director", token_label="fixture"
+            ),
+            grant="director_testing_rebuild",
+        )
+        hold = self.apply_staff_hold(
+            True,
+            "Prepare a fresh independent testing foundation",
+            purpose="isolation_staging",
+            actor="local-operator:fixture-director",
+        )
+        self.intent = self.intent.model_copy(update={"before": self.current()})
+        self.capture.return_value = self.intent
+        service.check_testing_rebuild_protection(self.root, self.store, self.operation, self.intent)
+        result = self.execute()
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
+        self.assertEqual(self.execute(), result)
+        self.assertEqual(self.current().target.policies.staff_testing_hold, hold)
+        self.assertEqual(self.effects, ["switch-new", "stop-old"])
 
     def test_real_hold_set_and_clear_during_preparation_allows_completion(self) -> None:
         original = service.NativeTestingRebuildExecution.prepare

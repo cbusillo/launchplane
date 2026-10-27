@@ -18,7 +18,10 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.durable_operation_authorization import (
     DurableOperationAuthorizationDeniedError,
+    launchplane_identity_from_durable_caller,
 )
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.service_auth import launchplane_identity_actor
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
@@ -563,16 +566,41 @@ def capture_rebuild_intent(
     )
 
 
+def testing_rebuild_hold_allows(
+    operation: OdooStableTargetReplacementOperationRecord,
+    intent: NativeTestingRebuildIntent,
+    target: DokployTargetRecord,
+    *,
+    actor: str = "",
+) -> bool:
+    hold = target.policies.staff_testing_hold
+    if hold is None:
+        return True
+    if not actor and operation.authorization is not None:
+        caller = operation.authorization.caller
+        if caller.identity_type in {"local_operator", "local_admin", "github_human"}:
+            actor = launchplane_identity_actor(launchplane_identity_from_durable_caller(caller))
+    return (
+        bool(actor)
+        and operation.request.data_source_mode == "empty"
+        and hold.purpose == "isolation_staging"
+        and hold == intent.before.target.policies.staff_testing_hold
+        and hold.recorded_by == actor
+    )
+
+
 def check_testing_rebuild_protection(
     root: Path,
     store: PostgresRecordStore,
     operation: OdooStableTargetReplacementOperationRecord,
     intent: NativeTestingRebuildIntent,
+    *,
+    actor: str = "",
 ) -> None:
     target = store.read_dokploy_target_record(
         context_name=operation.context, instance_name="testing"
     )
-    if target.policies.staff_testing_hold is not None:
+    if not testing_rebuild_hold_allows(operation, intent, target, actor=actor):
         raise TestingRebuildRefused(
             "testing_staff_hold", "This testing lane is held for staff testing."
         )
@@ -991,7 +1019,7 @@ class NativeTestingRebuildExecution:
         target = self.store.read_dokploy_target_record(
             context_name=self.operation.context, instance_name="testing"
         )
-        if not recovery and target.policies.staff_testing_hold is not None:
+        if not recovery and not testing_rebuild_hold_allows(self.operation, self.intent, target):
             raise NativeTestingRebuildPending("Staff testing holds this lane.")
         provider = (
             self.old_provider()
@@ -2321,7 +2349,7 @@ class NativeTestingRebuildExecution:
                             context_name=parent.operation.context,
                             instance_name="testing",
                         )
-                        if target.policies.staff_testing_hold is not None:
+                        if not testing_rebuild_hold_allows(parent.operation, parent.intent, target):
                             raise NativeTestingRebuildPending(
                                 "Staff testing holds retirement of the old copy."
                             )

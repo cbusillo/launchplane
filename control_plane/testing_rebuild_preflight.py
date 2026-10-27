@@ -64,6 +64,7 @@ def inspect_testing_rebuild(
     store: PostgresRecordStore,
     request: OdooStableTargetReplacementRequest,
     verified_manifest: ArtifactIdentityManifest | None = None,
+    actor: str = "",
 ) -> TestingRebuildPreflight:
     if request.strategy != "replace-and-cutover":
         raise ValueError("Native preflight requires the testing copy lifecycle.")
@@ -92,7 +93,7 @@ def inspect_testing_rebuild(
     )
     try:
         intent = capture_rebuild_intent(root, store, operation)
-        check_testing_rebuild_protection(root, store, operation, intent)
+        check_testing_rebuild_protection(root, store, operation, intent, actor=actor)
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:
             raise NativeSourceAuthorizationDenied(
