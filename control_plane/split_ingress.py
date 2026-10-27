@@ -161,6 +161,38 @@ def split_ingress_check_name(domain_name: str) -> str:
     return f"HTTPS {domain_name} ({sha256(domain_name.encode()).hexdigest()[:12]})"
 
 
+def split_ingress_recovery_domain(
+    binding: EnvironmentRouteBindingRecord | None, domain_name: str
+) -> bool:
+    return bool(
+        binding
+        and binding.external_ingress
+        and domain_name not in binding.external_ingress.domains
+        and any(
+            domain.domain_name == domain_name and domain.role != "primary"
+            for domain in binding.domains
+        )
+    )
+
+
+def split_ingress_advisory_check(
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    binding: EnvironmentRouteBindingRecord | None,
+    check: ProductLaneHealthCheck,
+) -> bool:
+    host = urlsplit(check.url).hostname or ""
+    return (
+        check.kind == "public_http"
+        and check.name == split_ingress_check_name(host)
+        and split_ingress_recovery_domain(binding, host)
+        and binding is not None
+        and not split_ingress_monitoring_policy(
+            profile, lane, tuple(d.domain_name for d in binding.domains), host
+        ).conflict
+    )
+
+
 def split_ingress_custody_hosts(
     binding: EnvironmentRouteBindingRecord | None, url: str
 ) -> tuple[str, ...]:
