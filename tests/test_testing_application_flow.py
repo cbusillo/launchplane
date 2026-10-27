@@ -4697,6 +4697,142 @@ class ApplicationFlowTests(unittest.TestCase):
     def test_supported_http_dry_run_and_original_receipt(self) -> None:
         self.assert_supported_http_activation(native_apply=False)
 
+    def test_original_candidate_inspection_identifies_terminal_predicates_without_values_or_writes(
+        self,
+    ) -> None:
+        from control_plane.testing_application_inspection import inspect_application_candidate
+        from control_plane.provider_operations import build_provider_operation_key
+
+        self.prepare()
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed")
+        assert completed.record is not None
+        row = completed.record
+        record = self.adapter.current()
+        operation_key = build_provider_operation_key(
+            scope=row.scope,
+            route_path=row.route_path,
+            idempotency_key=row.idempotency_key,
+            request_fingerprint=row.request_fingerprint,
+            reconciliation_key=row.reconciliation_key,
+        )
+        before = deepcopy((self.writes, self.schedules, self.schedule_history))
+        observed = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(observed.placement, "matched")
+        self.assertEqual(observed.domains, "empty")
+        self.assertEqual(observed.history, "complete")
+        self.assertEqual(observed.deployment_count, len(self.deployments[record.target_id]))
+        self.assertTrue(observed.stored_deployment_recorded)
+        self.assertTrue(observed.sole_deployment_id_matches)
+        self.assertTrue(observed.sole_deployment_title_matches)
+        self.assertEqual(observed.sole_deployment_status, "terminal_success")
+        self.assertEqual(observed.current_runtime_status, "available")
+        self.assertEqual(observed.current_http_status, 200)
+        self.assertEqual(observed.current_identity_status, "match")
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with (
+            patch(
+                "control_plane.testing_activation_inspection.activation_record",
+                return_value=record.model_copy(update={"phase": "restoring_application_route"}),
+            ),
+            patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=[],
+            ),
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertTrue(response.json()["result"]["candidate"]["sole_deployment_id_matches"])
+        self.assertEqual(response.json()["result"]["candidate"]["current_http_status"], 200)
+        for private in (
+            record.target_id,
+            record.app_name,
+            "retained-only-password",
+            self.deployments[record.target_id][0]["title"],
+        ):
+            self.assertNotIn(private, observed.model_dump_json())
+        original = deepcopy(self.payloads[record.target_id])
+        for changes, expected in (
+            ({}, "missing"),
+            ({"domains": None}, "malformed"),
+            ({"domains": [{"host": "private.example"}]}, "nonempty"),
+        ):
+            self.payloads[record.target_id] = {
+                key: value for key, value in original.items() if key != "domains"
+            } | changes
+            self.assertEqual(
+                inspect_application_candidate(self.adapter, record, operation_key).domains, expected
+            )
+        self.payloads[record.target_id] = original
+        with (
+            patch.object(
+                api,
+                "list_deployments_for_target",
+                side_effect=ValueError("private provider detail"),
+            ),
+            self.assertLogs("control_plane.http_error_evidence", level="WARNING") as diagnostic,
+        ):
+            unknown = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(unknown.history, "unknown")
+        self.assertIsNone(unknown.deployment_count)
+        self.assertIsNone(unknown.sole_deployment_id_matches)
+        self.assertNotIn("private provider detail", unknown.model_dump_json())
+        self.assertNotIn("private provider detail", "\n".join(diagnostic.output))
+        self.deployments[record.target_id].append(
+            {"deploymentId": "foreign-job", "title": "private foreign title", "status": "running"}
+        )
+        multiple = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(multiple.deployment_count, len(self.deployments[record.target_id]))
+        self.assertIsNone(multiple.sole_deployment_status)
+        from control_plane.testing_application_runtime import VerifiedApplicationRuntimeFailure
+
+        with patch(
+            "control_plane.testing_application_inspection.inspect_application_runtime",
+            side_effect=VerifiedApplicationRuntimeFailure(
+                {
+                    "http_status": 503,
+                    "identity_status": "missing",
+                    "health_payload": {"private": "unreported"},
+                }
+            ),
+        ):
+            failed = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(failed.current_http_status, 503)
+        self.assertEqual(failed.current_identity_status, "missing")
+        self.assertNotIn("unreported", failed.model_dump_json())
+        self.payloads[record.target_id]["appName"] = "foreign-private-application"
+        with patch(
+            "control_plane.testing_application_inspection.inspect_application_runtime",
+            side_effect=AssertionError("Changed placement must not be probed"),
+        ):
+            changed = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(changed.placement, "changed")
+        self.assertEqual(changed.current_runtime_status, "not_read")
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+        self.assertEqual(self.adapter.current(), record)
+
     def test_original_route_inspection_reads_bound_receipts_without_provider_or_writes(
         self,
     ) -> None:
