@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from control_plane.deployment_maintenance import (
     DeploymentMaintenance,
+    DeploymentHeld,
     MAINTENANCE_UNTIL_ENV,
     require_deployment_available,
     recovery_marker,
@@ -78,12 +79,23 @@ class DeploymentMaintenanceTests(unittest.TestCase):
             patch.object(
                 api,
                 "fetch_dokploy_target_payload",
-                return_value={"env": MAINTENANCE_UNTIL_ENV + "=" + deadline},
+                return_value={
+                    "sourceType": "git",
+                    "composeType": "docker-compose",
+                    "composePath": "./docker-compose.yml",
+                    "command": "",
+                    "autoDeploy": False,
+                    "customGitUrl": "git@github.com:example/control.git",
+                    "env": MAINTENANCE_UNTIL_ENV
+                    + "="
+                    + deadline
+                    + "\nDOCKER_IMAGE_REFERENCE=synthetic:current",
+                },
             ),
             patch.object(api, "update_dokploy_target_env") as update,
             patch.object(api, "trigger_deployment") as deploy,
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(DeploymentHeld):
                 script["run_break_glass_rollback"]()
         update.assert_not_called()
         deploy.assert_not_called()
@@ -109,12 +121,23 @@ class DeploymentMaintenanceTests(unittest.TestCase):
             patch.object(
                 api,
                 "fetch_dokploy_target_payload",
-                return_value={"env": MAINTENANCE_UNTIL_ENV + "=" + deadline},
+                return_value={
+                    "sourceType": "git",
+                    "composeType": "docker-compose",
+                    "composePath": "./docker-compose.yml",
+                    "command": "",
+                    "autoDeploy": False,
+                    "customGitUrl": "git@github.com:example/control.git",
+                    "env": MAINTENANCE_UNTIL_ENV
+                    + "="
+                    + deadline
+                    + "\nDOCKER_IMAGE_REFERENCE=synthetic:current",
+                },
             ),
             patch.object(api, "update_dokploy_target_env") as update,
             patch.object(api, "trigger_deployment") as deploy,
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(DeploymentHeld):
                 execute_launchplane_self_deploy(control_plane_root_path=Path("."), request=request)
         update.assert_not_called()
         deploy.assert_not_called()

@@ -5682,8 +5682,11 @@ Before any freeze, `hold` installs and reads back a persistent systemd calendar
 timer/service, records every original restart policy, and suppresses automatic
 restart on those exact IDs. Private fsync'd state and watchdog files survive
 reboot. The watchdog runs release at the recorded deadline, including after a
-missed deadline during reboot, and retries failed recovery with readback.
-Its service timeout bounds one recovery attempt. Observe actual release;
+missed deadline during reboot, and retries transient unavailable reads with readback.
+A genuine unsafe committed-state result is terminal for the watchdog; its distinct
+exit status prevents restart loops. The same manual release re-reads after an
+authorized in-place full restore or other external repair. Its service timeout
+bounds one recovery attempt. Observe actual release;
 installation alone is not a release receipt.
 
 The keeper takes the existing own-deploy dispatch lock and installs an expiring
@@ -5729,9 +5732,18 @@ Stream the complete custom dump through the existing private transport:
 python3 database_maintenance_host.py dump --state STATE_JSON
 ```
 
-Stdout is binary; direct it straight to approved mode-0600 encrypted private
-custody. Stderr and host state record the stream SHA-256; independently hash the
-private file and require agreement. Qualify capacity, encryption, custodian,
+Stdout is binary; create its approved mode-0600 encrypted private artifact
+exclusively, never overwriting a verified file. The dump carries a private
+hold-scoped application name; the keeper admits only its Unix-socket/current-role/no-XID
+backend and binds its first PID/start identity. Generic pg_dump names refuse.
+Only one dump attempt is supported per hold; after a failed read, release with
+readback and create a new hold rather than blindly retrying or replacing evidence. Stderr and host state record the stream SHA-256; independently hash the
+private file and require agreement. Prove actual artifact custody with one
+read-only private file descriptor feeding both stream hashing and pg_restore;
+check file identity/size/mtime and the full checksum before and after, require
+agreement with the native dump stream, and retain that same artifact. The
+rehearsal checksum argument is accepted only with this independently recorded
+operational proof; it is not proof by itself. Qualify capacity, encryption, custodian,
 minimum retention and Director-reviewed disposal before capture. Leave the
 existing bootstrap/keyring in place; copy or export no credential/key file.
 
@@ -5739,9 +5751,19 @@ Restore with PostgreSQL `pg_restore --no-owner --exit-on-error` into an empty
 qualified isolated cluster. It has no outbound network, published ports, logs,
 persistent mounts, application processes or production keys. Data and temporary
 storage are RAM-backed without VM swap, or independently qualified encrypted
-storage. Use only the exact reviewed migrator image and private held receipt,
+storage. Both PostgreSQL and migrator containers require `--ulimit core=0:0`
+with process-limit readback, so a crash cannot write a core onto an unencrypted
+VM disk. Capture restore/migrator stderr privately or in RAM and emit only fixed
+status summaries on failure. Use only the exact reviewed migrator image and private held receipt,
 never production configuration. The rehearsal requires a different system
-identifier, loopback DSN, no platform credentials and a loopback-only namespace:
+identifier, loopback DSN and no platform credentials. Run the migrator with
+`--cap-drop ALL --security-opt no-new-privileges:true`; it requires every
+capability set empty and NoNewPrivs enabled. Namespace-local socket flags,
+IPv4 addresses, IPv4/IPv6 routes and IPv6 addresses must prove that only
+loopback is active/configured/routed. Kernel-created DOWN unconfigured tunnel
+templates are permitted without a name allowlist; missing or unknown views
+refuse. The database container remains network-none, without NET_ADMIN or
+SYS_ADMIN, and its PostgreSQL OS user must have no effective capabilities:
 
 ```bash
 python -m control_plane.database_maintenance_cli rehearse \
@@ -5775,10 +5797,19 @@ revision and image **before** thaw/start or policy restoration. It resumes exact
 original IDs, checks running/health and restores their original policies. A
 partial resume records progress; subsequent cleanup retries reuse the safe
 proof because legitimate resumed writes may have changed rows. They never
-refreeze healthy services or demand the old full hashes again. The original
+refreeze healthy services or demand the old full hashes again. A crash after
+starting a stopped original, before progress is recorded, may leave its same
+container ID/image/project running with a newer PID. Only the already bound safe
+proof and persisted resume-start intent allow fresh thawed-cgroup qualification
+and policy readback in that case. Unverified changed identities still refuse. The original
 controller uses cached provider access for cleanup. After it can no longer act,
-an exact custody-checked marker read/removal is supported. Unexpected markers
-refuse; no provider write is replayed without fresh ownership readback.
+an exact custody-checked marker read/removal is supported. One-off intent and
+container identity are persisted; a timed-out reader is removed and its DB
+session must be gone before another read. An uncertain unfence is reconciled
+only by read-only marker observation after its local executor settles. Absence
+or the exact expired non-recovery marker proves this hold inactive; an
+unsettled recovery marker stays UNKNOWN. Unexpected markers refuse. No
+uncertain provider mutation is blindly replayed.
 The marker remains until all original recovery readbacks pass.
 
 ```bash

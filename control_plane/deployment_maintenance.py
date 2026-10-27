@@ -11,6 +11,10 @@ from control_plane.dokploy import api
 MAINTENANCE_UNTIL_ENV = "LAUNCHPLANE_DATABASE_MAINTENANCE_UNTIL"
 
 
+class DeploymentHeld(ValueError):
+    pass
+
+
 def recovery_marker(hold_id: str) -> str:
     return "recovery-required:" + hold_id
 
@@ -20,7 +24,7 @@ def require_deployment_available(environment: Mapping[str, str]) -> None:
     if not raw:
         return
     if raw.startswith("recovery-required:"):
-        raise ValueError("Launchplane database recovery must be verified before deployment.")
+        raise DeploymentHeld("Launchplane database recovery must be verified before deployment.")
     try:
         expires = datetime.fromisoformat(raw)
         if expires.tzinfo is None:
@@ -28,7 +32,7 @@ def require_deployment_available(environment: Mapping[str, str]) -> None:
     except ValueError:
         raise ValueError("The database maintenance deployment deadline is invalid.") from None
     if expires > datetime.now(timezone.utc):
-        raise ValueError("Launchplane deployment is held for database maintenance.")
+        raise DeploymentHeld("Launchplane deployment is held for database maintenance.")
 
 
 class DeploymentMaintenance:

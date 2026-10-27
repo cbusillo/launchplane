@@ -16901,6 +16901,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
     def test_frozen_client_admission_refuses_unmapped_xid_and_execution_locks(self) -> None:
         from control_plane.database_maintenance import disconnect_frozen_clients, locked_database
         from sqlalchemy.pool import NullPool
+        from ipaddress import ip_interface
 
         with _isolated_postgres_database() as url:
             engine = create_engine(url, poolclass=NullPool)
@@ -16909,11 +16910,15 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 seed.execute(text("CREATE TABLE sample(id integer PRIMARY KEY)"))
             with engine.connect() as keeper, engine.connect() as client:
                 address = str(
-                    client.scalar(
-                        text(
-                            "SELECT client_addr::text FROM pg_stat_activity WHERE pid=pg_backend_pid()"
+                    ip_interface(
+                        str(
+                            client.scalar(
+                                text(
+                                    "SELECT client_addr::text FROM pg_stat_activity WHERE pid=pg_backend_pid()"
+                                )
+                            )
                         )
-                    )
+                    ).ip
                 )
                 with self.assertRaises(RuntimeError):
                     disconnect_frozen_clients(keeper, {"unmapped"})

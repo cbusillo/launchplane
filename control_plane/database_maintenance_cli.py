@@ -1,4 +1,9 @@
 import argparse
+import errno
+import fcntl
+from ipaddress import IPv4Address, IPv6Address
+import socket
+import struct
 from datetime import datetime, timezone
 import json
 import os
@@ -25,7 +30,12 @@ from control_plane.database_maintenance import (
     retained_snapshot,
 )
 from control_plane.deployment_maintenance import DeploymentMaintenance, recovery_marker
-from control_plane.database_maintenance_host import locked_state, save
+from control_plane.database_maintenance_host import (
+    locked_state,
+    save,
+    RecoveryRequired,
+    dump_application_name,
+)
 from control_plane.storage.postgres import _build_engine
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
 
@@ -120,6 +130,71 @@ def await_command(
     raise TimeoutError("Maintenance deadline reached; roll back and release.")
 
 
+SIOCGIFFLAGS = 0x8913
+SIOCGIFADDR = 0x8915
+IFF_UP = 1
+IFF_LOOPBACK = 8
+
+
+def require_isolated_network() -> None:
+    status = dict(
+        line.split(":", 1)
+        for line in Path("/proc/self/status").read_text().splitlines()
+        if ":" in line
+    )
+    if status.get("NoNewPrivs", "").strip() != "1" or any(
+        int(status[key].strip(), 16) for key in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")
+    ):
+        raise RuntimeError("The rehearsal requires no capabilities and no privilege gains.")
+    loopback = set()
+    active_loopback = False
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control:
+        for _index, name in socket.if_nameindex():
+            request = struct.pack("256s", name.encode())
+            flags = struct.unpack_from(
+                "H", fcntl.ioctl(control.fileno(), SIOCGIFFLAGS, request), 16
+            )[0]
+            local = bool(flags & IFF_LOOPBACK)
+            if local:
+                loopback.add(name)
+                active_loopback = active_loopback or bool(flags & IFF_UP)
+            elif flags & IFF_UP:
+                raise RuntimeError("A non-loopback network interface is active.")
+            try:
+                address = IPv4Address(fcntl.ioctl(control.fileno(), SIOCGIFADDR, request)[20:24])
+            except OSError as error:
+                if error.errno != errno.EADDRNOTAVAIL:
+                    raise
+            else:
+                if not address.is_unspecified and (not local or not address.is_loopback):
+                    raise RuntimeError("A non-loopback IPv4 address is configured.")
+    if not active_loopback:
+        raise RuntimeError("The rehearsal loopback interface is unavailable.")
+    for path, width, position in (
+        ("/proc/self/net/route", 11, 0),
+        ("/proc/self/net/ipv6_route", 10, -1),
+    ):
+        rows = Path(path).read_text().splitlines()
+        if position == 0:
+            if not rows or rows[0].split()[0] != "Iface":
+                raise RuntimeError("IPv4 route metadata is unavailable.")
+            rows = rows[1:]
+        for line in rows:
+            fields = line.split()
+            if len(fields) != width or fields[position] not in loopback:
+                raise RuntimeError("A non-loopback route or unknown route metadata is present.")
+    for line in Path("/proc/self/net/if_inet6").read_text().splitlines():
+        fields = line.split()
+        if (
+            len(fields) != 6
+            or fields[-1] not in loopback
+            or not IPv6Address(int(fields[0], 16)).is_loopback
+        ):
+            raise RuntimeError(
+                "A non-loopback IPv6 address or unknown address metadata is present."
+            )
+
+
 def require_isolated_runtime(connection: Connection) -> None:
     from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 
@@ -127,10 +202,9 @@ def require_isolated_runtime(connection: Connection) -> None:
         raise RuntimeError("The rehearsal database must use isolated loopback.")
     if any(os.environ.get(key, "").strip() for key in PLATFORM_CREDENTIAL_KEYS):
         raise RuntimeError("The rehearsal must have no production keyring or provider credentials.")
-    if sys.platform != "linux" or {path.name for path in Path("/sys/class/net").iterdir()} != {
-        "lo"
-    }:
-        raise RuntimeError("The rehearsal requires a loopback-only network namespace.")
+    if sys.platform != "linux":
+        raise RuntimeError("The rehearsal requires a qualified Linux network namespace.")
+    require_isolated_network()
 
 
 def rehearsal_receipt(
@@ -205,7 +279,7 @@ def keep_database(
         )
         command = await_command(
             expires,
-            lambda: deployment.observe(deadline=arguments.expires_at),
+            lambda: None,
             arguments.job_directory,
         )
         if command.get("action") != "frozen" or (arguments.job_directory / "releasing").exists():
@@ -217,6 +291,7 @@ def keep_database(
             or any(not isinstance(value, str) for value in addresses)
         ):
             raise RuntimeError("Frozen container network identities are missing.")
+        deployment.observe(deadline=arguments.expires_at)
         require_no_active_executors(connection)
         connection.commit()
         with locked_database(
@@ -236,12 +311,14 @@ def keep_database(
                 before=before,
             )
 
+            dump_client: dict[str, Any] = {"name": dump_application_name(arguments.hold_id)}
+
             def observe() -> None:
-                deployment.observe(deadline=arguments.expires_at)
-                require_no_other_clients(connection, allow_dump=True)
+                require_no_other_clients(connection, dump_client=dump_client)
 
             receipt = await_command(expires, observe, arguments.job_directory)
             if receipt.get("action") == "apply":
+                deployment.observe(deadline=arguments.expires_at)
                 if any(
                     receipt.get(key) != value
                     for key, value in (
@@ -359,6 +436,11 @@ def main() -> int:
     }
     try:
         with engine.connect() as connection:
+            if name := os.environ.get("PGAPPNAME"):
+                connection.execute(
+                    text("SELECT set_config('application_name', :name, false)"), {"name": name}
+                )
+                connection.commit()
             if arguments.mode == "rehearse":
                 if arguments.before_file is None:
                     parser.error("rehearse requires the held-snapshot receipt.")
@@ -376,11 +458,12 @@ def main() -> int:
                 proof = json.loads((arguments.job_directory / "commit-pending.json").read_text())
                 if proof["hold_id"] != arguments.hold_id:
                     raise RuntimeError("The recovery proof belongs to another maintenance attempt.")
-                emit(
-                    "database_verified",
-                    revision=verify_committed_database(connection, proof),
-                    hold_id=arguments.hold_id,
-                )
+                try:
+                    revision = verify_committed_database(connection, proof)
+                except RecoveryRequired:
+                    emit("database_unsafe", hold_id=arguments.hold_id)
+                    return 0
+                emit("database_verified", revision=revision, hold_id=arguments.hold_id)
                 return 0
             if arguments.mode == "revision":
                 emit(

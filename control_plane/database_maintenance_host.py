@@ -18,6 +18,14 @@ import sys
 import time
 from typing import Any, cast
 from uuid import uuid4
+from urllib.parse import unquote, urlsplit
+
+
+RECOVERY_REQUIRED_EXIT = 75
+
+
+class RecoveryRequired(RuntimeError):
+    pass
 
 
 def run(*arguments: str, timeout: float | None = 30, input_text: str | None = None) -> str:
@@ -96,9 +104,14 @@ def update_state(path: Path, **changes: Any) -> dict[str, Any]:
         return dict(state)
 
 
-def operator_command(state: dict[str, Any], mode: str) -> list[str]:
-    observe_only = mode == "observe-unfence"
-    mode = "unfence" if observe_only else mode
+def dump_application_name(hold_id: str) -> str:
+    name = "lp-maint-dump-" + hold_id
+    if len(name.encode()) >= 63:
+        raise ValueError("The scoped backup client name exceeds PostgreSQL's identifier limit.")
+    return name
+
+
+def operator_command(state: dict[str, Any], mode: str, *, readback_only: bool = False) -> list[str]:
     command = [
         "docker",
         "compose",
@@ -118,6 +131,10 @@ def operator_command(state: dict[str, Any], mode: str) -> list[str]:
         "never",
         "--name",
         state["operator"] + ("-release" if mode in {"unfence", "verify", "revision"} else ""),
+        "--env",
+        "PGAPPNAME="
+        + state["operator"]
+        + ("-release" if mode in {"unfence", "verify", "revision"} else ""),
         "--volume",
         state["job_directory"] + ":/maintenance",
         "--entrypoint",
@@ -133,12 +150,88 @@ def operator_command(state: dict[str, Any], mode: str) -> list[str]:
         "--target-id",
         state.get("target_id", ""),
     ]
-    return command + (["--readback-only"] if observe_only else [])
+    return command + (["--readback-only"] if readback_only else [])
 
 
 def operator(state: dict[str, Any], mode: str) -> dict[str, Any]:
-    output = run(*operator_command(state, mode), timeout=300 if mode == "verify" else 90)
-    return cast(dict[str, Any], json.loads(output.strip().splitlines()[-1]))
+    root = Path(state["job_directory"])
+    intent_path = root / "operator-intent.json"
+    uncertain = root / "marker-cleanup-uncertain.json"
+    settle_operator(state)
+    readback_only = mode == "unfence" and uncertain.exists()
+    intent = {
+        "name": state["operator"]
+        + ("-release" if mode in {"unfence", "verify", "revision"} else ""),
+        "read_only": mode != "unfence" or readback_only,
+    }
+    save(intent_path, intent)
+    try:
+        output = run(
+            *operator_command(state, mode, readback_only=readback_only),
+            timeout=300 if mode == "verify" else 90,
+        )
+        result = cast(dict[str, Any], json.loads(output.strip().splitlines()[-1]))
+    except Exception:
+        if not intent["read_only"]:
+            save(uncertain, {"hold_id": state["hold_id"], "outcome": "unknown"})
+        settle_operator(state)
+        raise
+    settle_operator(state)
+    if mode == "unfence":
+        uncertain.unlink(missing_ok=True)
+    if result.get("event") == "database_unsafe":
+        raise RecoveryRequired("Committed database state requires an exact recovery decision.")
+    return result
+
+
+def settle_operator(state: dict[str, Any]) -> None:
+    path = Path(state["job_directory"]) / "operator-intent.json"
+    if not path.exists():
+        return
+    intent = json.loads(path.read_text())
+    observed = operator_container(state, name=intent["name"])
+    if observed is not None:
+        if not intent["read_only"]:
+            save(
+                path.parent / "marker-cleanup-uncertain.json",
+                {"hold_id": state["hold_id"], "outcome": "unknown"},
+            )
+        intent["addresses"] = sorted(
+            {
+                str(ipaddress.ip_address(network[key]))
+                for network in observed["NetworkSettings"]["Networks"].values()
+                for key in ("IPAddress", "GlobalIPv6Address")
+                if network.get(key)
+            }
+        )
+        save(path, intent)
+        run("docker", "rm", "-f", observed["Id"])
+        if operator_container(state, name=intent["name"]) is not None:
+            raise RuntimeError("The exact maintenance one-off has not exited.")
+    deadline = time.monotonic() + 30
+    while True:
+        count = run(
+            "docker",
+            "exec",
+            "-i",
+            state["postgres"],
+            "sh",
+            "-c",
+            'exec psql -X -At -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1" -v reader="$2" -v addresses="$3"',
+            "reader",
+            state["database"],
+            intent["name"],
+            ",".join(intent.get("addresses", [])),
+            input_text="SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND (application_name=:'reader' OR host(client_addr)=ANY(string_to_array(:'addresses',',')));\n",
+        )
+        if count.strip() == "0":
+            path.unlink()
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                "An owned maintenance reader still has an unsettled database session."
+            )
+        time.sleep(0.2)
 
 
 def require_no_outside_writers(
@@ -331,8 +424,19 @@ def resume_original(identifier: str, state: dict[str, Any]) -> str:
             observed["State"]["Pid"] != original["pid"]
             or observed["State"]["StartedAt"] != original["started_at"]
         ):
-            raise RuntimeError("The original process changed before verified release.")
-        set_freezer(original, False)
+            safe = state.get("safe_to_resume", {})
+            if (
+                not state.get("resume_started")
+                or not safe
+                or any(
+                    safe.get(key) != state[key]
+                    for key in ("hold_id", "system_identifier", "image_id", "revision")
+                )
+            ):
+                raise RuntimeError("The original process changed before verified release.")
+            freezer_identity(observed)
+        else:
+            set_freezer(original, False)
     if not observed["State"]["Running"]:
         run("docker", "start", identifier, timeout=60)
     deadline = time.monotonic() + 120
@@ -356,10 +460,11 @@ def resume_original(identifier: str, state: dict[str, Any]) -> str:
     raise RuntimeError("An original service did not recover with healthy readback.")
 
 
-def operator_container(state: dict[str, Any]) -> dict[str, Any] | None:
-    identifiers = run(
-        "docker", "ps", "-aq", "--filter", "name=^/" + state["operator"] + "$"
-    ).split()
+def operator_container(state: dict[str, Any], *, name: str | None = None) -> dict[str, Any] | None:
+    name = name or state["operator"]
+    if name not in {state["operator"], state["operator"] + "-release"}:
+        raise RuntimeError("The one-off intent belongs to another maintenance attempt.")
+    identifiers = run("docker", "ps", "-aq", "--filter", "name=^/" + name + "$").split()
     if not identifiers:
         return None
     observed = inspect_container(identifiers[0])
@@ -416,7 +521,7 @@ def install_watchdog(state_path: Path, state: dict[str, Any]) -> None:
         "[Unit]\nDescription=Launchplane maintenance recovery\nAfter=docker.service\n"
         "[Service]\nType=oneshot\nExecStart="
         + command
-        + "\nRestart=on-failure\nRestartSec=15s\nTimeoutStartSec=900s\n"
+        + f"\nRestart=on-failure\nRestartPreventExitStatus={RECOVERY_REQUIRED_EXIT}\nRestartSec=15s\nTimeoutStartSec=900s\n"
     )
     deadline = (
         datetime.fromisoformat(state["expires_at"])
@@ -458,6 +563,15 @@ def remove_watchdog(state: dict[str, Any]) -> None:
             raise RuntimeError("The recovery watchdog remains active after release.")
         state["watchdog_disabled"] = True
         save(state_path, state)
+    if not state.get("watchdog_service_settled"):
+        main_pid = run(
+            "systemctl", "show", unit + ".service", "--property=MainPID", "--value"
+        ).strip()
+        if main_pid != str(os.getpid()):
+            run("systemctl", "stop", unit + ".service")
+            run("systemctl", "reset-failed", unit + ".service")
+        state["watchdog_service_settled"] = True
+        save(state_path, state)
     for suffix in (".timer", ".service"):
         (Path("/etc/systemd/system") / (unit + suffix)).unlink(missing_ok=True)
     sync_path(Path("/etc/systemd/system"))
@@ -483,7 +597,7 @@ def release(state_path: Path) -> None:
             if safe and any(
                 safe.get(key) != state[key] for key in ("hold_id", "system_identifier", "image_id")
             ):
-                raise RuntimeError(
+                raise RecoveryRequired(
                     "The durable resume proof belongs to another maintenance runtime."
                 )
             if pending and not safe:
@@ -606,6 +720,7 @@ def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
         "operator": "lp-maint-" + hold_id,
         "job_directory": str(directory),
         "image_id": api["Image"],
+        "database": unquote(urlsplit(environment["LAUNCHPLANE_DATABASE_URL"]).path.lstrip("/")),
         "postgres": inspect_container(arguments.postgres_container)["Id"],
         "expires_at": (
             datetime.now(timezone.utc) + timedelta(seconds=arguments.duration_seconds)
@@ -810,6 +925,11 @@ def dump(state_path: Path) -> None:
     with locked_state(state_path, active=True) as state:
         if not state.get("held"):
             raise RuntimeError("The held snapshot is not available.")
+        if state.get("dump_started"):
+            raise RuntimeError(
+                "This hold already attempted its dump; release it and start a new hold."
+            )
+        state["dump_started"] = True
         check_originals(state, frozen=True)
         state = dict(state)
     snapshot = state["held"]["snapshot"]
@@ -822,6 +942,8 @@ def dump(state_path: Path) -> None:
         [
             "docker",
             "exec",
+            "--env",
+            "PGAPPNAME=" + dump_application_name(state["hold_id"]),
             state["postgres"],
             "sh",
             "-c",
@@ -880,7 +1002,7 @@ def interrupted(_signum: int, _frame: object) -> None:
     raise InterruptedError("Maintenance interrupted; release its bounded hold.")
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="Bounded full writer hold of Launchplane only.")
     parser.add_argument("mode", choices=("plan", "hold", "release", "dump", "submit"))
     parser.add_argument("--state", type=Path)
@@ -903,8 +1025,11 @@ def main() -> None:
         elif arguments.mode == "dump":
             dump(state_path)
         else:
-            release(state_path)
-        return
+            try:
+                release(state_path)
+            except RecoveryRequired:
+                return RECOVERY_REQUIRED_EXIT
+        return 0
     if (
         not arguments.api_container
         or not arguments.postgres_container
@@ -925,7 +1050,8 @@ def main() -> None:
     )
     if arguments.mode == "hold":
         hold(state_path)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

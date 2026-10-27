@@ -19,6 +19,7 @@ from control_plane.storage.schema_migration import (
     schema_migration_target,
 )
 from control_plane.storage.schema_invariants import verify_postgres_schema_invariants
+from control_plane.database_maintenance_host import RecoveryRequired
 
 
 MAINTENANCE_LOCKS = (
@@ -28,16 +29,34 @@ MAINTENANCE_LOCKS = (
 )
 
 
-def require_no_other_clients(connection: Connection, *, allow_dump: bool = False) -> None:
+def require_no_other_clients(
+    connection: Connection, *, dump_client: dict[str, Any] | None = None
+) -> None:
     connection.execute(text("SELECT pg_stat_clear_snapshot()"))
-    if connection.scalar(
-        text(
-            "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() "
-            "AND backend_type='client backend' AND pid<>pg_backend_pid() "
-            "AND NOT (:allow_dump AND application_name='pg_dump' AND backend_xid IS NULL)"
-        ),
-        {"allow_dump": allow_dump},
-    ):
+    clients = (
+        connection.execute(
+            text(
+                "SELECT pid,backend_start,application_name,backend_xid,client_addr IS NULL AS local,usename=current_user AS own_role "
+                "FROM pg_stat_activity WHERE datname=current_database() AND backend_type='client backend' AND pid<>pg_backend_pid()"
+            )
+        )
+        .mappings()
+        .all()
+    )
+    if dump_client is not None and len(clients) == 1:
+        client = clients[0]
+        if (
+            client["application_name"] == dump_client["name"]
+            and client["local"]
+            and client["own_role"]
+            and client["backend_xid"] is None
+        ):
+            identity = (client["pid"], client["backend_start"])
+            if "identity" not in dump_client:
+                dump_client["identity"] = identity
+            if dump_client["identity"] == identity:
+                clients = []
+    if clients:
         raise RuntimeError("Another database client is present; the writer hold is unproved.")
     if connection.scalar(
         text("SELECT count(*) FROM pg_prepared_xacts WHERE database=current_database()")
@@ -293,14 +312,17 @@ def apply_retirement(
 
 def verify_committed_database(connection: Connection, proof: dict[str, Any]) -> str:
     if database_system_identifier(connection) != proof["system_identifier"]:
-        raise RuntimeError("The recovery readback belongs to another database cluster.")
+        raise RecoveryRequired("The recovery readback belongs to another database cluster.")
     require_no_other_clients(connection)
     observed = database_snapshot(connection)
     if observed not in (proof["before"], proof["after"]):
-        raise RuntimeError("Committed state disagrees with both verified maintenance states.")
-    verify_postgres_schema_invariants(connection)
-    if observed == proof["after"] and proof["after"] != proof["before"]:
-        require_retired_functions_absent(connection)
+        raise RecoveryRequired("Committed state disagrees with both verified maintenance states.")
+    try:
+        verify_postgres_schema_invariants(connection)
+        if observed == proof["after"] and proof["after"] != proof["before"]:
+            require_retired_functions_absent(connection)
+    except RuntimeError as error:
+        raise RecoveryRequired("Committed schema invariants require recovery.") from error
     return str(connection.scalar(text("SELECT version_num FROM alembic_version")))
 
 
@@ -313,7 +335,7 @@ def disconnect_frozen_clients(connection: Connection, addresses: set[str]) -> No
     clients = (
         connection.execute(
             text(
-                "SELECT pid,backend_start,client_addr::text AS address,state,backend_xid,usename "
+                "SELECT pid,backend_start,host(client_addr) AS address,state,backend_xid,usename "
                 "FROM pg_stat_activity WHERE datname=current_database() "
                 "AND backend_type='client backend' AND pid<>pg_backend_pid()"
             )
@@ -343,7 +365,7 @@ def disconnect_frozen_clients(connection: Connection, addresses: set[str]) -> No
             text(
                 "SELECT pg_terminate_backend(pid,5000) FROM pg_stat_activity "
                 "WHERE pid=:pid AND backend_start=:started AND datname=current_database() "
-                "AND usename=current_user AND client_addr::text=:address "
+                "AND usename=current_user AND host(client_addr)=:address "
                 "AND state IN ('idle','idle in transaction') AND backend_xid IS NULL"
             ),
             {"pid": row["pid"], "started": row["backend_start"], "address": row["address"]},
