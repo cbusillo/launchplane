@@ -1,3 +1,4 @@
+from control_plane.database_maintenance import maintenance_thread
 import asyncio
 from typing import Annotated
 
@@ -190,7 +191,7 @@ def register_legacy_preview_reconciliation_route(
 
         try:
             # Preserve completion/replay evidence even when the HTTP caller disconnects.
-            return await asyncio.shield(asyncio.to_thread(execute))
+            return await asyncio.shield(maintenance_thread(execute))
         except (ValueError, FileNotFoundError, click.ClickException) as error:
             if reconciliation.mode != "inspect":
                 _, _, completed = await dependencies.replay_apply_idempotency(**replay_args)

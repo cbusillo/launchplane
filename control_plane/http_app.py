@@ -1,3 +1,4 @@
+from control_plane.database_maintenance import maintenance_thread
 from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
 from control_plane import odoo_business_hours_config
 from control_plane import browser_route_repair
@@ -48,7 +49,7 @@ from control_plane.operation_authorization import (
 import fastapi.exceptions as fastapi_exceptions
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
-from fastapi.concurrency import run_in_threadpool
+from control_plane.database_maintenance import maintenance_thread as run_in_threadpool
 from control_plane.contracts.updater_proposal import (
     UPDATER_PROPOSAL_ROUTE,
     UPDATER_PROPOSAL_MAX_BODY_BYTES,
@@ -4303,6 +4304,12 @@ def create_launchplane_fastapi_app(
     )
     app.state.authz_policy_runtime = resolved_authz_policy_runtime
     app.add_middleware(BoundedRequestBodyMiddleware)
+    from control_plane.database_maintenance import DatabaseMaintenanceMiddleware
+
+    app.add_middleware(
+        DatabaseMaintenanceMiddleware,
+        get_store=lambda: record_store_factory() if record_store_factory else shared_record_store,
+    )
     enforce_human_policy_revalidation = False
 
     def read_active_authz_policy_records() -> tuple[LaunchplaneAuthzPolicyRecord, ...] | None:
@@ -16113,7 +16120,7 @@ def create_launchplane_fastapi_app(
             return operation(reservation_store)
 
         operation_task = asyncio.create_task(
-            asyncio.to_thread(execute),
+            maintenance_thread(execute),
             name=f"provider-mutation:{trace_id}",
         )
         from control_plane.service_deploy_drain import ServiceDeployDraining
@@ -16484,7 +16491,7 @@ def create_launchplane_fastapi_app(
         try:
             if product_config_request.odoo_business_hours is not None:
                 try:
-                    calendar_plan, calendar_replacement = await asyncio.to_thread(
+                    calendar_plan, calendar_replacement = await maintenance_thread(
                         odoo_business_hours_config.plan_business_hours_config,
                         store=database_store,
                         profile=config_profile,
@@ -16535,7 +16542,7 @@ def create_launchplane_fastapi_app(
                     ) from None
 
             if product_config_request.public_hosts is not None:
-                public_hosts_plan = await asyncio.to_thread(
+                public_hosts_plan = await maintenance_thread(
                     product_public_hosts.plan_public_hosts,
                     record_store=database_store,
                     control_plane_root=resolved_control_plane_root,
@@ -16559,7 +16566,7 @@ def create_launchplane_fastapi_app(
                     )
             if product_config_request.reads_lane_provider_env() and product_config_request.instance:
                 # The service reads the provider values itself; they never reach the caller.
-                lane_provider_env = await asyncio.to_thread(
+                lane_provider_env = await maintenance_thread(
                     control_plane_product_config_service.read_lane_provider_env,
                     record_store=database_store,
                     control_plane_root=resolved_control_plane_root,
@@ -16751,7 +16758,7 @@ def create_launchplane_fastapi_app(
                 if public_hosts_plan is None:
                     database_store.write_product_authority_bundle(completed_bundle)
                 else:
-                    await asyncio.to_thread(
+                    await maintenance_thread(
                         database_store.write_product_public_hosts_bundle,
                         completed_bundle,
                         expected_target=public_hosts_plan.target,
@@ -23417,7 +23424,7 @@ def create_launchplane_fastapi_app(
                 message="This lifecycle intent is running; retry the identical intent/key after completion.",
             )
         await lock.acquire()
-        task = asyncio.create_task(asyncio.to_thread(operation))
+        task = asyncio.create_task(maintenance_thread(operation))
 
         def completed(finished: asyncio.Task[AcceptedEvidenceResponse]) -> None:
             if not finished.cancelled():
@@ -24143,7 +24150,7 @@ def create_launchplane_fastapi_app(
                 )
                 effective_context = plan_record.context
             else:
-                bound = await asyncio.to_thread(
+                bound = await maintenance_thread(
                     control_plane_product_retirement.bind_product_retirement_authority,
                     record_store=retirement_store,
                     request=retirement_request,
@@ -24291,7 +24298,7 @@ def create_launchplane_fastapi_app(
                 if retirement_request.no_target:
                     from control_plane.product_retirement_no_target import observe_no_target_absence
 
-                    observation = await asyncio.to_thread(
+                    observation = await maintenance_thread(
                         observe_no_target_absence,
                         control_plane_root=resolved_control_plane_root,
                         bound=bound,
@@ -24300,7 +24307,7 @@ def create_launchplane_fastapi_app(
                 else:
                     if bound.provider_target is None:
                         raise RuntimeError("Tracked retirement requires a provider target.")
-                    observation = await asyncio.to_thread(
+                    observation = await maintenance_thread(
                         control_plane_product_retirement.observe_tracked_dokploy_application,
                         control_plane_root=resolved_control_plane_root,
                         target_id=bound.provider_target.target_id,
@@ -24310,14 +24317,14 @@ def create_launchplane_fastapi_app(
                 if retirement_request.include_previews:
                     from control_plane.product_retirement_previews import plan_product_previews
 
-                    preview_plans = await asyncio.to_thread(
+                    preview_plans = await maintenance_thread(
                         plan_product_previews,
                         store=cast(PostgresRecordStore, retirement_store),
                         profile=bound.profile,
                         root=resolved_control_plane_root,
                         observed_at=requested_at,
                     )
-                    current_bound = await asyncio.to_thread(
+                    current_bound = await maintenance_thread(
                         control_plane_product_retirement.bind_product_retirement_authority,
                         record_store=retirement_store,
                         request=retirement_request,

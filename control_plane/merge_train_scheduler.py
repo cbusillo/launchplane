@@ -8,6 +8,8 @@ record's ``scheduler`` block stays the switch: ``enabled`` selects the target an
 ``mutate`` decides whether the pass may act.
 """
 
+from control_plane.database_maintenance import maintenance_operation
+
 from control_plane.contracts.github_app_installation_token import GitHubAppInstallationToken
 
 import logging
@@ -113,6 +115,7 @@ class MergeTrainScheduledTargetResult:
     continue_pass: bool = False
 
 
+@maintenance_operation
 def run_merge_train_scheduler_pass(
     *,
     record_store: object,

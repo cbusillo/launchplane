@@ -1,5 +1,7 @@
 """Observe trains independently; alerts never hold, reset or merge a train."""
 
+from control_plane.database_maintenance import maintenance_operation
+
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import datetime
@@ -237,6 +239,7 @@ def _issue_body(record: MergeTrainStallRecord) -> str:
     return "\n".join(lines)
 
 
+@maintenance_operation
 def run_stall_monitor_pass(
     *,
     store: object,

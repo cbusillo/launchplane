@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.database_maintenance import maintenance_operation
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -109,6 +111,7 @@ class OrdinaryAgentDeliveryCleanupResult:
     retry_seconds: int = 0
 
 
+@maintenance_operation
 def run_ordinary_agent_delivery_cleanup_once(
     *,
     record_store: object,
@@ -1392,6 +1395,7 @@ def reconcile_stale_privileged_operations(
     return tuple(reconciled)
 
 
+@maintenance_operation
 def execute_approved_privileged_operations_once(
     *,
     record_store: object,

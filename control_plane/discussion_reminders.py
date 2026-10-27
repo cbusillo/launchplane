@@ -4,6 +4,8 @@ The CM sender is an injected service capability. The current Discord Blue
 conversation socket requires an agent session and must not be impersonated here.
 """
 
+from control_plane.database_maintenance import maintenance_operation
+
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 import logging
@@ -235,6 +237,7 @@ class DiscussionReminderScheduler(_PreviewScheduler):
                     },
                 )
 
+    @maintenance_operation
     def run_once(self) -> bool:
         # Atomic outbox deduplication is sufficient, including across replicas;
         # avoid persisting one empty scheduler receipt per minute forever.

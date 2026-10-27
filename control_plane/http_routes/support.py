@@ -1,3 +1,4 @@
+from control_plane.database_maintenance import maintenance_thread
 import asyncio
 import logging
 from collections.abc import Callable
@@ -26,7 +27,7 @@ async def run_in_worker_thread[Result](
     left unretrieved. `on_finished` runs on the event loop when the worker finishes,
     not when the client disconnects.
     """
-    task = asyncio.ensure_future(asyncio.to_thread(operation))
+    task = asyncio.ensure_future(maintenance_thread(operation))
     if on_finished is not None:
         task.add_done_callback(lambda _: on_finished())
     try:

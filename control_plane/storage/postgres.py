@@ -5484,6 +5484,9 @@ class PostgresRecordStore(HumanSessionStore):
         self._preview_execution_context = local()
         self._disposable_authority_context = local()
         self._validated_history_payloads: set[tuple[str, str]] = set()
+        from control_plane.database_maintenance import install_transaction_guard
+
+        install_transaction_guard(self._engine)
 
     @property
     def backend_name(self) -> str:

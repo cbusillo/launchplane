@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from control_plane.database_maintenance import maintenance_operation
+
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -223,6 +225,7 @@ class HealthMonitorScheduler:
             if (lane[2] == "testing") == (instance == "testing")
         }
 
+    @maintenance_operation
     def run_once(self, instance: str = "prod") -> bool:
         key = monitor_key(str(monitor_slot(self.clock(), instance)), instance)
         revisions = self._revisions(instance)
@@ -284,6 +287,7 @@ class HealthMonitorScheduler:
             )
             return True
 
+    @maintenance_operation
     def run_delivery_once(self) -> bool:
         key = f"delivery:{monitor_slot(self.clock())}"
         if self._read(key) is not None:
@@ -316,6 +320,7 @@ class HealthMonitorScheduler:
             should_stop=self._stop.is_set,
         )
 
+    @maintenance_operation
     def watch_once(self, instance: str = "prod") -> bool:
         now = self.clock()
         enabled = self._read(monitor_key("enabled", instance))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.database_maintenance import maintenance_operation
+
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
@@ -595,6 +597,7 @@ class OdooStableOperationReconcileResult:
     reconciled_rollback_ids: tuple[str, ...] = ()
 
 
+@maintenance_operation
 def run_odoo_stable_operation_worker_once(
     *,
     record_store: OdooStableOperationWorkerStore,
@@ -901,6 +904,7 @@ def run_odoo_stable_operation_worker_once(
     )
 
 
+@maintenance_operation
 def reconcile_stale_odoo_stable_operation_records(
     *,
     record_store: OdooStableOperationWorkerStore,

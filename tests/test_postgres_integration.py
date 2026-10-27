@@ -16494,3 +16494,94 @@ class RealPostgresCalendarProfileFenceTests(unittest.TestCase):
                             self.assertEqual(receipt.response_payload["result"]["winner"], name)
                 finally:
                     second.close()
+
+
+class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
+    def test_hold_excludes_operations_transactions_and_releases_after_failure(self) -> None:
+        from control_plane.database_maintenance import (
+            DatabaseMaintenanceHeld,
+            maintenance_window,
+            operation_guard,
+        )
+
+        with _head_postgres_database() as database_url:
+            engine = create_engine(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(text("CREATE TABLE maintenance_probe (value integer)"))
+                with self.assertRaisesRegex(RuntimeError, "rehearsal failed"):
+                    with maintenance_window(
+                        engine, duration_seconds=30, drain_seconds=1, reason="test"
+                    ):
+                        with self.assertRaises(DatabaseMaintenanceHeld):
+                            with operation_guard(store):
+                                self.fail("provider operation entered during maintenance")
+                        with self.assertRaises(DatabaseMaintenanceHeld):
+                            with store._engine.begin() as connection:
+                                connection.execute(text("INSERT INTO maintenance_probe VALUES (1)"))
+                        raise RuntimeError("rehearsal failed")
+                with operation_guard(store):
+                    with store._engine.begin() as connection:
+                        connection.execute(text("INSERT INTO maintenance_probe VALUES (2)"))
+                with engine.connect() as connection:
+                    self.assertEqual(
+                        connection.scalar(text("SELECT value FROM maintenance_probe")), 2
+                    )
+            finally:
+                store.close()
+                engine.dispose()
+
+    def test_operations_between_transactions_must_finish_before_hold(self) -> None:
+        from control_plane.database_maintenance import (
+            DatabaseMaintenanceHeld,
+            maintenance_window,
+            operation_guard,
+        )
+
+        with _head_postgres_database() as database_url:
+            engine = create_engine(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with operation_guard(store):
+                    with store._engine.begin() as connection:
+                        connection.execute(text("SELECT 1"))
+                    with self.assertRaises(DatabaseMaintenanceHeld):
+                        with maintenance_window(
+                            engine, duration_seconds=10, drain_seconds=1, reason="test"
+                        ):
+                            self.fail("maintenance overtook an in-flight provider operation")
+                with maintenance_window(
+                    engine, duration_seconds=10, drain_seconds=1, reason="test"
+                ):
+                    with self.assertRaises(DatabaseMaintenanceHeld):
+                        with operation_guard(store):
+                            self.fail("new operation entered")
+            finally:
+                store.close()
+                engine.dispose()
+
+    def test_server_deadline_releases_gate_even_while_controller_is_idle(self) -> None:
+        from control_plane.database_maintenance import maintenance_window, operation_guard
+        from control_plane.database_maintenance_cli import status
+
+        with _head_postgres_database() as database_url:
+            engine = create_engine(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                with maintenance_window(
+                    engine, duration_seconds=2, drain_seconds=1, reason="deadline test"
+                ):
+                    self.assertTrue(status(engine)["exclusive_gate_observed"])
+                    deadline = time.monotonic() + 5
+                    while status(engine)["exclusive_gate_observed"]:
+                        if time.monotonic() >= deadline:
+                            self.fail("PostgreSQL did not release the bounded maintenance gate")
+                        time.sleep(0.05)
+                    with operation_guard(store):
+                        with store._engine.begin() as connection:
+                            self.assertEqual(connection.scalar(text("SELECT 1")), 1)
+                self.assertFalse(status(engine)["exclusive_gate_observed"])
+            finally:
+                store.close()
+                engine.dispose()

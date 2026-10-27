@@ -1,5 +1,6 @@
 """The browser and bounded admin helper share one scoped restart boundary."""
 
+from control_plane.database_maintenance import maintenance_thread
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -322,7 +323,7 @@ def register_service_restart_route(
 
         # Keep the provider runner alive through an HTTP disconnect. Its own
         # durable effect checkpoint prevents repeating an unknown POST.
-        task = asyncio.create_task(asyncio.to_thread(execute))
+        task = asyncio.create_task(maintenance_thread(execute))
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
