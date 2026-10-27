@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -30,6 +30,8 @@ from control_plane.contracts.odoo_walkthrough import (
     WalkthroughStep,
     walkthrough_activity_scope,
     WALKTHROUGH_DISPATCH_SECONDS,
+    WALKTHROUGH_MARKER_PREFIX,
+    WALKTHROUGH_CLOSED_STATE,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.dokploy.odoo_walkthrough import (
@@ -610,6 +612,11 @@ class AccountProgramTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.addCleanup(logging.disable, logging.root.manager.disable)
+        adapter = ModuleType("odoo_website_settings")
+        source = Path(__file__).parent / "fixtures/website-settings/consumer.txt"
+        exec(compile(source.read_text(), str(source), "exec"), adapter.__dict__)
+        self.enterContext(patch.dict(sys.modules, {"odoo_website_settings": adapter}))
+        self.enterContext(patch.object(sys, "path", list(sys.path)))
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.parameters: dict[str, str] = {TESTING_COPY_COMPLETION_PARAMETER: "testing-copy"}
@@ -627,8 +634,8 @@ class AccountProgramTests(unittest.TestCase):
 
         self.users.create.side_effect = create_user
         self.users.browse.return_value.exists.return_value = self.user
-        parameters = MagicMock()
-        parameters.get_param.side_effect = lambda key: self.parameters.get(key)
+        parameters = MagicMock(spec=["sudo", "get_param", "set_param"])
+        parameters.get_param.side_effect = lambda key, default="": self.parameters.get(key, default)
         parameters.set_param.side_effect = self.parameters.__setitem__
         self.env = MagicMock()
         models = {"res.users": self.users, "ir.config_parameter": parameters}
@@ -688,6 +695,32 @@ class AccountProgramTests(unittest.TestCase):
         self.assertEqual(self.execute()["account_id"], self.user.id)
         self.users.create.assert_called_once()
         self.user.write.assert_not_called()
+        self.execute()
+        self.users.create.assert_called_once()
+        self.user.write.assert_not_called()
+
+    def test_typed_parameters_preserve_provision_run_and_cleanup_ownership(self) -> None:
+        parameters = MagicMock(spec=["sudo", "get_str", "set_str"])
+        parameters.sudo.return_value = parameters
+        parameters.get_str.side_effect = lambda key, default="": self.parameters.get(key, default)
+        parameters.set_str.side_effect = self.parameters.__setitem__
+        self.env.__getitem__.side_effect = lambda name: {
+            "res.users": self.users,
+            "ir.config_parameter": parameters,
+        }[name]
+        self.assertEqual(self.execute()["account_id"], self.user.id)
+        self.request["operation"] = "run"
+        self.assertEqual(self.execute()["account_id"], self.user.id)
+        self.users.create.assert_called_once()
+        self.user.write.assert_not_called()
+        self.request["operation"] = "cleanup"
+        self.user.write.side_effect = lambda values: setattr(self.user, "active", values["active"])
+        self.assertEqual(self.execute()["account_id"], self.user.id)
+        marker = json.loads(self.parameters[WALKTHROUGH_MARKER_PREFIX + self.request["task_id"]])
+        self.assertEqual(marker["account_id"], self.user.id)
+        self.assertEqual(marker["state"], WALKTHROUGH_CLOSED_STATE)
+        self.assertFalse(self.user.active)
+        self.user.write.reset_mock()
         self.execute()
         self.users.create.assert_called_once()
         self.user.write.assert_not_called()

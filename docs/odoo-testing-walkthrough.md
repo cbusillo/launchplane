@@ -136,6 +136,10 @@ and may run after the service consumption deadline once its current copy and
 isolation prerequisites pass.
 An existing staff login can never be adopted or reset.
 
+The native account program uses the artifact's shared string-parameter adapter
+for its copy witness and task marker on Odoo 19 and 20. This compatibility layer
+preserves the account ownership, connection isolation and cleanup checks above.
+
 Account groups are explicit native group XML IDs. The default is
 `base.group_user`; supply only the business roles required by the checklist.
 The native groups `base.group_system`, `base.group_erp_manager`,
