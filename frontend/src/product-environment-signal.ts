@@ -149,10 +149,14 @@ export function operationalAttentionReasons(environment: ProductEnvironmentSumma
   return operationalSignal(environment, now).attentionReasons;
 }
 
+export function environmentReleaseHealthy(environment: ProductEnvironmentSummary | null, now = Date.now()): boolean {
+  return operationalSignal(environment, now).releaseHealthy;
+}
+
 function operationalSignal(environment: ProductEnvironmentSummary | null, now: number): {
-  tone: SignalTone; attentionReasons: string[]; warningReasons: string[];
+  tone: SignalTone; attentionReasons: string[]; warningReasons: string[]; releaseHealthy: boolean;
 } {
-  if (!environment) return { tone: "missing", attentionReasons: [], warningReasons: [] };
+  if (!environment) return { tone: "missing", attentionReasons: [], warningReasons: [], releaseHealthy: false };
   environment = expireEnvironmentEvidence(environment, now);
   const reasons = new Set<string>();
   const warnings = new Set<string>();
@@ -188,9 +192,10 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
     if (recovery) warnings.add(`Recovery path: ${readable(incident.failure_code)}`);
     return !recovery;
   });
-  const deliveryOnly = blockingIncidents.length > 0 && reasons.size === 0 && runtimeGap === null &&
+  const releaseHealthy = reasons.size === 0 && runtimeGap === null &&
     environment.topology.observed.trust_state === "verified" &&
     blockingIncidents.every(incident => productionDeliveryWarning(environment, incident));
+  const deliveryOnly = blockingIncidents.length > 0 && releaseHealthy;
   if (!deliveryOnly) {
     for (const incident of blockingIncidents) {
       const severity = readable(incident.severity) || "Open";
@@ -200,6 +205,7 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
   return {
     tone: reasons.size ? "danger" : ["missing", "stale"].includes(runtimeTone) ? runtimeTone
       : deliveryOnly || warnings.size ? "warning" : runtimeTone,
+    releaseHealthy,
     attentionReasons: [...reasons],
     warningReasons: reasons.size ? [] : [...warnings, ...(deliveryOnly
       ? blockingIncidents.map(incident => `${readable(incident.failure_code)}; the current production release is healthy`)

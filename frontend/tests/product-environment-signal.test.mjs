@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, operationalWarningReasons, publicObservationGap } from "../src/product-environment-signal.ts";
+import { environmentReleaseHealthy, environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, operationalWarningReasons, publicObservationGap } from "../src/product-environment-signal.ts";
 import { sidebarStatus } from "../src/sidebar-status.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -85,7 +85,15 @@ test("recovery and delivery warnings stay yellow together", () => {
     assert.equal(environmentOperationalTone(lane), "warning");
     assert.equal(sidebarStatus(lane, "Production").tone, "warning");
     assert.deepEqual(operationalAttentionReasons(lane), []);
+    assert.equal(environmentReleaseHealthy(lane), true);
   }
+  const businessTls = lane.topology.observed.tls_domains[0];
+  businessTls.provenance.stale_after = new Date(0).toISOString();
+  assert.equal(environmentReleaseHealthy(lane), false);
+  businessTls.provenance.stale_after = lane.provenance.stale_after;
+  lane.topology.observed.trust_state = "missing";
+  lane.topology.observed.tls_domains.shift();
+  assert.equal(environmentReleaseHealthy(lane), false);
   lane.health_monitoring.checks[0].status = "fail";
   assert.equal(environmentOperationalTone(lane), "danger");
   lane.environment = "testing";
