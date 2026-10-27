@@ -16589,12 +16589,12 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             with engine.connect() as keeper:
 
                 def commit_before_lock(
-                    connection: Any,
-                    cursor: Any,
+                    _connection: Any,
+                    _cursor: Any,
                     statement: str,
-                    parameters: Any,
-                    context: Any,
-                    executemany: bool,
+                    _parameters: Any,
+                    _context: Any,
+                    _executemany: bool,
                 ) -> None:
                     if statement.startswith("LOCK TABLE"):
                         with engine.begin() as writer:
@@ -16655,3 +16655,145 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
             with engine.begin() as writer:
                 writer.execute(text("SET LOCAL lock_timeout='1s'"))
                 writer.execute(text("INSERT INTO sample VALUES(1)"))
+
+    def test_rehearsal_refuses_the_live_cluster_before_migration(self) -> None:
+        from control_plane.database_maintenance import database_system_identifier
+        from control_plane.database_maintenance_cli import rehearsal_receipt
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.connect() as connection:
+                live_identifier = database_system_identifier(connection)
+                with (
+                    patch("control_plane.database_maintenance_cli.require_isolated_runtime"),
+                    patch(
+                        "control_plane.storage.schema_migration.migrate_schema_on_connection"
+                    ) as migrate,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "different PostgreSQL cluster"):
+                        rehearsal_receipt(
+                            connection,
+                            held={"system_identifier": live_identifier},
+                            backup_sha256="a" * 64,
+                            expires=datetime.now(timezone.utc) + timedelta(seconds=20),
+                        )
+                migrate.assert_not_called()
+
+    def test_live_apply_refuses_a_rehearsal_from_its_own_cluster(self) -> None:
+        from control_plane.database_maintenance import apply_retirement, database_system_identifier
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.connect() as connection:
+                live_identifier = database_system_identifier(connection)
+                with patch(
+                    "control_plane.database_maintenance.migrate_schema_on_connection"
+                ) as migrate:
+                    with self.assertRaisesRegex(RuntimeError, "different PostgreSQL cluster"):
+                        apply_retirement(
+                            connection, before={}, rehearsal={"system_identifier": live_identifier}
+                        )
+                migrate.assert_not_called()
+
+    def test_held_migration_joins_current_attestations_without_losing_retained_rows(self) -> None:
+        from control_plane.database_maintenance import (
+            database_snapshot,
+            locked_database,
+            retained_snapshot,
+        )
+        from control_plane.storage.schema_migration import (
+            migrate_schema_on_connection,
+            schema_migration_target,
+        )
+        from control_plane.storage.migrations.versions import (
+            c8d2e4f6a9b1_add_integration_attestations as current,
+        )
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as retired,
+        )
+        from tests.test_retired_delivery_migration import seed_retired_history
+        from sqlalchemy.pool import NullPool
+        from sqlalchemy import Table, MetaData
+
+        with _isolated_postgres_database() as url:
+            alembic_command.upgrade(_alembic_config(url), current.revision)
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            seed_retired_history(engine)
+            with engine.begin() as seed:
+                table = Table(current.TABLE_NAME, MetaData(), autoload_with=seed)
+                seed.execute(
+                    table.insert().values(
+                        record_id="retained-attestation",
+                        repository="example/control",
+                        pull_request_number=17,
+                        payload={"retained": "full columns", "nullable": None},
+                    )
+                )
+            with engine.connect() as connection:
+                with locked_database(
+                    connection, expires_at=datetime.now(timezone.utc) + timedelta(seconds=30)
+                ):
+                    before = database_snapshot(connection)
+                    final = migrate_schema_on_connection(
+                        connection, target_revision=retired.revision
+                    )
+                    self.assertEqual(
+                        final,
+                        schema_migration_target(
+                            current_revision=current.revision, target_revision=retired.revision
+                        ),
+                    )
+                    after = database_snapshot(connection)
+                    self.assertEqual(set(before) - set(after), set(retired.RETIRED_TABLES))
+                    self.assertEqual(retained_snapshot(after), retained_snapshot(before))
+                    self.assertEqual(
+                        after[current.TABLE_NAME],
+                        before[current.TABLE_NAME],
+                    )
+            with engine.connect() as observer:
+                self.assertEqual(
+                    observer.execute(text("SELECT version_num FROM alembic_version"))
+                    .scalars()
+                    .all(),
+                    [final],
+                )
+
+    def test_census_preserves_unknown_rows_and_ignores_scheduler_ownership(self) -> None:
+        from control_plane.database_maintenance_cli import in_flight_work
+        from control_plane.storage.postgres import LaunchplaneMergeTrainControllerStateRow
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "CREATE TABLE sample_operations(id integer PRIMARY KEY, state text, lease_expires_at text)"
+                    )
+                )
+                connection.execute(text("INSERT INTO sample_operations VALUES(1,'running','')"))
+                controller = connection.dialect.identifier_preparer.quote(
+                    LaunchplaneMergeTrainControllerStateRow.__tablename__
+                )
+                connection.execute(
+                    text(f"CREATE TABLE {controller}(status text, lease_expires_at text)")
+                )
+                future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+                connection.execute(
+                    text(f"INSERT INTO {controller} VALUES('running',:future)"), {"future": future}
+                )
+                self.assertEqual(in_flight_work(connection), {})
+                self.assertEqual(
+                    connection.scalar(text("SELECT state FROM sample_operations")), "running"
+                )
+                connection.execute(
+                    text("UPDATE sample_operations SET lease_expires_at=:future"),
+                    {"future": future},
+                )
+                self.assertTrue(in_flight_work(connection))

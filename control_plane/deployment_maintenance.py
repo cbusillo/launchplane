@@ -1,4 +1,7 @@
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,12 +28,11 @@ def require_deployment_available(environment: Mapping[str, str]) -> None:
 class DeploymentMaintenance:
     def __init__(self, *, target_id: str, database_url: str, image: str, root: Path) -> None:
         from control_plane.dokploy import api, source
-        from control_plane.workflows.launchplane import resolve_launchplane_github_token
         from control_plane.workflows.launchplane_self_deploy import (
             _validate_launchplane_compose_target,
         )
-        import re
 
+        self.root = root
         self.database_url = database_url
         self.image = image
         self.target_id = target_id
@@ -57,11 +59,6 @@ class DeploymentMaintenance:
         if not match:
             raise ValueError("The source repository cannot be proved from the deployment target.")
         self.repository = match[1]
-        self.github_token = resolve_launchplane_github_token(
-            control_plane_root=root, context_name="launchplane", repository=self.repository
-        )
-        if not self.github_token:
-            raise ValueError("Workflow observation has no supported source-control reader.")
 
     def read_target(self) -> api.JsonObject:
         from control_plane.dokploy import api
@@ -80,7 +77,6 @@ class DeploymentMaintenance:
 
     def observe(self, *, deadline: str | None) -> None:
         from control_plane.dokploy import api
-        from control_plane.workflows.launchplane import github_api_request
 
         target = self.read_target()
         if target.get("autoDeploy") is not False:
@@ -108,19 +104,57 @@ class DeploymentMaintenance:
             if not isinstance(row, dict) or not isinstance(row.get("data"), dict):
                 raise ValueError("The deployment queue contains an unknown job.")
             data = row["data"]
-            if isinstance(data, dict) and data.get("composeId") == self.target_id:
-                raise ValueError("An own-service deployment is queued.")
-        for state in ("queued", "in_progress", "waiting", "pending", "requested"):
-            runs = github_api_request(
-                path=f"/repos/{self.repository}/actions/workflows/deploy-launchplane.yml/runs?status={state}&per_page=100",
-                token=self.github_token,
-            )
             if (
-                not isinstance(runs, dict)
-                or runs.get("total_count") != 0
-                or runs.get("workflow_runs") != []
+                isinstance(data, dict)
+                and data.get("composeId") == self.target_id
+                and row.get("state") not in {"completed", "failed"}
             ):
-                raise ValueError("A self-deploy workflow is active or its absence is unproved.")
+                raise ValueError("An own-service deployment is queued.")
+
+    def require_idle_workflows(self) -> None:
+        from control_plane.workflows.launchplane import github_api_request, launchplane_github_token
+
+        with launchplane_github_token(
+            control_plane_root=self.root, context_name="launchplane", repository=self.repository
+        ) as token:
+            if not token:
+                raise ValueError("Workflow observation has no supported source-control reader.")
+            for state in ("queued", "in_progress", "waiting", "pending", "requested"):
+                runs = github_api_request(
+                    path=f"/repos/{self.repository}/actions/workflows/deploy-launchplane.yml/runs?status={state}&per_page=100",
+                    token=token,
+                )
+                if (
+                    not isinstance(runs, dict)
+                    or runs.get("total_count") != 0
+                    or runs.get("workflow_runs") != []
+                ):
+                    raise ValueError("A self-deploy workflow is active or its absence is unproved.")
+
+    @contextmanager
+    def fence(self, deadline: str, *, release_receipt: Path) -> Iterator[None]:
+        installed = False
+        released = False
+        try:
+            self.marker(deadline)
+            installed = True
+            self.require_idle_workflows()
+            self.observe(deadline=deadline)
+            yield
+        finally:
+            try:
+                if installed:
+                    self.marker(deadline, remove=True)
+                    released = True
+            finally:
+                receipt = {"released": released, "deadline": deadline, "target_id": self.target_id}
+                if not released:
+                    receipt["uncertain"] = True
+                    receipt["phase"] = "release" if installed else "install"
+                temporary = release_receipt.with_suffix(".new")
+                temporary.write_text(json.dumps(receipt))
+                temporary.chmod(0o600)
+                temporary.replace(release_receipt)
 
     def marker(self, deadline: str, *, remove: bool = False) -> None:
         from control_plane.dokploy import api
@@ -138,7 +172,6 @@ class DeploymentMaintenance:
             updates={} if remove else {MAINTENANCE_UNTIL_ENV: deadline},
             removals=(MAINTENANCE_UNTIL_ENV,) if remove else (),
             target_type="compose",
-            compose_type="docker-compose",
         )
         api.update_dokploy_target_env(
             host=self.host,

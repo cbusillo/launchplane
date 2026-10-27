@@ -5653,14 +5653,14 @@ image before use. Q777 and Q966 on #2437 retain full-backup recovery and a full
 writer hold; an online backup alone or selective table recovery does not meet
 that decision. Client-product databases, credentials and resources are excluded.
 
-From the documented Launchplane host, copy `scripts/database-maintenance-host.py`
+From the documented Launchplane host, copy `control_plane/database_maintenance_host.py`
 from the verified API image into a private host directory and run it with the
-host's Python. Supply the exact current API and PostgreSQL containers:
+host's Python 3.11 or newer. The host module uses only the standard library. Supply the exact current API and PostgreSQL containers:
 
 ```bash
-python3 database-maintenance-host.py plan --api-container API_CONTAINER \
+python3 database_maintenance_host.py plan --api-container API_CONTAINER \
   --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
-python3 database-maintenance-host.py hold --api-container API_CONTAINER \
+python3 database_maintenance_host.py hold --api-container API_CONTAINER \
   --postgres-container POSTGRES_CONTAINER --duration-seconds 1800
 ```
 
@@ -5669,27 +5669,43 @@ service target, provider queue/history and self-deploy workflows. It creates
 only private local evidence and a temporary, non-serving compose operator.
 That operator uses the provider's existing `.env` in place with no credential
 exports or new grants. Its image is pinned to the API's actual image ID. It
-publishes no ports and disables Traefik discovery. The browser can remain up
+publishes no ports and disables Traefik discovery. A generated one-off service
+uses only the existing default/external networks and private maintenance-state
+mount; it inherits none of the API's runtime, Odoo-copy or prepared-public
+volumes. Its root is read-only, temporary files use RAM, logs are disabled and
+it has no restart policy. The browser can remain up
 only when it has no database credential; every other own-project service must
 be running on the same consumer-free image. PostgreSQL's system identifier
-must match the configured database connection. Unrecognized state refuses.
+must match the configured database connection. Other containers with the API's
+OCI source label are inspected only for that same database binding; an outside
+writer, including a dormant one, refuses qualification without stopping it.
+Unrecognized state refuses.
 
 `hold` first arms and reads back an independent transient systemd restart
-unit, then installs the expiring provider deployment marker under the existing
-dispatch lock. The target's database, image and source repository are bound to
+unit, then starts one non-serving operator that owns the expiring provider
+marker and keeps its existing Dokploy access in memory through cleanup. The
+marker is installed under the existing dispatch lock. The target's database, image and source repository are bound to
 the running service, auto-deploy must already be off, and complete deployment
 history, the actual provider queue and self-deploy workflows must be idle.
 Both normal and emergency deploys refuse the marker before their first write.
 The marker update must leave the host credential file and original containers
 unchanged. No workflow is disabled and no access or grant changes.
 
-The API stops first with Docker's non-forcing `stop --timeout -1`, allowing
-admitted requests to finish. A conservative census of running states and live
-lease columns must settle, then the workers stop the same way. A new deployment,
+The plan refuses an unexpired lease on running operation work. Scheduler
+ownership alone is not a provider operation; durable running/UNKNOWN rows with
+no live operation lease are retained unchanged, never cleared to pass a census. The API then stops first
+with Docker's non-forcing `stop --timeout -1`, allowing admitted requests to
+finish, and the workers stop the same way. The keeper then observes actual
+process exit, client backends and locks rather than treating lease rows as
+proof that a writer stopped. A new deployment,
 unexpected container, malformed lease or unfinished operation aborts before
 backup. Docker's default ten-second forced kill and a raw TERM signal are not
-substitutes. The independent release waits out stops before restarting the exact
-original IDs, including the merge train. A busy operation that cannot finish
+substitutes. Stop clients are never canceled by a subprocess timeout; each is
+recorded by PID and process-start identity before releasing the state lock.
+Driver updates and stop launches use that same lock and reread current state,
+so none can proceed after release begins. The independent release waits out
+only each service's own stop before restarting its exact original ID; API and
+merge-train recovery do not wait on a long capture's stop. A busy operation that cannot finish
 within the budget is a failed qualification, never a held-window receipt.
 
 After services exit, the keeper takes the existing schema, dispatch and release
@@ -5697,24 +5713,31 @@ admission session locks, then exclusive locks on every public application table
 before establishing its repeatable-read snapshot. SELECT remains available to
 `pg_dump`; table writers are excluded. Table-set changes, foreign/materialized
 relations, other application schemas, large objects, prepared transactions,
-unexpected DB clients and remaining running/leased work refuse qualification.
-It observes provider/deploy state and clients throughout the window. Table
+unexpected DB clients refuse qualification. Active work that cannot finish
+gracefully prevents the stopped-service receipt, regardless of stored lease
+or status values.
+It observes provider/deploy state and clients throughout the window. Workflow
+absence is checked after installing the marker; its scoped token is released
+before the stopped-service window. Both deployment entry points then enforce
+the marker, while provider queue/history and container observations continue. Table
 locks and zero clients after process exit are the proof; a zero selected drain
 count alone is not. The selected deploy drain record is never rewritten.
 
 The `held` receipt binds the hold ID, keeper PID/start time, transaction, exported
-snapshot and every table's full-column/schema/row digest plus sequence state.
+snapshot, PostgreSQL system identifier and every table's full-column/schema/row
+digest plus sequence state.
 Keep it private. A second host connection can stream the exact staged snapshot:
 
 ```bash
-python3 database-maintenance-host.py dump --state STATE_JSON
+python3 database_maintenance_host.py dump --state STATE_JSON
 ```
 
 Its stdout is the binary custom-format dump; direct it over the existing
 private transport straight into mode-0600 encrypted private custody. It writes
 no host dump file. Stderr carries the host stream SHA-256; independently hash
-the private file and require agreement. No dump is verified until it restores
-successfully. Record the custodian, encrypted placement, retention minimum and
+the private file and require agreement. The host also stores its stream hash
+under the state lock, and `submit` requires the rehearsal's private-file hash
+to agree. No dump is verified until it restores successfully. Record the custodian, encrypted placement, retention minimum and
 Director-reviewed disposal trigger before capture; leave the keyring in place.
 
 Restore with `pg_restore --no-owner --exit-on-error` into a disposable PostgreSQL
@@ -5723,7 +5746,11 @@ ports, logs, persistent mounts or keyring. Data and temporary filesystems must
 be RAM-backed with no VM swap, or independently qualified encrypted storage.
 Run only the exact reviewed image's migrator in the restore's isolated loopback
 network; never start its API, workers or schedulers. Mount only the private
-held receipt, not production configuration. With an isolated, local-only DSN:
+held receipt, not production configuration. Rehearsal refuses the source
+cluster's system identifier, a non-loopback DSN, any production keyring/provider
+credential in its environment, and a network namespace with interfaces beyond
+loopback. The live apply independently rejects a rehearsal from its own cluster.
+With an isolated, local-only DSN:
 
 ```bash
 python -m control_plane.database_maintenance_cli rehearse \
@@ -5738,23 +5765,37 @@ Save the receipt in private host state and submit it without a terminal line-len
 limit:
 
 ```bash
-python3 database-maintenance-host.py submit --state STATE_JSON --receipt-file REHEARSAL_RECEIPT
+python3 database_maintenance_host.py submit --state STATE_JSON --receipt-file REHEARSAL_RECEIPT
 ```
 
-The private FIFO feeds that exact receipt to the keeper. Only `action: apply` with that exact
-passing proof reaches the live migration; `action: release` exits without DDL.
+The private FIFO feeds that exact receipt to the keeper. Only `action: apply`
+with that exact passing proof reaches the live migration. To abort without DDL,
+use the host's `release --state STATE_JSON`; terminal input is only monitored
+for EOF, never forwarded as an alternate command channel.
 EOF, a lost keeper, a deadline or observation mismatch rolls back. The migration
 and revision update remain uncommitted until verification finishes. Read back
 the committed revision and schema before recovery is complete.
 
 Both the normal exit and `release --state STATE_JSON` terminate only the exact
-keeper backend (PID plus start time), restart the original services, check API
-health and worker survival, remove/read back the deployment marker, and disarm/
-read back the timer. The server transaction deadline is a second backstop.
+keeper backend when still held (PID plus start time), restart the original
+services, check API health and worker survival, remove/read back the deployment
+marker, and disarm/read back the timer. Per-service restart progress is durable;
+a failed marker cleanup cannot stop or restart healthy services a second time.
+The long-lived operator's cleanup uses cached provider access and writes a
+private readback receipt, so it needs neither a healthy database nor GitHub.
+No credential is written to host state. A missing or failed provider readback
+never launches another env write while its original controller can still act;
+an uncertain write is preserved for reconciliation. Original services remain
+restarted, and the expiring deployment marker remains bounded. The server transaction deadline is a second backstop.
 Observe the unit's actual release and the final service state; a scheduled timer
 is not evidence that release happened. A host reboot removes the transient unit
-and may leave explicitly stopped services down: use the retained receipt's
-supported release after boot, then verify it. Recovery is UNKNOWN until readback.
+and may leave explicitly stopped services down. Private state defaults to
+`/var/lib/launchplane-maintenance`, survives reboot and includes the copied
+standalone driver. Use that state's supported release after boot, then verify
+it. If the in-memory controller was lost, marker cleanup uses the recorded
+own-target identity after the database recovers; it does not discover another
+target or mint a GitHub token. A missing cleanup readback stays UNKNOWN even
+when the expiring marker no longer refuses deployments. Recovery is UNKNOWN until readback.
 Launchplane monitoring is paused during this window, which counts against its
 live-product verification cadence; do not describe that interval as healthy.
 

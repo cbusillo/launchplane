@@ -225,7 +225,7 @@ def migrate_schema_on_connection(connection: Connection, *, target_revision: str
     current = str(revisions[0])
     action = schema_migration_action(current_revision=current, target_revision=target_revision)
     if action == "upgrade":
-        config = alembic_config(str(connection.engine.url))
+        config = alembic_config("postgresql://")
         config.attributes["connection"] = connection
         command.upgrade(
             config,

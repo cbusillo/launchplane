@@ -144,15 +144,16 @@ def database_snapshot(connection: Connection) -> dict[str, Any]:
             )
             or 'to_jsonb(t)::text COLLATE "C"'
         )
-        with connection.execution_options(stream_results=True).execute(
-            text(f"SELECT to_jsonb(t)::text FROM public.{quoted} t ORDER BY {ordering}")
+        with connection.execute(
+            text(
+                f"SELECT to_jsonb(t)::text FROM public.{quoted} t ORDER BY {ordering}"
+            ).execution_options(stream_results=True)
         ) as rows:
             for row in rows:
                 encoded = str(row[0]).encode()
-                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(len(encoded).to_bytes(8))
                 digest.update(encoded)
                 count += 1
-        connection.execution_options(stream_results=False)
         metadata = {}
         for category, query in (
             (
@@ -210,10 +211,33 @@ def retained_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def database_system_identifier(connection: Connection) -> str:
+    return str(connection.scalar(text("SELECT system_identifier FROM pg_control_system()")))
+
+
+def require_isolated_rehearsal(connection: Connection, source_identifier: object) -> str:
+    current = database_system_identifier(connection)
+    if (
+        not isinstance(source_identifier, str)
+        or not source_identifier
+        or current == source_identifier
+    ):
+        raise RuntimeError("The rehearsal must run in a different PostgreSQL cluster.")
+    return current
+
+
 def apply_retirement(
     connection: Connection, *, before: dict[str, Any], rehearsal: dict[str, Any]
 ) -> str:
     require_no_other_clients(connection)
+    if (
+        not isinstance(rehearsal.get("system_identifier"), str)
+        or not rehearsal["system_identifier"]
+        or rehearsal["system_identifier"] == database_system_identifier(connection)
+    ):
+        raise RuntimeError("The rehearsal did not run in a different PostgreSQL cluster.")
+    if rehearsal.get("startup_action") not in {"current", "compatible_ahead"}:
+        raise RuntimeError("The rehearsal did not prove startup compatibility.")
     if rehearsal.get("schema_invariants_verified") is not True:
         raise RuntimeError("The isolated rehearsal lacks passing schema invariants.")
     if rehearsal.get("restored") != before or rehearsal.get("retained") != retained_snapshot(

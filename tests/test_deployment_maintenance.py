@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import os
+import json
 from pathlib import Path
 import runpy
 from typing import Any
@@ -116,3 +117,96 @@ class DeploymentMaintenanceTests(unittest.TestCase):
                 execute_launchplane_self_deploy(control_plane_root_path=Path("."), request=request)
         update.assert_not_called()
         deploy.assert_not_called()
+
+    def test_cached_provider_cleanup_does_not_need_a_healthy_database(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        target: dict[str, Any] = {
+            "sourceType": "git",
+            "composeType": "docker-compose",
+            "composePath": "./docker-compose.yml",
+            "command": "",
+            "autoDeploy": False,
+            "customGitUrl": "git@github.com:example/control.git",
+            "env": "LAUNCHPLANE_DATABASE_URL=postgresql://own\nDOCKER_IMAGE_REFERENCE=synthetic:current\nUNRELATED=preserve",
+        }
+
+        def update(**values: Any) -> None:
+            target["env"] = values["env_text"]
+
+        deadline = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+        with (
+            TemporaryDirectory() as temporary,
+            patch.object(
+                source,
+                "read_dokploy_config",
+                return_value=("https://provider.invalid", "synthetic"),
+            ) as credentials,
+            patch.object(
+                api, "fetch_dokploy_target_payload", side_effect=lambda **_values: dict(target)
+            ),
+            patch.object(api, "update_dokploy_target_env", side_effect=update),
+            patch.object(api, "list_deployments_for_target", return_value=[]),
+            patch.object(api, "dokploy_request", return_value=[]),
+            patch.object(DeploymentMaintenance, "require_idle_workflows"),
+        ):
+            maintenance = DeploymentMaintenance(
+                target_id="own",
+                database_url="postgresql://own",
+                image="synthetic:current",
+                root=Path("."),
+            )
+            receipt = Path(temporary) / "release.json"
+            with self.assertRaisesRegex(RuntimeError, "database failed"):
+                with maintenance.fence(deadline, release_receipt=receipt):
+                    credentials.side_effect = RuntimeError("database failed")
+                    self.assertEqual(
+                        api.parse_dokploy_env_text(target["env"])[MAINTENANCE_UNTIL_ENV], deadline
+                    )
+                    raise RuntimeError("database failed")
+            self.assertTrue(json.loads(receipt.read_text())["released"])
+            self.assertNotIn(MAINTENANCE_UNTIL_ENV, api.parse_dokploy_env_text(target["env"]))
+            self.assertEqual(api.parse_dokploy_env_text(target["env"])["UNRELATED"], "preserve")
+            credentials.assert_called_once()
+
+    def test_completed_queue_jobs_do_not_refuse_an_idle_target(self) -> None:
+        target: dict[str, Any] = {
+            "sourceType": "git",
+            "composeType": "docker-compose",
+            "composePath": "./docker-compose.yml",
+            "command": "",
+            "autoDeploy": False,
+            "customGitUrl": "git@github.com:example/control.git",
+            "env": "LAUNCHPLANE_DATABASE_URL=postgresql://own\nDOCKER_IMAGE_REFERENCE=synthetic:current",
+        }
+        with (
+            patch.object(
+                source,
+                "read_dokploy_config",
+                return_value=("https://provider.invalid", "synthetic"),
+            ),
+            patch.object(api, "fetch_dokploy_target_payload", return_value=target),
+            patch.object(api, "list_deployments_for_target", return_value=[]),
+            patch.object(
+                api,
+                "dokploy_request",
+                return_value=[
+                    {"data": {"composeId": "own"}, "state": "completed"},
+                    {"data": {"composeId": "own"}, "state": "failed"},
+                ],
+            ),
+        ):
+            maintenance = DeploymentMaintenance(
+                target_id="own",
+                database_url="postgresql://own",
+                image="synthetic:current",
+                root=Path("."),
+            )
+            maintenance.observe(deadline=None)
+            with patch.object(
+                api,
+                "dokploy_request",
+                return_value=[{"data": {"composeId": "own"}, "state": "active"}],
+            ):
+                with self.assertRaisesRegex(ValueError, "queued"):
+                    maintenance.observe(deadline=None)
