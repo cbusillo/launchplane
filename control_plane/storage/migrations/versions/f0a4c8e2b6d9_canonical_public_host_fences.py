@@ -1,5 +1,3 @@
-"""Canonical hostname fences on the approved path, independently of held drops."""
-
 from alembic import op
 import sqlalchemy as sa
 
@@ -15,8 +13,6 @@ PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY = "launchplane:public-host-schema-transit
 
 
 def _replace_keys(*, canonical: bool) -> None:
-    # Match Python str.strip(), including retained Unicode surrounding whitespace.
-    # DNS case folding is ASCII; this changes identities, never stored payloads.
     whitespace = (
         r"\0009\000a\000b\000c\000d\001c\001d\001e\001f\0020\0085\00a0\1680"
         r"\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200a\2028\2029"
@@ -108,8 +104,6 @@ def _exclude_writers() -> None:
         {"key": PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY},
     ):
         raise RuntimeError("Public-host schema transition is busy; retry after writers settle.")
-    # Covers ordinary target writes, including an uncommitted new context whose
-    # trigger has not acquired its first authority key. Never wait holding K.
     op.execute("LOCK TABLE launchplane_dokploy_targets IN SHARE MODE NOWAIT")
 
 

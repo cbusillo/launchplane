@@ -204,7 +204,7 @@ class ProductPathCheckTests(unittest.TestCase):
                     },
                 )
                 store = Mock()
-                store.list_product_reconcile_requests.return_value = (record,)
+                store.read_product_reconcile_request.return_value = record
                 inputs = read_path_check_inputs(
                     path="testing",
                     profile=_profile(),
@@ -247,8 +247,8 @@ class ProductPathCheckTests(unittest.TestCase):
                     "control_plane.product_path_check.read_staff_testing_hold", return_value=None
                 ),
             ):
-                store.list_product_reconcile_requests.return_value = (
-                    record.model_copy(update={"state": state}),
+                store.read_product_reconcile_request.return_value = record.model_copy(
+                    update={"state": state}
                 )
                 inputs = read_path_check_inputs(
                     path="testing",
@@ -386,7 +386,7 @@ class ProductPathCheckTests(unittest.TestCase):
             _steps(check),
             {
                 "profile_lane": ("clear", "lane_recorded", "none"),
-                "testing_hold": ("blocked", "testing_hold_active", "wait"),
+                "testing_hold": ("blocked", "testing_hold_active", "by_hand"),
                 "testing_deploy": ("clear", "already_deployed", "none"),
             },
         )
@@ -858,7 +858,6 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                             error_response_model=BaseModel,
                         ),
                         read_product_profile_list_identity=lambda: identity,
-                        work_graph_planning_facts_provider=None,
                         workflow_credentials_ready=lambda _context, _repository: True,
                         control_plane_root=Path("."),
                         github_token=lambda: "",
@@ -957,6 +956,7 @@ class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 ("testing_deploy", "unknown"),
             ],
         )
+        self.assertEqual(check["steps"][-1]["code"], "no_reconcile_record")
         self.assertEqual(rollback.status_code, 200, rollback.text)
         self.assertEqual(rollback.json()["check"]["path"], "rollback")
         rollback_check = rollback.json()["check"]

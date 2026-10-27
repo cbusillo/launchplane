@@ -1,10 +1,15 @@
 """Accepted-release worker integration for independent private production recipients."""
 
+from control_plane.contracts.production_consumer_reads import ProductionConsumerReview
+
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -20,6 +25,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ArtifactIdentityReference,
     BackupGateEvidence,
+    promotion_failure,
 )
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence, DeploymentRecord
 from control_plane.contracts.ship_request import ShipRequest
@@ -49,6 +55,7 @@ from control_plane.provider_operations import (
     ProviderEvidenceLease,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_activation_compose import environment_mapping
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
@@ -60,6 +67,9 @@ from control_plane.workflows.production_promotion_backup import (
     require_production_promotion_backup,
 )
 from control_plane.dokploy import api, source
+from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.http_error_evidence import log_handled_error_cause
+from control_plane.outbound_http import _ValidatedAddressConnector, resolve_private_http_destination
 
 from control_plane.production_recipient_evidence import (
     WRITER_ACTION_MARKER,
@@ -84,6 +94,9 @@ class RecipientCutoverRequest(BaseModel):
     writer_binding_id: str = Field(min_length=1)
     destination_backup_operation_id: str = Field(min_length=1)
     readiness_url: str = Field(min_length=1)
+    consumer_review: ProductionConsumerReview | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
@@ -100,6 +113,26 @@ class RecipientCutoverPlan(BaseModel):
     release_required: Literal[True] = True
 
 
+def qualify_health_routes(request: RecipientCutoverRequest) -> None:
+    destinations = {}
+    for url in (*request.health_urls.values(), request.readiness_url):
+        parsed = urlsplit(url)
+        destinations[
+            (parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+        ] = url
+    for url in destinations.values():
+        destination = resolve_private_http_destination(url)
+        try:
+            with _ValidatedAddressConnector(destination.addresses)(
+                (destination.hostname, destination.port), 3, None
+            ):
+                continue
+        except ConnectionRefusedError:
+            continue
+        except OSError as error:
+            raise ValueError("Destination health route is unreachable from Launchplane.") from error
+
+
 def cutover_intent(
     root: Path,
     store: PostgresRecordStore,
@@ -107,6 +140,7 @@ def cutover_intent(
     request: RecipientCutoverRequest,
     *,
     check_freshness: bool = True,
+    check_routes: bool = True,
 ) -> dict[str, Any]:
     if request.preparation_plan_sha256 != record.plan_sha256 or request.context != record.context:
         raise ValueError("Cutover belongs to a different preparation.")
@@ -137,6 +171,8 @@ def cutover_intent(
     PrivateHealthEndpointRecord.model_validate(
         {**endpoints[0].model_dump(mode="json"), "url": request.readiness_url}
     )
+    if check_routes and request.mode != "readback":
+        qualify_health_routes(request)
     policies = [
         ProductionBackupPolicyRecord.model_validate(row)
         for row in before["backup_policies"]
@@ -211,12 +247,14 @@ def cutover_intent(
     secret = store.read_secret_record(binding.secret_id)
     values = runtime_values(store, root, record)
     rendered = qualified_render(record, values)
-    application = rendered["services"][record.request.application_service].get("environment", {})
-    database = rendered["services"][record.request.database_service].get("environment", {})
+    application = environment_mapping(
+        rendered["services"][record.request.application_service].get("environment", {})
+    )
+    database = environment_mapping(
+        rendered["services"][record.request.database_service].get("environment", {})
+    )
     if (
-        not isinstance(application, dict)
-        or not isinstance(database, dict)
-        or not values.get(binding.binding_key)
+        not values.get(binding.binding_key)
         or application.get(binding.binding_key) != values[binding.binding_key]
         or values[binding.binding_key] in database.values()
         or any(
@@ -482,6 +520,10 @@ WRITER_LIBRARY = (
 import base64,fcntl,hashlib,json,os,re,subprocess,sys,uuid
 from pathlib import Path
 WRITER_CUSTODY_ROOT=Path('/var/lib/launchplane/recipient-writers')
+def writer_identity_binding(value: object) -> object:
+    if not isinstance(value,dict):
+        return None
+    return {key:item for key,item in value.items() if key!='deployed_at'}
 def coordinate_writer(spec, *, base=None):
     base=base or WRITER_CUSTODY_ROOT
     if any(not re.fullmatch(r'[A-Za-z0-9_-]+',spec[key]) for key in ('project','service')) or not re.fullmatch(r'[a-f0-9]{64}',spec['binding']):
@@ -555,7 +597,7 @@ def _coordinate_writer(spec, *, base, owner_path):
         expected_identity=spec.get('expected_identity')
         environment=dict(item.split('=',1) for item in row.get('Config',{}).get('Env',[]) if '=' in item)
         observed=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
-        if not isinstance(expected_identity,dict) or observed!=expected_identity:
+        if not isinstance(expected_identity,dict) or writer_identity_binding(observed)!=writer_identity_binding(expected_identity):
             if not (spec.get('owned_replacement') and observed is None and row.get('Config',{}).get('Image')==spec['image']):
                 raise ValueError('writer runtime identity changed')
     expected={'id':ids[0],'image':row['Image'],'project':spec['project'],'service':spec['service']}
@@ -698,6 +740,21 @@ WRITER_RECEIPT_PROGRAM = (
 )
 
 
+def _attempt_execution_started(
+    record: ProductionRecipientRecord, provider_operation_key: str, *, repromote: bool
+) -> bool:
+    attempt_identity = record.execution.get("runtime_identity")
+    return bool(
+        record.execution.get(canonical_sha256(provider_operation_key) + ":old_pause_dispatched_at")
+    ) or bool(
+        not repromote
+        and record.execution.get("trigger_requested_at")
+        and isinstance(attempt_identity, dict)
+        and attempt_identity.get("deployment_record_id")
+        == "recipient-release-" + canonical_sha256(provider_operation_key)[:24]
+    )
+
+
 @dataclass
 class RecipientCutoverAdapter:
     root: Path
@@ -706,8 +763,19 @@ class RecipientCutoverAdapter:
     trace_id: str
     backup_record_id: str
     validate_release: Callable[[], None]
+    validate_source: Callable[[], None]
     rollback_observed: bool = False
     rollback_resume_pending: bool = False
+
+    def provider_target_origin(self) -> ProviderTargetOrigin:
+        return ProviderTargetOrigin(
+            product=self.record.product,
+            context=self.record.context,
+            instance="prod",
+            provider_id="dokploy",
+            target_type="compose",
+            target_id=self.record.retained_target_id.target_id,
+        )
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -748,7 +816,9 @@ class RecipientCutoverAdapter:
                 # The reviewed host fence proved this attempt never paused a writer.
                 return ProviderObservation(
                     "present",
-                    response_payload=self.result("fail", writer_effect="none").response_payload,
+                    response_payload=self.failed_result(
+                        provider_operation_key, writer_effect="none"
+                    ).response_payload,
                 )
             if current.phase == "rolled_back":
                 if current.execution.get("native_inverse") or current.execution.get(
@@ -756,8 +826,8 @@ class RecipientCutoverAdapter:
                 ):
                     return ProviderObservation(
                         "present",
-                        response_payload=self.result(
-                            "fail", rollback_status="pass"
+                        response_payload=self.failed_result(
+                            provider_operation_key, rollback_status="pass"
                         ).response_payload,
                     )
                 return ProviderObservation("absent", retry_safe=True)
@@ -794,7 +864,8 @@ class RecipientCutoverAdapter:
                                 or current.publication.get("writer_binding")
                                 or None,
                             )
-                    except Exception:
+                    except Exception as error:
+                        log_handled_error_cause(error, self.trace_id)
                         return ProviderObservation("unknown")
                 if (
                     not current.execution.get("trigger_requested_at")
@@ -859,8 +930,8 @@ class RecipientCutoverAdapter:
             )
             self.record = record
             self.fail_pending_promotion(provider_operation_key, lease)
-            return self.result(
-                "fail",
+            return self.failed_result(
+                provider_operation_key,
                 rollback_status="pass",
                 provider_effect_performed=self.rollback_resume_pending,
             )
@@ -899,14 +970,44 @@ class RecipientCutoverAdapter:
                     + canonical_sha256(provider_operation_key)[:24],
                 )
 
-            with self.store.provider_evidence_guard(lease.evidence_reservation):
-                return self._apply(provider_operation_key, lease, backup_check)
+            automatic_recovery = False
+            effects_admitted = bool(
+                lease.evidence_reservation().provider_effect_started_at
+            ) or _attempt_execution_started(
+                self.record,
+                provider_operation_key,
+                repromote=bool(self.record.publication.get("inverse_backup_policies"))
+                and self.record.phase in {"rolled_back", "preflight_refused", "bootstrapping"},
+            )
+
+            def validate_authority() -> None:
+                if not automatic_recovery:
+                    self.validate_release()
+                    if not effects_admitted:
+                        self.validate_source()
+
+            def mark_admitted() -> None:
+                nonlocal effects_admitted
+                effects_admitted = True
+
+            def begin_recovery() -> None:
+                nonlocal automatic_recovery
+                automatic_recovery = True
+
+            with self.store.provider_evidence_guard(
+                lease.evidence_reservation, effect_admission_checkpoint=validate_authority
+            ):
+                return self._apply(
+                    provider_operation_key, lease, backup_check, begin_recovery, mark_admitted
+                )
 
     def _apply(
         self,
         provider_operation_key: str,
         lease: ProviderOperationLease,
         backup_check: Callable[[], BackupGateEvidence],
+        begin_recovery: Callable[[], None],
+        mark_admitted: Callable[[], None],
     ) -> ProviderMutationOutcome:
         record = self.record
         repromote = bool(record.publication.get("inverse_backup_policies")) and record.phase in {
@@ -924,6 +1025,7 @@ class RecipientCutoverAdapter:
         started = False
         terminal_deployment = False
         old_paused = False
+        source_admitted = False
         preparation = ProductionRecipientAdapter(
             self.root,
             self.store,
@@ -949,8 +1051,29 @@ class RecipientCutoverAdapter:
             record = replacement
             self.record = record
 
+        def attempt_has_effects() -> bool:
+            # Historical generic markers can belong to an earlier release or
+            # repromotion. Only this attempt's pause dispatch or its original
+            # trigger-bound deployment proves source admission already happened.
+            attempt_started = _attempt_execution_started(
+                record, provider_operation_key, repromote=repromote
+            )
+            # The exact current reservation includes resource/schedule effects
+            # that precede writer pause. An older attempt's execution dictionary
+            # cannot supply this witness for a fresh repromotion.
+            if isinstance(lease, ProviderEvidenceLease):
+                attempt_started = attempt_started or bool(
+                    lease.evidence_reservation().provider_effect_started_at
+                )
+            return attempt_started
+
         def check_local() -> None:
+            nonlocal source_admitted
             self.validate_release()
+            if not source_admitted:
+                if not attempt_has_effects():
+                    self.validate_source()
+                source_admitted = True
             require_writer_exclusive(self.store, record)
             backup_check()
 
@@ -964,6 +1087,7 @@ class RecipientCutoverAdapter:
             if phase == "deploy_trigger" and not record.execution.get("trigger_requested_at"):
                 save(execution={**record.execution, "trigger_requested_at": utc_now_timestamp()})
             lease.checkpoint_effect(phase)
+            mark_admitted()
             started = True
 
         def recovery_checkpoint(phase: str) -> None:
@@ -971,6 +1095,7 @@ class RecipientCutoverAdapter:
             lease.checkpoint_effect("rollback_" + phase)
 
         pending: PromotionRecord | None = None
+        failure_code = "recipient_cutover_unverified"
         try:
             if not isinstance(lease, ProviderEvidenceLease):
                 raise ValueError("Cutover requires an evidence-bound execution lease.")
@@ -985,6 +1110,9 @@ class RecipientCutoverAdapter:
                     record,
                     RecipientCutoverRequest.model_validate(record.activation["request"]),
                     check_freshness=not bool(record.execution.get("old_pause_dispatched_at")),
+                    check_routes=not bool(
+                        record.execution.get(attempt_prefix + "old_pause_dispatched_at")
+                    ),
                 )
                 != record.activation
             ):
@@ -1118,6 +1246,7 @@ class RecipientCutoverAdapter:
                     binding=writer_binding,
                 )
                 old_paused = True
+                failure_code = "recipient_deploy_unverified"
                 writer_action(
                     self.root,
                     record,
@@ -1130,6 +1259,7 @@ class RecipientCutoverAdapter:
                 )
                 terminal_deployment = True
             elif record.execution.get("trigger_requested_at"):
+                failure_code = "recipient_deploy_unverified"
                 outcome = self.terminal_deployment(deployment_id)
                 if outcome is None:
                     raise ValueError("The original deployment is absent, pending or ambiguous.")
@@ -1155,6 +1285,7 @@ class RecipientCutoverAdapter:
                     binding=writer_binding,
                 )
                 old_paused = True
+                failure_code = "recipient_deploy_unverified"
                 execute_dokploy_artifact_deploy(
                     host=host,
                     token=token,
@@ -1184,25 +1315,32 @@ class RecipientCutoverAdapter:
                     effect_started=lambda: None,
                 )
                 terminal_deployment = True
-            health = _verify_health_evidence_with_identity(
-                HealthcheckEvidence(
-                    status="pending",
-                    urls=tuple(
-                        {
+            failure_code = "recipient_health_unverified"
+            health = HealthcheckEvidence(
+                status="pending",
+                urls=tuple(
+                    dict.fromkeys(
+                        (
                             *record.activation["request"]["health_urls"].values(),
                             record.activation["request"]["readiness_url"],
-                        }
-                    ),
-                    timeout_seconds=record.retained_target.healthcheck_timeout_seconds or 120,
+                        )
+                    )
                 ),
-                expected_runtime_identity=identity,
+                timeout_seconds=record.retained_target.healthcheck_timeout_seconds or 120,
             )
-            if health.status != "pass" or health.runtime_identity_status != "match":
-                raise ValueError(
-                    "The replacement did not complete bootstrap with exact runtime identity."
+            for url in health.urls:
+                verified = _verify_health_evidence_with_identity(
+                    health.model_copy(update={"urls": (url,)}), expected_runtime_identity=identity
                 )
+                if verified.status != "pass" or verified.runtime_identity_status != "match":
+                    raise ValueError(
+                        "The replacement did not complete bootstrap with exact runtime identity."
+                    )
+                health = verified.model_copy(update={"urls": health.urls})
+            failure_code = "recipient_runtime_unverified"
             writer_action(self.root, record, old=False, action="inspect", checkpoint=checkpoint)
             self.verify_runtime(record, checkpoint)
+            failure_code = "recipient_publication_unverified"
             checkpoint("publish_recipient_authority")
             publication = self.publication(
                 record, identity, health, deployment_id, authority=baseline
@@ -1253,10 +1391,22 @@ class RecipientCutoverAdapter:
             )
             return self.result("pass")
         except Exception as error:
+            log_handled_error_cause(error, self.trace_id)
+            if (
+                isinstance(error, GenericWebPromotionSourceRefused)
+                and not started
+                and isinstance(lease, ProviderEvidenceLease)
+                and not attempt_has_effects()
+            ):
+                # Saved preparation can predate this operation's first dispatch.
+                # Only the exact reservation and own markers prove zero effects;
+                # the shared runner still decides whether it can release the key.
+                raise ProviderMutationRejectedError(error) from error
             if not started and not record.execution:
                 raise ProviderMutationRejectedError(
                     ValueError("Recipient release gates refused bootstrap.")
                 ) from error
+            begin_recovery()
             terminal_deployment = (
                 terminal_deployment
                 or isinstance(error, api.DokployDeploymentFailed)
@@ -1270,6 +1420,14 @@ class RecipientCutoverAdapter:
                     and committed.plan_sha256 == record.plan_sha256
                 ):
                     return self.result("pass")
+                if pending is not None:
+                    pending = pending.model_copy(
+                        update={"failure": promotion_failure(failure_code)}
+                    )
+                    try:
+                        self.store.write_promotion_record(pending)
+                    except Exception as diagnostic_error:
+                        log_handled_error_cause(diagnostic_error, self.trace_id)
                 if not old_paused and not record.execution.get(
                     attempt_prefix + "old_pause_dispatched_at"
                 ):
@@ -1339,11 +1497,11 @@ class RecipientCutoverAdapter:
                                 }
                             )
                         )
-                    return self.result("fail", rollback_status="pass")
+                    return self.failed_result(provider_operation_key, rollback_status="pass")
             except ProviderMutationRejectedError:
                 raise
-            except Exception:
-                pass
+            except Exception as recovery_error:
+                log_handled_error_cause(recovery_error, self.trace_id)
             raise ProviderMutationUnknownError(
                 "Retain exact cutover custody; reconcile before restarting either writer."
             ) from error
@@ -1432,9 +1590,23 @@ class RecipientCutoverAdapter:
         with self.store.provider_evidence_guard(lease.evidence_reservation):
             self.store.write_promotion_record(
                 pending.model_copy(
-                    update={"deploy": pending.deploy.model_copy(update={"status": "fail"})}
+                    update={
+                        "deploy": pending.deploy.model_copy(update={"status": "fail"}),
+                        "failure": pending.failure
+                        or promotion_failure("recipient_cutover_unverified"),
+                    }
                 )
             )
+
+    def failed_result(
+        self, key: str, *, provider_effect_performed: bool = True, **extra: str
+    ) -> ProviderMutationOutcome:
+        return self.result(
+            "fail",
+            provider_effect_performed=provider_effect_performed,
+            promotion_record_id="promotion-recipient-" + canonical_sha256(key)[:24],
+            **extra,
+        )
 
     def result(
         self,

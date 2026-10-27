@@ -13,7 +13,6 @@ from __future__ import annotations
 from contextlib import ExitStack, contextmanager
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-import hashlib
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,8 +21,14 @@ from control_plane.lane_movement import LaneMovementRefused
 
 from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
+    format_launchplane_mutation_timestamp,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.preview_execution import (
+    odoo_preview_reconciliation_key,
+    odoo_preview_target_key,
+    preview_execution_lock_name as preview_execution_lock_name,
+)
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
     OdooPreviewApplyConfigError,
@@ -34,6 +39,8 @@ from control_plane.odoo_preview_apply_http import (
     execute_odoo_preview_apply_result,
     observe_odoo_preview_apply_result,
     odoo_preview_supersession_is_quiescent,
+    _odoo_preview_operation_is_stale,
+    OdooPreviewPlanProvenanceError,
 )
 from control_plane.provider_operations import (
     DurableProviderOperationResult,
@@ -44,11 +51,15 @@ from control_plane.provider_operations import (
     ProviderObservation,
     ProviderObservationOutcome,
     ProviderOperationLease,
+    ProviderEvidenceLease,
     ProviderTargetSupersession,
     provider_operation_response_payload,
     provider_operation_title,
     run_durable_provider_operation,
 )
+from control_plane.workflows.generic_web_preview import serialize_generic_web_preview_operation
+from control_plane.workflows.launchplane import find_preview_record, generate_preview_id
+from control_plane.launchplane_mutations import LaunchplaneMutationStore
 from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
     OdooPreviewApplyInputsResult,
@@ -82,12 +93,12 @@ class OdooPreviewProviderMutationAdapter:
         execute_apply: ExecuteOdooPreviewApply = execute_odoo_preview_apply_result,
         observe_apply: ObserveOdooPreviewApply = observe_odoo_preview_apply_result,
         pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
-        qualify_existing_refresh: bool = False,
+        qualify_existing_preview: bool = False,
         disposable_cleanup: bool = False,
     ) -> None:
         self._control_plane_root = control_plane_root
         self._pre_mutation_guard = pre_mutation_guard
-        self._qualify_existing_refresh = qualify_existing_refresh
+        self._qualify_existing_preview = qualify_existing_preview
         self._record_store = record_store
         self._profile = profile
         self._apply_request = apply_request
@@ -154,18 +165,36 @@ class OdooPreviewProviderMutationAdapter:
 
     def reconciliation_key(self) -> str:
         plan = self._apply_request.apply.dry_run_plan
-        return (
-            f"dokploy:compose:{self._profile.preview.context.strip()}:{plan.compose_name.strip()}"
+        return odoo_preview_reconciliation_key(
+            context=self._profile.preview.context, compose_name=plan.compose_name
         )
 
     def target_key(self) -> str:
-        reconciliation_key = self.reconciliation_key()
-        return f"dokploy-provider-target:{hashlib.sha256(reconciliation_key.encode()).hexdigest()}"
+        return odoo_preview_target_key(
+            context=self._profile.preview.context,
+            compose_name=self._apply_request.apply.dry_run_plan.compose_name,
+        )
 
     def _finalize_successful_result(
         self,
         driver_result: dict[str, object],
     ) -> tuple[dict[str, object], dict[str, object], int]:
+        self.execution_check()
+        if self._apply_request.preserve_original_reservation_id:
+            from control_plane.preview_preservation import run_preview_preservation
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            run_preview_preservation(
+                store=cast(PostgresRecordStore, self._record_store),
+                profile=self._profile,
+                issued_plan=self._issued_plan,
+                original_reservation_id=self._apply_request.preserve_original_reservation_id,
+                operation_record_id=self._deployment_record_id,
+                control_plane_root=self._control_plane_root,
+                mode="verify",
+                timeout_seconds=self._apply_request.apply.timeout_seconds,
+                check=self.execution_check,
+            )
         lifecycle_records = apply_odoo_preview_lifecycle_evidence(
             control_plane_root_path=self._control_plane_root,
             record_store=self._record_store,
@@ -209,9 +238,39 @@ class OdooPreviewProviderMutationAdapter:
             provider_effect_phase=provider_effect_phase,
         )
         if driver_result is None:
+            from control_plane.preview_preservation import (
+                PREVIEW_PRESERVATION_PHASES,
+                run_preview_preservation,
+            )
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            if (
+                self._apply_request.preserve_original_reservation_id
+                and provider_effect_phase in PREVIEW_PRESERVATION_PHASES
+                and observation_outcome != "present"
+            ):
+                run_preview_preservation(
+                    store=cast(PostgresRecordStore, self._record_store),
+                    profile=self._profile,
+                    issued_plan=self._issued_plan,
+                    original_reservation_id=self._apply_request.preserve_original_reservation_id,
+                    operation_record_id=self._deployment_record_id,
+                    control_plane_root=self._control_plane_root,
+                    mode="inspect",
+                    timeout_seconds=self._apply_request.apply.timeout_seconds,
+                    check=self.execution_check,
+                )
+                return ProviderObservation(
+                    outcome="absent", retry_safe=True, preserve_effect_checkpoint=True
+                )
             return ProviderObservation(
                 outcome=cast(ProviderObservationOutcome, observation_outcome),
                 retry_safe=retry_safe,
+                preserve_effect_checkpoint=(
+                    observation_outcome == "absent"
+                    and retry_safe
+                    and provider_effect_phase != "rollback_complete"
+                ),
             )
         self.execution_check()
         driver_result.pop("provider_effect_attempted", None)
@@ -236,6 +295,31 @@ class OdooPreviewProviderMutationAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         self.execution_check()
+        preview = find_preview_record(
+            record_store=cast(LaunchplaneMutationStore, self._record_store),
+            context_name=self._profile.preview.context,
+            anchor_repo=self._profile.repository.partition("/")[2],
+            anchor_pr_number=self._issued_plan.plan_request.pr_number,
+        )
+        provenance = self._issued_plan.plan_provenance
+        if preview is not None and (
+            provenance is None
+            or _odoo_preview_operation_is_stale(
+                record_store=cast(LaunchplaneMutationStore, self._record_store),
+                preview=preview,
+                issued_at=format_launchplane_mutation_timestamp(provenance.issued_at),
+                product=self._profile.product,
+            )
+        ):
+            raise ProviderMutationRejectedError(
+                OdooPreviewPlanProvenanceError(
+                    code="odoo_preview_plan_stale",
+                    message=(
+                        "Existing preview lifecycle authority does not admit this issued plan; "
+                        "inspect its original lifecycle before requesting a fresh plan."
+                    ),
+                )
+            )
         if self._pre_mutation_guard is not None:
             try:
                 self._pre_mutation_guard()
@@ -248,7 +332,7 @@ class OdooPreviewProviderMutationAdapter:
             nonlocal effect_started
             self.execution_check()
             if (
-                not effect_started or self._qualify_existing_refresh
+                not effect_started or self._qualify_existing_preview
             ) and self._pre_mutation_guard is not None:
                 try:
                     self._pre_mutation_guard()
@@ -306,8 +390,14 @@ class OdooPreviewProviderMutationAdapter:
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
                 **(
-                    {"qualify_existing_refresh": True, "provider_mutation_guard": mutation_guard}
-                    if self._qualify_existing_refresh
+                    {"recovery_reservation": lease.evidence_reservation()}
+                    if self._apply_request.preserve_original_reservation_id
+                    and isinstance(lease, ProviderEvidenceLease)
+                    else {}
+                ),
+                **(
+                    {"qualify_existing_preview": True, "provider_mutation_guard": mutation_guard}
+                    if self._qualify_existing_preview
                     else {}
                 ),
             )
@@ -361,7 +451,7 @@ class OdooPreviewProviderMutationAdapter:
         records: dict[str, object] = {}
         lifecycle_finalized = driver_status == "pass"
         if lifecycle_finalized:
-            if self._qualify_existing_refresh and self._pre_mutation_guard is not None:
+            if self._qualify_existing_preview and self._pre_mutation_guard is not None:
                 try:
                     self._pre_mutation_guard()
                 except Exception as error:
@@ -400,6 +490,27 @@ class OdooPreviewApplyOperation:
     target_supersession: ProviderTargetSupersession
     disposable_cleanup: bool = False
     route_path: str = ODOO_PREVIEW_APPLY_ROUTE
+
+    def require_original_preservation(self) -> None:
+        reference = self.adapter._apply_request.preserve_original_reservation_id
+        if not reference:
+            return
+        from control_plane.preview_preservation import require_preview_preservation_admission
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        try:
+            require_preview_preservation_admission(
+                store=cast(PostgresRecordStore, self.adapter._record_store),
+                profile=self.adapter._profile,
+                issued_plan=self.adapter._issued_plan,
+                original_reservation_id=reference,
+                operation_record_id=self.adapter._deployment_record_id,
+                captured_schedule_binding=self.adapter.schedule_binding,
+            )
+        except ValueError as error:
+            raise OdooPreviewPlanProvenanceError(
+                code="odoo_preview_preservation_unavailable", message=str(error)
+            ) from error
 
     def run(
         self, store: DurableProviderOperationStore, *, allow_mutation: bool = True
@@ -483,23 +594,66 @@ class OdooPreviewApplyOperation:
     ) -> DurableProviderOperationResult:
         check()
         self.adapter.execution_check = check
-        return run_durable_provider_operation(
-            store=store,
-            scope=self.reservation_scope,
-            route_path=self.route_path,
-            idempotency_key=self.idempotency_key,
-            request_fingerprint=self.request_fingerprint,
-            lease_owner=self.trace_id,
-            response_trace_id=self.trace_id,
-            adapter=self.adapter,
-            target_supersession=self.target_supersession,
-            allow_mutation=allow_mutation,
-            original_intent=self.adapter.original_intent(),
+        logical_id = generate_preview_id(
+            context_name=self.adapter._profile.preview.context,
+            anchor_repo=self.adapter._profile.repository.partition("/")[2],
+            anchor_pr_number=self.adapter._issued_plan.plan_request.pr_number,
         )
+        from control_plane.storage.postgres import PostgresRecordStore
 
+        postgres = cast(PostgresRecordStore, store)
+        with ExitStack() as locks:
+            if not postgres.preview_refresh_is_excluded(preview_id=logical_id):
+                locks.enter_context(
+                    postgres.serialize_preview_refresh(preview_id=logical_id, dedicated=True)
+                )
+            locks.enter_context(
+                serialize_generic_web_preview_operation(
+                    record_store=store,
+                    profile=self.adapter._profile,
+                    preview_slug=self.adapter._issued_plan.preview_slug,
+                )
+            )
 
-def preview_execution_lock_name(target_key: str) -> str:
-    return f"preview:{target_key}"
+            locks.enter_context(
+                postgres.bind_odoo_preview_execution(
+                    preview_id=logical_id,
+                    execution_lock_name=preview_execution_lock_name(self.adapter.target_key()),
+                )
+            )
+
+            def check_both() -> None:
+                check()
+                if (
+                    postgres.database_dialect_name == "postgresql"
+                    and not postgres.preview_refresh_is_excluded(preview_id=logical_id)
+                ):
+                    raise ValueError("Logical preview executor exclusion was lost.")
+
+            self.adapter.execution_check = check_both
+            if (
+                allow_mutation
+                and postgres.read_idempotency_record(
+                    scope=self.reservation_scope,
+                    route_path=self.route_path,
+                    idempotency_key=self.idempotency_key,
+                )
+                is None
+            ):
+                self.require_original_preservation()
+            return run_durable_provider_operation(
+                store=store,
+                scope=self.reservation_scope,
+                route_path=self.route_path,
+                idempotency_key=self.idempotency_key,
+                request_fingerprint=self.request_fingerprint,
+                lease_owner=self.trace_id,
+                response_trace_id=self.trace_id,
+                adapter=self.adapter,
+                target_supersession=self.target_supersession,
+                allow_mutation=allow_mutation,
+                original_intent=self.adapter.original_intent(),
+            )
 
 
 def prepare_odoo_preview_apply_operation(
@@ -519,7 +673,7 @@ def prepare_odoo_preview_apply_operation(
         odoo_preview_supersession_is_quiescent
     ),
     pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
-    qualify_existing_refresh: bool = False,
+    qualify_existing_preview: bool = False,
     disposable_cleanup: bool = False,
 ) -> OdooPreviewApplyOperation:
     """Build the adapter and supersession policy for a service-issued plan.
@@ -545,7 +699,7 @@ def prepare_odoo_preview_apply_operation(
         execute_apply=execute_apply,
         observe_apply=observe_apply,
         pre_mutation_guard=pre_mutation_guard,
-        qualify_existing_refresh=qualify_existing_refresh,
+        qualify_existing_preview=qualify_existing_preview,
         disposable_cleanup=disposable_cleanup,
     )
 
@@ -673,11 +827,25 @@ def _original_supersession_is_quiescent(
             return False
         if not resolved_id or resolved_id != new_plan.compose_ref:
             return False
+    custody_check: dict[str, object] = {}
+    if (
+        request.apply.dry_run_plan.operation == "refresh"
+        and profile.preview.clean_testing_snapshot
+        and find_preview_record(
+            record_store=store,
+            context_name=profile.preview.context,
+            anchor_repo=profile.repository.partition("/")[2],
+            anchor_pr_number=original.issued_plan.plan_request.pr_number,
+        )
+        is None
+    ):
+        custody_check["require_snapshot_custody"] = True
     return check(
         control_plane_root_path=root,
         request=original.apply_request,
         database_url=database_url,
         schedule_binding=store.read_original_mutation_intent(reservation).get("schedule_binding"),
+        **custody_check,
     )
 
 

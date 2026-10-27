@@ -1,5 +1,3 @@
-"""Join canonical hostname fences only where the held drop is already approved."""
-
 from control_plane.storage.migrations.versions import (
     e9e3a7b1c5d8_join_retirement_paths as retirement,
     f0a4c8e2b6d9_canonical_public_host_fences as hostnames,

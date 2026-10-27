@@ -54,11 +54,3 @@ def safe_agent_context_text(value: str, *, fallback: str) -> str:
     """Return bounded text suitable for agent-facing context payloads."""
 
     return redact_untrusted_text(value, fallback=fallback)
-
-
-def agent_safe_host_label(value: str) -> str:
-    """Collapse local host identity to a non-topology-bearing label."""
-
-    if value.strip():
-        return "claimed_local_worker"
-    return ""

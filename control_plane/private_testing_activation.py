@@ -4,6 +4,8 @@ Deployment remains with the existing immutable-artifact driver. This operation
 never reads a private key or a managed runtime value, and never deploys.
 """
 
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from copy import deepcopy
 from dataclasses import dataclass
 import json
@@ -198,6 +200,10 @@ class PrivateTestingActivationAdapter:
     scope: str
     trace_id: str
     intent: dict[str, Any]
+    origin: ProviderTargetOrigin | None = None
+
+    def provider_target_origin(self) -> ProviderTargetOrigin | None:
+        return self.origin
 
     def target_key(self) -> str:
         return str(self.intent["target_key"])
@@ -358,7 +364,23 @@ class PrivateTestingActivationAdapter:
         intent["plan_sha256"] = canonical_json_sha256(intent)
         if request.expected_plan_sha256 and request.expected_plan_sha256 != intent["plan_sha256"]:
             raise PrivateTestingTransportRefused("Reviewed activation source or intent is stale.")
-        return cls(root, store, product, request, scope, trace_id, intent)
+        return cls(
+            root,
+            store,
+            product,
+            request,
+            scope,
+            trace_id,
+            intent,
+            ProviderTargetOrigin(
+                product=product,
+                context=request.context,
+                instance=request.instance,
+                provider_id=provider.provider_id,
+                target_type="compose",
+                target_id=target_id.target_id,
+            ),
+        )
 
     def result(self, *, matches: bool) -> dict[str, object]:
         return {

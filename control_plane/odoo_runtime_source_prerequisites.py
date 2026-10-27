@@ -1,0 +1,620 @@
+import json
+import hashlib
+import hmac
+import logging
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, Protocol, cast
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from control_plane import odoo_runtime_reads as reads, odoo_import_consumer_programs as programs
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.runtime_identity import (
+    RUNTIME_IDENTITY_ENV_KEY,
+    parse_runtime_identity_payload,
+)
+from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
+from control_plane.dokploy.native_copy_stream import _read_remote
+from control_plane.odoo_import_diagnostics import (
+    DiagnosticStore,
+    GRANT_FIELDS,
+    SOURCE_PREFIXES,
+    import_authority,
+)
+from control_plane.odoo_import_overrides import import_runtime_authority
+from control_plane.odoo_secret_references import (
+    read_secret_reference_authority,
+    selected_config_parameter_bindings,
+)
+from control_plane.odoo_source_prerequisite_programs import (
+    CONTAINER_PROGRAM,
+    HOST_PROGRAM,
+    FailureStage,
+)
+from control_plane.release_compatibility import _files
+from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION, _decrypt_secret_value
+from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
+
+SourceName = Literal["cm_data", "repairshopr", "fishbowl"]
+Agreement = Literal["match", "mismatch", "unknown"]
+Origin = Literal["explicit", "empty", "absent", "unknown"]
+TlsConfiguration = Literal[
+    "enabled_with_verification", "disabled", "verification_disabled", "unknown"
+]
+OPTION_FIELDS = ("port", "use_ssl", "ssl_verify", "batch_size")
+SOURCE_ADDONS = {
+    "cm_data": ("cm_data_import", "cm_data_importer", "cm_data_client"),
+    "repairshopr": ("repairshopr_import", "repairshopr_importer", "repairshopr_sync_client"),
+    "fishbowl": ("fishbowl_import", "fishbowl_importer", "fishbowl_client"),
+}
+PAYLOAD_ADDON = "launchplane_settings"
+PAYLOAD_ROOT = "/opt/project/addons/shared"
+PAYLOAD_FILES = (
+    "__init__.py",
+    "__manifest__.py",
+    "models/__init__.py",
+    "models/launchplane_settings.py",
+    "services/__init__.py",
+    "services/override_payload.py",
+)
+_READ_SLOTS = threading.BoundedSemaphore(4)
+_logger = logging.getLogger(__name__)
+
+
+class PrerequisiteStore(DiagnosticStore, Protocol):
+    def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord: ...
+
+
+class OptionEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    field: Literal["port", "use_ssl", "ssl_verify", "batch_size"]
+    authority: Origin
+    delivered: Origin
+    applied: Origin
+    authority_delivered: Agreement
+    authority_applied: Agreement
+    delivered_applied: Agreement
+
+
+class SourcePrerequisites(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    source: SourceName
+    failure_stage: FailureStage | None = None
+    producer: Literal["verified", "unknown"] = "unknown"
+    addon_state: Literal["installed", "unknown"] = "unknown"
+    options: tuple[OptionEvidence, ...] = Field(default=(), max_length=4)
+    authority_tls_configuration: TlsConfiguration = "unknown"
+    delivered_tls_configuration: TlsConfiguration = "unknown"
+    applied_tls_configuration: TlsConfiguration = "unknown"
+    delivered_settings: Literal["valid", "unknown"] = "unknown"
+    applied_settings: Literal["valid", "unknown"] = "unknown"
+    applied_delivered_password: Agreement = "unknown"
+    binding: Literal["selected", "missing_or_unsafe"] = "missing_or_unsafe"
+    secret_reference: Agreement = "unknown"
+    selected_version_metadata: Literal["current", "unknown"] = "unknown"
+    managed_password_value_agreement: Literal["unknown"] = "unknown"
+
+    @model_validator(mode="after")
+    def unique_options(self) -> "SourcePrerequisites":
+        if len({item.field for item in self.options}) != len(self.options):
+            raise ValueError("Duplicate option evidence")
+        return self
+
+
+class SourcePrerequisiteResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    runtime: Literal["verified", "unknown"] = "unknown"
+    failure_stage: FailureStage | None = None
+    sources: tuple[SourcePrerequisites, ...] = Field(min_length=3, max_length=3)
+    applied: Literal[False] = False
+    values_redacted: Literal[True] = True
+
+    @model_validator(mode="after")
+    def fixed_sources(self) -> "SourcePrerequisiteResult":
+        if self.failure_stage is not None and self.runtime != "unknown":
+            raise ValueError("Failure stage requires unknown runtime")
+        if {item.source for item in self.sources} != set(SOURCE_ADDONS):
+            raise ValueError("Invalid prerequisite sources")
+        return self
+
+
+def unknown_result(stage: FailureStage | None = None) -> SourcePrerequisiteResult:
+    return SourcePrerequisiteResult(
+        failure_stage=stage,
+        sources=tuple(SourcePrerequisites(source=cast(SourceName, name)) for name in SOURCE_ADDONS),
+    )
+
+
+def producer_files(
+    manifest: ArtifactIdentityManifest, connection: reads.OdooRuntimeConnection, repository: str
+) -> dict[str, dict[str, str]]:
+    identity = connection.selection.identity
+    if (
+        manifest.artifact_id != identity.artifact_id
+        or manifest.source_commit != identity.source_git_ref
+        or manifest.source_build is None
+        or manifest.source_build.repository != repository
+        or f"{manifest.image.repository}@{manifest.image.digest}" != identity.image_reference
+    ):
+        raise ValueError("Unverified prerequisite artifact")
+    inventory = _files(manifest)
+    result = {}
+    for name, (addon, model, client) in SOURCE_ADDONS.items():
+        paths = (
+            "__init__.py",
+            "__manifest__.py",
+            "models/__init__.py",
+            f"models/{model}.py",
+            "services/__init__.py",
+            f"services/{client}.py",
+            "services/connection_settings.py",
+        )
+        try:
+            result[name] = {
+                f"/opt/project/addons/{addon}/{path}": inventory[
+                    ("tenant", f"addons/{addon}/{path}")
+                ].sha256
+                for path in paths
+            }
+        except KeyError:
+            result[name] = {}
+    candidates = (
+        [
+            source
+            for source in manifest.release_compatibility.sources
+            if source.input_name.startswith("addon:")
+            and all(
+                (source.input_name, f"{PAYLOAD_ADDON}/{path}") in inventory
+                for path in PAYLOAD_FILES
+            )
+        ]
+        if manifest.release_compatibility
+        else []
+    )
+    result["payload"] = (
+        {
+            f"{PAYLOAD_ROOT}/{PAYLOAD_ADDON}/{path}": inventory[
+                (candidates[0].input_name, f"{PAYLOAD_ADDON}/{path}")
+            ].sha256
+            for path in PAYLOAD_FILES
+        }
+        if len(candidates) == 1
+        else {}
+    )
+    return result
+
+
+@dataclass(frozen=True, repr=False)
+class _Authority:
+    snapshot: str
+    options: dict[str, dict[str, dict[str, object]]]
+    metadata: dict[str, dict[str, str]]
+
+
+def _authority(store: PrerequisiteStore, product: str) -> _Authority:
+    authority = import_authority(store, product)
+    lane = next(lane for lane in authority.profile.lanes if lane.instance == "testing")
+    values, expectation = import_runtime_authority(
+        record_store=store, context=lane.context, instance=lane.instance
+    )
+    target = store.read_dokploy_target_record(
+        context_name=lane.context, instance_name=lane.instance
+    )
+    bindings = store.list_secret_bindings(
+        integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION, context_name=lane.context
+    )
+    excluded = set(target.env)
+    for record in expectation.records:
+        excluded.update(record.retired_provider_keys)
+    excluded.update(
+        binding.binding_key
+        for binding in bindings
+        if binding.context == lane.context and binding.instance in {"", lane.instance}
+    )
+    options: dict[str, dict[str, dict[str, object]]] = {}
+    metadata: dict[str, dict[str, str]] = {}
+    try:
+        overrides = store.read_odoo_instance_override_record(
+            context_name=lane.context, instance_name=lane.instance
+        )
+    except FileNotFoundError:
+        overrides = None
+    try:
+        references = (
+            read_secret_reference_authority(store, overrides) if overrides is not None else None
+        )
+    except FileNotFoundError:
+        references = None
+    for name, prefix in SOURCE_PREFIXES.items():
+        options[name] = {}
+        for field in ("host", "user", "db", "name", *OPTION_FIELDS):
+            key = prefix + "." + field
+            runtime_key = config_parameter_runtime_key(key)
+            parameter = (
+                next((item for item in overrides.config_parameters if item.key == key), None)
+                if overrides
+                else None
+            )
+            literal_parameter = (
+                parameter if parameter is not None and parameter.value.source == "literal" else None
+            )
+            options[name][key] = {
+                "known": runtime_key not in excluded
+                and runtime_key not in values
+                and (parameter is None or literal_parameter is not None),
+                "present": parameter is not None,
+                "value": literal_parameter.value.value if literal_parameter is not None else None,
+            }
+        selected = authority.sources.get(name)
+        reference: Agreement = "unknown"
+        if selected is not None and overrides is not None and references is not None:
+            try:
+                chosen = selected_config_parameter_bindings(
+                    overrides, references, (prefix + ".password",)
+                )
+                parameter = next(
+                    item for item in overrides.config_parameters if item.key == prefix + ".password"
+                )
+                reference = (
+                    "match"
+                    if (
+                        chosen[prefix + ".password"] == selected.binding
+                        and parameter.value.secret_binding_id == selected.binding.binding_id
+                    )
+                    else "mismatch"
+                )
+            except ValueError:
+                reference = "unknown"
+        metadata[name] = {
+            "binding": "selected" if selected else "missing_or_unsafe",
+            "secret_reference": reference,
+            "selected_version_metadata": "current" if selected else "unknown",
+        }
+    snapshot = json.dumps(
+        {
+            "base": authority.private_snapshot,
+            "options": options,
+            "overrides": overrides.model_dump(mode="json") if overrides else None,
+            "references": {
+                "metadata": references.metadata.model_dump(mode="json"),
+                "runtime": references.runtime.model_dump(mode="json"),
+            }
+            if references
+            else None,
+            "excluded": sorted(excluded),
+        },
+        sort_keys=True,
+    )
+    return _Authority(snapshot, options, metadata)
+
+
+class PrerequisiteReadUnavailable(ValueError):
+    def __init__(self, stage: FailureStage) -> None:
+        super().__init__(stage)
+        self.stage = stage
+
+
+def runtime_prerequisites(
+    connection: reads.OdooRuntimeConnection,
+    *,
+    files: dict[str, dict[str, str]],
+    authority: _Authority,
+    observed_identity: str,
+) -> SourcePrerequisiteResult:
+    stage: FailureStage = "runtime_inspection"
+    try:
+        reads.require_runtime_identity(
+            connection.selection.identity, parse_runtime_identity_payload(observed_identity)
+        )
+        program = CONTAINER_PROGRAM.replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH)).replace(
+            "__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)
+        )
+        frames: list[dict[str, object]] = []
+        stage = "transport"
+        _read_remote(
+            host=connection.host,
+            token=connection.token,
+            server_id=connection.server_id,
+            program=HOST_PROGRAM.replace("__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)),
+            payload={
+                "project": connection.app_name,
+                "container": connection.evidence.container_id,
+                "identity": json.loads(observed_identity),
+                "files": files,
+                "addons": {name: value[0] for name, value in SOURCE_ADDONS.items()},
+                "prefixes": SOURCE_PREFIXES,
+                "option_fields": OPTION_FIELDS,
+                "authority": authority.options,
+                "metadata": authority.metadata,
+                "payload_addon": PAYLOAD_ADDON,
+                "payload_root": PAYLOAD_ROOT,
+                "container_program": program,
+            },
+            receive=frames.append,
+            timeout_seconds=60,
+        )
+        stage = "result_validation"
+        if (
+            len(frames) != 1
+            or set(frames[0]) != {"type", "result"}
+            or frames[0]["type"] != "complete"
+        ):
+            raise ValueError("Invalid prerequisite frame")
+        if len(json.dumps(frames[0])) > 16384:
+            raise ValueError("Oversized prerequisite frame")
+        result = SourcePrerequisiteResult.model_validate_json(json.dumps(frames[0]["result"]))
+        return result
+    except Exception:
+        raise PrerequisiteReadUnavailable(stage) from None
+
+
+def diagnose_source_prerequisites(
+    *, store: PrerequisiteStore, product: str, control_plane_root: Path, database_url: str | None
+) -> SourcePrerequisiteResult:
+    if not _READ_SLOTS.acquire(blocking=False):
+        return unknown_result("capacity")
+    stage: FailureStage = "authority"
+    try:
+        authority = _authority(store, product)
+        profile = store.read_product_profile_record(product)
+        stage = "runtime_selection"
+        selection = reads.select_stable_runtime(store, profile, "testing")
+        stage = "artifact"
+        manifest = store.read_artifact_manifest(selection.identity.artifact_id)
+        stage = "runtime_connection"
+        connection = reads.connect_runtime(
+            store=store,
+            selection=selection,
+            control_plane_root=control_plane_root,
+            database_url=database_url,
+        )
+        stage = "producer_inventory"
+        files = producer_files(manifest, connection, profile.repository)
+        if not files["payload"]:
+            return unknown_result("producer_inventory")
+        stage = "runtime_inspection"
+        before = reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
+        result = runtime_prerequisites(
+            connection,
+            files=files,
+            authority=authority,
+            observed_identity=before[RUNTIME_IDENTITY_ENV_KEY],
+        )
+        stage = "drift"
+        reads.assert_selection_current(store, selection)
+        after = reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
+        if (
+            before != after
+            or _authority(store, product).snapshot != authority.snapshot
+            or store.read_artifact_manifest(selection.identity.artifact_id) != manifest
+            or store.read_product_profile_record(product) != profile
+        ):
+            return unknown_result("drift")
+        return result
+    except PrerequisiteReadUnavailable as error:
+        return unknown_result(error.stage)
+    except Exception:
+        _logger.debug("Source prerequisite read unavailable.")
+        return unknown_result(stage)
+    finally:
+        _READ_SLOTS.release()
+
+
+class SourceConsumerEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    source: SourceName
+    producer: Literal["verified"] | None = None
+    failure_stage: FailureStage | None = None
+    grants: Literal["read_only", "unsafe", "unknown"] = "unknown"
+    parameters: dict[str, str] = Field(default_factory=dict, repr=False)
+
+
+class SourceConsumerResult(BaseModel):
+    evidence_sha256: str = ""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    runtime: Literal["verified", "unknown"]
+    failure_stage: FailureStage | None = None
+    sources: tuple[SourceConsumerEvidence, ...]
+
+
+def read_source_consumers(
+    *,
+    store: PrerequisiteStore,
+    product: str,
+    control_plane_root: Path,
+    database_url: str | None,
+    mode: Literal["grants", "preview"],
+    sources: tuple[str, ...],
+    expected_runtime: reads.OdooRuntimeConnection | None = None,
+) -> SourceConsumerResult:
+    unknown = SourceConsumerResult(
+        runtime="unknown",
+        sources=tuple(
+            SourceConsumerEvidence(source=cast(SourceName, name)) for name in SOURCE_ADDONS
+        ),
+    )
+    if not _READ_SLOTS.acquire(blocking=False):
+        return unknown
+    try:
+        authority = _authority(store, product)
+        bindings = import_authority(store, product)
+        profile = bindings.profile
+        selection = reads.select_stable_runtime(store, profile, "testing")
+        manifest = store.read_artifact_manifest(selection.identity.artifact_id)
+        connection = reads.connect_runtime(
+            store=store,
+            selection=selection,
+            control_plane_root=control_plane_root,
+            database_url=database_url,
+        )
+        if expected_runtime is not None and (
+            connection.selection != expected_runtime.selection
+            or (
+                connection.evidence.container_id,
+                connection.evidence.target_id,
+                connection.host,
+                connection.server_id,
+                connection.app_name,
+            )
+            != (
+                expected_runtime.evidence.container_id,
+                expected_runtime.evidence.target_id,
+                expected_runtime.host,
+                expected_runtime.server_id,
+                expected_runtime.app_name,
+            )
+        ):
+            return unknown
+        files = producer_files(manifest, connection, profile.repository)
+        before = reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
+        reads.require_runtime_identity(
+            selection.identity, parse_runtime_identity_payload(before[RUNTIME_IDENTITY_ENV_KEY])
+        )
+        metadata = {name: dict(value) for name, value in authority.metadata.items()}
+        password_keys = {
+            name: config_parameter_secret_env_key(prefix + ".password")
+            for name, prefix in SOURCE_PREFIXES.items()
+        }
+        for name in SOURCE_ADDONS:
+            selected = bindings.sources.get(name)
+            try:
+                if (
+                    name not in sources
+                    or selected is None
+                    or not hmac.compare_digest(
+                        _decrypt_secret_value(
+                            selected.version.ciphertext, selected.version.key_id
+                        ).encode(),
+                        before.get(password_keys[name], "").encode(),
+                    )
+                ):
+                    metadata[name]["binding"] = "missing_or_unsafe"
+            except Exception:
+                metadata[name]["binding"] = "missing_or_unsafe"
+        program = programs.CONTAINER_PROGRAM
+        for key, value in {
+            "__CONFIG_PATH__": repr(ODOO_WEB_CONFIG_PATH),
+            "__IDENTITY_KEY__": repr(RUNTIME_IDENTITY_ENV_KEY),
+            "__CONSUMER_MODE__": repr(mode),
+            "__GRANT_FIELDS__": repr(GRANT_FIELDS),
+            "__PROBE__": repr(Path(__file__).with_name("odoo_source_probe.py").read_text()),
+        }.items():
+            program = program.replace(key, value)
+        frames: list[dict[str, object]] = []
+        _read_remote(
+            host=connection.host,
+            token=connection.token,
+            server_id=connection.server_id,
+            program=programs.HOST_PROGRAM.replace(
+                "__IDENTITY_KEY__", repr(RUNTIME_IDENTITY_ENV_KEY)
+            ),
+            payload={
+                "project": connection.app_name,
+                "container": connection.evidence.container_id,
+                "identity": json.loads(before[RUNTIME_IDENTITY_ENV_KEY]),
+                "files": files,
+                "addons": {name: value[0] for name, value in SOURCE_ADDONS.items()},
+                "prefixes": SOURCE_PREFIXES,
+                "option_fields": OPTION_FIELDS,
+                "authority": authority.options,
+                "metadata": metadata,
+                "payload_addon": PAYLOAD_ADDON,
+                "payload_root": PAYLOAD_ROOT,
+                "password_keys": password_keys,
+                "container_program": program,
+            },
+            receive=frames.append,
+            timeout_seconds=75,
+        )
+        if (
+            len(frames) != 1
+            or set(frames[0]) != {"type", "result"}
+            or frames[0]["type"] != "complete"
+            or len(json.dumps(frames)) > 16384
+        ):
+            return unknown
+        result = SourceConsumerResult.model_validate_json(json.dumps(frames[0]["result"]))
+        if {item.source for item in result.sources} != set(SOURCE_ADDONS) or len(
+            result.sources
+        ) != len(SOURCE_ADDONS):
+            return unknown
+        for source in result.sources:
+            if source.parameters and (
+                mode != "preview"
+                or source.source != "fishbowl"
+                or set(source.parameters) != {"host", "user", "db", "port", "ssl_verify"}
+                or any(not value or len(value) > 16384 for value in source.parameters.values())
+            ):
+                return unknown
+            if (
+                source.source not in sources
+                or metadata[source.source]["binding"] != "selected"
+                or metadata[source.source]["secret_reference"] != "match"
+            ):
+                if source.parameters or source.grants != "unknown":
+                    return unknown
+        reads.assert_selection_current(store, selection)
+        after = reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
+        if (
+            before != after
+            or _authority(store, product).snapshot != authority.snapshot
+            or import_authority(store, product).private_snapshot != bindings.private_snapshot
+            or store.read_artifact_manifest(selection.identity.artifact_id) != manifest
+            or store.read_product_profile_record(product) != profile
+        ):
+            return unknown
+        reads.assert_selection_current(store, selection)
+        digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "authority": authority.snapshot,
+                    "identity": selection.identity.model_dump(mode="json"),
+                    "artifact": manifest.model_dump(mode="json"),
+                    "result": result.model_dump(mode="json"),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return result.model_copy(update={"evidence_sha256": digest})
+    except Exception:
+        _logger.debug("Qualified source read unavailable.")
+        return unknown
+    finally:
+        _READ_SLOTS.release()

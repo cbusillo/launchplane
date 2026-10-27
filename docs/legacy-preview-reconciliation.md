@@ -5,12 +5,15 @@ title: Legacy Preview Reconciliation
 # Legacy preview reconciliation
 
 `POST /v1/previews/legacy-generic-web/reconciliation` inspects and reconciles
-one legacy generic-web preview whose provider application is already absent.
+one legacy generic-web or Odoo preview whose provider resources are already absent.
+The existing path and operation ID remain compatible; driver selection comes from
+the recorded product profile.
 It takes an exact `product`, `preview_id`, `reason`, and `mode` (`inspect`,
 `plan`, or `apply`). It never deletes provider resources or retires a product.
 Provider-present standalone reconciliations require the existing authorized teardown path first.
 For retiring a product, use the [single reviewed product-retirement operation](product-retirement.md),
-which includes its own previews without separate preview-cleanup approvals.
+which includes its own generic-web previews without separate preview-cleanup approvals.
+Standalone Odoo reconciliation does not extend integrated product retirement.
 
 ## Review and execution
 
@@ -63,10 +66,87 @@ product's repository, image or naming policy block reconciliation. Targets
 uniquely tracked to another live preview or stable lane are inspected and
 excluded unless this preview's exact identity or domain matches. Missing,
 malformed, truncated, duplicate, changing or uncertain inventory is not absence.
-Shared contexts, ambiguous anchors, current running generations/reconciliation, missing
+Shared contexts, ambiguous anchors, running product reconciliation, missing
 generation pointers, and existing preview target authority fail closed.
 
-An unreferenced historical generation can retain an interrupted nonterminal
+For Odoo, the service enumerates every project's environments and composes, reads
+joined compose details and all live domains, and enumerates again. It also checks
+applications for preview identity or domain residue. Physical IDs include their
+provider category: an application ID cannot exclude a compose with the same ID.
+A legacy target ID needs its matching typed target configuration before it can
+exclude an owned sibling or stable target. A current Odoo serving generation can
+also prove a sibling's compose through its exact successful durable operation,
+retained issued intent and returned compose ID. A deployment-record locator or
+runtime instance name alone is insufficient. Its current runtime identity and
+the applied lifecycle response must agree, and physical ownership must be unique.
+The reviewed digest binds this sibling evidence. Completion locks its exact
+operation and original-intent rows without waiting; contention requires retry
+instead of reversing the provider recovery lock order. Existing typed target
+ownership remains valid for older producers without durable Odoo operations.
+For generic-web, a current READY serving generation can identify its application
+through a successful keyed HTTP refresh receipt or a qualified configured
+application lifecycle receipt. The runtime's generated deployment locator is
+neither receipt's record ID. HTTP proof uses the exact refresh route and runtime
+nonce, requires one receipt, and checks the complete successful response against
+the current preview, generation and runtime. A lifecycle receipt must bind the
+same artifact and source within that serving generation's attempt; older qualified
+receipts, later holds and conflicting physical IDs cannot establish ownership.
+These proofs share category and exclusive physical ownership checks and the
+reviewed authority digest.
+Completion protects HTTP receipts with the exact nonblocking row locks above;
+lifecycle receipts use the existing deployment-authority table lock and fresh
+commit-time binding. Missing physical proof grants no new exclusion, including
+event-only history with no persisted physical evidence. Missing, older-shape or
+unreadable sibling evidence grants no exclusion; complete provider inventory must
+still prove absence and refuses any unbound product candidate. An uncertain later
+lifecycle also discards an earlier HTTP exclusion. Conflicting proven physical
+ownership and storage identity inconsistencies continue to refuse reconciliation.
+Unknown renamed raw composes require safe image-source classification.
+YAML and environment values are inspected only
+in memory; returned evidence contains identities and classifications, never raw
+compose source or environment values. Bare image variables and literal defaults
+such as `${IMAGE:-registry.example/service:tag}` use unambiguous environment
+bindings; unresolved image expressions, malformed joins or uncertain source
+cannot prove absence. Historical compose names that
+disagree with the current profile's name remain uncertain and refuse.
+
+Odoo records must use the canonical repository basename and preview ID produced
+by the existing Odoo lifecycle. A different legacy identity needs investigation
+before reconciliation can establish a safe ordering barrier.
+
+Odoo inspection holds the actual physical executor lock, then the stable logical
+preview lock, then the existing preview serialization lock through completion.
+The logical key uses the preview context, repository and PR, so a service-issued
+plan with a custom physical slug shares the same fence. Original PostgreSQL lock
+transactions must remain alive. Durable running or uncertain reservations also
+block reconciliation, including legacy raw target keys. Settle or tear down the
+original operation through its supported recovery path before inspecting again;
+only retained original logical ownership can exempt another preview's held work.
+Physical sibling naming alone cannot exempt it. Never delete reservations or
+substitute provider absence for their settlement.
+
+A legacy Odoo generation with no runtime identity may retain interrupted
+nonterminal state, including current pointers, when those executor fences exclude
+current work and complete absence is established. Its history is retained unchanged.
+The atomic Odoo completion stores an exact receipt pointer on the destroyed preview.
+That pointer selects the authenticated completion as its only ordering authority;
+the reviewed reason is descriptive text and cannot establish a service destroy or
+override the completion time. A missing or invalid pointed receipt fails closed.
+Old issued Odoo plans are rejected before provider effects under the same fences.
+The same pre-provider check protects existing active histories: a missing or newer
+ordering record cannot be bypassed by executing first and publishing evidence later.
+Malformed existing ordering also rejects before effect and releases the unused
+provider reservation instead of leaving an operation held for reconciliation.
+Bare preview evidence cannot erase that terminal proof. Generation evidence can
+resume the preview only with a fresh generation requested strictly after completion;
+changing an old generation's timestamps does not qualify. Stale evidence returns
+`409 preview_retirement_conflict` without partially writing generation or preview.
+A globally existing generation ID cannot be reassigned to another preview by
+either standalone or bundled writers; a new preview needs its own generation ID.
+A genuine later service-issued Odoo destroy also retains its normal lifecycle flow.
+Unproven older destroyed records keep their existing fail-closed ordering behavior.
+
+For generic-web, an unreferenced historical generation can retain an interrupted nonterminal
 state. It no longer blocks inspection when all current generation pointers refer
 to terminal evidence and the service holds the preview's actual exclusive
 PostgreSQL executor lock (or retirement's exclusive product lock). The original
@@ -108,6 +188,84 @@ for the recorded product/preview context. Apply additionally requires existing
 the same context. Every call, including replay, checks current authorization.
 Testing-lane `product_retirement` authority does not authorize preview writes.
 This feature creates no grant, new caller identity or policy exception.
+
+## Unrecorded Odoo resources with retained original intent
+
+An interrupted snapshot Odoo preview can have a provider compose and original
+durable reservation without a preview lifecycle record. A new refresh leaves
+the original held when its native restore receipt, physical storage binding
+and database witness cannot prove custody. Completed operation status alone
+does not prove data ownership. Keep that original key and its retained intent.
+
+For this case, request a service-issued Odoo destroy plan for the exact existing
+preview. Submit it through the ordinary preview-apply service operation with
+`preserve_original_reservation_id` naming the original refresh reservation.
+This optional apply-envelope field does not change the issued plan or its
+fingerprint. The new destroy's retained intent includes the selector, so the
+same operation can recover after a service restart. Existing caller authority,
+executor locks, recovery grace, target ownership and provider quiescence still
+apply. Another held operation, an existing lifecycle record, known use, an only
+copy report, shared production resources or a target alias refuses admission.
+
+The original operation can outlive its issued plan's expiry. Only a
+framework-qualified retry of that exact preserving destroy, with its current
+lease, retained intent and nonempty effect checkpoint, may continue after
+expiry. It still rebuilds and compares current plan authority and rechecks
+preservation custody before effects. A fresh expired plan or another operation
+cannot use that continuation; retain the original key.
+
+After capture, the durable runner still requires positive provider retry safety.
+An admitted original retry rechecks admission and verifies its complete retained
+copy, then continues teardown without repeating capture or rewinding its checkpoint.
+This applies before and after expiry. Missing copies cannot be silently recaptured
+after a destructive checkpoint. Unknown effects stay held; an empty pre-effect
+checkpoint keeps ordinary retry and expiry handling.
+
+An older original without a clean snapshot can use its retained, scoped server
+schedule binding. If that binding is absent, the preserving operation captures
+and retains the same binding before effects. Missing or conflicting server
+evidence refuses preservation; old intents are not rewritten.
+
+The service qualifies an unserved plain preview with exclusively owned data,
+log and database volumes. Unexpected data, addon files, sessions, logs,
+additional databases, writable mounts or consumers remain held. Existing
+read-only runner bind mounts outside the data volumes are neither copied nor
+deleted; the runner is never started. Docker host-gateway aliases do not change
+storage custody. Other host aliases and privileged runtime shapes remain held.
+It stops that preview's unserved application containers under its durable
+provider lease. If its exclusively owned database is stopped, it starts only
+that database for the bounded dump after storage and capacity qualification.
+Memory headroom is checked again after startup. On completion or a reported
+failure it stops a database that it started; a previously running database stays
+running. Verifier removal and that database stop each have their own bounded
+cleanup window outside the work budget. Process death or transport loss retains the original operation's
+uncertainty fence and requires same-key recovery; it never restarts the application.
+The existing memory floor and disk reserve remain in force. It captures a
+bounded PostgreSQL dump and full filestore archive inside the same Docker
+host, hashes both and verifies every archived attachment. It restores the dump
+into a temporary database container using the already-local database image,
+no network, ports, application keys or original volumes, and verifies the
+restored schema before publishing the retained copy. Only exclusively owned
+verification fixtures are cleaned up.
+
+Completed copies live privately under the clean-snapshot state root's
+`retained-previews/<preservation-id>` directory. The receipt binds immutable
+original intent, provider identity and physical volume creation/backing
+identities. It records archive hashes, filestore inventory and successful
+restore verification. Copies have no automatic expiry. They preserve unknown
+legacy data; this operation does not qualify that data for later disposal.
+No runtime environment, license or credential file is exported.
+
+Every subsequent destructive checkpoint and lifecycle adoption verifies the
+retained copy. Reopened applications, changed storage or changed original
+filestore block deletion. Only preservation phases with positive source and
+execution readback can resume an interrupted capture under its original key.
+Other uncertain phases retain the normal provider-observation fence. After
+provider absence, the complete copy remains verifiable without deleted source
+containers. Actual successful destroy writes the normal destroyed lifecycle;
+it never fabricates one to authorize an earlier action. The event reconciler
+can then build the still-open PR's current verified artifact from its clean
+snapshot through its ordinary fresh-preview path.
 
 ## Bounded service helper
 

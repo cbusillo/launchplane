@@ -2,6 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from typing import (
     Any,
     cast,
@@ -810,6 +811,57 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["result"]["endpoint_key"], "repairshopr-sync-prod-runtime")
         self.assertEqual(payload["result"]["endpoint_status"], "applied")
         self.assertEqual(stored_record.url, "http://10.0.0.5:8000/health")
+
+    async def test_private_endpoint_ownership_conflicts_are_retryable_without_a_success_receipt(
+        self,
+    ) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
+        from control_plane.storage.product_authority_bundle import PublicHostAuthorityBusy
+
+        for error, code in (
+            (
+                PublicHostAuthorityBusy("Provider effect is in flight"),
+                "public_hosts_authority_busy",
+            ),
+            (
+                DokployTargetRecordChanged("Foreign target owns the hostname"),
+                "private_health_endpoint_host_owned",
+            ),
+        ):
+            with self.subTest(code=code), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="private_health_endpoint.apply",
+                        product="repairshopr-sync",
+                        context="repairshopr-sync",
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                headers = {
+                    "Authorization": "Bearer valid-token",
+                    "Idempotency-Key": "endpoint-conflict",
+                }
+                payload = _private_health_endpoint_apply_payload(mode="apply")
+                with patch.object(store, "write_private_health_endpoint_record", side_effect=error):
+                    response = await _asgi_request(
+                        app,
+                        "POST",
+                        "/v1/private-health-endpoints/apply",
+                        headers=headers,
+                        payload=payload,
+                    )
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json()["error"]["code"], code)
+                retried = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/private-health-endpoints/apply",
+                    headers=headers,
+                    payload=payload,
+                )
+                self.assertEqual(retried.status_code, 202)
 
     async def test_private_health_endpoint_dry_run_does_not_write_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

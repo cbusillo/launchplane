@@ -79,6 +79,7 @@ def require_testing_application_target_authority(
     *,
     target_id: str,
     provider_id: str,
+    driver_id: str = "generic-web",
 ) -> None:
     """Keep dispatch bound to the active application even after inputs are saved."""
     store = cast(TestingInputStore, record_store)
@@ -94,7 +95,7 @@ def require_testing_application_target_authority(
     )
     if (
         not current.is_active
-        or current.driver_id != "generic-web"
+        or current.driver_id != driver_id
         or lane.instance != "testing"
         or not any(
             item.context == lane.context

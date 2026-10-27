@@ -314,6 +314,16 @@ class TemporaryHotfixRehearsal(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rollback.authorization.grant, "client_release_acceptance")
         self.assertEqual(rollback.authorization.caller.github_id, CLIENT_ID)
         self.assertTrue(client_release_grant_allows(self.store, rollback.authorization))
+        from control_plane.release_review import release_version
+
+        def unreadable_testing(**kwargs: Any) -> Any:
+            if kwargs["instance"] == "testing":
+                raise FileNotFoundError("Testing evidence is unavailable")
+            return release_version(**kwargs)
+
+        with patch("control_plane.client_release.release_version", side_effect=unreadable_testing):
+            # Odoo's existing queued rollback grant still requires readable tuples.
+            self.assertFalse(client_release_grant_allows(self.store, rollback.authorization))
         self.finish(rollback_id)
         self.set_prod("artifact-prod")
         self.assertTrue(client_release_grant_allows(self.store, rollback.authorization))

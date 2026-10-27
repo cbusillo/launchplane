@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 
 from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
+    a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
 )
 from control_plane.storage.postgres import Base, _build_engine
 from control_plane.storage.schema_invariants import (
@@ -141,6 +142,7 @@ LEGACY_CURRENT_SCHEMA: dict[str, frozenset[str]] = {
 LEGACY_KNOWN_LATER_TABLES = (
     frozenset(Base.metadata.tables)
     | frozenset(retired_delivery.RETIRED_TABLES)
+    | frozenset({profile_archive.ARCHIVE_TABLE})
     | frozenset(LEGACY_CURRENT_SCHEMA)
 ) - frozenset(LEGACY_BASELINE_SCHEMA)
 

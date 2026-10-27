@@ -154,6 +154,9 @@ class NativeCaptureFinishedError(ValueError):
 def digest_json(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':')).encode()).hexdigest()
 
+"""
+
+PUBLISHED_SOURCE_LIBRARY = r"""
 def published_source(spec):
     namespace=spec['namespace']
     if not re.fullmatch(r'lp-prod-recipient-[a-f0-9]{32}',namespace):
@@ -225,6 +228,11 @@ def published_source(spec):
     identity=digest_json({'volumes':volume_rows,'containers':sorted(source_rows,key=lambda r:r['Id'])})
     return paths,services[spec['database_service']],identity
 
+"""
+
+PUBLISHED_RECOVERY_LIBRARY += (
+    PUBLISHED_SOURCE_LIBRARY
+    + r"""
 def read_native_ready(process,nonce):
     if process.stderr is None or process.stdin is None:
         raise ValueError('private native handshake unavailable')
@@ -595,6 +603,7 @@ def published_recovery(spec,*,base=None):
             raise
 
 """
+)
 
 PUBLISHED_RECOVERY_PROGRAM = (
     RESOURCE_LIBRARY

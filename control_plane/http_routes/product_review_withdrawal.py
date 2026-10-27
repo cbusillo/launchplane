@@ -23,6 +23,7 @@ from control_plane.product_review_withdrawal import (
     ReviewWithdrawalRequest,
     ReviewWithdrawalService,
     ReviewWithdrawalRefused,
+    ReviewWithdrawalRefusalReason,
     ReviewWithdrawalUnsettled,
     ReviewWithdrawalNotDispatched,
     ReviewWithdrawalHistoryUnverifiable,
@@ -53,9 +54,19 @@ def register_product_review_withdrawal_route(
     ) -> AcceptedEvidenceResponse:
         trace = dependencies.next_trace_id()
 
-        def refuse(status: int, code: str, message: str) -> NoReturn:
+        def refuse(
+            status: int,
+            code: str,
+            message: str,
+            *,
+            reason: ReviewWithdrawalRefusalReason | None = None,
+        ) -> NoReturn:
             raise dependencies.http_error(
-                status_code=status, trace_id=trace, code=code, message=message
+                status_code=status,
+                trace_id=trace,
+                code=code,
+                message=message,
+                reason=reason.value if reason is not None else None,
             )
 
         trusted = (
@@ -118,7 +129,7 @@ def register_product_review_withdrawal_route(
                 "Authenticated history cannot be uniquely verified. No new withdrawal was dispatched. Resolve history verification before retrying; changing keys cannot fix it.",
             )
         except ReviewWithdrawalRefused as error:
-            refuse(409, "product_review_withdrawal_refused", str(error))
+            refuse(409, "product_review_withdrawal_refused", str(error), reason=error.reason)
         except (ValueError, click.ClickException, OSError):
             refuse(
                 503,

@@ -10,7 +10,10 @@ from unittest.mock import Mock, patch
 
 from sqlalchemy import delete, select
 
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import (
+    DeploymentRecord,
+    deployment_operation_evidence,
+)
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -20,7 +23,6 @@ from control_plane.contracts.promotion_record import (
 from control_plane.production_delivery_monitor import (
     DELIVERY_EVIDENCE_PAGE_SIZE,
     _candidate_key,
-    _write_receipt,
     _SCOPE,
     _ROUTE,
     monitor_production_delivery_once,
@@ -28,6 +30,7 @@ from control_plane.production_delivery_monitor import (
     _observe,
     REFUSED_REQUEST_CHECK_PREFIX,
 )
+from tests.support.delivery_receipts import _write_receipt
 from control_plane.storage.delivery_evidence import sources
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -100,6 +103,377 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
 
     def incidents(self) -> tuple[object, ...]:
         return self.store.list_public_ingress_incident_records(status="open")
+
+    def test_later_rollback_recovers_old_target_and_matching_candidate_incidents(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                original = self.deploy("old-target-rollback", failed=True)
+                self.monitor()
+                record_production_delivery_failure(
+                    self.store,
+                    self.profile,
+                    self.lane,
+                    candidate="image@accepted-candidate",
+                    reason="rollback_failed",
+                    trace_id="release-step",
+                    observed_at=self.now.isoformat(),
+                )
+                incidents = self.store.list_public_ingress_incident_records(status="open")
+                self.assertEqual(len(incidents), 2)
+                for incident in incidents:
+                    observation = self.store.read_public_ingress_observation_record(
+                        incident.latest_observation_id
+                    )
+                    self.store.write_public_ingress_observation_record(
+                        observation.model_copy(update={"summary": "Updated human-readable wording"})
+                    )
+                self.now += timedelta(seconds=10)
+                rollback = self.deploy("new-drill")
+                rollback = rollback.model_copy(
+                    update={
+                        "artifact_identity": ArtifactIdentityReference(
+                            artifact_id="image@accepted-candidate"
+                        ),
+                        "runtime_source": deployment_operation_evidence(rollback=True),
+                    }
+                )
+                self.store.write_deployment_record(rollback)
+                self.monitor()
+                self.assertFalse(self.incidents())
+                for incident in incidents:
+                    resolved = self.store.read_public_ingress_incident_record(incident.incident_id)
+                    self.assertEqual(resolved.status, "resolved")
+                    self.assertEqual(resolved.resolution_reason, "recovered")
+                self.assertEqual(self.store.read_deployment_record(original.record_id), original)
+                self.monitor()
+                self.assertFalse(self.incidents())
+
+    def test_rollback_recovery_requires_matching_failure_and_later_passing_lane_rollback(
+        self,
+    ) -> None:
+        root = self.root
+        cases = (
+            "forward_failure",
+            "forward_success",
+            "failed_rollback",
+            "unhealthy_rollback",
+            "equal_time",
+            "earlier_rollback",
+            "other_context",
+            "testing",
+            "missing_origin",
+            "unrelated_failure",
+            "old_failure",
+            "future_rollback",
+        )
+        for backend in ("filesystem", "sqlite"):
+            for case in cases:
+                with self.subTest(backend=backend, case=case):
+                    self.root = root / case
+                    self.root.mkdir(exist_ok=True)
+                    self.setup_store(backend)
+                    original = self.deploy("old-target-rollback", failed=True)
+                    if case == "forward_failure":
+                        self.store.write_deployment_record(
+                            original.model_copy(
+                                update={
+                                    "runtime_source": deployment_operation_evidence(rollback=False)
+                                }
+                            )
+                        )
+                    if case == "old_failure":
+                        self.now += timedelta(seconds=1)
+                        record_production_delivery_failure(
+                            self.store,
+                            self.profile,
+                            self.lane,
+                            candidate="image@old-target-rollback",
+                            reason="later_forward_failure",
+                            trace_id="forward-step",
+                            observed_at=self.now.isoformat(),
+                        )
+                    self.monitor()
+                    incident = self.store.list_public_ingress_incident_records(status="open")[0]
+                    if case in {"missing_origin", "unrelated_failure"}:
+                        record_production_delivery_failure(
+                            self.store,
+                            self.profile,
+                            self.lane,
+                            candidate="request:unknown"
+                            if case == "missing_origin"
+                            else "image@other",
+                            reason="rollback_failed",
+                            trace_id="other-failure",
+                            observed_at=self.now.isoformat(),
+                        )
+                        incident = next(
+                            item
+                            for item in self.store.list_public_ingress_incident_records(
+                                status="open"
+                            )
+                            if item.incident_id != incident.incident_id
+                        )
+                    if case != "equal_time":
+                        self.now += timedelta(seconds=-10 if case == "earlier_rollback" else 10)
+                    rollback = original.model_copy(
+                        update={
+                            "record_id": "later-rollback",
+                            "source_git_ref": "later",
+                            "artifact_identity": ArtifactIdentityReference(
+                                artifact_id="image@later"
+                            ),
+                            "failure": None,
+                            "deploy": original.deploy.model_copy(
+                                update={
+                                    "status": "fail" if case == "failed_rollback" else "pass",
+                                    "finished_at": (
+                                        self.now + timedelta(seconds=10)
+                                        if case == "future_rollback"
+                                        else self.now
+                                    ).isoformat(),
+                                }
+                            ),
+                        }
+                    )
+                    changes: dict[str, object] = {
+                        "runtime_source": deployment_operation_evidence(
+                            rollback=case != "forward_success"
+                        )
+                    }
+                    if case == "unhealthy_rollback":
+                        changes["destination_health"] = HealthcheckEvidence(status="fail")
+                    if case == "other_context":
+                        changes["context"] = "other-production-lane"
+                    if case == "testing":
+                        changes["instance"] = "testing"
+                    self.store.write_deployment_record(rollback.model_copy(update=changes))
+                    self.monitor()
+                    self.assertEqual(
+                        self.store.read_public_ingress_incident_record(incident.incident_id).status,
+                        "open",
+                    )
+
+    def test_recovery_cannot_hide_a_later_failure_merged_into_the_incident(self) -> None:
+        root = self.root
+        for backend in ("filesystem", "sqlite"):
+            for cause in ("deployment", "release_step", "same_record"):
+                for matching in (False, True):
+                    with self.subTest(backend=backend, cause=cause, matching=matching):
+                        self.root = root / cause / str(matching)
+                        self.root.mkdir(parents=True, exist_ok=True)
+                        self.setup_store(backend)
+                        original = self.deploy("target-rollback", failed=True)
+                        self.monitor()
+                        assert original.artifact_identity is not None
+                        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+                        self.now += timedelta(seconds=10)
+                        success = self.deploy("recovery-rollback")
+                        if matching:
+                            success.artifact_identity = original.artifact_identity
+                            self.store.write_deployment_record(success)
+                        self.now += timedelta(seconds=10)
+                        if cause == "release_step":
+                            record_production_delivery_failure(
+                                self.store,
+                                self.profile,
+                                self.lane,
+                                candidate=original.artifact_identity.artifact_id,
+                                reason="deployment_failed",
+                                trace_id="later-release-step",
+                                observed_at=self.now.isoformat(),
+                            )
+                        else:
+                            self.store.write_deployment_record(
+                                original.model_copy(
+                                    update={
+                                        "record_id": original.record_id
+                                        if cause == "same_record"
+                                        else "later-forward-failure",
+                                        "deploy": original.deploy.model_copy(
+                                            update={"finished_at": self.now.isoformat()}
+                                        ),
+                                    }
+                                )
+                            )
+                        self.monitor()
+                        self.assertEqual(
+                            self.store.read_public_ingress_incident_record(
+                                incident.incident_id
+                            ).status,
+                            "open",
+                        )
+                        self.now += timedelta(seconds=10)
+                        self.deploy("even-later-rollback")
+                        self.monitor()
+                        self.assertEqual(
+                            self.store.read_public_ingress_incident_record(
+                                incident.incident_id
+                            ).status,
+                            "resolved" if cause == "same_record" else "open",
+                        )
+                        self.now += timedelta(seconds=10)
+                        delivered = self.deploy("matching-forward")
+                        delivered.artifact_identity = original.artifact_identity
+                        self.store.write_deployment_record(delivered)
+                        self.monitor()
+                        self.assertEqual(
+                            self.store.read_public_ingress_incident_record(
+                                incident.incident_id
+                            ).status,
+                            "resolved",
+                        )
+
+    def test_distinct_same_time_failures_survive_and_exact_replays_are_idempotent(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                traces = {"first-operation", "second-operation"}
+                for trace in sorted(traces):
+                    record_production_delivery_failure(
+                        self.store,
+                        self.profile,
+                        self.lane,
+                        candidate="image@candidate",
+                        reason="deployment_failed",
+                        trace_id=trace,
+                        observed_at=self.now.isoformat(),
+                    )
+                incident = self.store.list_public_ingress_incident_records(status="open")[0]
+                before = self.store.list_public_ingress_observation_records(
+                    incident_id=incident.incident_id
+                )
+                self.assertEqual(len(before), len(traces))
+                record_production_delivery_failure(
+                    self.store,
+                    self.profile,
+                    self.lane,
+                    candidate="image@candidate",
+                    reason="deployment_failed",
+                    trace_id="second-operation",
+                    observed_at=self.now.isoformat(),
+                )
+                self.assertEqual(
+                    self.store.list_public_ingress_observation_records(
+                        incident_id=incident.incident_id
+                    ),
+                    before,
+                )
+
+    def test_recovery_reads_compact_failures_and_does_not_treat_reminders_as_new_failures(
+        self,
+    ) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                self.deploy("target-rollback", failed=True)
+                self.monitor()
+                incident = self.store.list_public_ingress_incident_records(status="open")[0]
+                began = self.now
+                initial = self.store.read_public_ingress_observation_record(
+                    incident.latest_observation_id
+                )
+                self.store.write_public_ingress_observation_record(
+                    initial.model_copy(
+                        update={
+                            "targets": tuple(
+                                target.model_copy(update={"url": target.url.split("?", 1)[0]})
+                                for target in initial.targets
+                            )
+                        }
+                    )
+                )
+                _observe(
+                    self.store,
+                    self.profile,
+                    self.lane,
+                    check_name=incident.check_name,
+                    failed=True,
+                    summary=incident.summary,
+                    observed_at=(began + timedelta(minutes=1))
+                    .astimezone(timezone(timedelta(hours=-4)))
+                    .isoformat(),
+                    reason="deployment_failed",
+                )
+                for _ in range(20):
+                    self.now += timedelta(minutes=1)
+                    self.monitor()
+                self.now = began + timedelta(seconds=30)
+                self.deploy("passing-rollback")
+                self.now = began + timedelta(minutes=21)
+                with patch.object(
+                    self.store,
+                    "list_public_ingress_observation_records",
+                    side_effect=AssertionError("Recovery must not hydrate reminder history"),
+                ):
+                    self.monitor()
+                self.assertEqual(
+                    self.store.read_public_ingress_incident_record(incident.incident_id).status,
+                    "resolved",
+                )
+
+    def test_malformed_structured_failure_evidence_cannot_fall_back_to_display_text(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                original = self.deploy("target-rollback", failed=True)
+                self.monitor()
+                incident = self.store.list_public_ingress_incident_records(status="open")[0]
+                observation = self.store.read_public_ingress_observation_record(
+                    incident.latest_observation_id
+                )
+                self.store.write_public_ingress_observation_record(
+                    observation.model_copy(
+                        update={
+                            "targets": tuple(
+                                target.model_copy(
+                                    update={"url": target.url + "&" + target.url.split("?", 1)[1]}
+                                )
+                                for target in observation.targets
+                            )
+                        }
+                    )
+                )
+                self.now += timedelta(seconds=1)
+                success = self.deploy("passing-rollback")
+                success.artifact_identity = original.artifact_identity
+                self.store.write_deployment_record(success)
+                with self.assertLogs("control_plane.production_delivery_monitor", level="ERROR"):
+                    self.monitor()
+                self.assertEqual(
+                    self.store.read_public_ingress_incident_record(incident.incident_id).status,
+                    "open",
+                )
+
+    def test_matching_success_checks_another_candidate_after_verification_rejects_one(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                began = self.now
+                self.now += timedelta(seconds=1)
+                first = self.deploy("first")
+                self.now += timedelta(seconds=1)
+                second = self.deploy("second")
+                second.artifact_identity = first.artifact_identity
+                self.store.write_deployment_record(second)
+                self.monitor()
+                seen: set[str] = set()
+                assert first.artifact_identity is not None
+
+                def verify(record_id: str) -> bool:
+                    seen.add(record_id)
+                    return len(seen) > 1
+
+                with self.store.delivery_evidence_index() as index:
+                    self.assertTrue(
+                        index.matching_success(
+                            self.lane.context,
+                            _candidate_key(first.artifact_identity.artifact_id),
+                            began.isoformat(),
+                            verify,
+                        )
+                    )
+                self.assertEqual(seen, {first.record_id, second.record_id})
 
     def test_large_history_is_paged_then_idle_and_late_updates_read_only_changed_sources(
         self,

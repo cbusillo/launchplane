@@ -26,9 +26,12 @@ class EventDeployRecoveryCoordinates:
     reservation: LaunchplaneIdempotencyRecord
     original_deploy: GenericWebDeployEnvelope
     context: str
+    retained_reference: str = ""
 
     @property
     def reference(self) -> str:
+        if self.retained_reference:
+            return self.retained_reference
         return "event-deploy-" + build_generic_web_deploy_recovery_digest(
             {
                 "reservation": self.reservation.model_dump(mode="json"),
@@ -37,13 +40,90 @@ class EventDeployRecoveryCoordinates:
         )
 
 
+def validate_abandoned_testing_coordinates(
+    completed: LaunchplaneIdempotencyRecord,
+    *,
+    product: str,
+    context: str,
+    fingerprint: Callable[..., str],
+) -> EventDeployRecoveryCoordinates:
+    from control_plane.generic_web_testing_settlement import TESTING_ORIGINAL_ABANDONED
+    from control_plane.provider_target_holds import project_provider_target_hold
+    from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
+
+    archive = completed.response_payload.get("abandonment")
+    recovery = completed.response_payload.get("recovery")
+    if not isinstance(archive, dict) or not isinstance(recovery, dict):
+        raise ValueError("Abandoned original custody is unavailable.")
+    original = LaunchplaneIdempotencyRecord.model_validate(archive.get("original"))
+    changed = {
+        "state",
+        "updated_at",
+        "response_status_code",
+        "response_trace_id",
+        "recorded_at",
+        "response_payload",
+    }
+    if (
+        completed.state != "completed"
+        or completed.scope != reconcile_reservation_scope(product)
+        or completed.route_path != GENERIC_WEB_DEPLOY_ROUTE
+        or completed.response_payload.get("testing_settlement") != TESTING_ORIGINAL_ABANDONED
+        or recovery.get("recovery_action") != "abandon_testing_original"
+        or archive.get("original_outcome") != "unknown"
+        or archive.get("possible_fixture_residue") is not True
+        or original.state != "reconcile_required"
+        or original.model_dump(exclude=changed) != completed.model_dump(exclude=changed)
+        or original.record_id
+        != build_launchplane_mutation_reservation_id(
+            scope=original.scope,
+            route_path=original.route_path,
+            idempotency_key=original.idempotency_key,
+        )
+        or not original.idempotency_key.startswith(
+            f"{RECONCILE_SOURCE}:{product}:{context}:testing:"
+        )
+    ):
+        raise ValueError("Abandoned original custody changed.")
+    snapshot = decode_generic_web_provider_reconciliation_target(original.reconciliation_key)
+    envelope = GenericWebDeployEnvelope.model_validate(snapshot.original_event_deploy)
+    archived = EventDeployRecoveryCoordinates(original, envelope, context)
+    if (
+        snapshot.product != product
+        or snapshot.context != context
+        or snapshot.instance != "testing"
+        or envelope.product != product
+        or envelope.deploy.instance != "testing"
+        or project_provider_target_hold(original, None).origin is None
+        or archived.reference != archive.get("recovery_reference")
+        or fingerprint(
+            route_path=GENERIC_WEB_DEPLOY_ROUTE, payload=envelope.model_dump(mode="json")
+        )
+        != original.request_fingerprint
+        or fingerprint(route_path=GENERIC_WEB_DEPLOY_ROUTE, payload=snapshot.original_event_deploy)
+        != original.request_fingerprint
+    ):
+        raise ValueError("Abandoned original reference changed.")
+    return EventDeployRecoveryCoordinates(completed, envelope, context, archived.reference)
+
+
 def resolve_event_deploy_recovery_coordinates(
     *,
     store: PostgresRecordStore,
     product: str,
     context: str,
     fingerprint: Callable[..., str],
+    recovery_reference: str = "",
 ) -> EventDeployRecoveryCoordinates:
+    if recovery_reference:
+        completed = store.read_abandoned_testing_original(product, recovery_reference)
+        if completed is not None:
+            coordinates = validate_abandoned_testing_coordinates(
+                completed, product=product, context=context, fingerprint=fingerprint
+            )
+            if coordinates.reference != recovery_reference:
+                raise ValueError("Abandoned original reference changed.")
+            return coordinates
     candidates = []
     for record in store.list_held_provider_target_reservations():
         if (

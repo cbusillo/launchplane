@@ -51,15 +51,8 @@ it is deleted; do not extend them.
 
 ### Testing local consumers
 
-`POST /v1/local-consumer-deliveries` plans or issues an encrypted package for
-one reviewed local recipient. It requires a signed-in human administrator with
-existing exact-testing-lane `product_config.plan`/`product_config.apply`
-authority and browser CSRF protection. It cannot issue production, preview or
-shared credentials, and returns no plaintext. The local receiver's inert
-`POST /v1/local-consumer-deliveries/verify` compares the original unguessable
-receipt and exact package against current scope/version metadata, returning
-only a status and package digest. See the
-[complete custody, transport and recovery contract](testing-local-consumer.md).
+For recipient-encrypted testing bridge delivery and inert receipt verification,
+see the [custody, transport and recovery contract](testing-local-consumer.md).
 
 ### Repository Inventory
 
@@ -84,8 +77,6 @@ Service implementation ownership is split by runtime responsibility:
   configuration, policy and provider composition, OAuth/session wiring,
   FastAPI application construction, startup validation, Uvicorn execution, and
   store cleanup.
-- `control_plane/every_code_github_webhook.py` is retired domain code awaiting
-  deletion under #1313; it is not registered as HTTP ingress.
 - `control_plane/http_app.py` owns FastAPI composition, dependency injection,
   remaining core and mutation route registration, and the independent signed
   GitHub App and trusted-maintenance receiver callables. Domain modules under
@@ -469,8 +460,6 @@ remaining domain and storage removal is tracked in #2437.
 - Every Code local automation work-request routes (Every Code is retired; see
   `DIRECTION.md`. These routes and the Every Code sections below remain only
   until their readers move):
-  - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
-    human-session, and Every Code worker-token callers)
   - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
     human-session, and Every Code worker-token callers)
   - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
@@ -485,50 +474,6 @@ remaining domain and storage removal is tracked in #2437.
     bearer-token, human-session, and Every Code worker-token callers)
   - `GET /v1/previews/pr-feedback/notification-attempts` (native FastAPI for
     bearer-token and human-session callers)
-  - `POST /v1/every-code/notification-policies/apply` (native FastAPI for
-    bearer-token callers, DB-backed storage, `local_operator` reason enforcement,
-    and optional `Idempotency-Key` replay/conflict handling)
-  - `POST /v1/every-code/work-requests/create` (native FastAPI for
-    bearer-token callers, `every_code_work_request.write` authorization on
-    `launchplane`/`launchplane`, record-store write capability checks, and
-    optional `Idempotency-Key` replay/conflict handling)
-  - `POST /v1/every-code/work-requests/claim` (native FastAPI for Every Code
-    worker-token callers and bearer-token callers with
-    `every_code_work_request.claim`, record-store claim capability checks,
-    `404 not_found` for missing requests, `409 work_request_already_claimed`
-    for non-queued requests, and bearer or worker-token `Idempotency-Key`
-    replay/conflict handling; PostgreSQL commits the claim and completed replay
-    evidence atomically)
-  - `POST /v1/every-code/work-requests/heartbeat` (native FastAPI for Every Code
-    worker-token callers and authorized bearer callers, extending the lease only
-    when host and fencing token still match the active record)
-  - `POST /v1/every-code/work-requests/recover-stale` (native FastAPI for Every
-    Code worker-token callers and bearer-token callers with
-    `every_code_work_request.update`, using a locked stale-snapshot compare to
-    requeue bounded attempts or block for manual review)
-  - `POST /v1/every-code/work-requests/status` (native FastAPI for Every Code
-    worker-token callers and bearer-token callers with
-    `every_code_work_request.update`, replay-before-write idempotency handling,
-    record-store status capability checks, exact fencing-token enforcement for
-    leased requests, `404 not_found` for missing requests, and
-    blocked-notification delivery)
-  - `POST /v1/every-code/work-requests/rerun` (native FastAPI for Every Code
-    worker-token callers and bearer-token callers with
-    `every_code_work_request.rerun`, approved `every_code_rerun` write-intent
-    evidence, workflow replay-before-write idempotency handling, record-store
-    rerun capability checks, `404 not_found` for missing requests, terminal-only
-    compare-and-write requeue semantics, and atomic replay evidence for bearer
-    and worker-token callers)
-  - `POST /v1/every-code/pr-feedback` (native FastAPI for Every Code
-    worker-token callers, direct PR-feedback record writes, and DB-backed
-    storage capability enforcement without idempotency state)
-  - `POST /v1/every-code/pr-feedback/status` (native FastAPI for Every Code
-    worker-token callers, PR-feedback status transitions, `404 not_found` for
-    missing feedback, and `409 feedback_already_final` for already-final
-    feedback)
-  - `POST /v1/every-code/preview-gates` (native FastAPI for Every Code
-    worker-token callers, direct preview-gate record writes, and DB-backed
-    storage capability enforcement without idempotency state)
 - preview PR feedback notification policy route:
   - `POST /v1/previews/pr-feedback` (native FastAPI for bearer-token callers,
     `preview_pr_feedback.write` or matching lifecycle authorization,
@@ -549,16 +494,12 @@ confirmation phrase, a non-empty reason and related issue, and an unchanged
 managed-comment observation. If the managed comment is already absent, apply
 records `already_absent` without claiming a GitHub mutation.
 
-- work graph chooser route:
+- repository context and merge-delivery routes:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
-  - `GET /v1/work-graph/snapshot` (native FastAPI)
-  - `GET /v1/work-graph/github/issues` (native FastAPI)
   - `GET /v1/work-graph/merge-train/policy-targets` (native FastAPI)
   - `GET /v1/work-graph/merge-train/admission` (native FastAPI)
   - `GET /v1/work-graph/merge-train/controller/status` (native FastAPI)
-  - `POST /v1/work-graph/rank` (native FastAPI)
-  - `POST /v1/work-graph/github/issues/reconcile` (native FastAPI)
   - `POST /v1/work-graph/merge-train/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/batch-candidate/run-once` (native FastAPI)
   - `POST /v1/work-graph/merge-train/batch-landing/run-once` (native FastAPI)
@@ -625,7 +566,7 @@ typed Pydantic response, and focused OpenAPI assertions. Use it as the small
 contract shape for future route-family slices.
 
 Read-only ingress, topology, operational-record, managed-secret, product,
-driver, preview, work-graph, merge-train, and Every Code route families, plus
+driver, preview, merge-train, and Every Code route families, plus
 the seven evidence-ingress writes and twelve Generic Web provider writes, are
 registered from dependency-explicit modules under `control_plane.http_routes`.
 `http_app.py` remains the composition root: it passes frozen dependency objects
@@ -650,15 +591,21 @@ Frontend contract generation uses the same boundary. Run
 `uv run launchplane service export-openapi --output frontend/generated/openapi-canonical.json`
 to write the canonical OpenAPI document from `create_launchplane_fastapi_app`
 without live credentials, managed-secret values, or runtime-authority examples.
-The frontend then derives the checked `frontend/generated/openapi-ui.json` slice
-from that canonical export. `pnpm --dir frontend check:openapi-drift` regenerates
-the checked schemas and agent contract in temporary paths and fails on backend
-contract drift. The TypeScript client at `frontend/src/generated/openapi.ts` is
-ignored rather than committed, so concurrent client generation cannot create a
-merge conflict. Development and both TypeScript checks regenerate it from the
-checked UI schema; production builds (including the container) run the type check.
-Use `pnpm --dir frontend generate:openapi-types` for generation alone. No custom
-merge driver or train candidate regeneration is required. The canonical
+The frontend derives `frontend/generated/openapi-ui.json` from that export.
+Both JSON files and the TypeScript client at `frontend/src/generated/openapi.ts`
+are ignored build artifacts. Each schema replaces its prior file atomically so
+concurrent readers receive a complete document. Frontend tests, development, type checks and builds
+export schemas before consuming them. Docker provides Python and uv in its
+frontend build stage. The browser-container wrapper exports on the host before
+running the Node-only `test:browser:prepared` consumer inside its private namespace.
+That prepared command requires the wrapper's generated schemas.
+Python tests generate their UI fixtures in temporary paths; inventory reads derive
+the canonical document directly from the Python exporter.
+`(cd frontend && pnpm check:openapi-drift)` still compares the committed runtime
+agent contract with a temporary Python export. Use
+`(cd frontend && pnpm generate:openapi)` after a backend contract change and commit
+only the agent contract. No custom merge driver or train candidate regeneration
+is required. The canonical
 `x-launchplane-ui-read-operations` and
 `x-launchplane-ui-write-operations` manifests own each selected GET or accepted
 browser-safe POST path and stable operation id; slicing fails closed when a
@@ -669,13 +616,10 @@ after it is added to `UI_OPENAPI_WRITE_OPERATIONS` (or
 write route also goes in `BROWSER_WRITE_ROUTES` in
 `frontend/src/browser-write-contract.ts`;
 `frontend/tests/action-model.test.mjs` checks that those routes match the write
-manifest. The write slice currently covers work-graph ranking, product-config dry-run/apply,
-generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
-It also covers browser-human privileged-operation approval and revocation; the
-service-internal execution path is intentionally absent.
-Issue reconciliation remains a bearer-only service operation rather than a
-browser client binding. Generated request, success, validation, and error
-bindings are the API boundary consumed by the UI. Handwritten frontend types
+manifest. Use those manifests for the current selection rather than maintaining
+a second operation list here.
+Generated request, success, validation, and error bindings are the API boundary
+consumed by the UI. Handwritten frontend types
 remain only for UI view models and explicit normalization.
 
 The same canonical export also feeds the narrower checked
@@ -684,7 +628,7 @@ The same canonical export also feeds the narrower checked
 to project only the explicit agent/admin allow-list plus the semantic
 lifecycle, deploy, reconciliation, workflow, and governance overlay. The
 artifact carries a semantic digest and non-gating source revision. The existing
-`pnpm --dir frontend check:openapi-drift` gate regenerates it in a temporary
+`(cd frontend && pnpm check:openapi-drift)` gate regenerates it in a temporary
 path and compares only its normalization version and semantic digest, so
 unrelated OpenAPI or provenance-only changes do not create consumer drift.
 
@@ -700,14 +644,9 @@ replace an uncertain operation with a new key. The direct generic-web promotion
 binding always rewrites the generated request to `dry_run=true`; live promotion
 remains the separate product-owned workflow-dispatch path.
 
-The Engineering Ops browser routes consume the generated work-graph snapshot,
-issue-inbox, Every Code summary, merge-train policy-target, and merge-train
-controller-status read models directly. Work-graph ranking is the only
-Engineering Ops POST in the generated browser write contract; it is stateless
-and accepts the current generated snapshot. Issue reconciliation remains
-read-only in the browser: the UI explains the native GitHub Actions OIDC or
-trusted Director-agent write identity boundary and renders no Dry Run or Apply
-button. Merge-train UI is also status-only: target selection comes exclusively
+The Engineering Ops browser routes consume the generated merge-train
+policy-target and controller-status read models directly.
+Merge-train UI is status-only: target selection comes exclusively
 from `GET /v1/work-graph/merge-train/policy-targets`, while controller and
 legacy worker POST routes are never derived from data or invoked dynamically.
 Each route aborts superseded reads, distinguishes denied and empty responses,
@@ -781,6 +720,34 @@ never retries a dispatched mutation. An already-ended session counts as a
 successful browser sign-out, and concurrent revocation during CSRF consumption
 clears an ended cookie while a live session still requires valid CSRF proof.
 
+### Human OAuth credential retirement
+
+A valid logout removes its current database session and encrypted credential.
+Failed identity verification also removes local custody. Neither path makes a
+GitHub revocation request. Client sessions retain no OAuth credential. Current-row
+update guards prevent renewal from recreating a deleted session; they do not
+prevent restoration from an older database backup.
+
+Expired rows are deleted by normal session reads and by opportunistic sign-in
+or provider-refresh sweeps, which skip locked rows. An inactive service performs
+no sweep. Reaching the claims ceiling alone does not collect an inactive
+browser's credential, and ciphertext can remain beyond stored session expiry
+until a later read or sweep.
+
+Database backups may retain earlier encrypted credentials and the identifiers
+needed to decrypt them. Someone holding that backup and its original session
+root can recover the historical credential; local deletion does not erase the
+backup or establish that the credential has expired at GitHub. Rotating the
+current root invalidates current service cookies and custody, but does not
+invalidate GitHub credentials or prevent decryption with the old root. Restoring
+an older database with the same root can also restore unexpired session rows.
+Keep the root separate from database exports and preserve existing backup access
+and retention controls.
+
+Provider revocation is not implemented. Neither per-browser credential isolation
+nor complete refresh-pair retirement has been established. Supported provider
+expiry and rotation do not establish immediate retirement on logout.
+
 ### Browser Mutation Boundary
 
 `SameSite=Lax` remains defense-in-depth; it is not the authorization or CSRF
@@ -811,32 +778,20 @@ idempotency key so the service can replay or reconcile the original operation.
 It must not generate a replacement key merely because the browser stopped
 waiting.
 
-The cookie-capable mutation inventory is intentionally limited to:
-
-- `POST /auth/logout`
-- `POST /v1/work-graph/rank`
-- `POST /v1/agent/write-intents/evaluate`
-- `POST /v1/drivers/generic-web/prod-promotion`
-- `POST /v1/drivers/generic-web/prod-promotion-workflow`
-- `POST /v1/product-config/apply`
-- `POST /v1/merge-train/policies/import`
-- `POST /v1/authz-policies/managed-rule-sets/reconcile`
-- `POST /v1/authz-policies/privileged-policy-operations/activation/dry-run`
-- `POST /v1/authz-policies/privileged-policy-operations/activation/apply`
-- `POST /v1/tenant-admission/trusted-maintenance-policies/apply`
-
-Every other authenticated mutation route intentionally rejects session-cookie
-authentication and continues to require its existing GitHub Actions OIDC,
-`local_operator`/`local_admin` bearer, Every Code worker, or webhook boundary. A valid
-`Authorization: Bearer` identity on the existing mixed-identity routes above
-also bypasses browser origin, fetch-metadata, and CSRF checks exactly as before;
-a cookie does not weaken or replace bearer verification. The Launchplane UI exposes only the separately
-generated UI write slice; this inventory is a server-side cookie-capable surface
-list, not a promise of UI controls for every route. In particular, GitHub issue
-inbox reconciliation is displayed as unavailable because it remains a GitHub
-Actions OIDC service operation. Managed-secret root re-encryption is explicitly
-bearer-only even when a valid human session cookie is present; rotating the
-service root is not a browser mutation surface.
+Each route's authentication dependency selects its accepted identities;
+see the dependency definitions and route wiring in
+[`http_app.py`](../control_plane/http_app.py) and
+[`http_routes/`](../control_plane/http_routes/), with wiring and CSRF coverage in
+the [browser mutation tests](../tests/test_http_app_browser_mutation.py).
+Browser-capable mutations use
+the CSRF boundary above and still enforce their route-specific authorization.
+On routes that also accept bearer identities, bearer requests retain their
+existing verification rather than using browser origin, fetch-metadata, or CSRF
+proof. A cookie does not weaken or replace bearer verification. The Launchplane
+UI's selected write surface is defined by the OpenAPI manifests described above.
+Managed-secret root re-encryption remains bearer-only even when a valid human
+session cookie is present; rotating the service root is not a browser mutation
+surface.
 
 Trusted Launchplane CLI clients that are explicitly given `--session-cookie`
 preserve compatibility by reading `/v1/auth/session` immediately before the
@@ -1099,21 +1054,11 @@ The `/v1/manager-preview-approval/github-webhook` URL and its
 for signed trusted-maintenance evidence. Manager approval itself is retired; the
 webhook records no approval and the manager reconcile route is deleted.
 
-The Every Code worker read, native claim, and status routes also accept a
-dedicated local-worker bearer token. Configure
-`LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` on the Launchplane service and on the Mac
-worker host, then run the worker with
-`uv run launchplane every-code start --service-url https://...`. That token is
-scoped in code to Every Code work-request, PR-feedback, preview-gate, preview
-readiness routes, plus read-only `GET /v1/product-profiles` for preview
-readiness projection. The worker can create service-owned PR feedback records
-only for Launchplane-derived worker signals such as failed-check routing, while
-human PR feedback still enters through the signed webhook path and trusted-actor
-gate. It cannot create webhook requests, write product records, or access other
-Launchplane service routes. This keeps remote DB credentials on the Launchplane
-host while still allowing visible local Code/tmux work sessions to claim, rerun
-terminal requests, reconcile preview state, route failed checks, and report
-progress.
+Historical work-request, shared preview-readiness and product-profile list
+reads, plus engineering-review routes, retain the
+existing `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` bearer identity. The retired local
+worker cannot create or mutate Every Code requests through the service; the
+credential name does not select an executable or grant new authority.
 
 Engineering-review worker routes reuse that bearer secret but do not trust
 caller-supplied host or runtime strings. The service derives the worker identity
@@ -1122,13 +1067,6 @@ from `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_RUNTIME_ID` and
 DB-backed review authority and each claimed run to match both values before a
 scoped review credential is decrypted or returned.
 
-The local worker uses a separate GitHub token for public claim comments. Provide
-`LAUNCHPLANE_EVERY_CODE_GITHUB_TOKEN` on the worker host, and set
-`LAUNCHPLANE_EVERY_CODE_GITHUB_ACTOR` when the Director expects a specific
-automation account. Before creating the `<!-- every-code-claim -->` issue
-comment, the worker resolves `gh api user --jq .login` with that token and
-blocks the work request if the actor does not match. Claim comments never fall
-back to the host's ambient `gh` login.
 
 Local terminal agents that need Launchplane context use a separate read-only
 bearer credential, not the browser OAuth session cookie and not
@@ -1169,16 +1107,6 @@ service has recorded a matching Director-agent dry-run for the same payload. The
 requests still use Launchplane records, redacted responses, runtime key-safety
 policy, and managed secret storage. Terminal-agent credentials remain read-only.
 
-`GET /v1/every-code/summary` returns a compact agent-safe projection of Every
-Code work requests. It requires `every_code_work_request.read` for
-product/context `launchplane` and supports `repository`, `issue_number`,
-`state`, `limit`, and `offset` query parameters. Summary entries include source
-links, state, summary status, claim metadata, timestamps, result PR URL, and
-safe rerun guidance. They intentionally omit raw webhook delivery ids, error
-messages, issue bodies, prompt text, local checkout paths, and local worker
-hostnames. Entries include compact agent-context provenance and evidence so
-callers can tell recorded request state apart from source-of-truth links.
-
 `GET /v1/previews/readiness` returns a compact agent-safe projection of Every
 Code preview gate records. It requires `every_code_preview_gate.read` for
 product/context `launchplane` and supports `repository`, `pr_number`, `status`,
@@ -1195,34 +1123,9 @@ reads use `every_code_work_request.read`; PR-feedback reads use
 `every_code_notification_attempt.read`; preview PR-feedback notification-attempt
 reads use `preview_pr_feedback_notification_attempt.read`. The dedicated Every
 Code worker token is accepted only for the worker-facing Every Code read routes,
-not for the preview PR-feedback notification-attempt route. Every Code
-work-request status is also a native FastAPI route for the dedicated Every Code
-worker token and workflows authorized for `every_code_work_request.update`. It
-checks idempotency replay before requiring status-write store capabilities,
-writes successful idempotency records, preserves missing-request `404 not_found`,
-and delivers configured blocked notifications when a request transitions to
-`blocked`. Every Code PR-feedback write, PR-feedback status, and preview-gate
-write routes are also native FastAPI routes for the dedicated Every Code worker
-token. They require only the matching PR-feedback or preview-gate record-store
-capabilities, preserve the direct worker signal payloads, and do not create
-idempotency records. PR-feedback status preserves
-the worker transition semantics: missing feedback returns `404 not_found`, and
-already applied or ignored feedback returns `409 feedback_already_final`.
-
-`POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
-returns the queue payload under `result.queue`. The route requires the
-`work_graph.rank` action for product/context `launchplane`, accepts GitHub
-Actions OIDC and GitHub human-session callers, rejects Director-agent bearer tokens
-at the identity boundary even if a policy grant is too broad, performs no
-storage writes, and does not make Launchplane authoritative for copied GitHub or
-Code Plans state.
-
-`POST /v1/work-graph/github/issues/reconcile` retains its injected-provider
-contract. The deployed service has no reconcile provider and, after
-authorization, refuses with `400 invalid_request`. `dry_run` requires
-`work_graph.rank`; `apply` requires `work_graph.issue_inbox.reconcile`. When a
-provider is supplied, the route returns its reconcile evidence under
-`result.reconcile`.
+not for the preview PR-feedback notification-attempt route. Retired Every Code
+execution and notification-policy writes are removed; these read identities
+cannot start or resume that pipeline.
 
 `POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
 ordered-queue pass for a requested repository/base branch. It requires the
@@ -1428,7 +1331,7 @@ batch-candidate, batch-landing, and stack-collapse modes; the runner validates
 that exclusivity before any phase step mutates state.
 
 `GET /v1/repo-product-mapping` is a native FastAPI route that returns the
-repository ownership/awareness read model used by work graph and agent context.
+repository ownership/awareness read model used by agent context.
 The route requires
 `product_environment.read` for product/context `launchplane`, performs no
 writes, and distinguishes Launchplane-managed runtime repos from awareness-only
@@ -1436,26 +1339,13 @@ Every Code work-request repos. Managed runtime entries come from product profile
 records and include product, contexts, stable environments, driver id, and
 preview context; awareness entries do not imply Launchplane runtime ownership.
 
-`GET /v1/work-graph/snapshot` is a native FastAPI route that returns the
-current Launchplane-assembled work graph snapshot for the same authorization
-boundary. It composes product overviews and Every Code work-request records into
-the typed snapshot contract.
-The deployed service assembles the work graph from product profiles and durable
-work-request records. It does not read GitHub Projects, list inbox issues, or
-reconcile Project membership. Engineering > Work graph keeps these non-Project
-items; source counts report zero planning facts. The inbox read remains empty
-and unconfigured, and reconcile refuses without a provider. No Project/inbox
-environment bundle or `GH_TOKEN` is delivered by self-deploy. See
-[Q543](https://github.com/cbusillo/launchplane/issues/2436#issuecomment-6273441298).
-
 `GET /v1/agent/context` is a native FastAPI thin read-only aggregation endpoint
 for public-safe skill preflight. It requires `product_environment.read` for
 product/context `launchplane`, accepts an optional `repository` filter, and
-composes the existing repo-product mapping, work graph snapshot, Every Code
-summary, and preview readiness projections under named sections. Each section
-reports `available`, `unauthorized`, or `unavailable`; optional work-graph
-planning provider failures mark only that section unavailable instead of dropping
-the whole context or silently omitting the failure. The endpoint writes no
+composes the existing repo-product mapping, preview
+readiness, and optional exact tenant-admission projections under named sections.
+Each section reports `available`, `unauthorized`, or `unavailable`. The endpoint
+writes no
 records, fetches no issue bodies, and must preserve the lower-level
 redaction/provenance rules.
 
@@ -1522,22 +1412,11 @@ session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
 the Launchplane database when `LAUNCHPLANE_DATABASE_URL` is configured. GitHub
 access tokens stay server-side and are not exposed to the React Launchplane UI.
 Hosted requests reload the current DB policy before authorization and re-evaluate
-the session role. OAuth organization/team claims expire for authorization after
-24 hours; the session is revoked and the user must sign in again to refresh
-those mutable GitHub claims.
-
-The cookie's `Max-Age` and stored session expiry are 14 days (1,209,600 seconds),
-with renewal eligible after 24 hours (86,400 seconds) since issue or last renewal.
-This is separate from the production admin/read-only authorization-claims
-limit: those claims expire absolutely 24 hours after sign-in, and the service
-revokes the session before attempting cookie renewal. Background reads enter
-the same check but do not refresh GitHub claims or the sign-in time; there is no
-separate short idle timeout. Confined Client sessions follow their current
-product-ownership checks instead of this admin/read-only claims branch.
-The OAuth callback uses the GitHub token to read identity and membership, then
-retains only the Launchplane identity/session; it does not store the token or
-its expiry/refresh metadata. Later Launchplane session reads do not use that
-token. OAuth login state lasts 10 minutes (600 seconds).
+the session role. The [human auth/session contract](#service-route-checklist)
+above owns renewal, provider verification, credential custody, Client
+confinement, concurrency and logout. See
+[credential retirement](#human-oauth-credential-retirement) for the local/provider
+and backup boundaries. OAuth login state lasts 10 minutes (600 seconds).
 
 Every non-health `/v1` operation documents the refresh boundary: `503` means the
 active DB policy could not be loaded, and `409` means a fenced schema exposed an
@@ -2026,9 +1905,30 @@ transport or its managed authority.
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through native FastAPI authenticated service ingress and stored in Launchplane
 records; product repos do not carry repo-local Launchplane lifecycle manifests.
+Profile GET responses include a strong `ETag`. A full-profile POST may supply
+that exact revision as `If-Match`; stale revisions return HTTP 412 before any
+save. Existing idempotent replay precedes this check. The reviewed
+[preview override helper](preview-settings.md) uses this condition to preserve
+unrelated profile updates while changing one preview setting.
 Writes require `product_profile.write` for the profile product in the
 Launchplane service context, validate the profile write contract before storage,
 and preserve optional `Idempotency-Key` replay/conflict behavior.
+
+#### Testing storage requirements
+
+A Director agent may use the same conditional profile POST to configure only
+`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes` within
+one existing active Odoo testing lane's `odoo_testing_drill_storage`. Read the
+current profile and strong `ETag`, preserve every other field, and submit the
+reviewed replacement with that `If-Match` and a stable `Idempotency-Key`.
+The service requires all four positive integer requirements and preserves
+existing `retained_copy_bindings` exactly, including an empty list when first
+configuring storage. Mixed edits, budget removal, production lanes, scoped
+agents and inactive or non-Odoo products refuse. Existing atomic profile
+compare-and-write, stale-revision rejection and original-key replay remain in force.
+Read the profile back after acceptance or an uncertain response. This records
+working-headroom requirements; it neither qualifies actual capacity nor starts
+a restore, capture, drill or disposal.
 
 The testing-restore-policy route is a bounded Director-agent exception for
 ordinary testing preparation. It accepts only an owned Odoo testing context,
@@ -2192,19 +2092,9 @@ provider-safe external delivery links and bounded delivery state, but not
 destination ids, policy ids, raw outbox payloads, provider operation keys,
 provider ids, raw target URLs, secret references, or provider error text.
 
-Every Code notification policy writes use
-`POST /v1/every-code/notification-policies/apply`. The request carries
-`mode: "dry-run"` or `mode: "apply"` and a complete
-`EveryCodeNotificationPolicyRecord`. Apply requires
-`every_code_notification_policy.apply`, DB-backed Launchplane storage, and an
-idempotency key when a caller wants retry-safe service semantics. `local_operator`
-calls must include a non-empty reason. Policies store repository-scoped routing
-intent and managed secret record ids only; Discord webhook URLs and admin
-destination values must stay in managed secrets, not source or text-file
-defaults. When a worker status update transitions a work request to `blocked`,
-Launchplane persists the blocked request first, then attempts configured Every
-Code notifications and records delivered or failed attempts under
-`GET /v1/every-code/notification-attempts`.
+Every Code notification policies and attempts remain historical records. Their
+apply route and blocked-request delivery are removed; existing evidence stays
+readable through `GET /v1/every-code/notification-attempts`.
 
 Preview PR feedback notification policy writes use
 `POST /v1/previews/pr-feedback/notification-policies/apply`. The request
@@ -2263,6 +2153,34 @@ confirmation, and source label. This permits a different apply reason without
 changing the reviewed runtime or secret content. Idempotency replay is checked
 before the matching-dry-run marker so an already completed apply remains
 replayable.
+
+### Odoo business-hours policy
+
+A standalone `odoo_business_hours` section selects an Odoo prod company's
+calendar, with `inspect` (dry-run only), `set` or explicit `clear`. It cannot
+combine runtime settings, secrets or public hosts. It retains normal
+`product_config.plan` / `product_config.apply` lane authority and requires
+`product_profile.read` plus existing instance-scoped `operations.read` runtime
+permission. Applying additionally requires `product_profile.write` in the service
+context. Config-only authority does not acquire release-policy write authority.
+Signed-in mutations retain CSRF checks; terminal-agent exclusion is unchanged.
+
+Set requires positive `company_id` and `expected_calendar_id`, and optionally an
+existing owned prod private endpoint key. Inspection reports bounded permitted
+company scope rather than database-wide completeness. Authentication membership
+is bounded to 128 companies; a larger or incomplete membership response refuses
+qualification, including when a company filter is supplied. The reviewed plan binds
+scope, full starting profile, requested references, endpoint/runtime authority,
+reason and source label; clock progress and forecasts do not change its digest.
+Apply requires `reviewed_plan_sha256` and the same caller's saved dry-run marker.
+The profile write, expected existing profile or verified absence, and successful
+idempotency receipt commit in one authority bundle. Completed original-key replay
+precedes remote qualification; concurrent profile edits refuse without overwriting
+them. Runtime/Odoo observations remain point-in-time; the transaction does not
+freeze external systems. Clear needs no Odoo read. The result's optional
+`odoo_business_hours` contains bounded evidence; other runtime/secret results are
+skipped/empty and no live-sync action is requested. See
+[business-hours configuration](release-review.md#odoo-business-hours).
 
 ### Public hostnames on the prod compose target
 
@@ -2499,14 +2417,14 @@ After apply, `next_actions` can require `live_target_runtime_apply`; helpers
 should surface that action and stop. Applying product-config records does not by
 itself guarantee the live target process has been synchronized.
 
-Runtime key-safety policy reconciliation uses
-`POST /v1/runtime-key-safety/policies/apply`. It is restricted to workflows with
+Runtime key-safety policy writes use
+`POST /v1/runtime-key-safety/policies/apply`. It is restricted to callers with
 `runtime_key_safety.write` for product/context `launchplane`, requires DB-backed
 storage, and writes metadata-only policy records for managed runtime secret
 binding keys. Optional `Idempotency-Key` headers preserve replay/conflict
 semantics for retry-safe service calls. It merges requested rules into the
-latest active policy by binding key so deploy-time bootstrap can add required
-classifications without dropping existing policy coverage. Request and response
+latest active policy by binding key, so a write can add classifications without
+dropping existing policy coverage. Request and response
 payloads must not include secret plaintext. Rules can carry exact
 context/instance scope and explicit preview instance patterns for dynamic PR
 lanes; policy apply merges those scopes additively without making checked-in
@@ -2523,8 +2441,6 @@ The conventional generic-web contract requires an admin-supplied root
 preview base URL and writes it as the context-scoped
 `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record. The reviewed digest
 binds that mutable runtime value; no real domain becomes checked-in authority.
-Repeated onboarding merges that owned key into the existing preview-context
-record instead of replacing unrelated runtime values.
 Generic-web dry-run requires `generic_web_onboarding.plan`; apply and advanced
 manifest writes require `product_onboarding.apply`, all for product/context
 `launchplane`. The route requires DB-backed storage and returns only sanitized
@@ -2820,7 +2736,10 @@ either `context` and `instance` to inspect the current tracked target, or
 requires `dokploy_target.inspect` authz for product/context `launchplane`, reads
 Dokploy through Launchplane-managed secrets, and returns a redacted identity
 summary only: target ids, names, project/environment/server identity, domain
-summaries, source metadata, and environment key names/counts. It must not return
+summaries, source metadata, and environment key names/counts. The tracked target's
+`env_keys` lists stored override names separately from the provider's observed
+environment keys, so source-setting precedence can be checked without values.
+It must not return
 raw provider payloads or environment values. A tracked target's `public_hosts`
 returns its stored product-config hostname intent separately from origin `domains`
 and the provider's observed domain summaries. Compare those lists before HTTP
@@ -2911,7 +2830,13 @@ metadata.
 Live target runtime sync uses the native FastAPI
 `POST /v1/live-target-runtime/apply` route. The route accepts `mode: "dry-run"`
 or `mode: "apply"`, product/context/instance, and optional apply-only deploy
-controls. Dry-run requires `live_target_runtime.plan`; apply requires
+controls. Optional `selected_keys` is a nonempty list of unique existing managed
+key names. It restricts the plan, delivery and persistence readback to those
+keys, preserves every unselected provider value, and applies no retirements.
+Unknown, missing or retired selected keys fail before provider mutation.
+Selection cannot deploy or stage testing separation; any literal qualification
+must also be selected. Omitting the field retains full-lane sync behavior.
+Dry-run requires `live_target_runtime.plan`; apply requires
 `live_target_runtime.apply`. The route resolves DB-backed runtime environment
 records, managed runtime secrets, and the tracked Dokploy target in the deployed
 Launchplane service, evaluates runtime key-safety policy, compares desired and
@@ -3135,8 +3060,6 @@ For reviewed reconciliation of provider-absent legacy preview history, see
   human-session callers)
 - `GET /v1/dokploy/inventory` (native FastAPI for bearer-token and
   human-session callers)
-- `GET /v1/every-code/summary` (native FastAPI for bearer-token,
-  human-session, and Every Code worker-token callers)
 - `GET /v1/previews/readiness` (native FastAPI for bearer-token,
   human-session, and Every Code worker-token callers)
 - `GET /v1/every-code/work-requests` (native FastAPI for bearer-token,
@@ -3814,10 +3737,11 @@ with the exact base branch and optional merge method. It requires
 controller's `mutate=false` path, so it verifies current numeric repository and
 repository owner identity, head, base, open/merged state, draft/mergeability, admission,
 and live required-check policy without acquiring a controller lease or writing
-GitHub/provider state. Mergeable tenant UI PRs report required technical-check
-readiness. Engineering returns `not_applicable`; current results for both kinds
-have no human actions. Client decisions use product review and the release
-checklist, separately from these machine checks.
+GitHub/provider state. Mergeable tenant UI PRs report readiness only when both
+required technical checks and the existing current-head Client gate pass.
+Engineering returns `not_applicable`; current results for both kinds have no
+human actions. Client decisions are recorded through product review; this
+evaluation reads them and grants no acceptance or release authority.
 
 `GET /v1/work-graph/tenant-admission/status` exposes the public-safe unified
 tenant-admission read model. The query supplies the complete candidate binding:
@@ -3862,7 +3786,7 @@ It is bearer-only, requires `tenant_admission.controller.run_once` authorization
 for the candidate product/context, and is covered by the exact-length JSON body
 guard at 64 KiB. An explicitly authorized terminal agent may invoke this route.
 The controller independently rechecks classification, exact source-control facts,
-and technical evidence before every merge effect. This is a dedicated privileged
+technical evidence, and the existing Client gate before every merge effect. This is a dedicated privileged
 controller action: its context-scoped
 grant intentionally authorizes a central controller or admin whose source
 repository need not equal the target tenant repository. The submitted target
@@ -3886,12 +3810,22 @@ non-draft and currently mergeable. When the live required-check policy is
 strict, the exact PR head must also contain the current base SHA; missing or
 malformed strict-policy and draft evidence fails closed.
 
+Readiness uses the merge train's [Client-review contract](owner-acceptance.md#current-client-review),
+including its notes, current-head acceptance projection and saved veto rules.
+Missing profile or saved-decision storage cannot establish readiness.
+
 For `mutate=true`, Launchplane uses the existing repository/base controller
 lease only as a shared mutation and crash-reconciliation fence; it does not
 enqueue the PR or borrow merge-train scheduler, label, batch, or stack policy.
 After the first evaluation it re-fetches PR/base facts, recomputes admission,
-and re-reads technical checks immediately before checkpointing and issuing the
-GitHub merge request with the exact expected head SHA. Provider uncertainty
+and re-reads technical checks and Client review before checkpointing and issuing
+the GitHub merge request with the exact expected head SHA. A newly saved veto or
+a failed pre-merge read releases the lease without a provider mutation. GitHub's
+[documented synchronous merge refusals](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
+(403, 404, 405, 409 and 422) also release
+the fence; other statuses and uncertain merge outcomes retain it. An abrupt
+process death in any active phase requires the same tenant request to resume;
+another controller action cannot adopt that state. Provider uncertainty
 leaves the exact request, admission decision, technical-check digest, and merge
 phase in durable controller state. A retry adopts success only when GitHub shows
 that exact head merged into the requested base and the target branch contains
@@ -4365,6 +4299,8 @@ Launchplane's fixed description, the kind of fix (`code`, `grant`,
 `owner_approval`, `client_acceptance`, `by_hand` or `wait`) and the record ids
 it read. `testing` checks the lane, the staff-testing hold and the last
 reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
+Testing reads its exact current reconcile target; preview history does not
+limit that lookup.
 A completed `already_deployed` no-op is clear when the recorded current and
 desired artifact ids, commit SHAs and immutable image digests all match and the
 plan is not held. It cites the artifact id without inventing a deploy operation.
@@ -4543,7 +4479,7 @@ The request has `repository`, `base_sha`, `title`, optional `body`, and `files`.
 Each file has a relative `path`, UTF-8 `content` (or `null` to delete), and optional
 `mode` (`100644` or `100755`). An omitted mode preserves an existing regular
 file's mode and defaults to `100644` for a new file; symlinks are refused.
-It accepts at most 32 files, 512 KiB of old-plus-new changed content (including
+It accepts at most 32 files, 2 MiB of old-plus-new changed content (including
 deletions), and a 1 MiB JSON body. It rejects workflow-file edits, unsafe paths,
 duplicate/overlapping paths, and caller-selected branches, labels, PR numbers,
 or merge settings. The base must match the verified OIDC `sha`. A new branch
@@ -4552,6 +4488,17 @@ current default-branch head; a stale new proposal receives 409
 `updater_proposal_conflict` and reruns against the new base. An exact existing
 branch can resume its original bounded proposal after verifying its tree and
 single parent; it never updates that branch.
+
+The whole-file budget includes unchanged bytes within every submitted file. It
+is deliberately larger than the 1 MiB JSON ingress limit so small changes to
+large source files or lockfiles can fit without a second edit representation.
+The body limit still bounds all submitted content, JSON escaping and metadata;
+raising the old-plus-new budget does not raise that limit or file count. Callers
+omit genuinely unchanged files and measure the complete serialized request and
+old-plus-new changed-file bytes. An oversized coherent candidate is explicitly
+refused; do not skip necessary changes, truncate files or split it into competing
+pending proposals. The service still consumes whole UTF-8 file contents as data
+and performs no caller-supplied patch execution.
 
 The allow-list is part of the active DB-backed `LaunchplaneAuthzPolicyRecord`,
 using existing `github_actions` rules and the supported managed-rule-set
@@ -4602,8 +4549,35 @@ are not activated by adding the route.
 
 ## Reviewed stored-setting and workflow-rule retirement
 
+An exact testing lane can disable an existing runtime-secret binding through
+`POST /v1/product-config/apply` with `disable_secret_bindings`, a list of
+`binding_key` and current `version_id` pairs. Read version IDs through the
+names-only product secret-binding surface. Use the existing product-config
+dry-run/apply helpers, with a matching reviewed request and stable idempotency
+key. This metadata-only operation cannot be combined with other config writes.
+
+Retire the keys through product config and sync them out of provider configuration
+first. The service independently checks existing retirement intent, fresh provider
+key absence, unique lane bindings and current versions. Commit-time read sets
+protect retirement intent and secret metadata. The shared delivery selector must
+also find no inherited supplier after removal. Only the selected testing bindings
+become disabled; encrypted versions, secret records and other lanes stay intact.
+The response contains actions and names only. Provider persistence does not prove
+running-container adoption: complete the normal testing deployment and verify
+its runtime behavior before claiming isolation or a green lane.
+
 See [reviewed retirement](reviewed-retirement.md) for the exact request, saved
 review, administrator apply, private rollback custody and readback contracts of
 `POST /v1/admin/runtime-settings/removal`, and the read-only
 `POST /v1/authz-policies/workflow-rule-retirement-plan`. These paths install no
 grant and perform no provider action.
+
+### Structured refusal diagnostics
+
+Restart and native testing-rebuild refusals include an optional bounded
+`error.reason` code independent of human-readable `error.message`. A restart
+blocked by newer deployment history also returns
+`details.blocking_deployment_id`. These fields describe the existing refusal;
+they do not change its HTTP status, primary error code, authorization, dispatch
+or original-operation reconciliation requirements. Callers may project the code
+and record reference without parsing message wording. Older responses omit them.

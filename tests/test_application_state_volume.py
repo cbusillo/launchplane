@@ -1,4 +1,6 @@
 from copy import deepcopy
+from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+
 from contextlib import nullcontext
 import json
 from typing import Any
@@ -219,6 +221,98 @@ class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
             mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
         )
 
+    def serve_application(self) -> None:
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.environment_inventory import EnvironmentInventory
+        from control_plane.contracts.promotion_record import (
+            ArtifactIdentityReference,
+            DeploymentEvidence,
+        )
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+        from control_plane.dokploy.application_runtime import (
+            ApplicationRuntimeObservation,
+            ApplicationContainerMetadata,
+            ApplicationEnvironmentKeys,
+        )
+
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        artifact = ArtifactIdentityReference(
+            artifact_id="registry.example.invalid/site@sha256:" + "a" * 64
+        )
+        deploy = DeploymentEvidence(
+            target_name="testing-app",
+            target_type="application",
+            deploy_mode="image",
+            status="pass",
+            deployment_id="provider-deployment",
+        )
+        record = DeploymentRecord(
+            record_id="serving-deployment",
+            context=self.context,
+            instance="testing",
+            source_git_ref="a" * 40,
+            artifact_identity=artifact,
+            deployed_target=provider.to_deployed_target_reference(),
+            deploy=deploy,
+            runtime_identity=RuntimeIdentity(
+                context=self.context,
+                instance="testing",
+                deployment_record_id="serving-deployment",
+                artifact_id=artifact.artifact_id,
+                source_git_ref="a" * 40,
+                image_reference=artifact.artifact_id,
+            ),
+        )
+        self.store.write_deployment_record(record)
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context=self.context,
+                instance="testing",
+                source_git_ref=record.source_git_ref,
+                artifact_identity=artifact,
+                deploy=deploy,
+                deployment_record_id=record.record_id,
+                updated_at=self.profile.updated_at,
+                runtime_identity=record.runtime_identity,
+            )
+        )
+        self.live.update(
+            sourceType="docker",
+            dockerImage=artifact.artifact_id,
+            env="EXAMPLE=managed-testing-value",
+            deployments=[{"deploymentId": deploy.deployment_id, "status": "done"}],
+            applicationStatus="done",
+            endpointSpecSwarm={"Mode": "dnsrr"},
+        )
+        self.runtime_observer = self.enterContext(
+            patch(
+                "control_plane.application_serving_hold.fetch_application_runtime",
+                return_value=ApplicationRuntimeObservation(
+                    application_id=self.live["applicationId"],
+                    app_name=self.live["appName"],
+                    service_id="serving-service",
+                    service_image=artifact.artifact_id,
+                    service_deployment_record_id=record.record_id,
+                    desired_replicas=1,
+                    rollout_state="completed",
+                    rollout_started_at="",
+                    running_container_images=((artifact.artifact_id,),),
+                    running_container_deployment_record_ids=(record.record_id,),
+                    running_container_health=("",),
+                    pending_task_count=0,
+                    server_id=self.payload["server_id"],
+                    service_version=1,
+                    running_containers=(
+                        ApplicationContainerMetadata(
+                            "a" * 64, "serving-task", ApplicationEnvironmentKeys()
+                        ),
+                    ),
+                ),
+            )
+        )
+
     def private_domain(self) -> dict[str, Any]:
         """Hydrated domain.one defaults for the supported private-origin creation."""
         return {
@@ -244,6 +338,348 @@ class _ApplicationStateVolumeFixture(_DirectorTestingSetupFixture):
 
 
 class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
+    async def test_unpublished_activation_retaining_current_recipient_keeps_interlock(self) -> None:
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRecord,
+            TestingActivationRequest,
+        )
+        from control_plane.contracts.testing_application import (
+            TestingApplicationSpecification,
+            TestingApplicationState,
+        )
+
+        await self.prepare_application_hold()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        binding = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        activation = TestingActivationRecord(
+            product=self.profile.product,
+            context=self.context,
+            actor="original-actor",
+            scope="original-scope",
+            request=TestingActivationRequest(
+                context=self.context,
+                preparation_key="original-preparation",
+                interlock_record_sha256="a" * 64,
+                source_commit="a" * 40,
+                volume_keys={},
+                port_keys=(),
+                reason="Retain original activation custody",
+                application=TestingApplicationSpecification(
+                    runtime_port=self.profile.runtime_port,
+                    health_path="/health",
+                    network_name="fixture-network",
+                    state=TestingApplicationState(kind="none"),
+                ),
+            ),
+            plan_sha256="a" * 64,
+            namespace="original-recipient",
+            preparation_record_id="original-preparation",
+            retained_target=target,
+            retained_target_id=binding,
+            retained_provider=provider,
+            retained_reservations=(),
+            configuration_sha256="b" * 64,
+            compose_source="",
+            image_reference="registry.example.invalid/site@sha256:" + "a" * 64,
+        )
+        payload = activation.model_dump(mode="json")
+        for legacy in (False, True):
+            with (
+                self.subTest(legacy=legacy),
+                patch.object(
+                    self.store,
+                    "list_testing_application_activations",
+                    return_value=() if legacy else (payload,),
+                ),
+                patch.object(
+                    self.store, "read_testing_activation", return_value=payload if legacy else None
+                ),
+            ):
+                result = await self._reviewed_application_lift()
+                self.assertEqual(result.status_code, 409, result.text)
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ),
+                    target,
+                )
+        independent = activation.model_copy(
+            update={
+                "retained_target_id": binding.model_copy(
+                    update={"target_id": "independent-original"}
+                ),
+                "retained_provider": provider.model_copy(
+                    update={"target_id": "independent-original"}
+                ),
+            }
+        )
+        with patch.object(
+            self.store,
+            "list_testing_application_activations",
+            return_value=(independent.model_dump(mode="json"),),
+        ):
+            result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assert_production_unchanged()
+
+    async def test_serving_managed_credential_and_terminal_cancelled_history_continue(self) -> None:
+        from control_plane import secrets
+        from control_plane.dokploy.api import parse_dokploy_env_text
+        from control_plane.dokploy.post_deploy import DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
+        from control_plane.contracts.runtime_key_safety_policy import (
+            RuntimeKeySafetyPolicyRecord,
+            RuntimeSecretSafetyRule,
+        )
+        from tests.test_generic_web_deploy import (
+            _runtime_secret_record,
+            _runtime_secret_version,
+            _runtime_secret_binding,
+        )
+
+        self.enterContext(
+            patch.dict(
+                "os.environ", {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "fixture-master-key"}
+            )
+        )
+        await self.prepare_application_hold()
+        self.serve_application()
+        value = "fixture-managed-testing-token"
+        self.store.write_secret_record(
+            _runtime_secret_record(
+                secret_id="testing-token",
+                scope="context_instance",
+                name="app-token",
+                version_id="testing-token-v1",
+                context=self.context,
+                instance="testing",
+            )
+        )
+        self.store.write_secret_version(
+            _runtime_secret_version(
+                secret_id="testing-token", version_id="testing-token-v1", plaintext_value=value
+            )
+        )
+        self.store.write_secret_binding(
+            _runtime_secret_binding(
+                secret_id="testing-token",
+                binding_key="APP_TOKEN",
+                context=self.context,
+                instance="testing",
+            )
+        )
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="testing-key-policy",
+                source="test",
+                updated_at=self.profile.updated_at,
+                rules=(RuntimeSecretSafetyRule(binding_key="APP_TOKEN", secret_class="testing"),),
+            )
+        )
+        self.live["env"] += "\nAPP_TOKEN=" + value
+        self.live["deployments"].extend(
+            {"deploymentId": "old-" + status, "status": status}
+            for status in DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES
+        )
+        result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertEqual(
+            self.runtime_observer.call_args.kwargs["expected_environment"],
+            parse_dokploy_env_text(self.live["env"]),
+        )
+        self.assertNotIn(value, result.text)
+        self.assert_production_unchanged()
+
+    async def test_application_lift_refuses_unreviewed_plan_without_clearing_staff_hold(
+        self,
+    ) -> None:
+        await self.prepare_application_hold()
+        self.serve_application()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.assertIsNotNone(target.policies.staff_testing_hold)
+        plan = await self._testing_hold()
+        self.assertEqual(plan.status_code, 202, plan.text)
+        reviewed = plan.json()["result"]["plan_sha256"]
+        stale = ("0" if reviewed[0] != "0" else "1") + reviewed[1:]
+        applied = await self._testing_hold(mode="apply", reviewed_plan_sha256=stale)
+        self.assertEqual(applied.status_code, 409, applied.text)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            target,
+        )
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assert_production_unchanged()
+
+        accepted = await self._testing_hold(mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+
+    async def test_serving_application_lifts_without_deploy_or_reconcile_and_replays(self) -> None:
+        await self.prepare_application_hold()
+        self.serve_application()
+        before = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        calls = self.provider.call_count
+        plan = await self._testing_hold()
+        reviewed = plan.json()["result"]["plan_sha256"]
+        result = await self._testing_hold(mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertFalse(result.json()["result"]["reconcile_requested"])
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.assertEqual(
+            self.store.read_environment_inventory(
+                context_name=self.context, instance_name="testing"
+            ),
+            before,
+        )
+        self.assertEqual(self.provider.call_count, calls)
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.storage_inspector.assert_called_once()
+        self.live["dockerImage"] = "changed-after-clear"
+        replay = await self._testing_hold(mode="apply", reviewed_plan_sha256=reviewed)
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(replay.json()["result"], result.json()["result"])
+        self.storage_inspector.assert_called_once()
+        self.assert_production_unchanged()
+
+    async def test_serving_continuation_rejects_unbound_history_and_provider_drift(self) -> None:
+        await self.prepare_application_hold()
+        self.serve_application()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        history_changes: tuple[dict[str, Any], ...] = (
+            {"deployment_record_id": "absent-deployment"},
+            {"artifact_identity": None},
+            {"source_git_ref": "another-commit"},
+            {"runtime_identity": None},
+        )
+        for changes in history_changes:
+            with self.subTest(changes=changes):
+                self.store.write_environment_inventory(inventory.model_copy(update=changes))
+                result = await self._reviewed_application_lift()
+                self.assertEqual(result.status_code, 409, result.text)
+        self.store.write_environment_inventory(inventory)
+        original = deepcopy(self.live)
+        provider_changes: tuple[dict[str, Any], ...] = (
+            {"dockerImage": "registry.example.invalid/foreign@sha256:" + "b" * 64},
+            {"deployments": [{"deploymentId": "different", "status": "done"}]},
+            {"deployments": [{"deploymentId": "provider-deployment", "status": "running"}]},
+            {"endpointSpecSwarm": {"Mode": "vip", "Ports": [{"PublishedPort": 443}]}},
+            {"networkSwarm": [{"Target": "production-network"}]},
+            {"mounts": []},
+            {"env": "DISCORD_TOKEN=untracked-live-token"},
+            {"env": "DOKPLOY_TOKEN=platform-token"},
+            {
+                "deployments": [
+                    {"deploymentId": "later-deployment", "status": "done"},
+                    *original["deployments"],
+                ]
+            },
+        )
+        for provider_change in provider_changes:
+            with self.subTest(changes=provider_change):
+                self.live = {**deepcopy(original), **provider_change}
+                result = await self._reviewed_application_lift()
+                self.assertEqual(result.status_code, 409, result.text)
+        self.storage_inspector.assert_not_called()
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.assert_production_unchanged()
+
+    async def test_serving_continuation_rechecks_current_deployment_after_host_read(self) -> None:
+        await self.prepare_application_hold()
+        self.serve_application()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        self.storage_inspector.side_effect = lambda *_args, **_kwargs: (
+            self.store.write_environment_inventory(
+                inventory.model_copy(update={"source_git_ref": "changed-during-inspection"})
+            )
+        )
+        result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.assert_production_unchanged()
+
+    async def test_serving_newer_unsettled_deployment_keeps_original_hold(self) -> None:
+        await self.prepare_application_hold()
+        self.serve_application()
+        current = self.store.read_deployment_record("serving-deployment")
+        assert current.deployed_target is not None
+        for target in (
+            current.deployed_target,
+            current.deployed_target.model_copy(update={"display_name": "previous-name"}),
+            None,
+        ):
+            with self.subTest(target=target):
+                self.store.write_deployment_record(
+                    current.model_copy(
+                        update={
+                            "record_id": "newer-attempt",
+                            "resolved_target": None,
+                            "deployed_target": target,
+                            "deploy": current.deploy.model_copy(update={"status": "pending"}),
+                        }
+                    )
+                )
+                result = await self._reviewed_application_lift()
+                self.assertEqual(result.status_code, 409, result.text)
+        self.storage_inspector.assert_not_called()
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.assert_production_unchanged()
+
+    async def test_serving_runtime_change_after_storage_read_keeps_hold(self) -> None:
+        from dataclasses import replace
+
+        await self.prepare_application_hold()
+        self.serve_application()
+        observed = self.runtime_observer.return_value
+        self.storage_inspector.side_effect = lambda *_args, **_kwargs: setattr(
+            self.runtime_observer,
+            "return_value",
+            replace(observed, service_version=observed.service_version + 1),
+        )
+        result = await self._reviewed_application_lift()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertIsNotNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
+        self.assert_production_unchanged()
+
     async def test_application_lift_plan_remains_inert_when_provider_or_allocation_is_unavailable(
         self,
     ) -> None:
@@ -772,6 +1208,14 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
             idempotency_key="original-key",
             request_fingerprint="original-request",
             provider_target_key=dokploy_generic_web_provider_target_key(current),
+            provider_target_origin=ProviderTargetOrigin(
+                product="example-site",
+                context=current.context,
+                instance=current.instance,
+                provider_id=current.provider_id,
+                target_type=current.target_category,
+                target_id=current.target_id,
+            ),
             reconciliation_key="original-binding",
             lease_owner="original-worker",
         )
@@ -1042,6 +1486,31 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
 
     async def test_source_drift_after_mount_keeps_custody_before_adoption(self) -> None:
         await self.assert_source_drift_preserves_allocation(MOUNT_CREATE)
+
+    async def test_binding_drift_after_project_retains_returned_identity(self) -> None:
+        await self.plan()
+        changed = self.profile.model_copy(update={"display_name": "Concurrent metadata change"})
+        acknowledged: dict[str, Any] = {}
+
+        def create_then_change(
+            host: str, token: str, path: str, payload: dict[str, Any]
+        ) -> dict[str, Any]:
+            response = self.mutate(host, token, path, payload)
+            if path == PROJECT_CREATE_PATH:
+                acknowledged.update(response)
+                self.store.write_product_profile_record(changed)
+            return response
+
+        self.provider.side_effect = create_then_change
+        result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        readback = (await self.post(mode="readback")).json()["result"]
+        phase = json.loads(readback["provider_effect_phase"])
+        self.assertEqual(phase["project"], self.placement["project_id"])
+        self.assertEqual(phase["default_environment"], acknowledged["environment"]["environmentId"])
+        self.assertEqual(self.provider.call_args_list[-1].args[2], PROJECT_CREATE_PATH)
+        self.profile = changed
+        self.assert_production_unchanged()
 
     async def test_production_existing_mount_or_volume_and_host_path_inputs_refuse(self) -> None:
         for changes in (
@@ -1914,3 +2383,16 @@ class ApplicationStateVolumeTests(_ApplicationStateVolumeFixture):
                     {**self.payload, "mode": "dry-run"}
                 ),
             )
+
+
+class ServingApplicationHoldProtectionTests(_ApplicationStateVolumeFixture):
+    async def prepare_application_hold(self) -> None:
+        await super().prepare_application_hold()
+        self.serve_application()
+
+    test_application_alias_and_unknown_provider_effect_preserve_hold = (
+        ApplicationStateVolumeTests.test_application_alias_and_unknown_provider_effect_preserve_hold
+    )
+    test_application_continuation_preserves_foreign_staff_and_protected_data = ApplicationStateVolumeTests.test_application_continuation_preserves_foreign_staff_and_protected_data
+    test_application_continuation_rechecks_ownership_under_authority_lock = ApplicationStateVolumeTests.test_application_continuation_rechecks_ownership_under_authority_lock
+    test_unpublished_activation_retaining_current_recipient_keeps_interlock = ApplicationStateVolumeTests.test_unpublished_activation_retaining_current_recipient_keeps_interlock

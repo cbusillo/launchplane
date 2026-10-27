@@ -1,7 +1,9 @@
 """Read-only comparison with the retained original capture, without extraction."""
 
 REHEARSAL_CAPTURE_COMPARISON_LIBRARY = r"""
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from pathlib import Path
 import selectors
 
 
@@ -62,7 +64,7 @@ def captured_attachment_table_chunks(stream,containers,deadline,output_limit):
                 if not chunk:
                     break
                 consumed+=len(chunk)
-                if consumed>output_limit:
+                if output_limit is not None and consumed>output_limit:
                     raise ValueError('Captured database output exceeds its bound')
                 yield chunk
         remaining=deadline-time.monotonic()
@@ -82,22 +84,18 @@ def captured_attachment_table_chunks(stream,containers,deadline,output_limit):
         process.wait()
 
 
-def captured_attachment_reference_present(chunks,reference):
+def captured_attachment_rows(chunks: Iterable[bytes]) -> Iterator[dict[str, bytes]]:
     prefix=b'COPY public.ir_attachment ('
     suffix=b') FROM stdin;\n'
     columns=None
     complete=False
-    found=False
     metadata=b''
     index=0
     offset=0
     marker=b''
-    row_matches=True
-    expected={}
+    selected={}
+    values={}
     for chunk in chunks:
-        # COPY escapes tabs/newlines inside values. Only literal delimiters
-        # end fields/rows. Compare the three short values incrementally;
-        # discard arbitrary-length index_content/db_datas and other fields.
         for part in re.split(b'([\t\n])',chunk):
             if columns is None or complete:
                 metadata+=part
@@ -114,21 +112,22 @@ def captured_attachment_reference_present(chunks,reference):
                 keys=(b'store_fname',b'checksum',b'file_size')
                 if len(columns)!=len(set(columns)) or not all(key in columns for key in keys):
                     raise ValueError('Captured attachment columns are unavailable')
-                values=(reference['name'].encode(),reference['checksum'].encode(),str(reference['size']).encode())
-                expected={columns.index(key):value for key,value in zip(keys,values)}
+                selected={columns.index(key):key.decode() for key in keys}
+                values={key:b'' for key in selected.values()}
                 continue
             if part not in (b'\t',b'\n'):
                 if index==0:
                     marker=(marker+part)[:3]
-                if index in expected and part!=expected[index][offset:offset+len(part)]:
-                    row_matches=False
+                if index in selected:
+                    key=selected[index]
+                    values[key]+=part
+                    if len(values[key])>64:
+                        raise ValueError('Captured attachment field exceeds its bound')
                 offset+=len(part)
                 continue
             if part==b'\n' and index==0 and offset==2 and marker==b'\\.':
                 complete=True
                 continue
-            if index in expected and offset!=len(expected[index]):
-                row_matches=False
             if part==b'\t':
                 index+=1
                 if index>=len(columns):
@@ -137,10 +136,19 @@ def captured_attachment_reference_present(chunks,reference):
                 continue
             if index+1!=len(columns):
                 raise ValueError('Captured attachment row is incomplete')
-            found=found or row_matches
-            index,offset,marker,row_matches=0,0,b'',True
+            yield values
+            values={key:b'' for key in selected.values()}
+            index,offset,marker=0,0,b''
     if not complete or metadata:
         raise ValueError('Captured attachment table is incomplete')
+
+
+def captured_attachment_reference_present(chunks,reference):
+    expected={'store_fname':reference['name'].encode(),'checksum':reference['checksum'].encode(),
+        'file_size':str(reference['size']).encode()}
+    found=False
+    for row in captured_attachment_rows(chunks):
+        found=found or row==expected
     return found
 
 

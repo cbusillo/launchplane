@@ -97,6 +97,173 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         }
         self.app = self.make_app()
 
+    def test_copy_to_preview_uses_the_existing_secret_path_and_stays_isolated(self) -> None:
+        from control_plane.runtime_environments import (
+            resolve_preview_runtime_environment_from_store,
+        )
+
+        from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="preview-copy-policy",
+                status="active",
+                source="test",
+                updated_at="2026-10-26T00:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="REPAIRSHOPR_TOKEN",
+                        secret_class="shared_safe",
+                        allowed_contexts=(self.profile.preview.context,),
+                        allowed_instances=("preview",),
+                    ),
+                ),
+            )
+        )
+        self.payload["instance"] = "preview"
+        result = apply_product_config_bundle(
+            record_store=self.store,
+            payload=self.payload,
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        safety = result["runtime_key_safety"]
+        assert isinstance(safety, dict)
+        self.assertEqual(safety["status"], "pass")
+        preview = resolve_preview_runtime_environment_from_store(
+            record_store=self.store,
+            context_name=self.profile.preview.context,
+            template_values={},
+        )
+        self.assertEqual(preview.values["REPAIRSHOPR_TOKEN"], "source-only-test-token")
+        preview_records = self.store.list_secret_records(instance_name="preview")
+        self.assertEqual(len(preview_records), 1)
+        self.assertNotEqual(preview_records[0].secret_id, self.source.secret_id)
+        self.assertEqual(self.store.read_secret_record(self.source.secret_id), self.source)
+
+    async def test_preview_configuration_uses_existing_http_read_and_apply_routes(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductSecretConfigRequirement
+
+        self.profile.preview.context = "example-preview"
+        self.profile.expected_config.managed_secret_bindings = (
+            ProductSecretConfigRequirement(
+                binding_key="APP_PASSWORD",
+                context=self.profile.preview.context,
+                instance="preview",
+            ),
+        )
+        self.store.write_product_profile_record(self.profile)
+        headers = {"Authorization": "Bearer test-operator-token"}
+        config = await _asgi_request(
+            self.app,
+            "GET",
+            "/v1/products/example-site/environments/preview/config-status",
+            headers=headers,
+        )
+        self.assertEqual(config.status_code, 200, config.text)
+        self.assertEqual(config.json()["config_status"]["environment"], "preview")
+        payload: dict[str, object] = {
+            "mode": "dry-run",
+            "reason": "Preview configuration",
+            "managed_secrets": [
+                {
+                    "binding_key": "APP_PASSWORD",
+                    "integration": "runtime_environment",
+                    "value": "preview-only-test-password",
+                }
+            ],
+        }
+        route = "/v1/products/example-site/environments/preview/config/apply"
+        dry_run = await _asgi_request(self.app, "POST", route, headers=headers, payload=payload)
+        self.assertEqual(dry_run.status_code, 202, dry_run.text)
+        applied = await _asgi_request(
+            self.app,
+            "POST",
+            route,
+            headers={**headers, "Idempotency-Key": "preview-config-once"},
+            payload={**payload, "mode": "apply", "confirmation": "APPLY example-site/preview"},
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertNotIn("preview-only-test-password", dry_run.text + applied.text)
+        self.assertEqual(self.store.read_secret_record(self.source.secret_id), self.source)
+        self.assertFalse(self.store.list_runtime_environment_records(instance_name="testing"))
+        self.assertFalse(self.store.list_runtime_environment_records(instance_name="prod"))
+
+    def test_preview_config_refuses_opaque_payloads_collisions_and_shared_destinations(
+        self,
+    ) -> None:
+        from control_plane.product_config import ProductConfigError
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+
+        for additions in (
+            {
+                "secrets": [
+                    {
+                        "binding_key": ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+                        "value": "opaque",
+                        "secret_class": "preview",
+                    }
+                ]
+            },
+            {
+                "runtime_env": {"env": {"SETTING": "public"}},
+                "secrets": [
+                    {"binding_key": "SETTING", "value": "private", "secret_class": "preview"}
+                ],
+            },
+            {"secrets": [{"binding_key": "APP_PASSWORD", "scope": "context", "value": "private"}]},
+        ):
+            with self.subTest(additions=additions), self.assertRaises(ProductConfigError):
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={
+                        "product": self.profile.product,
+                        "context": self.profile.preview.context,
+                        "instance": "preview",
+                        **additions,
+                    },
+                    mode="apply",
+                    actor="fixture",
+                    source_label="test",
+                )
+            self.assertFalse(self.store.list_secret_records(instance_name="preview"))
+            self.assertFalse(self.store.list_runtime_environment_records(instance_name="preview"))
+
+    def test_disabled_preview_binding_does_not_block_plain_settings(self) -> None:
+        payload = {
+            "product": self.profile.product,
+            "context": self.profile.preview.context,
+            "instance": "preview",
+        }
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                **payload,
+                "secrets": [
+                    {"binding_key": "SETTING", "value": "private", "secret_class": "preview"}
+                ],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        binding = self.store.list_secret_bindings(instance_name="preview")[0]
+        self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={**payload, "runtime_env": {"env": {"SETTING": "public"}}},
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        self.assertEqual(
+            self.store.list_runtime_environment_records(instance_name="preview")[0].env,
+            {"SETTING": "public"},
+        )
+
     def make_app(self, *, source_read: bool = True, standing_read: bool = False) -> FastAPI:
         actions: tuple[str, ...] = (
             "product_config.plan",
@@ -181,8 +348,66 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(binding.declared_secret_class, "shared_safe")
         self.assertEqual(binding.value_source, "copy")
+        record = self.store.read_secret_record(binding.secret_id)
+        self.assertEqual(
+            self.store.read_secret_version(record.current_version_id).value_origin, "supplied"
+        )
         assert binding.sharing_reason is not None
         self.assertEqual(binding.sharing_reason.kind, "read_only_source")
+
+    def test_copy_origin_is_service_owned_and_propagates_without_fresh_generation_credit(
+        self,
+    ) -> None:
+        template = self.store.read_secret_version(self.source.current_version_id)
+        for origin in ("supplied", "provider", "generated", None):
+            with self.subTest(origin=origin):
+                source_version = template.model_copy(
+                    update={
+                        "version_id": secrets._version_id(secret_id=self.source.secret_id),
+                        "value_origin": origin,
+                    }
+                )
+                self.store.write_secret_version(source_version)
+                self.store.write_secret_record(
+                    self.source.model_copy(update={"current_version_id": source_version.version_id})
+                )
+                requested = {
+                    **self.payload["secrets"][0],
+                    "copy_from": {
+                        **self.payload["secrets"][0]["copy_from"],
+                        "version_id": source_version.version_id,
+                    },
+                }
+                for depth in range(2):
+                    entry = {**requested, "value_origin": "supplied"}
+                    apply_product_config_bundle(
+                        record_store=self.store,
+                        payload={**self.payload, "secrets": [entry]},
+                        mode="apply",
+                        actor="fixture",
+                        source_label="test",
+                    )
+                    destination = next(
+                        binding
+                        for binding in self.store.list_secret_bindings(limit=None)
+                        if binding.instance == "testing"
+                    )
+                    self.assertEqual(destination.value_source, "copy")
+                    target_record = self.store.read_secret_record(destination.secret_id)
+                    self.assertEqual(
+                        self.store.read_secret_version(
+                            target_record.current_version_id
+                        ).value_origin,
+                        origin,
+                    )
+                    requested = {
+                        **entry,
+                        "copy_from": {
+                            "context": "example-site",
+                            "instance": "testing",
+                            "version_id": target_record.current_version_id,
+                        },
+                    }
 
     async def test_read_role_cannot_replace_explicit_secret_copy_source_grant(self) -> None:
         app = self.make_app(source_read=False, standing_read=True)

@@ -130,7 +130,8 @@ route, execute action, static execution credential, or agent execution path.
   explicit `schema_migration` mode, reason, and optional related issue. The
   migration mode defaults to `reject`; `migrate_v2_to_v3` is accepted only with
   a schema-v3 desired policy and remains bound into planning, replay, approval,
-  and worker execution. Planning persists the proposal as operation data but
+  and worker execution; applying it is refused because ordinary-agent rules can
+  no longer be added. Planning persists the proposal as operation data but
   never writes the active authorization policy. The separate policy-write
   transition and its fences are described in the authorization authority
   [Current Transitional Model](authorization-authority.md#current-transitional-model).
@@ -407,7 +408,20 @@ pre-state are unchanged, until withdrawn (cancelled before approval or revoked
 after approval) or executed. Approval and execution keep the existing policy
 checks and compare-and-swap refusal for stale revisions. Changing a policy
 requires preparing the remaining change for fresh review; elapsed time alone
-does not. Reads do not reconcile time-based expiry or append events.
+does not. Pending policy-plan list and detail reviews compare the saved evidence
+with the current planner evidence, using the same comparison as approval. A stale
+plan is readable with an explicit warning and no approval control. The stale
+category also covers current policy evidence that cannot be verified; refreshing
+can make the same saved plan usable again when that evidence becomes available.
+If the policy has changed, an administrator can cancel the plan and prepare a
+new one. Unavailable current planning is identified separately and can also be
+checked again by refreshing. Existing transition authorization and browser
+cancellation controls are unchanged. Policy storage read
+failures leave the affected review unavailable instead of presenting saved
+evidence as current. Detailed access changes are withheld when current eligibility
+is blocked. These reads do not expire or cancel the plan, reconcile time-based
+expiry, or append events. Approved and terminal records retain their historical
+review and revoke/cancel behavior.
 
 New records and approvals store an empty `expires_at`. Legacy timestamps and
 terminal `expired` records remain readable with their original digests; pending
@@ -491,8 +505,8 @@ deeper authorized disclosure. Mutation, challenge, worker, agent-summary,
 approval, revoke, cancel, and execution behavior is unchanged.
 The projection explicitly records that it authorizes neither approval nor
 execution and persists no state; its `can_approve` and `can_revoke` values are
-non-authoritative UI affordances derived from persisted lifecycle and blocker
-state.
+non-authoritative UI affordances derived from persisted lifecycle, blockers,
+and current policy-plan availability.
 
 ## HTTP, UI, And Worker
 

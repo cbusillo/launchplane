@@ -3,7 +3,7 @@ import logging
 import unittest
 from collections.abc import Callable
 from pathlib import Path
-from threading import Event, current_thread
+from threading import Event
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
@@ -248,15 +248,113 @@ def _restore_operation(
 
 
 class OdooStableOperationWorkerTests(unittest.TestCase):
-    def test_cold_invitation_reads_do_not_delay_the_next_accepted_release_pass(self) -> None:
-        from control_plane.workflows.odoo_stable_operation_worker import (
-            CLIENT_RELEASE_ADVANCE_SECONDS,
-        )
+    def test_reconcile_wait_does_not_delay_next_accepted_release_pass(self) -> None:
+        for blocked_step in ("operation", "sweep"):
+            with self.subTest(blocked_step=blocked_step), TemporaryDirectory() as directory:
+                first, second, stop = Event(), Event(), Event()
+
+                def advance(**_kwargs: object) -> tuple[str, ...]:
+                    (second if first.is_set() else first).set()
+                    return ()
+
+                def wait(*_args: object, **_kwargs: object) -> object:
+                    second.wait(10)
+                    stop.set()
+                    return type("Idle", (), {"status": "idle"})()
+
+                store = FilesystemRecordStore(state_dir=Path(directory))
+                with (
+                    patch.object(store, "request_product_reconcile", create=True),
+                    patch(
+                        "control_plane.workflows.odoo_stable_operation_worker.CLIENT_RELEASE_ADVANCE_SECONDS",
+                        0.01,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_operation_worker.advance_client_releases",
+                        side_effect=advance,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_operation_worker.advance_release_invitations"
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep",
+                        side_effect=wait if blocked_step == "sweep" else None,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                        side_effect=wait if blocked_step == "operation" else None,
+                    ),
+                ):
+                    result = run_odoo_stable_operation_worker_loop(
+                        record_store=store,
+                        control_plane_root_path=Path(directory),
+                        lease_owner="worker",
+                        stop_event=stop,
+                        max_iterations=1,
+                    )
+                self.assertTrue(second.is_set())
+                self.assertEqual(result.status, "stopped")
+
+    def test_checkpoint_observation_does_not_block_production_poll(self) -> None:
+        from control_plane.storage.postgres import PostgresRecordStore
 
         started, release, finished, stop = Event(), Event(), Event(), Event()
-        passes: list[float] = []
-        clock = [0.0]
-        advance_threads = []
+
+        def observe(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+            started.set()
+            if not release.wait(10):
+                raise AssertionError("Production poll waited behind checkpoint observation")
+            finished.set()
+            return ()
+
+        def poll(**_kwargs: object) -> object:
+            self.assertTrue(started.wait(10))
+            self.assertFalse(finished.is_set())
+            release.set()
+            stop.set()
+            return type("Idle", (), {"status": "idle"})()
+
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'store.db'}"
+            )
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            with (
+                patch(
+                    "control_plane.rehearsal_deploy_resume.resume_rehearsals", side_effect=observe
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.advance_client_releases"
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.advance_release_invitations"
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.request_product_reconcile_sweep"
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                    side_effect=poll,
+                ),
+            ):
+                try:
+                    result = run_odoo_stable_operation_worker_loop(
+                        record_store=store,
+                        control_plane_root_path=Path(directory),
+                        lease_owner="replacement-worker",
+                        stop_event=stop,
+                        max_iterations=1,
+                    )
+                finally:
+                    release.set()
+        self.assertEqual(result.status, "stopped")
+        self.assertTrue(finished.is_set())
+
+    def test_cold_invitation_reads_do_not_delay_the_next_accepted_release_pass(self) -> None:
+        started, release, finished, stop, second = Event(), Event(), Event(), Event(), Event()
+        passes: list[bool] = []
+        observed_while_waiting: list[bool] = []
 
         def invite(**_kwargs: object) -> None:
             started.set()
@@ -265,24 +363,25 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             finished.set()
 
         def advance(**_kwargs: object) -> tuple[str, ...]:
-            advance_threads.append(current_thread())
-            passes.append(clock[0])
+            passes.append(True)
+            if len(passes) >= 2:
+                second.set()
             return ()
 
         def poll(**_kwargs: object) -> object:
-            self.assertTrue(started.wait(10))
-            if advance_threads:
-                advance_threads[-1].join(timeout=1)
-            if len(passes) >= 2:
-                self.assertFalse(finished.is_set())
-                release.set()
-                stop.set()
-            clock[0] += CLIENT_RELEASE_ADVANCE_SECONDS
+            started.wait(10)
+            second.wait(10)
+            observed_while_waiting.append(started.is_set() and not finished.is_set())
+            release.set()
+            stop.set()
             return type("Idle", (), {"status": "idle"})()
 
         with TemporaryDirectory() as directory:
-            store = FilesystemRecordStore(state_dir=Path(directory))
             with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.CLIENT_RELEASE_ADVANCE_SECONDS",
+                    0.01,
+                ),
                 patch(
                     "control_plane.workflows.odoo_stable_operation_worker.advance_release_invitations",
                     side_effect=invite,
@@ -298,18 +397,16 @@ class OdooStableOperationWorkerTests(unittest.TestCase):
             ):
                 try:
                     run_odoo_stable_operation_worker_loop(
-                        record_store=store,
+                        record_store=FilesystemRecordStore(state_dir=Path(directory)),
                         control_plane_root_path=Path(directory),
                         lease_owner="worker",
                         stop_event=stop,
-                        max_iterations=5,
-                        poll_seconds=1,
-                        monotonic=lambda: clock[0],
+                        max_iterations=1,
                     )
                 finally:
                     release.set()
         self.assertGreaterEqual(len(passes), 2)
-        self.assertLessEqual(passes[1] - passes[0], CLIENT_RELEASE_ADVANCE_SECONDS)
+        self.assertTrue(all(observed_while_waiting))
         self.assertEqual(invitations.call_count, 1)
         self.assertTrue(finished.is_set())
 

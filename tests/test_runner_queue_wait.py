@@ -11,7 +11,7 @@ from control_plane.cli import main
 from control_plane.contracts.runner_queue_wait import build_runner_queue_wait_job
 from control_plane.contracts.runner_queue_wait import build_runner_queue_wait_summary
 from control_plane.merge_train_github import MergeTrainGitHubError
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.runner_queue_wait_github import GitHubRunnerQueueWaitReader
 
 
@@ -206,7 +206,6 @@ class RunnerQueueWaitCliTests(unittest.TestCase):
             result = CliRunner().invoke(
                 CLI_MAIN,
                 [
-                    "work-graph",
                     "runner-queue-wait",
                     "--repository",
                     "cbusillo/repo",
@@ -224,7 +223,7 @@ class RunnerQueueWaitCliTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             result = CliRunner().invoke(
                 CLI_MAIN,
-                ["work-graph", "runner-queue-wait", "--repository", "cbusillo/repo"],
+                ["runner-queue-wait", "--repository", "cbusillo/repo"],
             )
 
         self.assertNotEqual(result.exit_code, 0)

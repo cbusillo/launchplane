@@ -70,6 +70,8 @@ def _controller_policy(
     *,
     mode: str,
     include_binding_authority: bool = True,
+    products: tuple[str, ...] = ("example-product",),
+    contexts: tuple[str, ...] = ("example-testing",),
 ) -> LaunchplaneAuthzPolicy:
     controller_action = f"route_binding.odoo_testing_refresh.{mode}"
     binding_action = "route_binding.apply" if mode == "apply" else "route_binding.read"
@@ -93,8 +95,8 @@ def _controller_policy(
                     "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
                 ],
                 "event_names": ["pull_request"],
-                "products": ["example-product"],
-                "contexts": ["example-testing"],
+                "products": list(products),
+                "contexts": list(contexts),
                 "instances": ["testing"],
                 "actions": [binding_action],
             }
@@ -634,7 +636,7 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
         assert parent_idempotency is not None
         self.assertEqual(parent_idempotency.state, "completed")
 
-    async def test_parent_reservation_fences_retry_after_partial_completion(self) -> None:
+    async def test_failed_parent_completion_allows_retry_after_partial_completion(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
                 database_url=_sqlite_database_url(
@@ -677,27 +679,22 @@ class RouteBindingRefreshControllerHttpTests(unittest.IsolatedAsyncioTestCase):
                 context_name="example-testing",
                 instance_name="testing",
             )
-            parent_reservation = store.read_idempotency_record(
-                scope=idempotency_scope(_identity()),
-                route_path="/v1/route-bindings/odoo-testing/controller/run-once",
-                idempotency_key="odoo-testing-route-binding-refresh-partial",
-            )
-            retry = await _asgi_request(
-                app,
-                "POST",
-                "/v1/route-bindings/odoo-testing/controller/run-once",
-                headers=headers,
-                payload=_refresh_payload(mode="apply"),
-            )
+            with patch(
+                "control_plane.http_app.utc_now_timestamp", return_value="2026-07-20T12:00:00Z"
+            ):
+                retry = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/route-bindings/odoo-testing/controller/run-once",
+                    headers=headers,
+                    payload=_refresh_payload(mode="apply"),
+                )
             store.close()
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(refreshed.source.refreshed_at, "2026-07-20T12:00:00Z")
-        self.assertIsNotNone(parent_reservation)
-        assert parent_reservation is not None
-        self.assertEqual(parent_reservation.state, "running")
-        self.assertEqual(retry.status_code, 409)
-        self.assertEqual(retry.json()["error"]["code"], "mutation_in_progress")
+        self.assertEqual(retry.status_code, 202, retry.text)
+        self.assertEqual(retry.json()["result"]["unchanged_count"], 1)
 
     async def test_openapi_includes_refresh_controller_contract(self) -> None:
         app = create_launchplane_fastapi_app(

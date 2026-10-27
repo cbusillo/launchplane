@@ -1,6 +1,7 @@
 """Exercise the durable env program and the stopped recreation adapter."""
 
 import base64
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
@@ -66,7 +67,7 @@ class SlotStartupTests(unittest.TestCase):
             self.environments[project] = raw
             self.configs[project] = {"services": {}}
             for writer in self.plan.writers:
-                service = writer.writer_id
+                service = "web" if writer.kind == "web" else "scheduler"
                 name = project + "-" + service
                 self.current[project, service] = name
                 self.configs[project]["services"][service] = {
@@ -154,16 +155,18 @@ class SlotStartupTests(unittest.TestCase):
                 return json.dumps(self.configs[project])
             if "up" in argv:
                 self.effects.append("recreate:" + project)
-                for writer in self.plan.writers:
-                    key = project, writer.writer_id
+                selected = argv[argv.index("never") + 1 :]
+                self.assertEqual(len(selected), len(set(selected)))
+                self.assertEqual(set(selected), set(self.configs[project]["services"]))
+                for service in selected:
+                    key = project, service
                     old = self.current[key]
                     name = old + "-recreated"
                     matching = [
                         name
                         for name, value in self.containers.items()
                         if value["Config"]["Labels"]["com.docker.compose.project"] == project
-                        and value["Config"]["Labels"]["com.docker.compose.service"]
-                        == writer.writer_id
+                        and value["Config"]["Labels"]["com.docker.compose.service"] == service
                     ]
                     template = self.containers[matching[0]] if matching else self.templates[key]
                     container = json.loads(json.dumps(template))
@@ -238,6 +241,39 @@ class SlotStartupTests(unittest.TestCase):
         self.bad_config = True
         with self.assertRaises(ValueError):
             self.startup.preflight(self.plan)
+        self.assertFalse(self.effects)
+
+    def test_inventory_keeps_logical_coverage_and_rejects_cross_slot_or_image_aliases(self) -> None:
+        targets = self.writers.targets
+        self.assertLess(len({target.container for target in targets}), len(targets))
+        for invalid in (
+            targets[:-1],
+            (*targets[:-1], targets[0]),
+            tuple(replace(target, container=targets[0].container) for target in targets),
+            (replace(targets[0], image=self.plan.new.image), *targets[1:]),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                ContainerSlotWriters(self.plan, invalid, self.execute, lambda _: 0)
+        self.assertFalse(self.effects)
+
+    def test_effective_settings_inspects_each_shared_container_once(self) -> None:
+        from control_plane.dokploy.slot_website_settings import _verify_startup_containers
+
+        assert self.plan.website_settings is not None
+        readback = self.startup(self.plan, self.plan.new, self.plan.website_settings)
+        with patch.object(self, "execute", wraps=self.execute) as execute:
+            _verify_startup_containers(self.plan, self.plan.website_settings, readback, execute)
+        inspected = [call.args[0][-1] for call in execute.call_args_list]
+        self.assertCountEqual(inspected, {target.container for target in readback.containers})
+
+    def test_refresh_refuses_active_jobs_from_a_shared_nonrepresentative_writer(self) -> None:
+        hidden = next(target for target in self.writers.targets if target.writer.kind != "web")
+        self.writers.active_jobs = lambda target: int(
+            target.writer == hidden.writer and target.slot_id == hidden.slot_id
+        )
+        assert self.plan.website_settings is not None
+        with self.assertRaises(ValueError):
+            self.startup(self.plan, self.plan.new, self.plan.website_settings)
         self.assertFalse(self.effects)
 
     def test_running_writers_and_wrong_recreated_image_cannot_return_success(self) -> None:
@@ -331,12 +367,15 @@ class SlotStartupTests(unittest.TestCase):
 
     def recover(self, *, jobs: int = 0) -> None:
         assert self.plan.rollback_website_settings is not None
+        hidden = next(target for target in self.writers.targets if target.writer.kind != "web")
         self.startup.recover(
             self.plan,
             self.plan.old,
             self.plan.rollback_website_settings,
             verify_guard=lambda plan: self.assertEqual(plan, self.plan),
-            active_jobs=lambda slot, writer: jobs,
+            active_jobs=lambda slot, writer: (
+                jobs if slot.slot_id == hidden.slot_id and writer == hidden.writer else 0
+            ),
         )
 
     def test_recovery_after_restart_converges_zero_and_multiple_without_old_ids(self) -> None:

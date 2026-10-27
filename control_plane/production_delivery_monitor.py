@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import logging
 import re
-from typing import Literal
+from urllib.parse import parse_qs, urlencode, urlsplit
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from starlette.requests import Request
 from starlette.concurrency import run_in_threadpool
 
 from control_plane.build_provenance import BuildProvenanceTransport
-from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
-from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.deployment_record import (
+    DEPLOYMENT_OPERATION_EVIDENCE_KEY,
+    DeploymentRecord,
+    deployment_operation_evidence,
+    deployment_record_passed,
+)
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -41,10 +45,18 @@ from control_plane.lane_runtime_verification import (
     read_lane_runtime_verification,
 )
 from control_plane.source_control_change import read_branch_revision
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.delivery_evidence import DeliveryEvidenceIndex, DeliveryEvidenceWork
+from control_plane.storage.delivery_evidence import (
+    DeliveryEvidenceIndex,
+    DeliveryEvidenceWork,
+    DeliveryFailureObservation,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.workflows.public_ingress_monitor import _store_monitor_observation
+from control_plane.workflows.public_ingress_monitor import (
+    PublicIngressIncidentChanged,
+    _store_monitor_observation,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 Store = PostgresRecordStore | FilesystemRecordStore
@@ -68,15 +80,10 @@ _NONTERMINAL_CODES = frozenset(
 )
 
 
-class RefusedProductionRequestReconciliation(BaseModel):
-    """An admin attests caller retirement; the service verifies refusal and health."""
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    incident_id: str = Field(min_length=1)
-    caller_retired: Literal[True]
-    caller_retired_at: AwareDatetime
-    caller_retirement_evidence: str = Field(min_length=1, max_length=2000)
+@dataclass(frozen=True)
+class DeliveryFailureReference:
+    trace_id: str
+    failed_at: str
 
 
 def is_guard_refusal_incident(incident: PublicIngressIncidentRecord) -> bool:
@@ -104,80 +111,6 @@ def _is_refusal_only_incident(store: Store, incident: PublicIngressIncidentRecor
     )
 
 
-def reconcile_refused_production_requests(
-    store: Store,
-    *,
-    requests: tuple[RefusedProductionRequestReconciliation, ...],
-    observed_at: str,
-) -> tuple[str, ...]:
-    """One-time supported disposition; never infer caller retirement from runtime health."""
-    now = _time(observed_at)
-    resolved: list[str] = []
-    for request in requests:
-        incident = store.read_public_ingress_incident_record(request.incident_id)
-        with (
-            store.delivery_evidence_index() as index,
-            index.lane_lock(incident.context, incident.product) as acquired,
-        ):
-            if not acquired:
-                raise ValueError(
-                    "Delivery monitoring is active; retry reconciliation after it finishes."
-                )
-            refusals = store.list_public_ingress_observation_records(
-                product=incident.product,
-                context_name=incident.context,
-                instance_name="prod",
-                check_kind="provider",
-                check_name_prefix=REFUSED_REQUEST_CHECK_PREFIX,
-                limit=1,
-            )
-            resolved.append(
-                _reconcile_refused_production_request(
-                    store,
-                    request=request,
-                    now=now,
-                    latest_refusal_at=_time(refusals[0].observed_at) if refusals else None,
-                )
-            )
-    return tuple(resolved)
-
-
-def _reconcile_refused_production_request(
-    store: Store,
-    *,
-    request: RefusedProductionRequestReconciliation,
-    now: datetime,
-    latest_refusal_at: datetime | None,
-) -> str:
-    incident = store.read_public_ingress_incident_record(request.incident_id)
-    if not is_guard_refusal_incident(incident):
-        raise ValueError("Only a promotion guard refusal can be reconciled as refused.")
-    if incident.status == "resolved":
-        if incident.resolution_reason == PRODUCTION_REQUEST_REFUSED:
-            return incident.incident_id
-        raise ValueError(
-            "This incident already resolved by another outcome; retain that disposition."
-        )
-    if not _time(incident.opened_at) <= request.caller_retired_at <= now:
-        raise ValueError("Caller retirement must follow the refused request and precede now.")
-    profile = store.read_product_profile_record(incident.product)
-    lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
-    if lane is None or not profile.is_active or lane.context != incident.context:
-        raise ValueError("The production lane has changed; inspect its current evidence.")
-    if latest_refusal_at is not None and latest_refusal_at >= request.caller_retired_at:
-        raise ValueError("A production caller is still making refused requests.")
-    return _resolve_guard_refusal(
-        store,
-        incident=incident,
-        profile=profile,
-        lane=lane,
-        now=now,
-        health_after=request.caller_retired_at,
-        summary="Production request refused, nothing changed. Caller retired at "
-        f"{request.caller_retired_at.isoformat()}; evidence: {request.caller_retirement_evidence}. ",
-    )
-
-
 def _resolve_guard_refusal(
     store: Store,
     *,
@@ -188,6 +121,9 @@ def _resolve_guard_refusal(
     health_after: datetime,
     summary: str,
 ) -> str:
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(store, profile, lane)
+    )
     checks = tuple(
         check
         for check in lane.health_monitoring.checks
@@ -215,9 +151,7 @@ def _resolve_guard_refusal(
             or monitor_observation_provenance(observations[0], now=now).freshness_status
             != "verified"
         ):
-            raise ValueError(
-                "Production health must pass freshly after the last refusal or retirement."
-            )
+            raise ValueError("Production health must pass freshly after the last refusal.")
     _require_verified_production_runtime(store, profile, lane, now)
     if not _is_refusal_only_incident(store, incident):
         raise ValueError("Incident history includes a failure or uncertain outcome beyond refusal.")
@@ -330,11 +264,18 @@ def _observe(
     retired: bool = False,
     refused: bool = False,
     expected_incident_sha256: str = "",
+    failure_reference: DeliveryFailureReference | None = None,
+    failure_event: bool = False,
 ) -> None:
     delivery_kind = "testing" if lane.instance == "testing" else "production"
     failure_code: PublicIngressFailureCode = (
         "testing_delivery_failed" if lane.instance == "testing" else "production_delivery_failed"
     )
+    target_url = f"provider://launchplane/{delivery_kind}-delivery/{reason}"
+    if failure_reference is not None:
+        target_url += "?" + urlencode(
+            {"trace": failure_reference.trace_id, "failed_at": failure_reference.failed_at}
+        )
     observation = PublicIngressObservationRecord(
         record_id=build_public_ingress_observation_id(
             product=profile.product,
@@ -358,13 +299,23 @@ def _observe(
         targets=(
             PublicIngressTargetObservation(
                 target="provider",
-                url=f"provider://launchplane/{delivery_kind}-delivery/{reason}",
+                url=target_url,
                 status="fail" if failed else "pass",
                 failure_code=failure_code if failed else None,
                 summary=summary,
             ),
         ),
     )
+    if failure_event and failure_reference is not None:
+        observation = observation.model_copy(
+            update={
+                "record_id": observation.record_id
+                + "-"
+                + _candidate_key(
+                    reason + "\0" + failure_reference.trace_id + "\0" + failure_reference.failed_at
+                )
+            }
+        )
     if refused:
         observation = observation.model_copy(
             update={
@@ -419,7 +370,7 @@ def _observe(
         notification_drivers=None,
         expected_incident_sha256=expected_incident_sha256,
         reconciliation_reason=PRODUCTION_REQUEST_REFUSED
-        if expected_incident_sha256
+        if retired and expected_incident_sha256
         else "monitoring_intent_changed",
     )
     if result.authority_changed:
@@ -440,6 +391,12 @@ def record_production_delivery_failure(
         return
     check_name = DELIVERY_CHECK_PREFIX + _candidate_key(candidate)
     safe_reason = reason if re.fullmatch(r"[a-z][a-z0-9_]{0,99}", reason) else "delivery_failed"
+    safe_trace = trace_id if re.fullmatch(r"[A-Za-z0-9_:\-.]{1,200}", trace_id) else "unavailable"
+    failure_at = observed_at or utc_now_timestamp()
+    reference = DeliveryFailureReference(
+        trace_id=safe_trace,
+        failed_at=_canonical_time(failure_at),
+    )
     existing = store.list_public_ingress_incident_records(
         product=profile.product,
         context_name=lane.context,
@@ -447,7 +404,6 @@ def record_production_delivery_failure(
         check_name=check_name,
         status="open",
     )
-    # New stages update the same incident; exact retries retain their original trace.
     if (
         existing
         and existing[0].material_fingerprint is not None
@@ -456,8 +412,18 @@ def record_production_delivery_failure(
             == "production-delivery/" + safe_reason
         )
     ):
-        return
-    safe_trace = trace_id if re.fullmatch(r"[A-Za-z0-9_:\-.]{1,200}", trace_id) else "unavailable"
+        previous = store.read_public_ingress_observation_record(existing[0].latest_observation_id)
+        if (
+            _delivery_failure_reference(
+                DeliveryFailureObservation(
+                    summary=previous.summary,
+                    observed_at=previous.observed_at,
+                    target_url=previous.targets[0].url if previous.targets else "",
+                )
+            )
+            == reference
+        ):
+            return
     _observe(
         store,
         profile,
@@ -466,8 +432,12 @@ def record_production_delivery_failure(
         failed=True,
         summary=f"Production delivery blocked: {safe_reason}; trace: {safe_trace}. "
         "The previous runtime may still be healthy. Inspect the supported release path.",
-        observed_at=observed_at or utc_now_timestamp(),
+        observed_at=failure_at,
         reason=safe_reason,
+        failure_reference=reference
+        if safe_reason != ProductionChangeRequiresPromotion.code
+        else None,
+        failure_event=True,
     )
 
 
@@ -942,8 +912,12 @@ def _recover_delivery_failures(
         ):
             continue
         key = incident.check_name.removeprefix(DELIVERY_CHECK_PREFIX)
+        failures = store.list_delivery_failure_observations(incident_id=incident.incident_id)
+        failed_at, rollback_only = _delivery_failure_evidence(
+            store, lane, incident, failures, index
+        )
 
-        def verify_file(record_id: str) -> bool:
+        def verify_deployment(record_id: str) -> bool:
             try:
                 record = store.read_deployment_record(record_id)
             except FileNotFoundError:
@@ -953,32 +927,50 @@ def _recover_delivery_failures(
                 keys.add(_candidate_key(record.artifact_identity.artifact_id))
             return bool(
                 deployment_record_passed(record)
+                and record.failure is None
                 and key in keys
                 and record.deploy.finished_at
-                and _time(record.deploy.finished_at) > _time(incident.opened_at)
+                and _time(failed_at) < _time(record.deploy.finished_at) <= _time(now)
+                and record.context == lane.context
+                and record.instance == "prod"
             )
 
+        recovery_summary = ""
         if index.matching_success(
             lane.context,
             key,
-            incident.opened_at,
-            verify_file if isinstance(store, FilesystemRecordStore) else None,
+            failed_at,
+            verify_deployment,
+            finished_before=now,
         ):
-            _observe(
-                store,
-                profile,
-                lane,
-                check_name=incident.check_name,
-                failed=False,
-                summary="The matching production delivery succeeded.",
-                observed_at=now,
-            )
+            recovery_summary = "The matching production delivery succeeded."
+        elif (
+            profile.driver_id == "generic-web"
+            and rollback_only
+            and (recovery := _later_passing_rollback(store, lane, failed_at, now, index))
+        ):
+            recovery_summary = f"The failed production rollback recovered through {recovery}."
+        if recovery_summary:
+            try:
+                _observe(
+                    store,
+                    profile,
+                    lane,
+                    check_name=incident.check_name,
+                    failed=False,
+                    summary=recovery_summary,
+                    observed_at=now,
+                    expected_incident_sha256=public_ingress_incident_record_sha256(incident),
+                )
+            except PublicIngressIncidentChanged:
+                continue
         elif not _is_refusal_only_incident(store, incident) and incident.latest_observed_at != now:
             reason = (
                 incident.material_fingerprint.route_authority.provider_check.rsplit("/", 1)[-1]
                 if incident.material_fingerprint
                 else "delivery_failed"
             )
+            previous = store.read_public_ingress_observation_record(incident.latest_observation_id)
             _observe(
                 store,
                 profile,
@@ -988,7 +980,125 @@ def _recover_delivery_failures(
                 summary=incident.summary,
                 observed_at=now,
                 reason=reason,
+                failure_reference=_delivery_failure_reference(
+                    DeliveryFailureObservation(
+                        summary=previous.summary,
+                        observed_at=previous.observed_at,
+                        target_url=previous.targets[0].url if previous.targets else "",
+                    )
+                )
+                if previous.targets and urlsplit(previous.targets[0].url).query
+                else None,
             )
+
+
+def _is_rollback_deployment(record: DeploymentRecord) -> bool:
+    if DEPLOYMENT_OPERATION_EVIDENCE_KEY in record.runtime_source:
+        return record.runtime_source.items() >= deployment_operation_evidence(rollback=True).items()
+    return record.deploy.deploy_mode == "atomic-switch-back" or record.record_id.endswith(
+        "-rollback"
+    )
+
+
+def _delivery_failure_trace(summary: str) -> str:
+    match = re.search(r"; trace: ([A-Za-z0-9_:\-.]{1,200})\. ", summary)
+    return match[1] if match else ""
+
+
+def _delivery_failure_reference(
+    observation: DeliveryFailureObservation,
+) -> DeliveryFailureReference:
+    parsed = urlsplit(observation.target_url)
+    if parsed.query:
+        metadata = parse_qs(parsed.query, keep_blank_values=True)
+        if (
+            parsed.scheme != "provider"
+            or parsed.netloc != "launchplane"
+            or not parsed.path.startswith("/production-delivery/")
+            or set(metadata) != {"trace", "failed_at"}
+            or any(len(values) != 1 for values in metadata.values())
+            or re.fullmatch(r"[A-Za-z0-9_:\-.]{1,200}", metadata["trace"][0]) is None
+        ):
+            raise ValueError("Stored production delivery failure reference is invalid.")
+        return DeliveryFailureReference(
+            trace_id=metadata["trace"][0],
+            failed_at=_canonical_time(metadata["failed_at"][0]),
+        )
+    return DeliveryFailureReference(
+        trace_id=_delivery_failure_trace(observation.summary),
+        failed_at=_canonical_time(observation.observed_at),
+    )
+
+
+def _delivery_failure_evidence(
+    store: Store,
+    lane: ProductLaneProfile,
+    incident: PublicIngressIncidentRecord,
+    failures: tuple[DeliveryFailureObservation, ...],
+    index: DeliveryEvidenceIndex,
+) -> tuple[str, bool]:
+    references = tuple(_delivery_failure_reference(failure) for failure in failures)
+    latest = max(
+        [_time(incident.opened_at)] + [_time(reference.failed_at) for reference in references]
+    )
+    key = incident.check_name.removeprefix(DELIVERY_CHECK_PREFIX)
+    traces = {reference.trace_id for reference in references}
+    record_ids = dict.fromkeys(
+        [
+            *traces,
+            *index.deployment_candidates(lane.context, key=key, finished_since=incident.opened_at),
+        ]
+    )
+    rollback_only = bool(failures)
+    for record_id in record_ids:
+        try:
+            record = store.read_deployment_record(record_id)
+        except FileNotFoundError:
+            if record_id in traces:
+                rollback_only = False
+            continue
+        keys = {_candidate_key(record.source_git_ref)}
+        if record.artifact_identity:
+            keys.add(_candidate_key(record.artifact_identity.artifact_id))
+        failed = record.failure is not None or "fail" in {
+            record.deploy.status,
+            record.post_deploy_update.status,
+            record.destination_health.status,
+        }
+        matches = record.context == lane.context and record.instance == "prod" and key in keys
+        if record_id in traces and not (matches and failed and record.deploy.finished_at):
+            rollback_only = False
+        if matches and failed and record.deploy.finished_at:
+            latest = max(latest, _time(record.deploy.finished_at))
+            rollback_only = rollback_only and _is_rollback_deployment(record)
+    return latest.isoformat(), rollback_only
+
+
+def _later_passing_rollback(
+    store: Store,
+    lane: ProductLaneProfile,
+    failed_at: str,
+    now: str,
+    index: DeliveryEvidenceIndex,
+) -> str:
+    for record_id in index.deployment_candidates(
+        lane.context, passed=True, finished_after=failed_at, finished_before=now
+    ):
+        try:
+            record = store.read_deployment_record(record_id)
+        except FileNotFoundError:
+            continue
+        if (
+            record.context == lane.context
+            and record.instance == "prod"
+            and _is_rollback_deployment(record)
+            and record.failure is None
+            and deployment_record_passed(record)
+            and record.deploy.finished_at
+            and _time(failed_at) < _time(record.deploy.finished_at) <= _time(now)
+        ):
+            return record.record_id
+    return ""
 
 
 def _monitor_availability(
@@ -1001,7 +1111,14 @@ def _monitor_availability(
     available: bool,
 ) -> None:
     candidate = "monitor:" + component
-    if not available:
+    incidents = store.list_public_ingress_incident_records(
+        product=profile.product,
+        context_name=lane.context,
+        instance_name="prod",
+        check_name=DELIVERY_CHECK_PREFIX + _candidate_key(candidate),
+        status="open",
+    )
+    if not available and not incidents:
         record_production_delivery_failure(
             store,
             profile,
@@ -1011,13 +1128,7 @@ def _monitor_availability(
             trace_id="production-delivery-monitor:" + _candidate_key(profile.product),
             observed_at=now,
         )
-    elif store.list_public_ingress_incident_records(
-        product=profile.product,
-        context_name=lane.context,
-        instance_name="prod",
-        check_name=DELIVERY_CHECK_PREFIX + _candidate_key(candidate),
-        status="open",
-    ):
+    elif available and incidents:
         _observe(
             store,
             profile,
@@ -1034,17 +1145,10 @@ def _time(value: str) -> datetime:
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 
-def _write_receipt(store: Store, *, key: str, now: str, payload: dict[str, object]) -> None:
-    store.write_idempotency_record(
-        LaunchplaneIdempotencyRecord(
-            record_id="production-delivery-" + _candidate_key(key),
-            scope=_SCOPE,
-            route_path=_ROUTE,
-            idempotency_key=key,
-            request_fingerprint="production-delivery-monitor-v1",
-            response_status_code=200,
-            response_trace_id="production-delivery-monitor:" + _candidate_key(key),
-            recorded_at=now,
-            response_payload=payload,
-        )
+def _canonical_time(value: str) -> str:
+    return (
+        _time(value)
+        .astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
     )

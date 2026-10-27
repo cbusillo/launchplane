@@ -1,4 +1,5 @@
 import asyncio
+from tests.support.sync_cycle_health import sync_cycle_payload
 import json
 import threading
 import unittest
@@ -4849,6 +4850,14 @@ class GenericWebHttpTests(unittest.TestCase):
                 refresh.assert_called_once()
 
     def test_generic_web_preview_refresh_retry_runs_again_after_blocked_result(self) -> None:
+        self._assert_preview_refresh_retries(memory_refusal=False)
+
+    def test_preview_memory_refusal_is_clear_and_same_key_can_retry(self) -> None:
+        self._assert_preview_refresh_retries(memory_refusal=True)
+
+    def _assert_preview_refresh_retries(self, *, memory_refusal: bool) -> None:
+        from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
+
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
@@ -4912,7 +4921,13 @@ class GenericWebHttpTests(unittest.TestCase):
                         "application_id": "",
                         "preview_url": "https://pr-42.example.test",
                         "error_message": "Generic web preview readiness blocked refresh.",
-                    },
+                    }
+                    if not memory_refusal
+                    else PreviewMemoryCapacityRefused(
+                        "private-host-marker Floor 5000 bytes; current headroom 4999 bytes",
+                        floor=5000,
+                        headroom=4999,
+                    ),
                     {
                         "refresh_status": "pass",
                         "refresh_started_at": "2026-05-03T15:06:00Z",
@@ -4941,8 +4956,13 @@ class GenericWebHttpTests(unittest.TestCase):
                     headers={"Idempotency-Key": "generic-web-preview-refresh:syo:42:sha"},
                 )
 
-        self.assertEqual(first_status_code, 202)
-        self.assertEqual(first_payload["result"]["refresh_status"], "blocked")
+        self.assertEqual(first_status_code, 409 if memory_refusal else 202)
+        if memory_refusal:
+            self.assertNotIn("private-host-marker", first_payload["error"]["message"])
+            self.assertIn("5000", first_payload["error"]["message"])
+            self.assertIn("4999", first_payload["error"]["message"])
+        else:
+            self.assertEqual(first_payload["result"]["refresh_status"], "blocked")
         self.assertEqual(second_status_code, 202)
         self.assertEqual(second_payload["result"]["refresh_status"], "pass")
         self.assertNotIn("replayed", second_payload)
@@ -5259,7 +5279,6 @@ class GenericWebHttpTests(unittest.TestCase):
                         data_transport_mode="none",
                         copied_env_keys=(),
                         omitted_env_keys=(),
-                        override_env_keys=(),
                         preview_url_env_keys=(),
                         preview_domain_env_keys=(),
                     ),
@@ -5810,6 +5829,7 @@ class GenericWebHttpTests(unittest.TestCase):
                             "status": "ok",
                             "version": runtime_identity.artifact_id,
                             "runtime_identity": runtime_identity.model_dump(mode="json"),
+                            "sync": sync_cycle_payload(),
                         },
                     },
                 },
@@ -5821,6 +5841,9 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2))
         self.assertEqual(deployment.destination_health.status, "pass")
         self.assertEqual(deployment.destination_health.structured_health.status, "pass")
+        self.assertNotIn(
+            "sync", deployment.destination_health.structured_health.model_dump(mode="json")
+        )
         self.assertEqual(
             deployment.destination_health.structured_health.version,
             runtime_identity.artifact_id,

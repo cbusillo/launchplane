@@ -5,12 +5,10 @@ _DNS_CASE_TRANSLATION = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijk
 
 
 def canonical_dns_hostname(value: str) -> str:
-    """Compare DNS labels using locale-independent ASCII case folding."""
     return value.strip().rstrip(".").translate(_DNS_CASE_TRANSLATION)
 
 
 def retained_hostname_identity(value: str) -> str:
-    """Extract a retained domain/URL claim without accepting it as new input."""
     authority = value.strip().split("://", 1)[-1]
     authority = re.split(r"[/#?]", authority, maxsplit=1)[0].rsplit("@", 1)[-1]
     hostname = (

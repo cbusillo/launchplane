@@ -5,6 +5,9 @@ import json
 import multiprocessing
 import os
 import unittest
+from multiprocessing.connection import Connection
+from multiprocessing.connection import wait as wait_for_connections
+from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Event
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -13,6 +16,8 @@ from unittest.mock import patch
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.secret_record import SecretAuditEvent
 from control_plane.storage.filesystem import FilesystemRecordStore
+
+WRITER_HANG_DEADLINE_SECONDS = 120.0
 
 
 def _audit_event() -> SecretAuditEvent:
@@ -26,9 +31,9 @@ def _audit_event() -> SecretAuditEvent:
     )
 
 
-def _paused_creation(root: str, boundary: str, reached: Event, release: Event) -> None:
+def _paused_creation(root: str, boundary: str, reached: Connection, release: Event) -> None:
     def pause() -> None:
-        reached.set()
+        reached.send_bytes(b"")
         if not release.wait(timeout=60):
             raise TimeoutError("Parent did not terminate or release the writer.")
 
@@ -57,6 +62,17 @@ def _paused_creation(root: str, boundary: str, reached: Event, release: Event) -
 
 
 class FilesystemCreationTests(unittest.TestCase):
+    def wait_for_writer_boundary(self, writer: BaseProcess, reached: Connection) -> None:
+        self.assertTrue(
+            wait_for_connections([reached], timeout=WRITER_HANG_DEADLINE_SECONDS),
+            "Writer neither reached the boundary nor exited.",
+        )
+        try:
+            reached.recv_bytes()
+        except EOFError:
+            writer.join(timeout=10)
+            self.fail(f"Writer exited with code {writer.exitcode} before the boundary.")
+
     def test_failed_existence_read_does_not_replace_an_existing_record(self) -> None:
         event = _audit_event()
         with TemporaryDirectory() as directory:
@@ -151,14 +167,15 @@ class FilesystemCreationTests(unittest.TestCase):
         event = _audit_event()
         for boundary in ("serialization", "before_publication", "after_publication"):
             with self.subTest(boundary=boundary), TemporaryDirectory() as directory:
-                reached = context.Event()
+                reached, writer_reached = context.Pipe(duplex=False)
                 release = context.Event()
                 writer = context.Process(
-                    target=_paused_creation, args=(directory, boundary, reached, release)
+                    target=_paused_creation, args=(directory, boundary, writer_reached, release)
                 )
                 writer.start()
+                writer_reached.close()
                 try:
-                    self.assertTrue(reached.wait(timeout=20), "Writer did not reach the boundary.")
+                    self.wait_for_writer_boundary(writer, reached)
                     writer.kill()
                     writer.join(timeout=10)
                     self.assertFalse(writer.is_alive(), "Killed writer did not exit.")
@@ -168,6 +185,7 @@ class FilesystemCreationTests(unittest.TestCase):
                         writer.kill()
                         writer.join(timeout=10)
                     writer.close()
+                    reached.close()
 
                 store = FilesystemRecordStore(Path(directory))
                 expected = (event,) if boundary == "after_publication" else ()

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, publicObservationGap } from "../src/product-environment-signal.ts";
+import { environmentOperationalTone, expireProductEvidence, expireEnvironmentEvidence, operationalAttentionReasons, operationalWarningReasons, publicObservationGap } from "../src/product-environment-signal.ts";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 Object.defineProperty(globalThis, "window", { configurable: true, value: { location: { search: "" } } });
@@ -34,6 +34,48 @@ function environment() {
 
 test("a fresh identity and health verification makes a monitored lane green", () =>
   assert.equal(environmentOperationalTone(environment()), "verified"));
+
+test("failed production delivery warns only while the running release is verified", () => {
+  for (const failure_code of ["production_delivery_failed", "deploy_fence_held"]) {
+    const lane = environment();
+    lane.environment = "prod";
+    const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+    Object.assign(incident, { severity: "warning", check_kind: "provider", check_name: "production-delivery-example", failure_layer: "provider", failure_code });
+    lane.health_monitoring.open_incidents = [incident];
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.deepEqual(operationalAttentionReasons(lane), []);
+    assert.equal(lane.health_monitoring.open_incidents[0], incident);
+    const critical = { ...incident, severity: "critical", failure_code: "monitor_run_missed" };
+    lane.health_monitoring.open_incidents.push(critical);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    lane.health_monitoring.open_incidents.pop();
+    lane.health_monitoring.checks[0].incident_status = "open";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    assert.ok(operationalAttentionReasons(lane).length > 1);
+    lane.health_monitoring.checks[0].incident_status = "";
+    const extraDomain = { ...lane.topology.observed.tls_domains[0], domain_name: "retained.example.test", status: "expired" };
+    lane.topology.observed.tls_domains.push(extraDomain);
+    assert.equal(environmentOperationalTone(lane), "danger");
+    assert.deepEqual(operationalWarningReasons(lane), []);
+    assert.ok(operationalAttentionReasons(lane).length > 1);
+    lane.topology.observed.tls_domains.pop();
+    lane.health_monitoring.checks[0].status = "fail";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.checks[0].status = "pass";
+    for (const status of ["mismatch", "malformed", "missing", "unchecked", "unverifiable"]) {
+      lane.topology.observed.placement.runtime_identity_status = status;
+      assert.equal(environmentOperationalTone(lane), "danger");
+    }
+    lane.topology.observed.placement.runtime_identity_status = "match";
+    assert.equal(environmentOperationalTone(lane, Date.parse(lane.provenance.stale_after) + 1), "danger");
+    incident.severity = "critical";
+    assert.equal(environmentOperationalTone(lane), "danger");
+    lane.health_monitoring.open_incidents = [];
+    assert.equal(environmentOperationalTone(lane), "verified");
+  }
+});
 
 test("a canonical generated occurrence blocks green independently of declared checks", () => {
   const lane = environment();
@@ -279,3 +321,43 @@ test("expired negative TLS observations remain failures", () => {
   lane.topology.desired.domains = [];
   assert.ok(publicObservationGap(lane.topology));
  });
+
+test("a red lane names every cause that turns it red, and only a red lane has causes", () => {
+  const lane = environment();
+  const agrees = () => assert.equal(operationalAttentionReasons(lane).length > 0, environmentOperationalTone(lane) === "danger");
+  assert.deepEqual(operationalAttentionReasons(lane), []);
+  agrees();
+  // An open incident on a lane whose health check passes must explain the red, not the pass.
+  const incident = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "prod").health_monitoring.open_incidents[0]);
+  incident.severity = "warning";
+  incident.failure_code = "testing_delivery_failed";
+  lane.health_monitoring.open_incidents = [incident];
+  assert.match(operationalAttentionReasons(lane).join("\n"), /warning.*testing delivery failed/i);
+  agrees();
+  lane.health_monitoring.open_incidents = [];
+  const check = lane.health_monitoring.checks[0];
+  check.status = "fail";
+  check.summary = "Private health check failed: destination outside the allowed network scope.";
+  assert.ok(operationalAttentionReasons(lane).includes(check.summary));
+  agrees();
+  check.status = "pass";
+  check.incident_status = "open";
+  assert.equal(operationalAttentionReasons(lane).length, 1);
+  agrees();
+  check.incident_status = "";
+  lane.topology.observed.placement.runtime_identity_status = "mismatch";
+  assert.match(operationalAttentionReasons(lane).join("\n"), /runtime identity.*mismatch/i);
+  agrees();
+  lane.topology.observed.placement.runtime_identity_status = "match";
+  lane.topology.warnings = [{ code: "custom_health_warning", severity: "error", scope: "ingress", detail: "Health warning detail", domain_name: "" }];
+  assert.ok(operationalAttentionReasons(lane).includes("Health warning detail"));
+  agrees();
+  lane.topology.warnings = [{ code: "stale_route_authority", severity: "error", scope: "authority", detail: "Stale authority", domain_name: "" }];
+  assert.deepEqual(operationalAttentionReasons(lane), []);
+  agrees();
+  lane.topology.warnings = [];
+  const domain = lane.topology.observed.tls_domains[0];
+  domain.status = "self_signed";
+  assert.match(operationalAttentionReasons(lane).join("\n"), new RegExp(`${domain.domain_name}.*self signed`, "i"));
+  agrees();
+});

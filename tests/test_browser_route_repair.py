@@ -428,6 +428,51 @@ class _BrowserRouteRepairFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserRouteRepairTests(_BrowserRouteRepairFixture):
+    async def test_binding_card_verdict_and_current_read_share_the_persisted_record(self) -> None:
+        payload = self.seed_binding()
+        query = "product=example-product&context=example-testing&instance=web"
+
+        async def read_current() -> Any:
+            return await request(
+                self.app,
+                "GET",
+                f"/v1/route-bindings/records/current?{query}",
+                headers=_browser_mutation_headers(self.manager, self.session),
+            )
+
+        self.assertEqual((await read_current()).status_code, 404)
+        domain_review = await self.domain_plan()
+        self.assertEqual(domain_review["status"], "unchanged")
+        planned = await self.post("/v1/route-bindings/reconcile", payload)
+        self.assertEqual(planned.status_code, 202, planned.text)
+        review = planned.json()["review"]
+        self.assertEqual((review["status"], review["binding_operation"]), ("ready", "create"))
+        self.assertIsNone(review.get("current_record"))
+        applied = await self.post(
+            "/v1/route-bindings/reconcile",
+            {
+                **payload,
+                "mode": "apply",
+                "reason": "Record the reviewed testing route.",
+                "confirmation": review["expected_confirmation"],
+                "browser_review": {
+                    "product": payload["product"],
+                    "reviewed_plan_sha256": review["plan_sha256"],
+                },
+            },
+            "binding-verdict-record",
+        )
+        self.assertEqual(applied.status_code, 202, applied.text)
+        current = await read_current()
+        self.assertEqual(current.status_code, 200, current.text)
+        reviewed = await self.post("/v1/route-bindings/reconcile", payload)
+        self.assertEqual(reviewed.status_code, 202, reviewed.text)
+        card = reviewed.json()["review"]
+        self.assertEqual(card["status"], "unchanged")
+        self.assertEqual(card["current_record"], current.json()["record"])
+        self.assertEqual(card["proposed_record"], current.json()["record"])
+        self.assertEqual(card["current_record_sha256"], current.json()["record"]["record_sha256"])
+
     async def test_domain_apply_and_immutable_replay_precede_source_drift(self) -> None:
         await self.assert_domain_apply_and_immutable_replay_precede_source_drift()
 

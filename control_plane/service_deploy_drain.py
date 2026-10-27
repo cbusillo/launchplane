@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from collections.abc import Iterator
 from contextlib import contextmanager
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -18,9 +19,18 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, text
 from control_plane.contracts.product_reconcile import RECONCILE_SOURCE
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.contracts.odoo_upgrade_rehearsal import (
+    ODOO_UPGRADE_REHEARSAL_ROUTE,
+    rehearsal_execution_lock_name,
+)
+from control_plane.contracts.service_deploy_drain import operation_reference
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 
 
 SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS = 10 * 60
+_REHEARSAL_ROUTE_PATTERN = re.compile(
+    re.escape(ODOO_UPGRADE_REHEARSAL_ROUTE).replace(re.escape("{product}"), r"[^/]+")
+)
 
 
 class ServiceDeployDrainRecord(BaseModel):
@@ -74,7 +84,10 @@ class ServiceDeployDrainTimeout(ServiceDeployPreEffectRefused):
 
     def __init__(self, blockers: tuple[str, ...]) -> None:
         super().__init__(
-            "Self-deploy drain timed out before provider effects; inspect runtime.release_drain."
+            "Self-deploy drain timed out before provider effects. "
+            "Inspect runtime.release_drain. Let the held operations finish or use their "
+            "supported recovery, then submit a fresh normal deploy with a new key and marker. "
+            "This timed-out request cannot dispatch."
         )
         self.blockers = blockers
 
@@ -170,23 +183,34 @@ def admission_allowed(session: Any, now: str) -> bool:
     )
 
 
-def reservation_requires_admission(scope: str) -> bool:
-    return scope.strip() == "client-release" or scope.strip().startswith(f"{RECONCILE_SOURCE}:")
+def rehearsal_route(route_path: str) -> bool:
+    return _REHEARSAL_ROUTE_PATTERN.fullmatch(route_path.strip()) is not None
 
 
-def admit_reservation(store: Any, session: Any, scope: str) -> None:
-    """Order every fresh/retried event effect against the self-deploy fence."""
-    if not reservation_requires_admission(scope):
+def reservation_requires_admission(scope: str, route_path: str = "") -> bool:
+    return (
+        scope.strip() == "client-release"
+        or scope.strip().startswith(f"{RECONCILE_SOURCE}:")
+        or rehearsal_route(route_path)
+    )
+
+
+def admit_reservation(store: Any, session: Any, scope: str, route_path: str = "") -> None:
+    """Order fresh/retried provider effects against the self-deploy fence."""
+    if not reservation_requires_admission(scope, route_path):
         return
     if not store.database_url.startswith("sqlite"):
         lock(store, session)
     if not admission_allowed(session, store._database_mutation_timestamp(session)):
-        raise ServiceDeployDraining("Launchplane is draining product provider effects.")
+        raise ServiceDeployDraining(
+            "Launchplane is draining provider effects; retry after the deploy."
+        )
 
 
 def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[str, object], ...]:
     from control_plane.storage.postgres import (
         LaunchplaneIdempotencyRow,
+        LaunchplaneOutboxDeliveryRow,
         LaunchplaneOdooProdPromotionOperationRow,
         LaunchplaneOdooProdRollbackOperationRow,
         LaunchplaneOdooStableTargetReplacementOperationRow,
@@ -217,6 +241,29 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
                 }
             )
     observed_at = parse_launchplane_mutation_timestamp(now, field_name="observed_at")
+    for row in session.scalars(
+        select(LaunchplaneOutboxDeliveryRow).where(
+            LaunchplaneOutboxDeliveryRow.kind == "github_workflow_dispatch",
+            LaunchplaneOutboxDeliveryRow.state == "running",
+        )
+    ):
+        observations.append(
+            {
+                "operation_id": row.delivery_id,
+                "kind": row.kind,
+                "state": row.state,
+                "lease_owner": row.lease_owner,
+                "lease_expires_at": row.lease_expires_at,
+                "blocks_drain": bool(row.provider_operation_key)
+                or (
+                    bool(row.lease_expires_at)
+                    and parse_launchplane_mutation_timestamp(
+                        row.lease_expires_at, field_name="lease_expires_at"
+                    )
+                    > observed_at
+                ),
+            }
+        )
     from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
     from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
     from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
@@ -227,10 +274,15 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
             (
                 (LaunchplaneIdempotencyRow.scope == "client-release")
                 | LaunchplaneIdempotencyRow.scope.startswith(f"{RECONCILE_SOURCE}:")
+                | LaunchplaneIdempotencyRow.route_path.like(
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product="%")
+                )
             ),
             LaunchplaneIdempotencyRow.state.in_(("running", "reconcile_required")),
         )
     ):
+        if not reservation_requires_admission(row.scope, row.route_path):
+            continue
         lease_active = (
             bool(row.lease_expires_at)
             and parse_launchplane_mutation_timestamp(
@@ -242,11 +294,13 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
         # its target execution lock through its effects. Admission
         # stays serialized until our fence commits, so a new lock owner cannot
         # start an effect between this probe and dispatch admission.
-        execution_excluded = False
+        execution_excluded = executor_exit_recorded(session, row)
         execution_lock_name = ""
+        is_rehearsal = rehearsal_route(row.route_path)
         if (
-            not lease_active
-            and row.scope.startswith(f"{RECONCILE_SOURCE}:")
+            not execution_excluded
+            and not lease_active
+            and (row.scope.startswith(f"{RECONCILE_SOURCE}:") or is_rehearsal)
             and row.provider_target_key
         ):
             if row.route_path == GENERIC_WEB_DEPLOY_ROUTE and row.state == "reconcile_required":
@@ -256,6 +310,8 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
                 # their persisted state or missing original intent, proves that
                 # replacement will not interrupt an executor. Keep the row held.
                 execution_lock_name = preview_execution_lock_name(row.provider_target_key)
+            elif is_rehearsal and row.lease_expires_at:
+                execution_lock_name = rehearsal_execution_lock_name(row.provider_target_key)
         if execution_lock_name:
             with store.testing_replacement_execution_lock(execution_lock_name) as check:
                 if check is not None:
@@ -277,6 +333,61 @@ def _operation_observations(store: Any, session: Any, now: str) -> tuple[dict[st
             }
         )
     return tuple(sorted(observations, key=lambda item: cast(str, item["operation_id"])))
+
+
+def record_executor_exit(store: Any, reservation: LaunchplaneIdempotencyRecord) -> None:
+    from control_plane.storage.postgres import (
+        LaunchplaneIdempotencyRow,
+        LaunchplaneServiceDeployDrainRow,
+    )
+
+    if not reservation_requires_admission(reservation.scope, reservation.route_path):
+        return
+    with store._session_factory() as session:
+        state = session.scalar(
+            select(LaunchplaneIdempotencyRow.state).where(
+                LaunchplaneIdempotencyRow.record_id == reservation.record_id
+            )
+        )
+        if state != "reconcile_required":
+            return
+    with store._session_factory() as session:
+        lock(store, session)
+        row = session.get(LaunchplaneIdempotencyRow, reservation.record_id)
+        if row is None or row.state != "reconcile_required":
+            return
+        current = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+        if (
+            current.attempt != reservation.attempt
+            or current.lease_owner != reservation.lease_owner
+            or current.request_fingerprint != reservation.request_fingerprint
+        ):
+            return
+        receipt_id = f"executor-exit:{current.record_id}"
+        receipt = session.get(LaunchplaneServiceDeployDrainRow, receipt_id)
+        payload = {
+            "attempt": current.attempt,
+            "lease_owner": current.lease_owner,
+            "request_fingerprint": current.request_fingerprint,
+        }
+        if receipt is None:
+            session.add(LaunchplaneServiceDeployDrainRow(record_id=receipt_id, payload=payload))
+        else:
+            receipt.payload = payload
+        session.commit()
+
+
+def executor_exit_recorded(session: Any, row: Any) -> bool:
+    from control_plane.storage.postgres import LaunchplaneServiceDeployDrainRow
+
+    if row.state != "reconcile_required":
+        return False
+    receipt = session.get(LaunchplaneServiceDeployDrainRow, f"executor-exit:{row.record_id}")
+    return receipt is not None and receipt.payload == {
+        "attempt": row.payload.get("attempt"),
+        "lease_owner": row.lease_owner,
+        "request_fingerprint": row.request_fingerprint,
+    }
 
 
 def _running_operations(store: Any, session: Any, now: str) -> tuple[str, ...]:
@@ -350,7 +461,13 @@ def prepare(
             and target_type == current.target_type
             and target_id == current.target_id
         )
-        if supersedes_deployment_marker and not repair_matches:
+        continuing_drain = (
+            prior is not None
+            and current is not None
+            and prior.state == current.state == "draining"
+            and current.request_fingerprint == request_fingerprint
+        )
+        if supersedes_deployment_marker and not repair_matches and not continuing_drain:
             raise ServiceDeployFenceConflict(
                 "The superseded self-deploy fence does not match.", fence=current
             )
@@ -525,9 +642,15 @@ def read_status(store: Any) -> dict[str, object]:
         result["running_operation_ids"] = tuple(
             item["operation_id"] for item in observations if item["blocks_drain"]
         )
-        result["operation_details"] = observations[:100]
+        result["operation_details"] = tuple(
+            {**item, "operation_ref": operation_reference(cast(str, item["operation_id"]))}
+            for item in observations[:100]
+        )
         result["operation_detail_count"] = len(observations)
         result["operation_details_truncated"] = len(observations) > 100
         result["drain_timeout_seconds"] = SERVICE_DEPLOY_DRAIN_TIMEOUT_SECONDS
         result["admission_paused"] = not admission_allowed(session, now)
+        from control_plane.rehearsal_deploy_resume import checkpoint_status
+
+        result["rehearsal_checkpoints"] = checkpoint_status(session)
         return result

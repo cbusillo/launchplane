@@ -11,7 +11,8 @@ from control_plane.odoo_testing_restore import (
     require_distinct_testing_credentials,
 )
 from control_plane.odoo_walkthrough import WalkthroughPrerequisite, read_walkthrough_prerequisites
-from control_plane.product_path_check import ActionAllowed, PathCheckStep
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.product_path_check import ActionAllowed, PathCheckStep, TESTING_HOLD_ACTIVE
 from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
     WALKTHROUGH_ACTION,
@@ -20,6 +21,8 @@ from control_plane.contracts.odoo_walkthrough import (
 from control_plane.testing_replacement_resources import (
     resource_context,
     TestingReplacementResourcesRequest,
+    NativeTestingRebuildRequired,
+    require_legacy_testing_target,
 )
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.testing_initial_generation import (
@@ -37,6 +40,7 @@ from control_plane.testing_replacement_bootstrap import (
 )
 
 _WALKTHROUGH_DESCRIPTIONS = {
+    WalkthroughPrerequisite.NOT_REACHED: "This read was not reached because an earlier prerequisite did not pass.",
     WalkthroughPrerequisite.IDENTITY: "Verify the testing runtime identity and its separate HTTPS origin.",
     WalkthroughPrerequisite.GENERATION: "Verify the current generation still owns its independent target and resources.",
     WalkthroughPrerequisite.GENERATION_MISSING: "Create a fresh sanitized testing generation before provisioning a task account.",
@@ -46,9 +50,18 @@ _WALKTHROUGH_DESCRIPTIONS = {
     WalkthroughPrerequisite.RUNTIME: "Verify the running testing target matches the generation.",
     WalkthroughPrerequisite.ORIGIN: "Verify the testing HTTPS origin belongs to this target.",
     WalkthroughPrerequisite.DATABASE: "Verify the recorded testing database matches the running copy.",
-    WalkthroughPrerequisite.ISOLATION_OR_USAGE: "Verify connection isolation and the absence of protected staff sessions.",
+    WalkthroughPrerequisite.ISOLATION_OR_USAGE: "The native isolation and protected sign-in read was unavailable; repeat the read-only check.",
+    WalkthroughPrerequisite.RUNNER_UNSELECTED: "The testing target did not have exactly one script runner; verify the running testing target.",
+    WalkthroughPrerequisite.RUNNER_CHANGED: "The testing runner identity, image or database differs from the selected runtime.",
+    WalkthroughPrerequisite.COPY_WITNESS_CHANGED: "The running database does not carry this generation's copy witness; preserve the copy.",
+    WalkthroughPrerequisite.ISOLATION_REFUSED: "Connection isolation readback refused; use the supported isolation repair and readback.",
+    WalkthroughPrerequisite.PROTECTED_SIGNIN: "A protected sign-in was observed since preparation; preserve that use.",
     WalkthroughPrerequisite.CREDENTIAL: "Supply the task id to verify its account access and custody.",
 }
+
+
+class TestingPathHoldActive(ValueError):
+    pass
 
 
 def read_testing_prerequisites(
@@ -68,30 +81,39 @@ def read_testing_prerequisites(
     context = lane.context
     steps: list[PathCheckStep] = []
 
-    def check(step_id: str, code: str, description: str, read: Callable[[], object]) -> None:
-        state: Literal["clear", "blocked", "unknown"] = "clear"
+    def check(step_id: str, step_code: str, description: str, read: Callable[[], object]) -> None:
+        step_state: Literal["clear", "blocked", "unknown"] = "clear"
         try:
             read()
+        except TestingPathHoldActive:
+            step_state, step_code = "blocked", TESTING_HOLD_ACTIVE
+            description = "The testing hold prevents this action-admission check; inspect its recorded purpose and supported continuation."
         except TestingCredentialsOverlap:
-            state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
+            step_state, step_code = "blocked", BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
             description = "Generate independent testing-local passwords; an existing value equals production's."
         except TestingCredentialVersionsMissing:
-            state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING
+            step_state, step_code = "blocked", BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING
             description = "Configure the missing managed local passwords before comparing testing and production."
+        except NativeTestingRebuildRequired as error:
+            step_state, step_code, description = "blocked", error.code, str(error)
         except TestingBootstrapPrerequisiteError as error:
-            state, code = "unknown" if error.unavailable else "blocked", error.code
+            step_state, step_code = "unknown" if error.unavailable else "blocked", error.code
             description = str(error)  # Fixed code-owned text, never the underlying exception.
         except ValueError:
-            state = "blocked"
+            step_state = "blocked"
         except Exception:  # noqa: BLE001 - private provider/storage text never leaves this read.
-            state = "unknown"
+            step_state = "unknown"
         steps.append(
             PathCheckStep(
                 step_id=step_id,
-                state=state,
-                code=code if state != "clear" else step_id + "_clear",
-                description=description if state != "clear" else "This prerequisite passed.",
-                fix="none" if state == "clear" else "wait" if state == "unknown" else "by_hand",
+                state=step_state,
+                code=step_code if step_state != "clear" else step_id + "_clear",
+                description=description if step_state != "clear" else "This prerequisite passed.",
+                fix="none"
+                if step_state == "clear"
+                else "wait"
+                if step_state == "unknown"
+                else "by_hand",
             )
         )
 
@@ -156,7 +178,18 @@ def read_testing_prerequisites(
                         description=(
                             "This prerequisite passed."
                             if state == "clear"
-                            else _WALKTHROUGH_DESCRIPTIONS[code]
+                            else (
+                                "Physical-copy predicate "
+                                + code.value
+                                + (
+                                    " was not satisfied."
+                                    if state == "blocked"
+                                    else " could not be observed."
+                                )
+                                + " Preserve the original copy and inspect the selected runtime."
+                                if isinstance(code, ReadbackPredicate)
+                                else _WALKTHROUGH_DESCRIPTIONS[code]
+                            )
                         ),
                         fix="none"
                         if state == "clear"
@@ -247,6 +280,8 @@ def read_testing_prerequisites(
         provider = store.read_provider_target_record(context_name=context, instance_name="testing")
         if target.target_type != "compose" or provider.target_id != target_id.target_id:
             raise ValueError("Testing resource authority disagrees.")
+        if intent != "provision":
+            require_legacy_testing_target(store, target, target_id.target_id)
         if target.pending_public_host_effects:
             raise ValueError("Testing has pending route effects.")
         if any(
@@ -277,6 +312,9 @@ def read_testing_prerequisites(
             raise ValueError("Retained resource preparation is missing.")
         if (preparation.product, preparation.context) != (profile.product, context):
             raise ValueError("Retained resource preparation belongs to another lane.")
+        target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        if target.policies.staff_testing_hold is not None:
+            raise TestingPathHoldActive
         request = TestingReplacementResourcesRequest(
             context=context,
             operation_id=operation_id,
@@ -328,9 +366,14 @@ def read_testing_prerequisites(
         preparation = (
             store.read_disposable_resource_preparation(operation_id) if operation_id else None
         )
+        if preparation is not None and (preparation.product, preparation.context) != (
+            profile.product,
+            context,
+        ):
+            raise ValueError("Preparation belongs to another lane.")
+        if target.policies.staff_testing_hold is not None:
+            raise TestingPathHoldActive
         if preparation is not None:
-            if (preparation.product, preparation.context) != (profile.product, context):
-                raise ValueError("Preparation belongs to another lane.")
             require_initial_usage(
                 root,
                 store,

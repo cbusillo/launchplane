@@ -24,6 +24,7 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as migration,
 )
 from control_plane.storage.postgres import Base, PostgresRecordStore
+from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 from control_plane.storage.schema_migration import (
     SCHEMA_MIGRATION_TARGET_REVISION,
     alembic_config,
@@ -131,7 +132,7 @@ class RetiredDeliveryMigrationTests(unittest.TestCase):
     def test_fresh_head_has_only_supported_tables_and_no_retired_models(self) -> None:
         with TemporaryDirectory() as directory:
             url = f"sqlite+pysqlite:///{Path(directory) / 'records.db'}"
-            command.upgrade(alembic_config(url), migration.revision)
+            command.upgrade(alembic_config(url), EXPECTED_ALEMBIC_HEAD_REVISION)
             engine = create_engine(url)
             try:
                 tables = set(inspect(engine).get_table_names())

@@ -18,6 +18,8 @@ from control_plane.production_recipient_publication import (
     RecipientPublication,
     commit_publication,
     rollback_publication,
+    require_owned_publication_rows,
+    RecipientOwnedAuthorityChanged,
 )
 from tests.test_production_backup_authority import _source_target, _destination_target, _policy
 from tests import test_production_recipient as preparation_tests
@@ -162,6 +164,27 @@ class RecipientPublicationTests(unittest.TestCase):
             self.store, self.record, self.publication, validate_release=lambda: None
         )
 
+    def test_read_only_inventory_bookkeeping_does_not_weaken_publication_mutation_guards(
+        self,
+    ) -> None:
+        from datetime import datetime, timedelta
+
+        record = self.publish()
+        inventory = self.store.read_environment_inventory(
+            context_name=record.context, instance_name="prod"
+        )
+        stamp = (datetime.fromisoformat(inventory.updated_at) + timedelta(seconds=1)).isoformat()
+        self.store.write_environment_inventory(inventory.model_copy(update={"updated_at": stamp}))
+        with self.assertRaises(RecipientOwnedAuthorityChanged):
+            require_owned_publication_rows(self.store, record)
+        require_owned_publication_rows(self.store, record, inventory_timestamp_required=False)
+        foreign = "a" * 40 if inventory.source_git_ref != "a" * 40 else "b" * 40
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"updated_at": stamp, "source_git_ref": foreign})
+        )
+        with self.assertRaises(RecipientOwnedAuthorityChanged):
+            require_owned_publication_rows(self.store, record, inventory_timestamp_required=False)
+
     def test_revoked_execution_lease_cannot_publish_or_update_custody(self) -> None:
         reservation = self.store.reserve_mutation(
             scope="fixture",
@@ -280,6 +303,36 @@ class RecipientPublicationTests(unittest.TestCase):
         self.assertEqual(current.fast_snapshot, self.policy.fast_snapshot)
         self.assertEqual(current.policy_revision, self.next_policy.policy_revision + 1)
         self.assertEqual(len(history), 3)
+
+    def test_publication_and_inverse_refuse_a_foreign_targets_endpoint_hostname(self) -> None:
+        from urllib.parse import urlsplit
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
+
+        foreign = self.publication.target.model_copy(
+            update={
+                "context": "foreign",
+                "domains": (urlsplit(self.publication.health_endpoints[0].url).hostname,),
+            }
+        )
+        self.store.write_dokploy_target_record(foreign)
+        before = authority_snapshot(self.store, self.record.product, self.record.context)
+        with self.assertRaises(DokployTargetRecordChanged):
+            self.publish()
+        self.assertEqual(
+            authority_snapshot(self.store, self.record.product, self.record.context), before
+        )
+        self.assertEqual(custody(self.store, self.record.product, self.record.context), self.record)
+        self.store.delete_dokploy_target_record(expected_record=foreign)
+        published = self.publish()
+        foreign = foreign.model_copy(update={"domains": (urlsplit(self.monitor.url).hostname,)})
+        self.store.write_dokploy_target_record(foreign)
+        before = authority_snapshot(self.store, self.record.product, self.record.context)
+        with self.assertRaises(DokployTargetRecordChanged):
+            rollback_publication(self.store, published, stop_replacement=lambda: None)
+        self.assertEqual(
+            authority_snapshot(self.store, self.record.product, self.record.context), before
+        )
+        self.assertEqual(custody(self.store, self.record.product, self.record.context), published)
 
     def test_failure_before_commit_rolls_back_target_monitor_backup_and_custody(self) -> None:
         before = authority_snapshot(self.store, self.record.product, self.record.context)

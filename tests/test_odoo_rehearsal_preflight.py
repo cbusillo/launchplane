@@ -121,7 +121,14 @@ class SourceMeasurementTests(unittest.TestCase):
             sum(item.st_blocks * 512 for item in before.values()),
         )
         self.assertEqual({self.filestore, *self.filestore.rglob("*")}, set(paths))
-        self.assertEqual({path: path.stat() for path in paths}, before)
+
+        def write_metadata(item: os.stat_result) -> tuple[int, ...]:
+            return (item.st_size, item.st_mtime_ns, item.st_ctime_ns, item.st_ino, item.st_mode)
+
+        self.assertEqual(
+            {path: write_metadata(path.stat()) for path in paths},
+            {path: write_metadata(item) for path, item in before.items()},
+        )
         database.assert_called_once()
         arguments = database.call_args.args[0]
         self.assertEqual(arguments[:6], ["sudo", "-n", "-u", "fixture_db_reader", "--", "psql"])
@@ -179,6 +186,16 @@ class SourceMeasurementTests(unittest.TestCase):
                 )
             self.assertEqual(result, {"type": "denied"})
             database.assert_called_once()
+
+
+class PreflightContractTests(unittest.TestCase):
+    def test_each_backing_role_belongs_to_one_group(self) -> None:
+        payload = observation()
+        RehearsalPreflightObservation.model_validate(payload)
+        group = payload["backing_groups"][0]
+        group["roles"].append(group["roles"][0])
+        with self.assertRaises(ValueError):
+            RehearsalPreflightObservation.model_validate(payload)
 
 
 class PreflightHostTests(unittest.TestCase):
@@ -433,6 +450,16 @@ class PreflightHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["result"]["source_context"], self.fixture.context)
         self.assertNotIn("rehearsal_id", result["result"])
         self.assertEqual(result["result"]["database_bytes"], expected["database_bytes"])
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        code, receipt, client_read, client_write = RehearsalClientTests().preflight(
+            response=result, product=self.fixture.product, source_context=self.fixture.context
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt["status"], "verified")
+        self.assertEqual(receipt["trace_id"], result["trace_id"])
+        client_read.assert_called_once()
+        client_write.assert_not_called()
         self.assertEqual(
             (
                 self.fixture.authority(),

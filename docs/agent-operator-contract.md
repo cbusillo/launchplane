@@ -16,7 +16,7 @@ Generate the canonical OpenAPI document, UI bindings, and agent/admin
 contract together:
 
 ```bash
-pnpm --dir frontend generate:openapi
+(cd frontend && pnpm generate:openapi)
 ```
 
 Generate only the agent/admin contract:
@@ -26,10 +26,10 @@ uv run launchplane service export-agent-contract \
   --output contracts/agent-operator-contract.json
 ```
 
-Check every generated contract without changing checked-in files:
+Check the runtime agent/admin contract without changing checked-in files:
 
 ```bash
-pnpm --dir frontend check:openapi-drift
+(cd frontend && pnpm check:openapi-drift)
 ```
 
 The drift check compares `normalization_version` and

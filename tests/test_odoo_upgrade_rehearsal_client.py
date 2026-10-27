@@ -14,6 +14,9 @@ import unittest
 from unittest.mock import Mock, patch
 import urllib.error
 
+from control_plane.http_routes.mutation_support import accepted_evidence_response
+from control_plane.provider_operations import provider_operation_response_payload
+
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     OdooUpgradeRehearsalRequest,
     rehearsal_identity,
@@ -21,12 +24,56 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
 
 
 class RehearsalClientTests(unittest.TestCase):
+    def test_keyless_status_read_does_not_need_an_original_review(self) -> None:
+        code, result, post = self.call(
+            "readback",
+            action="execute",
+            saved_review=False,
+            key="",
+            response_result={
+                "completed": True,
+                "public_route": False,
+                "business_host_frozen": False,
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "verified")
+        self.assertEqual(post.call_args.kwargs["idempotency_key"], "")
+
+    def test_readback_sends_the_saved_original_binding_for_every_action(self) -> None:
+        for action in ("prepare", "execute", "simulate-final", "verify", "retire"):
+            with self.subTest(action=action):
+                code, result, post = self.call(
+                    "readback",
+                    action=action,
+                    saved_review=True,
+                    response_result={
+                        "completed": True,
+                        "public_route": False,
+                        "business_host_frozen": False,
+                    },
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(result["status"], "verified")
+                self.assertEqual(post.call_args.kwargs["body"]["reviewed_plan_sha256"], "a" * 64)
+                code, _, post = self.call("readback", action=action, saved_review=False)
+                self.assertNotEqual(code, 0)
+                post.assert_not_called()
+
+    def test_preflight_accepts_added_response_fields(self) -> None:
+        code, result, _, _ = self.preflight(changes={"future_observation": {"new": True}})
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "verified")
+
     def preflight(
         self,
         *,
         evidence: str = "",
         changes: dict[str, Any] | None = None,
         extra_args: tuple[str, ...] = (),
+        response: dict[str, Any] | None = None,
+        product: str = "fixture-product",
+        source_context: str = "fixture-context",
     ) -> tuple[int, dict[str, Any], Mock, Mock]:
         from tests.test_odoo_rehearsal_preflight import observation
 
@@ -34,10 +81,12 @@ class RehearsalClientTests(unittest.TestCase):
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
         )
         read = Mock(
-            return_value={
-                "status": "accepted",
-                "trace_id": "fixture-preflight-trace",
-                "result": {
+            return_value=response
+            if response is not None
+            else accepted_evidence_response(
+                trace_id="fixture-preflight-trace",
+                records={"product": "fixture-product"},
+                result={
                     **observation(),
                     "product": "fixture-product",
                     "source_context": "fixture-context",
@@ -45,7 +94,7 @@ class RehearsalClientTests(unittest.TestCase):
                     "source_binding_sha256": "a" * 64,
                     **(changes or {}),
                 },
-            }
+            ).model_dump(mode="json")
         )
         write = Mock(side_effect=AssertionError("Preflight must use only the GET transport"))
         transport = {
@@ -66,9 +115,9 @@ class RehearsalClientTests(unittest.TestCase):
                 "client",
                 "preflight",
                 "--product",
-                "fixture-product",
+                product,
                 "--source-context",
-                "fixture-context",
+                source_context,
                 "--operator-helper",
                 str(helper),
             ]
@@ -185,14 +234,21 @@ class RehearsalClientTests(unittest.TestCase):
         *,
         lost: bool = False,
         changed: bool = False,
+        saved_review: bool = True,
+        reviewed_binding: str = "a" * 64,
         failure: tuple[int, dict[str, Any]] | None = None,
+        failure_headers: dict[str, str] | None = None,
         action: str = "prepare",
         response_result: dict[str, Any] | None = None,
+        response: dict[str, Any] | None = None,
+        request: OdooUpgradeRehearsalRequest | None = None,
+        product: str = "fixture-product",
+        key: str = "fixture-key",
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/odoo-upgrade-rehearsal.py")
         )
-        draft = OdooUpgradeRehearsalRequest.model_validate(
+        draft = request or OdooUpgradeRehearsalRequest.model_validate(
             {
                 "action": action,
                 "source_context": "fixture",
@@ -207,14 +263,22 @@ class RehearsalClientTests(unittest.TestCase):
                 },
             }
         )
-        identifier = rehearsal_identity("fixture-product", "fixture-principal", "fixture-key")
-        result = {
-            "product": "fixture-product",
+        if not draft.rehearsal_id and action != "prepare":
+            draft = draft.model_copy(
+                update={
+                    "rehearsal_id": rehearsal_identity(product, "fixture-principal", "fixture-key")
+                }
+            )
+        identifier = draft.rehearsal_id or rehearsal_identity(
+            product, "fixture-principal", "fixture-key"
+        )
+        result: dict[str, Any] = {
+            "product": product,
             "rehearsal_id": identifier,
             "state": "planned" if mode == "dry-run" else "prepared",
             "applied": mode == "apply",
             "action": draft.action,
-            "plan_sha256": "a" * 64,
+            "plan_sha256": reviewed_binding,
             "public_route": False,
             "business_host_frozen": False,
             "resources_preserved": True,
@@ -226,17 +290,24 @@ class RehearsalClientTests(unittest.TestCase):
                 **response_result,
             }
         post = Mock(
-            return_value={"status": "accepted", "trace_id": "fixture-trace", "result": result}
+            return_value=response
+            if response is not None
+            else accepted_evidence_response(
+                trace_id="fixture-trace", records={"rehearsal": identifier}, result=result
+            ).model_dump(mode="json")
         )
         if lost:
             post.side_effect = http.client.IncompleteRead(b"", 1)
         if failure is not None:
             status, failure_payload = failure
+            headers = Message()
+            for name, value in (failure_headers or {}).items():
+                headers[name] = value
             post.side_effect = urllib.error.HTTPError(
                 "https://service.invalid",
                 status,
                 "Fixture refusal",
-                Message(),
+                headers,
                 io.BytesIO(json.dumps(failure_payload).encode()),
             )
             self.addCleanup(post.side_effect.close)
@@ -256,17 +327,19 @@ class RehearsalClientTests(unittest.TestCase):
             payload = root / "intent.json"
             payload.write_text(draft.model_dump_json())
             evidence = root / "review.json"
-            if mode == "apply":
-                request = draft.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"})
+            if mode == "apply" or (mode == "readback" and saved_review):
+                reviewed_request = draft.model_dump(
+                    mode="json", exclude={"mode", "reviewed_plan_sha256"}
+                )
                 evidence.write_text(
                     json.dumps(
                         {
                             "intent": {
-                                "product": "fixture-product",
-                                "request": request,
-                                "key": "fixture-key",
+                                "product": product,
+                                "request": reviewed_request,
+                                "key": key,
                             },
-                            "plan": {**result, "plan_sha256": "a" * 64, "applied": False},
+                            "plan": {**result, "plan_sha256": reviewed_binding, "applied": False},
                         }
                     )
                 )
@@ -280,7 +353,7 @@ class RehearsalClientTests(unittest.TestCase):
                 "client",
                 mode,
                 "--product",
-                "fixture-product",
+                product,
                 "--payload-file",
                 str(payload),
                 "--operator-helper",
@@ -288,10 +361,11 @@ class RehearsalClientTests(unittest.TestCase):
                 "--evidence-file",
                 str(evidence),
                 "--idempotency-key",
-                "fixture-key",
+                key,
             ]
             if mode == "apply":
                 args += ["--reviewed-dry-run"]
+            original_files = {path.name: path.read_bytes() for path in root.iterdir()}
             output = io.StringIO()
             with (
                 patch.object(sys, "argv", args),
@@ -300,14 +374,107 @@ class RehearsalClientTests(unittest.TestCase):
             ):
                 code = client["main"]()
             self.assertNotIn("private-fixture-token", output.getvalue())
-            if mode == "dry-run" and not lost and failure is None:
+            if mode != "dry-run":
+                self.assertEqual(
+                    {path.name: path.read_bytes() for path in root.iterdir()}, original_files
+                )
+            if mode == "dry-run" and code == 0:
                 self.assertEqual(
                     json.loads(evidence.read_text())["plan"]["rehearsal_id"], identifier
                 )
             return code, json.loads(output.getvalue()), post
 
+    def test_checkpoint_reports_pending_original_operation_without_completion_or_replay(
+        self,
+    ) -> None:
+        response = provider_operation_response_payload(
+            trace_id="fixture-checkpoint-trace",
+            records={"operation": "opaque-operation"},
+            result={"state": "checkpointed", "original_key_required": True},
+        )
+        code, result, post = self.call("apply", action="execute", response=response)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(result["status"], "checkpointed")
+        self.assertEqual(result["state"], "checkpointed")
+        self.assertEqual(result["trace_id"], response["trace_id"])
+        self.assertEqual(result["operation_id"], "opaque-operation")
+        self.assertIs(result["original_key_required"], True)
+        self.assertNotIn("completed", result)
+        self.assertNotIn("copies", result)
+        post.assert_called_once()
+        self.assertEqual(post.call_args.kwargs["idempotency_key"], "fixture-key")
+        self.assertEqual(post.call_args.kwargs["body"]["action"], "execute")
+
+    def test_malformed_or_unrelated_checkpoints_fail_closed_without_replay(self) -> None:
+        checkpoint = provider_operation_response_payload(
+            trace_id="fixture-checkpoint-trace",
+            records={"operation": "opaque-operation"},
+            result={"state": "checkpointed", "original_key_required": True},
+        )
+        cases: list[dict[str, Any]] = [
+            {"status": "rejected"},
+            {"trace_id": ""},
+            {"records": {}},
+            {"records": {"operation": None}},
+            {"records": {"operation": "private/path"}},
+            {"records": {"operation": "x" * 257}},
+            {"result": None},
+            {"result": []},
+            {"records": []},
+            {"result": {"state": "checkpointed"}},
+            {"result": {"state": "checkpointed", "original_key_required": 1}},
+            {"result": {"state": "checkpointed", "original_key_required": False}},
+            {"result": {"state": "checkpointed", "original_key_required": True, "completed": True}},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                code, result, post = self.call(
+                    "apply", action="execute", response={**checkpoint, **changes}
+                )
+                self.assertNotEqual(code, 0)
+                self.assertEqual(result["status"], "reconciliation_required")
+                self.assertNotIn("operation_id", result)
+                self.assertTrue(result["original_key_required"])
+                post.assert_called_once()
+        for mode, action in (
+            ("dry-run", "execute"),
+            ("readback", "execute"),
+            ("apply", "prepare"),
+            ("apply", "retire-incomplete"),
+        ):
+            with self.subTest(mode=mode, action=action):
+                code, result, post = self.call(mode, action=action, response=checkpoint)
+                self.assertNotEqual(code, 0)
+                self.assertNotEqual(result["status"], "checkpointed")
+                post.assert_called_once()
+
+    def test_completed_receipt_mismatches_still_refuse(self) -> None:
+        for changes in (
+            {"product": "foreign-product"},
+            {"rehearsal_id": "foreign-rehearsal"},
+            {"action": "prepare"},
+            {"public_route": True},
+            {"business_host_frozen": True},
+        ):
+            with self.subTest(changes=changes):
+                code, result, post = self.call(
+                    "apply",
+                    action="execute",
+                    response_result={
+                        "action": "execute",
+                        "completed": True,
+                        "public_route": False,
+                        "business_host_frozen": False,
+                        **changes,
+                    },
+                )
+                self.assertNotEqual(code, 0)
+                self.assertEqual(result["status"], "reconciliation_required")
+                post.assert_called_once()
+
     def test_incomplete_retirement_requires_disposal_and_original_hold_release(self) -> None:
         receipt = {
+            "future_receipt_field": {"new": True},
             "action": "retire-incomplete",
             "state": "retired",
             "completed": True,
@@ -325,6 +492,7 @@ class RehearsalClientTests(unittest.TestCase):
             "shape_sha256": "c" * 64,
             "elapsed_seconds": {},
             "host_disposal": {
+                "future_custody_field": {"new": True},
                 "qualified": True,
                 "disposed": True,
                 "binding_sha256": "d" * 64,
@@ -342,6 +510,8 @@ class RehearsalClientTests(unittest.TestCase):
             code, result, _ = self.call(mode, action="retire-incomplete", response_result=receipt)
             self.assertEqual(code, 0)
             self.assertTrue(result["disposed"])
+            self.assertNotIn("future_receipt_field", result)
+            self.assertNotIn("future_custody_field", result["host_disposal"])
             for field in ("disposed", "original_operation_released", "raw_source_retained"):
                 with self.subTest(mode=mode, missing=field):
                     incomplete = {key: value for key, value in receipt.items() if key != field}
@@ -391,6 +561,27 @@ class RehearsalClientTests(unittest.TestCase):
                     "reconciliation_required" if mode == "apply" else "unavailable",
                 )
                 post.assert_called_once()
+
+    def test_rebuild_readback_sends_the_original_saved_review_binding(self) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        binding = canonical_json_sha256({"fixture": "retired-rebuild-review"})
+        code, _, post = self.call(
+            "readback",
+            action="rebuild-final",
+            saved_review=True,
+            reviewed_binding=binding,
+            response_result={
+                "completed": True,
+                "state": "switched",
+                "public_route": False,
+                "business_host_frozen": False,
+                "resources_preserved": True,
+            },
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(post.call_args.kwargs["body"]["reviewed_plan_sha256"], binding)
+        self.assertEqual(post.call_args.kwargs["idempotency_key"], "fixture-key")
 
     def test_readback_preserves_each_original_key_for_an_uncertain_effect(self) -> None:
         from control_plane.contracts.odoo_upgrade_rehearsal import RehearsalPrerequisite

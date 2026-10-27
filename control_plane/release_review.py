@@ -6,16 +6,25 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import NamedTuple, Protocol, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import click
 
+from control_plane.client_test_notes import change_client_review, owner_test_notes
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.generic_web_source_qualification import (
+    GenericWebSourceQualificationStore,
+    GenericWebSourceUnqualified,
+    GenericWebSourceOperationUnresolved,
+    recorded_generic_web_source_inventory,
+    qualified_generic_web_source_inventory,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -44,7 +53,7 @@ from control_plane.workflows.launchplane import (
 )
 
 
-class ReleaseReviewStore(Protocol):
+class ReleaseReviewStore(GenericWebSourceQualificationStore, Protocol):
     def list_preview_records(
         self,
         *,
@@ -60,6 +69,13 @@ class ReleaseReviewStore(Protocol):
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
+    def compare_and_write_product_profile_record(
+        self,
+        *,
+        expected_record: LaunchplaneProductProfileRecord,
+        replacement_record: LaunchplaneProductProfileRecord,
+    ) -> object: ...
+
     def read_release_tuple_record(
         self, *, context_name: str, channel_name: str
     ) -> ReleaseTupleRecord: ...
@@ -69,6 +85,8 @@ class ReleaseReviewStore(Protocol):
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory: ...
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def list_product_review_decision_records(
         self, *, repository: str, pull_request_number: int, limit: int | None = None
@@ -100,7 +118,8 @@ RELEASE_EVIDENCE_MESSAGES: dict[ReleaseEvidenceReason, str] = {
     "testing_lane_missing": "This product has no testing lane to release from.",
     "source_control_access_unavailable": "Launchplane cannot read this product's source control.",
     "production_identity_missing": "Production has no recorded deployed version.",
-    "candidate_identity_missing": "Testing has no recorded deployed version.",
+    "candidate_identity_missing": "Testing has no qualified deployed version.",
+    "candidate_operation_unresolved": "Testing has an unresolved operation. Fresh release work waits until it finishes.",
     "release_record_missing": "A release record Launchplane needs is missing.",
     "github_read_failed": "Reading this release's changes from GitHub failed. Reload to try again.",
 }
@@ -138,6 +157,70 @@ def _read_release_github(*, path: str, token: str, product: str, trace_id: str) 
             if not retry:
                 raise
     raise AssertionError("Checklist read attempts exhausted without a result.")
+
+
+class PullRequestNotes(NamedTuple):
+    title: str
+    client_test_notes: str
+    client_test_notes_error: str
+
+
+UNREAD_PULL_REQUEST_NOTES = PullRequestNotes(
+    title="",
+    client_test_notes="",
+    client_test_notes_error="The test notes could not be loaded. Refresh the review.",
+)
+
+
+def read_pull_request_notes(
+    *,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    pull_request_number: int,
+    trace_id: str,
+) -> PullRequestNotes:
+    path = f"/repos/{quote(profile.repository)}/pulls/{pull_request_number}"
+    try:
+        with launchplane_github_token(
+            token_resolver=resolve_launchplane_github_token,
+            api_request=github_api_request,
+            control_plane_root=control_plane_root,
+            context_name=profile.preview.context,
+            repository=profile.repository,
+        ) as token:
+            pull = (
+                _read_release_github(
+                    path=path, token=token, product=profile.product, trace_id=trace_id
+                )
+                if token
+                else None
+            )
+    except (click.ClickException, OSError, ValueError) as error:
+        _LOGGER.warning(
+            "product review pull request read failed product=%s trace_id=%s error_type=%s",
+            profile.product,
+            trace_id or "-",
+            type(error).__name__,
+        )
+        return UNREAD_PULL_REQUEST_NOTES
+    if not isinstance(pull, dict) or not isinstance(pull.get("title"), str):
+        return UNREAD_PULL_REQUEST_NOTES
+    labels = pull.get("labels", [])
+    if not isinstance(labels, list) or any(
+        not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels
+    ):
+        return UNREAD_PULL_REQUEST_NOTES
+    body = str(pull.get("body") or "")
+    intent = change_client_review(
+        body=body,
+        labels=tuple(label["name"] for label in labels),
+        review_label=profile.owner.review_label,
+    )
+    return PullRequestNotes(
+        title=pull["title"],
+        client_test_notes=owner_test_notes(body),
+        client_test_notes_error=intent.error,
+    )
 
 
 @dataclass(eq=False)
@@ -203,7 +286,13 @@ def release_website_settings(
         settings = record.last_apply.website_settings.model_copy(
             update={"artifact_id": artifact_id}
         )
-    return settings if settings is not None and settings.artifact_id == artifact_id else None
+    return (
+        settings
+        if settings is not None
+        and settings.artifact_id == artifact_id
+        and settings.settings.operation == "apply"
+        else None
+    )
 
 
 def release_version(
@@ -224,6 +313,12 @@ def release_version(
             raise ReleaseEvidenceUnavailable("release_record_missing") from error
         if release.context != lane.context or release.channel != instance:
             raise _identity_missing(instance)
+        from control_plane.testing_serving_copy import require_published_testing_release
+
+        try:
+            require_published_testing_release(store, release)
+        except (FileNotFoundError, ValueError) as error:
+            raise _identity_missing(instance) from error
 
         sources = sorted(
             (repository_key(source.repository), source.ref)
@@ -257,14 +352,47 @@ def release_version(
         except ValueError as error:
             raise _identity_missing(instance) from error
     try:
-        inventory = store.read_environment_inventory(
-            context_name=lane.context, instance_name=instance
+        inventory = (
+            qualified_generic_web_source_inventory(store=store, profile=profile, lane=lane)
+            if instance == "testing"
+            else store.read_environment_inventory(context_name=lane.context, instance_name=instance)
         )
+    except GenericWebSourceOperationUnresolved as error:
+        raise ReleaseEvidenceUnavailable("candidate_operation_unresolved") from error
+    except GenericWebSourceUnqualified as error:
+        raise _identity_missing(instance) from error
     except FileNotFoundError as error:
         raise ReleaseEvidenceUnavailable("release_record_missing") from error
+    return _generic_web_inventory_release_version(
+        inventory=inventory, profile=profile, instance=instance, context=lane.context
+    )
+
+
+def recorded_generic_web_testing_version(
+    *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord
+) -> ReleaseVersion:
+    lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
+    if lane is None:
+        raise ReleaseEvidenceUnavailable("testing_lane_missing")
+    try:
+        inventory = recorded_generic_web_source_inventory(store=store, profile=profile, lane=lane)
+    except GenericWebSourceUnqualified as error:
+        raise _identity_missing("testing") from error
+    return _generic_web_inventory_release_version(
+        inventory=inventory, profile=profile, instance="testing", context=lane.context
+    )
+
+
+def _generic_web_inventory_release_version(
+    *,
+    inventory: EnvironmentInventory,
+    profile: LaunchplaneProductProfileRecord,
+    instance: str,
+    context: str,
+) -> ReleaseVersion:
     identity = inventory.runtime_identity
     if (
-        inventory.context != lane.context
+        inventory.context != context
         or inventory.instance != instance
         or identity is None
         or inventory.deploy.status != "pass"
@@ -350,6 +478,7 @@ def build_release_review(
             read=read,
             preview_hosts=preview_hosts,
             review_label=profile.owner.review_label,
+            policy_store=store,
         )
         if production.shared_addons_digest != candidate.shared_addons_digest:
             shared_sources, additional_changes = read_shared_source_changes(
@@ -359,6 +488,7 @@ def build_release_review(
                 read=read,
                 preview_hosts=preview_hosts,
                 review_label=profile.owner.review_label,
+                policy_store=store,
             )
     except ReleaseEvidenceUnavailable:
         raise
@@ -462,7 +592,7 @@ def build_release_review(
                 ),
             }
         )
-    blockers = checklist_blockers(checklist)
+    blockers = checklist_blockers(checklist, profile=profile)
     complete = not blockers
     approved = bool(latest_decision and latest_decision.release_issue_url) and (
         bool(latest_decision and latest_decision.decision == "overridden")
@@ -538,11 +668,13 @@ def build_release_review(
     )
 
 
-def checklist_blockers(checklist: ReleaseChecklist) -> tuple[str, ...]:
+def checklist_blockers(
+    checklist: ReleaseChecklist, *, profile: LaunchplaneProductProfileRecord
+) -> tuple[str, ...]:
     blockers = []
     if not checklist.owner_github_id:
         blockers.append("No Client set for this product.")
-    if not checklist.testing_url:
+    if not checklist.testing_url and profile.public_website != "none":
         blockers.append("The testing site URL is unavailable.")
     groups = [("", checklist.items, checklist.untracked_commits)] + [
         (f"{source.repository} ", source.items, source.untracked_commits)

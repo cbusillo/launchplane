@@ -57,6 +57,7 @@ export function EnvironmentDiagnostics({
       </DiagnosticSection>
 
       <DiagnosticSection title="Provider-recorded topology">
+        {detail.topology.provider_recorded.external_ingress && <p>Separate ingress paths. The default managed endpoint and TLS facts below apply to the recovery aliases. External domains: {detail.topology.provider_recorded.external_ingress.domains.join(", ")} · {detail.topology.provider_recorded.external_ingress.custodian}.</p>}
         <DiagnosticGrid
           items={[
             ["Authority status", detail.topology.provider_recorded.authority_status],

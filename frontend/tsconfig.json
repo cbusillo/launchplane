@@ -3,6 +3,7 @@
     "target": "ES2022",
     "useDefineForClassFields": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
     "allowJs": false,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -18,5 +19,5 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src"]
 }

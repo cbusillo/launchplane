@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineReadiness
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 from control_plane.contracts.runner_lane_inventory import RunnerLaneRecord
+from control_plane.contracts.text_fields import require_text
 
 
 RunnerLaneMaintainerPlanStatus = Literal["ready", "blocked"]
@@ -93,7 +94,7 @@ class RunnerLaneDesiredState(BaseModel):
         self.service_user = _normalized_identifier(self.service_user, "service_user")
         self.systemd_unit_name = _normalized_systemd_unit_name(self.systemd_unit_name)
         self.labels = _normalized_identifiers(self.labels, "label")
-        self.runner_version = _required_text(
+        self.runner_version = require_text(
             self.runner_version, "runner lane maintainer desired state requires runner_version"
         )
         if not self.labels:
@@ -115,9 +116,7 @@ class RunnerLaneMaintainerBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "RunnerLaneMaintainerBlocker":
-        self.message = _required_text(
-            self.message, "runner lane maintainer blocker requires message"
-        )
+        self.message = require_text(self.message, "runner lane maintainer blocker requires message")
         return self
 
 
@@ -142,7 +141,7 @@ class RunnerLaneMaintainerPlan(BaseModel):
         )
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
-        self.summary = _required_text(self.summary, "runner lane maintainer plan requires summary")
+        self.summary = require_text(self.summary, "runner lane maintainer plan requires summary")
         if self.status == "ready" and self.blockers:
             raise ValueError("ready runner lane maintainer plan cannot include blockers")
         if self.status == "blocked" and not self.blockers:
@@ -414,10 +413,3 @@ def _normalized_path(value: str) -> str:
             raise ValueError("runner lane maintainer paths must not contain '..' components")
         segments.append(segment)
     return "/" + "/".join(segments)
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

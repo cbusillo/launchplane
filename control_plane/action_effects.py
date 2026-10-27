@@ -8,6 +8,8 @@ from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ACTION, WALKTHR
 
 ActionEffect = Literal["read", "plan", "projection_sync", "write"]
 AGENT_READ_ROLE_ACTION = "agent.read"
+BACKUP_CONTINUATION_ACTION = "client_release_backup.continue"
+GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION = "generic_web_deploy_recovery.plan"
 ODOO_CONNECTION_ISOLATION_ACTIONS = MappingProxyType(
     {
         "dry-run": "odoo_connection_isolation.plan",
@@ -68,6 +70,8 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "backup_gate.write": ActionDeclaration("write"),
         "deployment.read": ActionDeclaration("read"),
         "deployment.write": ActionDeclaration("write"),
+        # Agenda metadata cannot accept a release, change runtime settings or grant access.
+        "discussion_topic.write": ActionDeclaration("write", director_agent_write=True),
         "detached_application_retirement.apply": ActionDeclaration("write"),
         "detached_application_retirement.plan": ActionDeclaration("plan"),
         "dokploy_target.inspect": ActionDeclaration("read"),
@@ -99,6 +103,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "every_code_work_request.update": ActionDeclaration("write"),
         "every_code_work_request.write": ActionDeclaration("write"),
         "generic_web_deploy.execute": ActionDeclaration("write"),
+        GENERIC_WEB_DEPLOY_RECOVERY_PLAN_ACTION: ActionDeclaration("plan"),
         "generic_web_deploy_recovery_provider_evidence.read": ActionDeclaration("read"),
         "generic_web_onboarding.plan": ActionDeclaration("plan"),
         "generic_web_preview_authz.plan": ActionDeclaration("plan"),
@@ -121,6 +126,10 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "ingress_route.plan": ActionDeclaration("plan"),
         "inventory.read": ActionDeclaration("read"),
         "launchplane_service.read": ActionDeclaration("read"),
+        "launchplane_service.runtime_settings.apply": ActionDeclaration(
+            "write", "service", director_agent_write=True
+        ),
+        "launchplane_service.runtime_settings.plan": ActionDeclaration("plan", "service"),
         "launchplane_service.reconcile_odoo_workers": ActionDeclaration("write"),
         "launchplane_service.reconcile_verireel_workers": ActionDeclaration("write"),
         "launchplane_service_deploy.execute": ActionDeclaration("write"),
@@ -169,7 +178,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "owner_acceptance.read": ActionDeclaration("read"),
         "owner_acceptance_event.write": ActionDeclaration("write"),
         "preview.read": ActionDeclaration("read"),
-        "preview_desired_state.discover": ActionDeclaration("write"),
+        "preview_desired_state.discover": ActionDeclaration("plan"),
         "preview_destroy.execute": ActionDeclaration("write"),
         "preview_destroyed.write": ActionDeclaration("write"),
         "preview_generation.write": ActionDeclaration("write"),
@@ -177,7 +186,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "preview_inventory.read": ActionDeclaration("write"),
         "preview_lifecycle.cleanup": ActionDeclaration("write"),
         "preview_lifecycle.cleanup.secret": ActionDeclaration("write"),
-        "preview_lifecycle.plan": ActionDeclaration("write"),
+        "preview_lifecycle.plan": ActionDeclaration("plan"),
         "preview_pr_feedback.write": ActionDeclaration("write"),
         "preview_pr_feedback_notification_attempt.read": ActionDeclaration("read"),
         "preview_pr_feedback_notification_policy.apply": ActionDeclaration("write"),
@@ -223,6 +232,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         # A pending-request withdrawal records the Director's routing decision.
         # It cannot replace a Client decision, accept a release or change access.
         "product_review.withdraw": ActionDeclaration("write", director_agent_write=True),
+        BACKUP_CONTINUATION_ACTION: ActionDeclaration("write", director_agent_write=True),
         "product_retirement.apply": ActionDeclaration("write"),
         "product_retirement.plan": ActionDeclaration("write"),
         "production_backup_authority.read": ActionDeclaration("read"),
@@ -235,7 +245,7 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "public_ingress_monitor.run_once": ActionDeclaration("write"),
         "public_ingress_notification_policy.apply": ActionDeclaration("write"),
         "repository_inventory.read": ActionDeclaration("read"),
-        "repository_inventory.write": ActionDeclaration("write"),
+        "repository_inventory.write": ActionDeclaration("write", director_agent_write=True),
         "route_binding.apply": ActionDeclaration("write"),
         "route_binding.external.apply": ActionDeclaration("write"),
         "route_binding.external.plan": ActionDeclaration("plan"),
@@ -269,8 +279,6 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "verireel_prod_rollback.execute": ActionDeclaration("write"),
         "verireel_stable_environment.read": ActionDeclaration("read"),
         "verireel_testing_deploy.execute": ActionDeclaration("write"),
-        "work_graph.issue_inbox.reconcile": ActionDeclaration("write"),
-        "work_graph.rank": ActionDeclaration("plan"),
     }
 )
 

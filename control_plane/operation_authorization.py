@@ -1,26 +1,12 @@
 """Declaration-bound observation using the existing revocable DB service-read grant."""
 
 from collections.abc import Callable, Iterable
-from typing import Any, Protocol
+from typing import Any
 
 from control_plane.contracts.operation_descriptor import OperationDescriptor
-from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity, LaunchplaneIdentity
 
 
-OBSERVATION_AUTHZ_ACTION = "launchplane_service.read"
 _OPERATION_DESCRIPTOR_ATTRIBUTE = "__launchplane_operation_descriptor__"
-
-
-class AuthorizationAllows(Protocol):
-    def __call__(
-        self,
-        *,
-        identity: LaunchplaneIdentity,
-        action: str,
-        product: str,
-        context: str,
-        target: AuthorizationTarget | None,
-    ) -> bool: ...
 
 
 def bind_operation_handler(
@@ -52,45 +38,6 @@ def operation_observation_is_declared(*, endpoint: object, mode: str) -> bool:
     return (
         isinstance(descriptor, OperationDescriptor)
         and descriptor.mode_effects.get(mode) == "observation"
-    )
-
-
-def observation_authorization_allows(
-    *,
-    endpoint: object,
-    mode: str,
-    authorization_allows: AuthorizationAllows,
-    identity: LaunchplaneIdentity,
-    product: str,
-    context: str,
-    instances: tuple[str, ...] = (),
-) -> bool:
-    descriptor = getattr(endpoint, _OPERATION_DESCRIPTOR_ATTRIBUTE, None)
-    if not operation_observation_is_declared(endpoint=endpoint, mode=mode):
-        return False
-    assert isinstance(descriptor, OperationDescriptor)
-    try:
-        target = AuthorizationTarget(scope=descriptor.scope, instances=instances)
-    except ValueError:
-        return False
-    if isinstance(identity, GitHubHumanIdentity):
-        # Keep the existing admin permission for the route. Machine observation
-        # must instead match its revocable standing grant.
-        if identity.role != "admin":
-            return False
-        return authorization_allows(
-            identity=identity,
-            action=descriptor.authz_action,
-            product=product,
-            context=context,
-            target=target,
-        )
-    return authorization_allows(
-        identity=identity,
-        action=OBSERVATION_AUTHZ_ACTION,
-        product=product,
-        context=context,
-        target=target,
     )
 
 

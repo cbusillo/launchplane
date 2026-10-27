@@ -9,10 +9,13 @@ another backup, and promotes the same artifact again. Rolling back restores the
 checklist's production version, so the checklist recompiles to the digest the
 Client accepted, and that acceptance covers the second promotion and nothing else.
 
-Every step runs under a Client release grant naming the decision. Before a step is
-queued, and before each provider effect, the decision must still be the product's
-newest one, accepted by its recorded Client, with releases not held. The promotion
-still checks release approval for the exact candidate and the verified backup.
+Every step runs under a Client release grant naming the decision. Fresh work
+checks the product's newest decision, its recorded Client, and any release hold.
+Generic rollback checks that authority until its own first marked effect. A
+recipient inverse checks until its own replacement-writer pause dispatch, including
+any earlier peer parking. After the relevant boundary, protective restoration
+finishes under the original lease and target/publication fences.
+The promotion checks release approval for the exact candidate and verified backup.
 Each step's operation id derives from the decision, so the run needs no record of
 its own and a second worker replica finds the same operations.
 
@@ -51,7 +54,10 @@ from control_plane.contracts.generic_web_rollback import (
     GenericWebRollbackPlanRequest,
     build_generic_web_rollback_plan,
 )
-from control_plane.contracts.idempotency_record import build_launchplane_mutation_reservation_id
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    build_launchplane_mutation_reservation_id,
+)
 from control_plane.contracts.durable_operation_authorization import (
     RELEASE_DECISION_GRANTS,
     DurableOperationAuthorization,
@@ -79,6 +85,7 @@ from control_plane.contracts.odoo_prod_rollback_operation import (
     odoo_prod_rollback_request_fingerprint,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.production_recipient import ProductionRecipientRecord
 from control_plane.contracts.production_backup_gate import (
     PRODUCTION_BACKUP_GATE_EXECUTE_ACTION,
     ProductionBackupGateRequest,
@@ -97,8 +104,10 @@ from control_plane.odoo_release_recovery import (
 )
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
 from control_plane.release_review import (
+    ReleaseEvidenceUnavailable,
     current_release_review,
     release_version,
+    recorded_generic_web_testing_version,
     checklist_blockers,
 )
 from control_plane.release_review_record import publish_release_decision
@@ -108,6 +117,10 @@ from control_plane.generic_web_promotion_http import (
 )
 from control_plane.generic_web_rollback_http import GENERIC_WEB_ROLLBACK_ROUTE
 from control_plane.generic_web_rollback_drill import run_generic_web_rollback_drill
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionSourceRefused,
+    qualified_generic_web_source_inventory,
+)
 from control_plane.generic_web_promotion_provider_adapter import (
     GenericWebProdPromotionProviderMutationAdapter,
     require_generic_web_promotion_target,
@@ -142,10 +155,12 @@ _STOPPED_STATUSES = frozenset({"fail", "cancelled", "reconciliation_required"})
 
 
 @dataclass(slots=True)
-class StandingReleaseReviewBackoff:
-    """Delay incomplete standing reviews; never cache acceptance authority."""
-
+class ClientReleaseBackoff:
     blocked: dict[str, tuple[str, float]] = field(default_factory=dict)
+    reconciliations: dict[str, tuple[str, float]] = field(default_factory=dict)
+
+
+CLIENT_RELEASE_RECONCILIATION_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +179,7 @@ _DRILL_STEPS = (
     ClientReleaseStep("backup", 2),
     ClientReleaseStep("promote", 2),
 )
+ROLLBACK_DRILL_CODE_CHANGED_AT = "2026-10-24T19:25:37Z"
 
 
 class ClientReleaseFailureView(BaseModel):
@@ -301,9 +317,23 @@ def _product_drill_passed(store: object, profile: LaunchplaneProductProfileRecor
     for decision in record_store.list_release_review_decision_records(product=profile.product):
         if decision.release_start != "promote_with_rollback_drill":
             continue
+        if _drill_predates_rollback_code(decision):
+            continue
         if _step_status(record_store, profile, decision, final_step)[0] == "pass":
             return True
     return False
+
+
+def _drill_predates_rollback_code(decision: ReleaseReviewDecisionRecord) -> bool:
+    try:
+        decided_at = parse_launchplane_mutation_timestamp(
+            decision.decided_at, field_name="decided_at"
+        )
+    except ValueError:
+        return True
+    return decided_at < parse_launchplane_mutation_timestamp(
+        ROLLBACK_DRILL_CODE_CHANGED_AT, field_name="rollback_drill_code_changed_at"
+    )
 
 
 def client_release_grant(
@@ -348,11 +378,19 @@ def names_director(store: object, decision: ReleaseReviewDecisionRecord) -> bool
 
 
 def rejection_rollback_target(
-    store: PostgresRecordStore, profile: LaunchplaneProductProfileRecord
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    *,
+    before_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> DeploymentRecord | None:
     """The newest Client-accepted release with a passing production deployment."""
 
     owner = profile.owner.github_id
+    cutoff = (
+        parse_launchplane_mutation_timestamp(before_decision.decided_at, field_name="decided_at")
+        if before_decision is not None
+        else None
+    )
     deployments = store.list_deployment_records(
         context_name=_prod_context(profile), instance_name="prod"
     )
@@ -362,6 +400,9 @@ def rejection_rollback_target(
             or not owner
             or decision.actor_github_id != owner
             or decision.checklist.owner_github_id != owner
+            or cutoff is not None
+            and parse_launchplane_mutation_timestamp(decision.decided_at, field_name="decided_at")
+            > cutoff
         ):
             continue
         version = decision.checklist.candidate
@@ -438,10 +479,8 @@ def live_temporary_hotfix(
 
 
 def _covering_decision(
-    store: object, product: str, *, decision_record_id: str = ""
+    store: object, product: str, *, decision_record_id: str = "", recovering: bool = False
 ) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
-    """The product and its newest decision, when that decision still starts a release."""
-
     record_store = cast(PostgresRecordStore, store)
     try:
         profile = record_store.read_product_profile_record(product)
@@ -454,7 +493,18 @@ def _covering_decision(
         or not profile.owner.github_id
     ):
         return None
-    latest = record_store.list_release_review_decision_records(product=product, limit=1)
+    latest: tuple[ReleaseReviewDecisionRecord, ...]
+    if recovering and decision_record_id:
+        try:
+            latest = (
+                record_store.read_release_review_decision_record(
+                    product=product, record_id=decision_record_id
+                ),
+            )
+        except FileNotFoundError:
+            return None
+    else:
+        latest = record_store.list_release_review_decision_records(product=product, limit=1)
     if not latest:
         return None
     decision = latest[0]
@@ -482,11 +532,13 @@ def _covering_decision(
         return profile, decision
     if (
         decision.decision != "accepted"
-        or profile.release_on_acceptance == "held"
+        or not recovering
+        and profile.release_on_acceptance == "held"
         or decision.actor_github_id != profile.owner.github_id
         or (
             decision.acceptance_source == "director_standing"
             and profile.release_on_acceptance != "director_standing"
+            and not recovering
         )
     ):
         return None
@@ -502,30 +554,42 @@ def accepted_release_can_start(store: object, decision: ReleaseReviewDecisionRec
     )
 
 
-def client_release_grant_allows(
-    store: object, authorization: DurableOperationAuthorization
-) -> bool:
-    """The worker's re-check of a release decision grant before each provider effect."""
-
+def _client_release_authority(
+    store: object,
+    authorization: DurableOperationAuthorization,
+    *,
+    recovering: bool = False,
+) -> tuple[LaunchplaneProductProfileRecord, ReleaseReviewDecisionRecord] | None:
     if authorization.grant not in RELEASE_DECISION_GRANTS or authorization.instances != ("prod",):
-        return False
+        return None
     covered = _covering_decision(
         store,
         authorization.product,
         decision_record_id=authorization.release_decision_record_id,
+        recovering=recovering,
     )
     if covered is None:
-        return False
+        return None
     profile, decision = covered
     context = _prod_context(profile)
     checklist = decision.checklist
     expected = _decision_caller(decision)
     try:
         record_store = cast(PostgresRecordStore, store)
-        testing = release_version(store=record_store, profile=profile, instance="testing")
-        production = release_version(store=record_store, profile=profile, instance="prod")
+        production = (
+            None
+            if recovering
+            else release_version(store=record_store, profile=profile, instance="prod")
+        )
+        production_artifact = (
+            production.artifact_id
+            if production is not None
+            else record_store.read_release_tuple_record(
+                context_name=context, channel_name="prod"
+            ).artifact_id
+        )
     except (FileNotFoundError, ValueError):
-        return False
+        return None
     if (
         authorization.context != context
         or authorization.grant
@@ -533,21 +597,64 @@ def client_release_grant_allows(
         or authorization.caller.github_id != expected.github_id
         or authorization.caller.role != expected.role
     ):
-        return False
+        return None
     if decision.release_start == "rollback":
         # The rejected hotfix's candidate is live until the rollback restores the
         # Client's last accepted release; testing may already carry newer work.
-        target = rejection_rollback_target(record_store, profile)
-        return target is not None and production.artifact_id in (
-            checklist.candidate.artifact_id,
-            target.artifact_identity.artifact_id if target.artifact_identity else "",
+        target = rejection_rollback_target(record_store, profile, before_decision=decision)
+        return (
+            covered
+            if target is not None
+            and production_artifact
+            in (
+                checklist.candidate.artifact_id,
+                target.artifact_identity.artifact_id if target.artifact_identity else "",
+            )
+            else None
         )
-    # Every step happens while testing carries the accepted candidate, and production
-    # runs either the checklist's production version or that candidate.
-    return testing == checklist.candidate and production in (
-        checklist.production,
-        checklist.candidate,
+    return (
+        covered
+        if (
+            production_artifact
+            in (checklist.production.artifact_id, checklist.candidate.artifact_id)
+            if recovering
+            else production in (checklist.production, checklist.candidate)
+        )
+        else None
     )
+
+
+def client_release_grant_allows(
+    store: object, authorization: DurableOperationAuthorization
+) -> bool:
+    """Validate external/queued release work against its authority and current source."""
+    covered = _client_release_authority(store, authorization)
+    if covered is None:
+        return False
+    profile, decision = covered
+    if decision.release_start == "rollback" and profile.driver_id == "generic-web":
+        return True
+    try:
+        testing = (
+            recorded_generic_web_testing_version(
+                store=cast(PostgresRecordStore, store), profile=profile
+            )
+            if profile.driver_id == "generic-web"
+            else release_version(
+                store=cast(PostgresRecordStore, store), profile=profile, instance="testing"
+            )
+        )
+    except (FileNotFoundError, ValueError):
+        return False
+    return decision.release_start == "rollback" or testing == decision.checklist.candidate
+
+
+def _generic_web_release_authority_allows(
+    store: object, authorization: DurableOperationAuthorization
+) -> bool:
+    """Ongoing authority for an admitted web attempt or its accepted baseline inverse."""
+    covered = _client_release_authority(store, authorization)
+    return covered is not None and covered[0].driver_id == "generic-web"
 
 
 def _step_status(
@@ -652,7 +759,7 @@ def _release_step_failure(
     elif status == "reconciliation_required":
         message = (
             message
-            or "The provider outcome needs admin reconciliation before this release can continue."
+            or "The original provider outcome is not verified. This release is held for reconciliation."
         )
     return ClientReleaseFailureView(
         code=safe_operation_error_code(code) or status,
@@ -707,16 +814,105 @@ def read_client_release_step_views(
     return tuple(views)
 
 
+_TESTING_RELEASE_CHANGED_MESSAGE = "Testing has moved to a different version. Qualify this accepted artifact and revision again, or accept the new candidate for its own release."
+
+
+def _release_needs_testing(
+    profile: LaunchplaneProductProfileRecord, views: tuple[ClientReleaseStepView, ...]
+) -> bool:
+    next_step = next(view for view in views if view.status != "pass")
+    return not (
+        profile.driver_id == "generic-web"
+        and (
+            next_step.kind == "rollback"
+            or next_step.kind == "promote"
+            and next_step.status in {"pending", "running"}
+        )
+    )
+
+
+def _testing_release_evidence_blocked_reason(error: ValueError | FileNotFoundError) -> str:
+    if (
+        isinstance(error, ReleaseEvidenceUnavailable)
+        and error.code == "candidate_operation_unresolved"
+    ):
+        return str(error)
+    if isinstance(error, ReleaseEvidenceUnavailable) and error.code == "candidate_identity_missing":
+        return "Testing must qualify this accepted artifact and revision again before a fresh release step can start. Run its normal testing deployment."
+    return "The testing release evidence is unavailable. Restore the testing lane and qualify this accepted artifact and revision before starting a fresh release step."
+
+
+def _native_release_continuation(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    views: tuple[ClientReleaseStepView, ...],
+) -> OdooProdPromotionOperationRecord | OdooProdRollbackOperationRecord | None:
+    from control_plane.odoo_cutover_recovery import operation_cutover, rollback_operation_cutover
+    from control_plane.odoo_release_recovery import odoo_release_wrote_production
+
+    step = next((view for view in views if view.status != "pass"), None)
+    if (
+        profile.driver_id != "odoo"
+        or step is None
+        or step.status != "running"
+        or step.kind not in {"promote", "rollback"}
+    ):
+        return None
+    try:
+        operation: OdooProdPromotionOperationRecord | OdooProdRollbackOperationRecord
+        operation = (
+            store.read_odoo_prod_promotion_operation_record(step.operation_id)
+            if step.kind == "promote"
+            else store.read_odoo_prod_rollback_operation_record(step.operation_id)
+        )
+        if (
+            operation.status != "running"
+            or operation.product != profile.product
+            or operation.authorization.release_decision_record_id != decision.record_id
+            or not odoo_release_wrote_production(operation)
+        ):
+            return None
+        record = (
+            operation_cutover(store, operation)
+            if isinstance(operation, OdooProdPromotionOperationRecord)
+            else rollback_operation_cutover(store, operation)
+        )
+    except FileNotFoundError:
+        return None
+    return operation if record is not None else None
+
+
 def _release_run_blocked_reason(
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
     views: tuple[ClientReleaseStepView, ...],
+    *,
+    native_continuation: OdooProdPromotionOperationRecord
+    | OdooProdRollbackOperationRecord
+    | None = None,
 ) -> str:
     """Explain known local blockers without recompiling a checklist or admitting work."""
 
     if not decision.release_issue_url:
         return "The release approval has not been published yet. This release cannot advance until its release record is published."
+    if native_continuation is not None:
+        from control_plane.odoo_release_recovery import (
+            odoo_release_continuation_allows,
+            odoo_rollback_continuation_allows,
+        )
+
+        allowed = (
+            odoo_release_continuation_allows(store, native_continuation)
+            if isinstance(native_continuation, OdooProdPromotionOperationRecord)
+            else odoo_rollback_continuation_allows(store, native_continuation)
+        )
+        return (
+            ""
+            if allowed
+            else "This release needs an admin before it can continue because its original approval no longer applies."
+        )
     if not accepted_release_can_start(store, decision):
         if decision.decision == "accepted" and profile.release_on_acceptance == "held":
             return (
@@ -728,11 +924,22 @@ def _release_run_blocked_reason(
         # A rejected hotfix rolls back even if testing has moved on.
         if decision.release_start == "rollback":
             return ""
-        candidate = release_version(store=store, profile=profile, instance="testing")
     except (FileNotFoundError, ValueError):
         return "The current release's lane records are unavailable. An admin must reconcile them before this release can advance."
-    if candidate != decision.checklist.candidate:
-        return "The testing version has changed since this release was accepted. The Client must review the current candidate before it can go live."
+    try:
+        candidate = (
+            (
+                recorded_generic_web_testing_version(store=store, profile=profile)
+                if profile.driver_id == "generic-web"
+                else release_version(store=store, profile=profile, instance="testing")
+            )
+            if _release_needs_testing(profile, views)
+            else None
+        )
+    except (FileNotFoundError, ValueError) as error:
+        return _testing_release_evidence_blocked_reason(error)
+    if candidate is not None and candidate != decision.checklist.candidate:
+        return _TESTING_RELEASE_CHANGED_MESSAGE
     next_step = next(view for view in views if view.status != "pass")
     expected_production = (
         decision.checklist.candidate
@@ -756,6 +963,37 @@ def read_client_release_run(
     decision: ReleaseReviewDecisionRecord,
     control_plane_root: Path | None = None,
 ) -> ClientReleaseRunView | None:
+    run = _read_client_release_continuation(
+        store=store, profile=profile, decision=decision, control_plane_root=control_plane_root
+    )
+    if (
+        run is None
+        or run.blocked_reason
+        or run.state not in {"waiting", "running"}
+        or profile.driver_id != "generic-web"
+        or not _release_needs_testing(profile, run.steps)
+    ):
+        return run
+    try:
+        candidate = release_version(
+            store=cast(PostgresRecordStore, store), profile=profile, instance="testing"
+        )
+    except (FileNotFoundError, ValueError) as error:
+        return run.model_copy(
+            update={"blocked_reason": _testing_release_evidence_blocked_reason(error)}
+        )
+    if candidate != decision.checklist.candidate:
+        return run.model_copy(update={"blocked_reason": _TESTING_RELEASE_CHANGED_MESSAGE})
+    return run
+
+
+def _read_client_release_continuation(
+    *,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    control_plane_root: Path | None = None,
+) -> ClientReleaseRunView | None:
     if not client_release_steps(decision.release_start) or not isinstance(
         store, PostgresRecordStore
     ):
@@ -771,13 +1009,20 @@ def read_client_release_run(
         state = "running"
     else:
         state = "waiting"
+    native_continuation = (
+        _native_release_continuation(store, profile, decision, views)
+        if state == "running"
+        else None
+    )
     blocked_reason = (
-        _release_run_blocked_reason(store, profile, decision, views)
+        _release_run_blocked_reason(
+            store, profile, decision, views, native_continuation=native_continuation
+        )
         if state in {"waiting", "running"}
         else ""
     )
     window = None
-    if not blocked_reason and state in {"waiting", "running"}:
+    if not blocked_reason and native_continuation is None and state in {"waiting", "running"}:
         window = release_window(
             store=store, profile=profile, decision=decision, control_plane_root=control_plane_root
         )
@@ -786,12 +1031,29 @@ def read_client_release_run(
 
     if (
         not blocked_reason
+        and native_continuation is None
         and state in {"waiting", "running"}
         and read_status(store).get("admission_paused")
     ):
         blocked_reason = "Launchplane is draining admitted release steps before replacement. Pending steps will resume on the replacement worker."
+    next_step = next((view for view in views if view.status != "pass"), None)
+    native_inverse = None
+    if (
+        not blocked_reason
+        and profile.driver_id == "generic-web"
+        and state == "waiting"
+        and next_step is not None
+        and next_step.kind == "rollback"
+    ):
+        try:
+            native_inverse = _native_recipient_inverse(store, profile, decision)
+        except ClientReleaseNotReady:
+            blocked_reason = "The retained recipient inverse's saved baseline or owned publication rows changed. Reconcile its existing release before restoring production."
     if not blocked_reason and decision.release_start == "rollback" and state == "waiting":
-        if rejection_rollback_target(store, profile) is None:
+        if (
+            native_inverse is None
+            and rejection_rollback_target(store, profile, before_decision=decision) is None
+        ):
             blocked_reason = "No Client-accepted release has a passing production deployment to roll back to. An admin must roll back by hand."
     elif not blocked_reason and profile.driver_id == "odoo" and state == "waiting":
         try:
@@ -803,6 +1065,7 @@ def read_client_release_run(
         and profile.driver_id == "generic-web"
         and decision.release_start == "promote_with_rollback_drill"
         and state == "waiting"
+        and native_inverse is None
     ):
         try:
             _generic_web_drill_target(store, profile, decision)
@@ -823,11 +1086,85 @@ class ClientReleaseNotReady(Exception):
     """The next step cannot be queued now; nothing was queued."""
 
 
+def _require_standing_release_available(store: PostgresRecordStore, product: str) -> None:
+    """Automatic acceptance cannot supersede an outstanding admitted production attempt."""
+    covered = _covering_decision(store, product)
+    if covered is None:
+        return
+    profile, decision = covered
+    if profile.driver_id != "generic-web":
+        return
+    steps = client_release_steps(decision.release_start)
+    statuses: dict[str, ClientReleaseStepStatus] = {}
+    for step in steps:
+        status, operation = _step_status(store, profile, decision, step)
+        statuses[step.name] = status
+        if step.kind in {"promote", "rollback"} and (
+            status == "reconciliation_required"
+            or status == "running"
+            and bool(getattr(operation, "provider_effect_started_at", ""))
+        ):
+            raise ClientReleaseNotReady("standing_release_effects_outstanding")
+    if (
+        decision.release_start == "promote_with_rollback_drill"
+        and statuses.get(ClientReleaseStep("promote", 1).name) == "pass"
+        and statuses.get(ClientReleaseStep("rollback", 1).name)
+        in {"not_started", "pending", "running", "reconciliation_required"}
+    ):
+        production = release_version(store=store, profile=profile, instance="prod")
+        if production != decision.checklist.candidate:
+            return
+        try:
+            if _native_recipient_inverse(store, profile, decision) is None:
+                _generic_web_drill_target(store, profile, decision)
+        except ClientReleaseNotReady:
+            # No original inverse was dispatched. A new candidate must qualify
+            # its own reviewed production baseline and drill before any effect.
+            return
+        raise ClientReleaseNotReady("standing_release_inverse_outstanding")
+
+
+def _stopped_standing_release_can_restart(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    run: ClientReleaseRunView | None,
+) -> bool:
+    if run is None or run.state != "stopped":
+        return False
+    stopped = tuple(step for step in run.steps if step.status in _STOPPED_STATUSES)
+    if any(step.status != "fail" or step.failure is None for step in stopped):
+        return False
+    lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+    inventory = qualified_generic_web_source_inventory(store=store, profile=profile, lane=lane)
+    identity = inventory.runtime_identity
+    if identity is None or (
+        identity.artifact_id != decision.checklist.candidate.artifact_id
+        or identity.source_git_ref != decision.checklist.candidate.source_commit
+    ):
+        return False
+    qualified_at = parse_launchplane_mutation_timestamp(
+        inventory.deploy.finished_at, field_name="testing_deployment_finished_at"
+    )
+    if qualified_at <= parse_launchplane_mutation_timestamp(
+        decision.decided_at, field_name="release_decided_at"
+    ):
+        return False
+    return all(
+        step.failure is not None
+        and qualified_at
+        > parse_launchplane_mutation_timestamp(
+            step.failure.recorded_at, field_name="release_failure_recorded_at"
+        )
+        for step in stopped
+    )
+
+
 def _record_standing_acceptance(
     store: PostgresRecordStore,
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
-    backoff: StandingReleaseReviewBackoff | None = None,
+    backoff: ClientReleaseBackoff | None = None,
 ) -> None:
     """Materialize the Director's recorded standing acceptance for one exact checklist.
 
@@ -843,6 +1180,7 @@ def _record_standing_acceptance(
         or profile.production_use == "prelaunch"
     ):
         return
+    _require_standing_release_available(store, profile.product)
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
     if production == candidate:
@@ -867,6 +1205,7 @@ def _record_standing_acceptance(
                     )
                     is not None
                     and run.state != "waiting"
+                    and not _stopped_standing_release_can_restart(store, profile, previous, run)
                 )
             )
         ):
@@ -891,7 +1230,7 @@ def _record_standing_acceptance(
     if (
         checklist is None
         or checklist.production == checklist.candidate
-        or checklist_blockers(checklist)
+        or checklist_blockers(checklist, profile=profile)
     ):
         return
     existing = review.latest_decision
@@ -902,7 +1241,9 @@ def _record_standing_acceptance(
     ).hexdigest()
     expected_record_id = f"release-review-standing-{record_key}"
     if existing is not None and existing.release_issue_url and existing.release_start:
-        return
+        run = read_client_release_run(store=store, profile=profile, decision=existing)
+        if not _stopped_standing_release_can_restart(store, profile, existing, run):
+            return
     if existing is not None and not existing.release_issue_url:
         decision = existing
     else:
@@ -918,7 +1259,10 @@ def _record_standing_acceptance(
             release_start=release_start_for_acceptance(store=store, profile=profile),
             acceptance_source="director_standing",
         )
-    decision = store.create_release_review_decision_record_if_absent(decision)
+    decision = store.create_release_review_decision_record_if_absent(
+        decision,
+        validate_before_insert=lambda: _require_standing_release_available(store, profile.product),
+    )
     # Use the existing publication/recovery path. An unpublished decision cannot
     # queue a backup or promotion, and a retry keeps the same decision id.
     issue_url = decision.release_issue_url or publish_release_decision(
@@ -952,6 +1296,8 @@ def _run_generic_web_promotion(
     decision: ReleaseReviewDecisionRecord,
     step: ClientReleaseStep,
     backup_record_id: str,
+    *,
+    allow_mutation: bool = True,
 ) -> str:
     request = client_release_promotion_request(profile, decision, backup_record_id)
     lane = next(lane for lane in profile.lanes if lane.instance == "prod")
@@ -963,7 +1309,7 @@ def _run_generic_web_promotion(
     )
 
     def validate_checkpoint() -> None:
-        if not client_release_grant_allows(store, grant):
+        if not _generic_web_release_authority_allows(store, grant):
             raise click.ClickException("The release is no longer accepted.")
 
     def validate_before_effect(target: GenericWebResolvedDeployTarget) -> None:
@@ -985,6 +1331,11 @@ def _run_generic_web_promotion(
     from control_plane.production_recipient_cutover import RecipientCutoverAdapter
 
     recipient = custody(store, profile.product, lane.context)
+    original = store.read_idempotency_record(
+        scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+        idempotency_key=_step_key(decision, step),
+    )
     if (
         recipient is not None
         and recipient.activation
@@ -1015,7 +1366,19 @@ def _run_generic_web_promotion(
             if covered is None:
                 raise click.ClickException("The release is no longer accepted.")
 
-        if recipient.phase != "published" and not recipient.execution:
+        def validate_recipient_source() -> None:
+            # The adapter admits the source before this attempt starts production;
+            # its later acceptance and recovery checks do not chase testing.
+            _require_qualified_generic_web_release_source(store, profile, decision)
+            if original is not None and not recipient.execution:
+                try:
+                    _require_current_release(store, control_plane_root, profile, decision)
+                except ClientReleaseNotReady as error:
+                    raise GenericWebPromotionSourceRefused(
+                        "The accepted release changed."
+                    ) from error
+
+        if recipient.phase != "published" and not recipient.execution and original is None:
             _require_current_release(store, control_plane_root, profile, decision)
 
         recipient_adapter = RecipientCutoverAdapter(
@@ -1025,6 +1388,7 @@ def _run_generic_web_promotion(
             f"client-release-{decision.record_id}",
             backup_record_id,
             validate_recipient_release,
+            validate_source=validate_recipient_source,
         )
         recipient_result = run_durable_provider_operation(
             store=store,
@@ -1035,6 +1399,7 @@ def _run_generic_web_promotion(
             lease_owner=f"client-release-{decision.record_id}-{datetime.now(UTC).isoformat()}",
             response_trace_id=f"client-release-{decision.record_id}",
             adapter=recipient_adapter,
+            allow_mutation=allow_mutation,
         )
         expected_id = client_release_step_operation_id(
             profile=profile, decision=decision, step=step
@@ -1071,6 +1436,7 @@ def _run_generic_web_promotion(
         lease_owner=f"client-release-{decision.record_id}-{datetime.now(UTC).isoformat()}",
         response_trace_id=f"client-release-{decision.record_id}",
         adapter=adapter,
+        allow_mutation=allow_mutation,
     )
     operation_id = client_release_step_operation_id(profile=profile, decision=decision, step=step)
     return (
@@ -1085,7 +1451,7 @@ def advance_client_releases(
     store: object,
     control_plane_root: Path,
     stop_event: Event | None = None,
-    standing_review_backoff: StandingReleaseReviewBackoff | None = None,
+    release_backoff: ClientReleaseBackoff | None = None,
 ) -> tuple[str, ...]:
     """Queue the next step of every Client release that is ready for one.
 
@@ -1103,16 +1469,19 @@ def advance_client_releases(
         if profile.driver_id not in {"odoo", "generic-web"}:
             continue
         try:
-            _record_standing_acceptance(store, control_plane_root, profile, standing_review_backoff)
-        except (FileNotFoundError, ValueError, click.ClickException):
+            _record_standing_acceptance(store, control_plane_root, profile, release_backoff)
+        except (ClientReleaseNotReady, FileNotFoundError, ValueError, click.ClickException):
             _LOGGER.info("standing acceptance not ready product=%s", profile.product)
-            continue
         covered = _covering_decision(store, profile.product)
         if covered is None:
             continue
         try:
-            operation_id = _advance(store, control_plane_root, *covered)
-        except (ClientReleaseNotReady, BusinessHoursHeld) as reason:
+            operation_id = _advance(store, control_plane_root, *covered, backoff=release_backoff)
+        except (
+            ClientReleaseNotReady,
+            BusinessHoursHeld,
+            GenericWebPromotionSourceRefused,
+        ) as reason:
             _LOGGER.info(
                 "client release not advanced product=%s reason=%s", profile.product, reason
             )
@@ -1158,11 +1527,12 @@ def _advance(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
+    *,
+    backoff: ClientReleaseBackoff | None = None,
 ) -> str:
     from control_plane.service_deploy_drain import read_status
 
-    if read_status(store).get("admission_paused"):
-        return ""
+    admission_paused = bool(read_status(store).get("admission_paused"))
     context = _prod_context(profile)
     previous: object | None = None
     for step in client_release_steps(decision.release_start):
@@ -1170,8 +1540,21 @@ def _advance(
         if status == "pass":
             previous = operation
             continue
+        if status == "reconciliation_required" and profile.driver_id == "generic-web":
+            return _reconcile_generic_web_step(
+                store,
+                control_plane_root,
+                profile,
+                decision,
+                step,
+                operation,
+                previous,
+                allow_mutation=not admission_paused,
+                backoff=backoff,
+            )
         if status != "not_started":
-            # Running, or stopped: a stopped release never continues by itself.
+            return ""
+        if admission_paused:
             return ""
         authorized_at = utc_now_timestamp()
         if decision.release_start == "rollback":
@@ -1209,6 +1592,119 @@ def _advance(
     return ""
 
 
+def _reconcile_generic_web_step(
+    store: PostgresRecordStore,
+    root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    operation: object | None,
+    previous: object | None,
+    *,
+    allow_mutation: bool,
+    backoff: ClientReleaseBackoff | None,
+) -> str:
+    if (
+        decision.decision != "accepted"
+        or not isinstance(operation, LaunchplaneIdempotencyRecord)
+        or step.kind not in {"promote", "rollback"}
+    ):
+        return ""
+    if backoff is not None:
+        now = monotonic()
+        blocked = backoff.reconciliations.get(profile.product)
+        if blocked is not None and blocked[0] == operation.record_id and now < blocked[1]:
+            return ""
+        backoff.reconciliations[profile.product] = (
+            operation.record_id,
+            now + CLIENT_RELEASE_RECONCILIATION_SECONDS,
+        )
+    from control_plane.production_recipient import custody
+    from control_plane.production_recipient_cutover import cutover_reconciliation_key
+    from control_plane.production_recipient_inverse import inverse_reconciliation_key
+
+    context = _prod_context(profile)
+    recipient = custody(store, profile.product, context)
+    if recipient is not None:
+        if step.kind == "promote" and operation.reconciliation_key == cutover_reconciliation_key(
+            recipient.plan_sha256
+        ):
+            return _run_generic_web_promotion(
+                store,
+                root,
+                profile,
+                decision,
+                step,
+                str(getattr(previous, "backup_record_id", "")),
+                allow_mutation=allow_mutation,
+            )
+        if step.kind == "rollback" and operation.reconciliation_key == inverse_reconciliation_key(
+            recipient.plan_sha256
+        ):
+            return (
+                _queue_recipient_inverse(
+                    store,
+                    root,
+                    profile,
+                    decision,
+                    step,
+                    context,
+                    utc_now_timestamp(),
+                    allow_mutation=allow_mutation,
+                )
+                or ""
+            )
+    from control_plane.generic_web_promotion_recovery import (
+        adopt_inspected_promotion,
+        inspect_promotion,
+        inspect_rollback_drill,
+    )
+
+    inspect = inspect_promotion if step.kind == "promote" else inspect_rollback_drill
+    inspection = inspect(
+        store=store,
+        root=root,
+        product=profile.product,
+        decision_record_id=decision.record_id,
+        attempt=step.attempt,
+    )
+    if inspection.reservation != operation or inspection.action not in {
+        "adopt_promotion",
+        "adopt_rollback",
+    }:
+        return ""
+    adopted = adopt_inspected_promotion(
+        store=store,
+        inspection=inspection,
+        trace_id=f"client-release-{decision.record_id}",
+        recovery_receipt={"action": inspection.action, "source": "accepted_release_worker"},
+    )
+    return (
+        operation.record_id
+        if adopted.status in {"adopted", "replayed"}
+        and adopted.record is not None
+        and adopted.record.record_id == operation.record_id
+        else ""
+    )
+
+
+def _require_qualified_generic_web_release_source(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+) -> None:
+    try:
+        candidate = release_version(store=store, profile=profile, instance="testing")
+    except ReleaseEvidenceUnavailable as error:
+        raise GenericWebPromotionSourceRefused(str(error)) from error
+    except (FileNotFoundError, ValueError) as error:
+        raise GenericWebPromotionSourceRefused(
+            "Testing is no longer qualified for release."
+        ) from error
+    if candidate != decision.checklist.candidate:
+        raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
+
+
 def _require_current_release(
     store: PostgresRecordStore,
     control_plane_root: Path,
@@ -1221,14 +1717,40 @@ def _require_current_release(
     # Cheap reads first, so a stale acceptance does not read GitHub on every poll.
     try:
         production = release_version(store=store, profile=profile, instance="prod")
-        candidate = release_version(store=store, profile=profile, instance="testing")
     except (FileNotFoundError, ValueError) as error:
         raise ClientReleaseNotReady("release_record_missing") from error
-    if (production, candidate) != (checklist.production, checklist.candidate):
+    if production != checklist.production:
         raise ClientReleaseNotReady("release_changed")
+    if profile.driver_id == "generic-web":
+        _require_qualified_generic_web_release_source(store, profile, decision)
+    else:
+        try:
+            candidate = release_version(store=store, profile=profile, instance="testing")
+        except (FileNotFoundError, ValueError) as error:
+            raise ClientReleaseNotReady("release_record_missing") from error
+        if candidate != checklist.candidate:
+            raise ClientReleaseNotReady("release_changed")
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=store, profile=profile
     )
+    if profile.driver_id == "generic-web":
+        if (
+            review.latest_decision is not None
+            and review.latest_decision.record_id != decision.record_id
+        ):
+            raise ClientReleaseNotReady("release_not_accepted")
+        if review.unavailable_reason in {
+            "candidate_identity_missing",
+            "candidate_operation_unresolved",
+        }:
+            raise GenericWebPromotionSourceRefused(
+                str(ReleaseEvidenceUnavailable(review.unavailable_reason))
+            )
+        if review.checklist is not None:
+            if review.checklist.production != checklist.production:
+                raise ClientReleaseNotReady("release_changed")
+            if review.checklist.candidate != checklist.candidate:
+                raise GenericWebPromotionSourceRefused("The accepted testing release changed.")
     if (
         not review.approved
         or review.checklist_digest != decision.checklist_digest
@@ -1357,12 +1879,15 @@ def _queue_rollback(
     checklist = decision.checklist
     try:
         production = release_version(store=store, profile=profile, instance="prod")
-        testing = release_version(store=store, profile=profile, instance="testing")
+        testing = (
+            release_version(store=store, profile=profile, instance="testing")
+            if profile.driver_id != "generic-web"
+            else None
+        )
     except (FileNotFoundError, ValueError) as error:
         raise ClientReleaseNotReady("release_record_missing") from error
-    if (production.artifact_id, testing.artifact_id) != (
-        checklist.candidate.artifact_id,
-        checklist.candidate.artifact_id,
+    if production.artifact_id != checklist.candidate.artifact_id or (
+        testing is not None and testing.artifact_id != checklist.candidate.artifact_id
     ):
         raise ClientReleaseNotReady("release_changed")
     target_artifact_id = checklist.production.artifact_id
@@ -1399,7 +1924,7 @@ def _queue_rollback(
         )
 
         def validate_checkpoint() -> None:
-            if not client_release_grant_allows(store, grant):
+            if not _generic_web_release_authority_allows(store, grant):
                 raise click.ClickException("The release is no longer accepted.")
 
         operation_id = run_generic_web_rollback_drill(
@@ -1528,7 +2053,7 @@ def _queue_rejection_rollback(
         )
         if recipient_operation is not None:
             return recipient_operation
-    deployment = rejection_rollback_target(store, profile)
+    deployment = rejection_rollback_target(store, profile, before_decision=decision)
     if deployment is None or deployment.artifact_identity is None:
         raise ClientReleaseNotReady("rollback_target_missing")
     grant = client_release_grant(
@@ -1551,7 +2076,7 @@ def _queue_rejection_rollback(
             raise ClientReleaseNotReady("rollback_not_ready")
 
         def validate_checkpoint() -> None:
-            if not client_release_grant_allows(store, grant):
+            if not _generic_web_release_authority_allows(store, grant):
                 raise click.ClickException("The Client's request for changes no longer applies.")
 
         operation_id = run_generic_web_rollback_drill(
@@ -1600,19 +2125,16 @@ def _queue_rejection_rollback(
     return persisted.operation_id if persisted.operation_id == operation.operation_id else ""
 
 
-def _queue_recipient_inverse(
+def _native_recipient_inverse(
     store: PostgresRecordStore,
-    root: Path,
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
-    step: ClientReleaseStep,
-    context: str,
-    authorized_at: str,
-) -> str | None:
-    from control_plane.production_recipient import custody
-    from control_plane.production_recipient_inverse import run_recipient_inverse
+) -> ProductionRecipientRecord | None:
+    """Read native inverse applicability without provider I/O or fresh drill gates."""
+    from control_plane.production_recipient import custody, RecipientAuthorityChanged
+    from control_plane.production_recipient_publication import require_owned_publication_rows
 
-    record = custody(store, profile.product, context)
+    record = custody(store, profile.product, _prod_context(profile))
     if (
         record is None
         or not record.publication
@@ -1628,6 +2150,30 @@ def _queue_recipient_inverse(
         != decision.checklist.production.artifact_id
     ):
         raise ClientReleaseNotReady("recipient_inverse_target_changed")
+    if record.phase in {"published", "reverting"}:
+        try:
+            require_owned_publication_rows(store, record)
+        except (RecipientAuthorityChanged, FileNotFoundError) as error:
+            raise ClientReleaseNotReady("recipient_inverse_publication_changed") from error
+    return record
+
+
+def _queue_recipient_inverse(
+    store: PostgresRecordStore,
+    root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    context: str,
+    authorized_at: str,
+    *,
+    allow_mutation: bool = True,
+) -> str | None:
+    from control_plane.production_recipient_inverse import run_recipient_inverse
+
+    record = _native_recipient_inverse(store, profile, decision)
+    if record is None:
+        return None
     grant = client_release_grant(
         decision=decision,
         action="generic_web_rollback.execute",
@@ -1636,7 +2182,7 @@ def _queue_recipient_inverse(
     )
 
     def validate() -> None:
-        if not client_release_grant_allows(store, grant):
+        if not _generic_web_release_authority_allows(store, grant):
             raise click.ClickException("The Client release no longer authorizes this inverse.")
 
     actual = run_recipient_inverse(
@@ -1648,6 +2194,7 @@ def _queue_recipient_inverse(
         key=_step_key(decision, step),
         trace=f"client-release-{decision.record_id}",
         validate_release=validate,
+        allow_mutation=allow_mutation,
     )
     expected = client_release_step_operation_id(profile=profile, decision=decision, step=step)
     return expected if actual == expected else ""

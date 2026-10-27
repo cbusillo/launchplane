@@ -15,6 +15,7 @@ from control_plane.testing_event_deploy_recovery import testing_event_execution_
 from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
 )
+from control_plane.workflows.ingress_provider import NPMPLUS_BASE_URL_ENV_KEY
 from tests import test_testing_private_ingress as private_ingress_tests
 from tests.test_postgres_integration import _head_postgres_database
 
@@ -228,6 +229,7 @@ class RealPostgresTestingPrivateIngressRecoveryTests(private_ingress_tests.Priva
             )
         )
         with (
+            patch.dict("os.environ", {NPMPLUS_BASE_URL_ENV_KEY: "http://10.21.0.9:81"}),
             patch(
                 "control_plane.testing_private_health.build_npmplus_ingress_client_from_env",
                 return_value=self.client,

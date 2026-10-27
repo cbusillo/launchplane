@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
-from typing import Any, cast
+from typing import cast
 from collections.abc import Callable
 
 from fastapi import FastAPI, HTTPException
@@ -21,7 +21,11 @@ from control_plane.odoo_preview_apply_execution import (
     prepare_odoo_preview_apply_operation,
     preview_execution_lock_name,
 )
-from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope, ODOO_PREVIEW_APPLY_ROUTE
+from control_plane.odoo_preview_apply_http import (
+    OdooPreviewApplyEnvelope,
+    OdooPreviewPlanProvenanceError,
+    ODOO_PREVIEW_APPLY_ROUTE,
+)
 from control_plane.preview_reservation_recovery import (
     classify_preview_reservation,
     held_preview_reservations,
@@ -303,6 +307,27 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 observer.assert_called_once()
                 write.assert_not_called()
 
+    def test_original_without_optional_preservation_field_still_observes_and_adopts(self) -> None:
+        with self.store._session_factory() as session:
+            row = session.scalar(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.scope == self.reservation.scope,
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == self.reservation.record_id,
+                )
+            )
+            assert row is not None
+            payload = json.loads(json.dumps(row.payload))
+            payload["response_payload"]["original_intent"]["apply_request"].pop(
+                "preserve_original_reservation_id", None
+            )
+            row.payload = payload
+            session.commit()
+        observer = Mock(return_value=("present", {"status": "fail"}, False))
+        result = self.recover(observe=observer)
+        self.assertEqual(result["settlement"], "adopted")
+        observer.assert_called_once()
+
     def remove_original_intent(self) -> None:
         with self.store._session_factory() as session:
             receipt = session.scalar(
@@ -556,75 +581,18 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         self.store.write_preview_generation_record(generation)
         preview = preview.model_copy(update={"serving_generation_id": generation.generation_id})
         self.store.write_preview_record(preview)
-        from control_plane.http_app import create_launchplane_fastapi_app
-        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
-        from control_plane.service_auth import LaunchplaneAuthzPolicy
-        from tests.http_app_test_support import _RejectingVerifier, _local_operator_bearer_config
-        from tests.support.http import request as http_request
+        if not facts:
+            return
+        from tests.support.disposable_lanes import record_safety
 
-        policy = LaunchplaneAuthzPolicy()
-        self.store.seed_authz_policy_if_absent(
-            LaunchplaneAuthzPolicyRecord(
-                record_id="preview-cleanup-fixture-policy",
-                source="test",
-                updated_at=self.profile.updated_at,
-                policy=policy,
-            )
+        record_safety(
+            self.store,
+            self.profile.product,
+            preview.context,
+            "pr-42",
+            preview=preview,
+            **facts,
         )
-        app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            authz_policy=policy,
-            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
-            record_store_factory=lambda: self.store,
-            control_plane_root_path=self.root,
-        )
-        payload = {
-            "mode": "inspect",
-            "product": self.profile.product,
-            "context": preview.context,
-            "instance": "pr-42",
-            "preview_id": preview.preview_id,
-        }
-
-        def observe() -> Any:
-            return asyncio.run(
-                http_request(
-                    app,
-                    "POST",
-                    "/v1/disposable-lanes/observations",
-                    headers={"Authorization": "Bearer local-operator-token"},
-                    payload=payload,
-                )
-            )
-
-        inspected = observe()
-        self.assertEqual(inspected.status_code, 202, inspected.text)
-        payload.update(
-            mode="clear",
-            expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
-            expected_observation_sha256=inspected.json()["result"]["observation_sha256"],
-        )
-        cleared = observe()
-        self.assertEqual(cleared.status_code, 202, cleared.text)
-        payload["mode"] = "inspect"
-        payload.pop("expected_observation_sha256")
-        inspected = observe()
-        self.assertEqual(inspected.status_code, 202, inspected.text)
-        payload.update(
-            {
-                "mode": "record",
-                "expected_binding_sha256": inspected.json()["result"]["binding_sha256"],
-                "usage": "unused",
-                "data": "reproducible",
-                "production_resources": "isolated",
-                "usage_evidence": "fixture:occupancy",
-                "data_evidence": "fixture:copy",
-                "isolation_evidence": "fixture:isolated",
-                **facts,
-            }
-        )
-        recorded = observe()
-        self.assertEqual(recorded.status_code, 202, recorded.text)
 
     def cleanup(
         self,
@@ -674,108 +642,134 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         assert old is not None
         self.assertNotEqual(old.response_payload["result"]["status"], "pass")
 
-    def test_cleanup_holds_name_protected_and_unknown_conditions(self) -> None:
-        self.remove_original_intent()
-        for condition, value in (
-            ("usage", "in_use"),
-            ("usage", "unknown"),
-            ("data", "only_copy"),
-            ("data", "unknown"),
+    def cleanup_unrecorded(self, **hooks: object) -> ReconcileOutcome:
+        from tests.test_product_reconcile import FakePreviewProvider
+        from control_plane.workflows.odoo_preview_runtime import OdooPreviewApplyInputsRequest
+
+        provider = FakePreviewProvider()
+
+        def inputs(
+            *,
+            profile: LaunchplaneProductProfileRecord,
+            request: OdooPreviewApplyInputsRequest,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            payload = provider.build_inputs(profile=profile, request=request, **kwargs)
+            plan = payload["dry_run_plan"]
+            assert isinstance(plan, dict)
+            plan["environment_id"] = self.issued.dry_run_plan.environment_id
+            return payload
+
+        with patch(
+            "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+            return_value=self.issued.dry_run_plan.compose_name,
         ):
-            with self.subTest(condition=condition, value=value):
-                self.prepare_cleanup(**{condition: value})
-                result = self.cleanup()
-                self.assertTrue(result.plan["held"])
-                self.assertIn(value, str(result.plan["reason"]))
-                self.assertFalse(self.provider.applied)
-                self.assertEqual(self.store.list_preview_records()[0].state, "active")
-                self.assertTrue(held_preview_reservations(self.store, product=self.profile.product))
+            return self.cleanup(
+                previous_plan=None,
+                pr_state="closed",
+                **{
+                    "observe_apply": lambda **_: ("unknown", None, False),
+                    "build_inputs": inputs,
+                    **hooks,
+                },
+            )
 
-    def test_cleanup_leaves_shared_credentials_untouched(self) -> None:
-        from control_plane.contracts.secret_record import SecretRecord, SecretBinding
+    def test_closed_unrecorded_preview_retires_its_retained_original(self) -> None:
+        self.assertEqual(self.store.list_preview_records(), ())
+        result = self.cleanup_unrecorded()
+        self.assertFalse(result.error, result.plan)
+        self.assertEqual(self.provider.applied, [("destroy", 42)])
+        self.assertEqual(held_preview_reservations(self.store, product=self.profile.product), ())
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
 
-        self.remove_original_intent()
-        secret = SecretRecord(
-            secret_id="shared-integration",
-            scope="context",
-            integration="runtime_environment",
-            name="INTEGRATION_PASSWORD",
-            context=self.profile.preview.context,
-            current_version_id="fixture-version",
-            created_at=self.profile.updated_at,
-            updated_at=self.profile.updated_at,
+    def test_closed_preview_retires_a_completed_failed_creation(self) -> None:
+        self.reservation = self.replace_record(
+            state="completed",
+            response_status_code=502,
+            response_trace_id="failed-creation",
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            response_payload={"result": {"status": "fail"}},
         )
-        self.store.write_secret_record(secret)
+        result = self.cleanup_unrecorded()
+        self.assertFalse(result.error, result.plan)
+        self.assertEqual(self.provider.applied, [("destroy", 42)])
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+
+    def test_reopened_preview_creation_can_be_retired_after_closing_again(self) -> None:
+        from control_plane.workflows.launchplane import apply_preview_destroyed_transition
+        from control_plane.odoo_preview_apply_http import _odoo_preview_destroy_reason
+
+        self.prepare_cleanup()
+        previous = self.store.list_preview_records()[0]
+        self.store.write_preview_record(
+            apply_preview_destroyed_transition(
+                preview=previous,
+                destroyed_at=previous.updated_at,
+                destroy_reason=_odoo_preview_destroy_reason(
+                    plan_id="previous-destroy", issued_at=previous.updated_at
+                ),
+            )
+        )
+        result = self.cleanup_unrecorded()
+        self.assertFalse(result.error, result.plan)
+        self.assertEqual(self.provider.applied, [("destroy", 42)])
+        self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
+
+    def test_unrecorded_cleanup_preserves_unknown_original_and_live_executor(self) -> None:
+        with self.store.testing_replacement_execution_lock(
+            preview_execution_lock_name(self.reservation.provider_target_key)
+        ):
+            result = self.cleanup()
+        self.assertTrue(result.error or result.deferred, result.plan)
+        self.assertEqual(result.plan["reason"], "held_preview_recovery_required")
+        self.assertFalse(self.provider.applied)
+        result = self.cleanup(quiescence_check=lambda **_: False)
+        self.assertTrue(result.error or result.deferred, result.plan)
+        self.assertEqual(result.plan["reason"], "held_preview_recovery_required")
+        self.assertFalse(self.provider.applied)
+        self.assertEqual(self.store.list_preview_records(), ())
+
+    def test_unrecorded_cleanup_requires_the_original_and_preserves_other_lanes(self) -> None:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
         for instance in ("prod", "pr-42"):
-            self.store.write_secret_binding(
-                SecretBinding(
-                    binding_id=f"integration-{instance}",
-                    secret_id=secret.secret_id,
-                    integration=secret.integration,
-                    binding_key=secret.name,
-                    context=secret.context,
+            self.store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=self.profile.preview.context,
                     instance=instance,
-                    created_at=secret.created_at,
-                    updated_at=secret.updated_at,
+                    target_id="physically-shared-target",
+                    updated_at=self.profile.updated_at,
                 )
             )
-        bindings = self.store.list_secret_bindings()
-        self.prepare_cleanup(production_resources="shared")
+        result = self.cleanup(observe_apply=lambda **_: ("unknown", None, False))
+        self.assertTrue(result.plan["held"], result.plan)
+        self.assertFalse(self.provider.applied)
+        self.remove_original_intent()
+        result = self.cleanup()
+        self.assertFalse(self.provider.applied)
+        self.assertEqual(self.store.list_preview_records(), ())
+
+    def test_closed_pr_cleanup_ignores_usage_and_custody_reports(self) -> None:
+        self.remove_original_intent()
+        self.prepare_cleanup(usage="in_use", data="only_copy")
         result = self.cleanup()
         self.assertFalse(result.error, result.plan)
         self.assertEqual(self.provider.applied, [("destroy", 42)])
         self.assertEqual(self.store.list_preview_records()[0].state, "destroyed")
-        self.assertEqual(self.store.read_secret_record(secret.secret_id), secret)
-        self.assertEqual(self.store.list_secret_bindings(), bindings)
 
-    def test_only_cleanup_can_ignore_credential_isolation(self) -> None:
+    def test_historical_preview_facts_cannot_qualify_other_lane_mutations(self) -> None:
         from control_plane.disposable_lanes import (
             DisposableLaneSafetyUnknown,
             require_disposable_lane,
         )
-        from tests.support.disposable_lanes import record_safety
-        from control_plane.product_reconcile import _preview_cleanup_guard
-        from functools import partial
 
-        self.prepare_cleanup(production_resources="shared")
-        preview = self.store.list_preview_records()[0]
-        lane = dict(product=self.profile.product, context=preview.context, instance="pr-42")
-        require_lane = partial(
-            require_disposable_lane,
-            self.store,
-            product=self.profile.product,
-            context=preview.context,
-            instance="pr-42",
-        )
-        for isolation in ("shared", "unknown", "separation_ready"):
-            with self.subTest(isolation=isolation):
-                record_safety(
-                    self.store,
-                    **lane,
-                    preview=preview,
-                    production_resources=isolation,
-                )
-                with self.assertRaises(DisposableLaneSafetyUnknown):
-                    require_lane()
-                if isolation != "unknown":
-                    with self.assertRaises(DisposableLaneSafetyUnknown):
-                        require_lane(preview_refresh=True)
-                require_lane(preview_cleanup=True)
-                _preview_cleanup_guard(self.store, self.profile, 42)
-        record_safety(
-            self.store,
-            self.profile.product,
-            preview.context,
-            "testing",
-            production_resources="shared",
-        )
+        self.prepare_cleanup(observer_kind="historical-preview")
         with self.assertRaises(DisposableLaneSafetyUnknown):
             require_disposable_lane(
                 self.store,
                 product=self.profile.product,
-                context=preview.context,
-                instance="testing",
-                preview_cleanup=True,
+                context=self.profile.preview.context,
+                instance="pr-42",
             )
 
     def test_cleanup_refuses_a_production_shared_target(self) -> None:
@@ -791,7 +785,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                     updated_at=self.profile.updated_at,
                 )
             )
-        self.prepare_cleanup(production_resources="shared")
+        self.prepare_cleanup()
         result = self.cleanup()
         self.assertTrue(result.plan["held"])
         self.assertEqual(result.plan["reason"], "preview_cleanup_safety_unknown")
@@ -800,7 +794,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
 
     def test_cleanup_holds_when_closed_pr_is_not_confirmed(self) -> None:
         self.remove_original_intent()
-        self.prepare_cleanup(production_resources="shared")
+        self.prepare_cleanup()
         for state in (None, "unavailable", "open"):
             with self.subTest(state=state):
                 result = self.cleanup(pr_state=state)
@@ -883,13 +877,30 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
 
         first = self.cleanup(execute_apply=fail)
         self.assertTrue(first.error)
-        self.prepare_cleanup(usage="unknown")
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        for instance in ("prod", "pr-42"):
+            self.store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=self.profile.preview.context,
+                    instance=instance,
+                    target_id="shared-target",
+                    updated_at=self.profile.updated_at,
+                )
+            )
         held = self.cleanup(previous_plan=first.plan, execute_apply=fail)
         self.assertTrue(held.plan["held"])
         self.assertEqual(
             held.plan["destroy_failed_attempts"], first.plan["destroy_failed_attempts"]
         )
-        self.prepare_cleanup()
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context=self.profile.preview.context,
+                instance="pr-42",
+                target_id="owned-preview-target",
+                updated_at=self.profile.updated_at,
+            )
+        )
         resumed = self.cleanup(previous_plan=held.plan, execute_apply=fail)
         self.assertEqual(
             resumed.plan["destroy_failed_attempts"],
@@ -901,7 +912,7 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         from tests.test_product_reconcile import FakePreviewProvider
 
         self.remove_original_intent()
-        self.prepare_cleanup()
+        self.prepare_cleanup(usage="unknown")
         first = self.cleanup(
             execute_apply=Mock(side_effect=ProviderMutationUnknownError("lost response"))
         )
@@ -1043,6 +1054,65 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.store.list_preview_records(), ())
 
+    def test_sweep_revisits_completed_failed_creations_without_preview_records(self) -> None:
+        from control_plane.product_reconcile import request_product_reconcile_sweep
+        from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+
+        self.reservation = self.replace_record(
+            state="completed",
+            response_status_code=502,
+            response_trace_id="failed-creation",
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+            response_payload={"result": {"status": "fail"}},
+        )
+        transport = Mock()
+        transport.get_json.return_value = []
+        with (
+            patch("control_plane.product_reconcile._has_repository_identity", return_value=True),
+            patch.object(self.store, "list_odoo_preview_cleanup_originals") as history,
+        ):
+            request_product_reconcile_sweep(
+                self.store, datetime.now(timezone.utc).isoformat(), lambda *_: transport
+            )
+            history.assert_not_called()
+        self.store.write_preview_inventory_scan_record(
+            PreviewInventoryScanRecord(
+                scan_id="observed-preview",
+                context=self.profile.preview.context,
+                product=self.profile.product,
+                repository=self.profile.repository,
+                source="provider",
+                scanned_at=datetime.now(timezone.utc).isoformat(),
+                status="pass",
+                preview_count=1,
+                preview_slugs=(self.issued.preview_slug,),
+            )
+        )
+        with patch("control_plane.product_reconcile._has_repository_identity", return_value=True):
+            request_product_reconcile_sweep(
+                self.store, datetime.now(timezone.utc).isoformat(), lambda *_: transport
+            )
+        requests = self.store.list_product_reconcile_requests(product=self.profile.product)
+        self.assertTrue(any(item.pull_request_number == 42 for item in requests))
+        self.assertEqual(
+            self.store.list_odoo_preview_cleanup_originals(product=self.profile.product, number=42),
+            (self.reservation,),
+        )
+        self.assertEqual(
+            self.store.list_odoo_preview_cleanup_originals(product="other", number=42), ()
+        )
+        self.assertEqual(
+            self.store.list_odoo_preview_cleanup_originals(product=self.profile.product, number=43),
+            (),
+        )
+        result = self.cleanup_unrecorded()
+        self.assertFalse(result.error, result.plan)
+        with patch("control_plane.product_reconcile._has_repository_identity", return_value=True):
+            targets = request_product_reconcile_sweep(
+                self.store, datetime.now(timezone.utc).isoformat(), lambda *_: transport
+            )
+        self.assertNotIn(f"{self.profile.product}:preview:42", targets)
+
     def test_disappeared_compose_can_use_only_retained_schedule_binding(self) -> None:
         from control_plane.dokploy.post_deploy import ComposeDataWorkflowBinding
         from control_plane.workflows.odoo_preview_runtime import odoo_preview_target_is_quiescent
@@ -1096,6 +1166,8 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         )
         cases: tuple[object, ...] = (
             {},
+            {"items": []},
+            {"items": [], "total": 40},
             [None],
             [{"name": "data", "appName": binding.app_name}],
             [{"name": "data", "appName": binding.app_name, "deployments": [{"status": "running"}]}],
@@ -1177,6 +1249,103 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 )
                 schedules.assert_not_called()
 
+    def test_unowned_snapshot_refresh_preserves_original_before_reservation(self) -> None:
+        from control_plane.odoo_preview_apply_http import issue_odoo_preview_apply_plan
+
+        request = self.request.model_copy(deep=True)
+        self.profile.preview.clean_testing_snapshot = True
+        request.apply.dry_run_plan.compose_ref = "retained-compose"
+        issued = issue_odoo_preview_apply_plan(
+            result=_issued_plan(request), plan_id="new-existing-preview-plan"
+        )
+        assert issued.plan_provenance is not None
+        execute = Mock(return_value={"status": "fail", "provider_effect_attempted": True})
+        quiescence = Mock(return_value=False)
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=request,
+            issued_plan=issued,
+            reservation_scope=self.reservation.scope,
+            idempotency_key=issued.plan_provenance.plan_id,
+            request_fingerprint="new-existing-preview",
+            trace_id="new-existing-preview",
+            execute_apply=execute,
+            supersession_is_quiescent=quiescence,
+        )
+        original = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                return_value="retained-compose",
+            ),
+        ):
+            result = operation.run(self.store)
+        self.assertEqual(result.status, "target_busy")
+        self.assertTrue(quiescence.call_args.kwargs["require_snapshot_custody"])
+        execute.assert_not_called()
+        current = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+        assert current is not None and original is not None
+        self.assertEqual(current.state, "reconcile_required")
+        self.assertEqual(
+            current.model_dump(exclude={"state", "updated_at"}),
+            original.model_dump(exclude={"state", "updated_at"}),
+        )
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=operation.reservation_scope,
+                route_path=operation.route_path,
+                idempotency_key=operation.idempotency_key,
+            )
+        )
+
+    def test_unqualified_preservation_reference_preserves_original_before_reservation(self) -> None:
+        from control_plane.odoo_preview_apply_http import issue_odoo_preview_apply_plan
+
+        request = self.request.model_copy(deep=True)
+        request.apply.dry_run_plan.compose_ref = "retained-compose"
+        request.apply.dry_run_plan.operation = "destroy"
+        request.preserve_original_reservation_id = self.reservation.record_id
+        issued = issue_odoo_preview_apply_plan(
+            result=_issued_plan(request), plan_id="new-existing-preview-plan"
+        )
+        assert issued.plan_provenance is not None
+        execute = Mock(return_value={"status": "fail", "provider_effect_attempted": True})
+        operation = prepare_odoo_preview_apply_operation(
+            control_plane_root=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            apply_request=request,
+            issued_plan=issued,
+            reservation_scope=self.reservation.scope,
+            idempotency_key=issued.plan_provenance.plan_id,
+            request_fingerprint="new-existing-preview",
+            trace_id="new-existing-preview",
+            execute_apply=execute,
+            supersession_is_quiescent=Mock(return_value=True),
+        )
+        original = self.store.read_idempotency_record_by_id(self.reservation.record_id)
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.resolve_original_preview_compose_id",
+                return_value="retained-compose",
+            ),
+            self.assertRaises(OdooPreviewPlanProvenanceError),
+        ):
+            operation.run(self.store)
+        execute.assert_not_called()
+        self.assertEqual(
+            self.store.read_idempotency_record_by_id(self.reservation.record_id), original
+        )
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=operation.reservation_scope,
+                route_path=operation.route_path,
+                idempotency_key=operation.idempotency_key,
+            )
+        )
+
     def test_guarded_supersession_retains_both_intents_and_refuses_stale_or_active_proof(
         self,
     ) -> None:
@@ -1254,14 +1423,14 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             operation.idempotency_key,
         )
 
-    def test_scheduled_monitor_alerts_for_legacy_preview_without_original_intent(self) -> None:
+    def test_scheduled_monitor_records_legacy_preview_warning_without_discord(self) -> None:
         self.remove_original_intent()
-        self.assert_scheduled_preview_alert(recover=False)
+        self.assert_scheduled_preview_warning(recover=False)
 
     def test_scheduled_monitor_resolves_preview_incident_after_supported_settlement(self) -> None:
-        self.assert_scheduled_preview_alert(recover=True)
+        self.assert_scheduled_preview_warning(recover=True)
 
-    def assert_scheduled_preview_alert(self, *, recover: bool) -> None:
+    def assert_scheduled_preview_warning(self, *, recover: bool) -> None:
         from control_plane.contracts.public_ingress_monitoring import (
             PublicIngressNotificationDestination,
             PublicIngressNotificationPolicyRecord,
@@ -1310,21 +1479,9 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         queued = self.store.list_outbox_delivery_records(
             states=("pending",), kind="public_ingress_notification"
         )
-        self.assertTrue(queued)
-        delivery = deliver_public_ingress_notification_outbox_delivery(
-            record=queued[0],
-            drivers=drivers,
-            record_store=self.store,
-            mark_provider_started=lambda _key, _provider: None,
-        )
-        self.assertEqual(delivery.state, "delivered")
-        self.assertTrue(posts)
-        for private in (
-            self.reservation.scope,
-            self.reservation.idempotency_key,
-            self.reservation.reconciliation_key,
-        ):
-            self.assertNotIn(private, json.dumps(posts))
+        self.assertEqual(incidents[0].severity, "warning")
+        self.assertFalse(queued)
+        self.assertFalse(posts)
         if not recover:
             self.assertEqual(
                 held_preview_reservations(self.store, product=self.profile.product),
@@ -1341,6 +1498,19 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
             self.assertTrue(scheduler.run_once())
         self.assertFalse(self.store.list_public_ingress_incident_records(status="open"))
         self.assertTrue(self.store.list_public_ingress_incident_records(status="resolved"))
+        self.assertFalse(posts)
+        for record in self.store.list_outbox_delivery_records(kind="public_ingress_notification"):
+            delivery = deliver_public_ingress_notification_outbox_delivery(
+                record=record,
+                drivers=drivers,
+                record_store=self.store,
+                mark_provider_started=lambda _record, _key, _provider: self.fail(
+                    "Warning resolution attempted delivery"
+                ),
+            )
+            self.assertEqual(delivery.state, "delivered")
+            self.assertFalse(delivery.provider_operation_key)
+        self.assertFalse(posts)
 
     @patch.dict(
         "os.environ",
@@ -1370,7 +1540,6 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                     error_response_model=BaseModel,
                 ),
                 read_product_profile_list_identity=lambda: None,
-                work_graph_planning_facts_provider=None,
                 workflow_credentials_ready=lambda *_: False,
                 control_plane_root=self.root,
                 github_token=lambda **_: "",

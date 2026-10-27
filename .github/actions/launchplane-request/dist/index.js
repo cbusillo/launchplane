@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const os = require("node:os");
+const selfDeployPreEffectErrors = new Set(require("./self-deploy-pre-effect-errors.json"));
 
 function inputNameToEnvKey(name) {
   return `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
@@ -608,7 +609,7 @@ async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options)
     const isDraining = response.ok && responseBody?.result?.deploy_state === "draining";
     // The server replays dispatched results; a fenced draining state proves
     // this same request has not dispatched, even after an earlier lost reply.
-    if (isDraining) mayHaveDispatched = false;
+    if (isDraining || selfDeployPreEffectErrors.has(responseBody?.error?.code)) mayHaveDispatched = false;
     requestOutcomeRecorded = true;
     let responseFileBody = responseBody;
     if (preserveDispatchProof && mayHaveDispatched && !response.ok) {

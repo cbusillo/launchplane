@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.record_fields import SHA256_PATTERN
 
 RepositoryInventoryState = Literal["tracked", "retired"]
 
 REPOSITORY_INVENTORY_READ_ACTION = "repository_inventory.read"
 REPOSITORY_INVENTORY_WRITE_ACTION = "repository_inventory.write"
-
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class RepositoryInventoryRecord(BaseModel):
@@ -132,6 +130,6 @@ def normalize_utc_timestamp(value: str, label: str) -> str:
 
 def normalize_sha256(value: str, label: str) -> str:
     normalized = required_token(value, label).lower()
-    if _SHA256_PATTERN.fullmatch(normalized) is None:
+    if SHA256_PATTERN.fullmatch(normalized) is None:
         raise ValueError(f"repository inventory {label} must be a lowercase SHA-256")
     return normalized

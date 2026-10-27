@@ -1,40 +1,61 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from collections.abc import Callable, Iterator
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
-from typing import Any, Literal, Protocol, cast, runtime_checkable
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
 import hashlib
 import json
+import logging
 import os
 import smtplib
 import socket
 import ssl
 import time
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from control_plane.contracts.secret_record import SecretRecord
+from control_plane.provider_target_holds import (
+    DEPLOY_FENCE_RECONCILE_GRACE as DEPLOY_FENCE_RECONCILE_GRACE,
+)
+from control_plane.provider_target_holds import (
+    ProviderHoldLaneSnapshot,
+    ProviderOperationAttentionReference,
+    TestingReplacementReference,
+    canonical_provider_operation_reference,
+)
+from control_plane.provider_target_holds import (
+    provider_hold_is_stuck as _deploy_fence_is_stuck,
+)
+
+if TYPE_CHECKING:
+    from control_plane.storage.postgres import OutboxWithIdempotencyRequest
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
-    parse_launchplane_mutation_timestamp,
 )
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
-from control_plane.testing_replacement_recovery import service_testing_operation
-from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.outbox_delivery import (
+    PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY,
+    RETIRED_DISCORD_SUMMARY_AGGREGATE_TYPE,
     OutboxDeliveryRecord,
     build_outbox_dedupe_key,
     build_outbox_delivery_id,
     retry_outbox_delivery,
+)
+from control_plane.contracts.private_health_endpoint_record import (
+    PrivateHealthEndpointRecord,
+    private_health_endpoint_record_sha256,
 )
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -48,19 +69,19 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_probe_effective,
     product_profile_record_sha256,
 )
-from control_plane.contracts.private_health_endpoint_record import (
-    PrivateHealthEndpointRecord,
-    private_health_endpoint_record_sha256,
+from control_plane.contracts.product_topology_read_model import product_lane_public_domains
+from control_plane.contracts.public_dns import (
+    PublicDnsExpectedTarget,
+    PublicDnsObservation,
+    public_dns_addresses,
 )
 from control_plane.contracts.public_ingress_monitoring import (
     HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS,
-    PRODUCTION_REQUEST_REFUSED,
-    RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     MONITOR_CADENCE_CHECK_PREFIX,
-    monitored_check_identity,
+    PRODUCTION_REQUEST_REFUSED,
     PUBLIC_TLS_EXPIRING_DAYS,
     PUBLIC_TLS_STALE_AFTER_SECONDS,
-    PublicIngressRouteBindingSourceKind,
+    RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     PublicIngressCheckKind,
     PublicIngressFailureCode,
     PublicIngressIncidentEvent,
@@ -77,11 +98,12 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
     PublicIngressObservationRecord,
     PublicIngressObservationStatus,
+    PublicIngressRouteBindingSourceKind,
     PublicIngressTargetKind,
+    PublicIngressTargetObservation,
     PublicIngressTlsObservation,
     PublicIngressTlsProbeEvidence,
     PublicIngressTlsRecordedEvidence,
-    PublicIngressTargetObservation,
     build_public_ingress_incident_event_id,
     build_public_ingress_incident_id,
     build_public_ingress_material_fingerprint,
@@ -90,56 +112,65 @@ from control_plane.contracts.public_ingress_monitoring import (
     build_public_ingress_reconciliation_observation_id,
     build_public_ingress_reminder_state_id,
     build_public_ingress_tls_check_name,
-    public_ingress_material_fingerprint_sha256,
+    monitored_check_identity,
     public_ingress_failure_layer,
     public_ingress_incident_record_sha256,
     public_ingress_incident_severity,
+    public_ingress_material_fingerprint_sha256,
 )
-from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
-from control_plane.contracts.route_binding_record import RouteBindingDomain
-from control_plane.contracts.route_binding_record import RouteBindingTerminationKind
-from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
-from control_plane.contracts.route_binding_record import route_binding_record_sha256
-from control_plane.contracts.runtime_identity import (
-    RuntimeIdentity,
-    RuntimeIdentityStatus,
-    health_payload_runtime_identity_status,
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+    RouteBindingTerminationKind,
+    RouteBindingTlsOwner,
+    route_binding_record_sha256,
 )
 from control_plane.contracts.runtime_dependency_health import (
     RuntimeDependencyExpectations,
     RuntimeDependencyHealthPolicy,
     runtime_dependency_health_evidence,
 )
-from control_plane.runtime_dependency_health import derive_runtime_dependencies
+from control_plane.contracts.runtime_identity import (
+    RuntimeIdentity,
+    RuntimeIdentityStatus,
+    health_payload_runtime_identity_status,
+)
+from control_plane.contracts.sync_cycle_health import sync_cycle_health_evidence_from_payload
 from control_plane.drivers.registry import read_driver_descriptor
-from control_plane.lane_runtime_verification import lane_expected_runtime_identity
+from control_plane.lane_runtime_verification import (
+    lane_expected_runtime_identity,
+    monitor_health_url,
+)
 from control_plane.notifications import (
+    DISCORD_CRITICAL_ALERT_COLOR,
+    DiscordNotificationError,
+    DiscordNotificationNotSentError,
+    DiscordNotificationSuperseded,
     post_discord_webhook,
     public_discord_url_error,
     public_url_error,
 )
-from control_plane.outbound_http import PublicHttpDestinationError
-from control_plane.outbound_http import PublicTlsProbeResult
-from control_plane.outbound_http import resolve_public_http_destination
-from control_plane.contracts.public_dns import (
-    PublicDnsExpectedTarget,
-    PublicDnsObservation,
-    public_dns_addresses,
+from control_plane.outbound_http import (
+    PublicHttpDestinationError,
+    PublicHttpResponse,
+    PublicTlsProbeResult,
+    custody_redirects_match,
+    probe_public_tls,
+    request_private_http,
+    request_public_http,
+    resolve_public_http_destination,
 )
-from control_plane.outbound_http import probe_public_tls
-from control_plane.contracts.product_topology_read_model import product_lane_public_domains
-from control_plane.outbound_http import request_private_http
-from control_plane.outbound_http import PublicHttpResponse
-from control_plane.workflows.generic_web_deploy_provider import (
-    decode_generic_web_provider_reconciliation_target,
+from control_plane.runtime_dependency_health import derive_runtime_dependencies
+from control_plane.split_ingress import (
+    read_split_ingress_binding,
+    split_ingress_check_name,
+    split_ingress_custody_hosts,
+    split_ingress_monitoring_lane,
+    split_ingress_check_base_url,
+    split_ingress_monitoring_policy,
 )
-from control_plane.outbound_http import request_public_http
-from control_plane.workflows.odoo_verification import (
-    default_odoo_health_url,
-    is_legacy_derived_odoo_health_url,
-)
+from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.workflows.ship import utc_now_timestamp
-
 
 MAX_REDIRECTS = 10
 USER_AGENT = "Launchplane public-ingress-monitor/1.0"
@@ -147,8 +178,6 @@ PUBLIC_INGRESS_GITHUB_TOKEN_ENV_KEY = "LAUNCHPLANE_PUBLIC_INGRESS_GITHUB_TOKEN"
 MISSING_AUTHORITY_SHA256 = "missing"
 DEPLOY_FENCE_PROVIDER = "launchplane"
 DEPLOY_FENCE_CHECK_NAME = "launchplane-deploy-fence"
-# Long enough for a same-key retry or a recovery already underway to settle.
-DEPLOY_FENCE_RECONCILE_GRACE = timedelta(minutes=15)
 # A deploy records its new runtime identity when its own rollout check passes,
 # and the public route can still answer from the previous container for a few
 # seconds. A mismatch is probed once more after this delay before it counts.
@@ -280,6 +309,8 @@ class PublicIngressMonitorTarget:
     private_endpoint_material_sha256: str = ""
     private_tls_ca_pem: str = ""
     route_binding_sha256: str = ""
+    allowed_https_hosts: tuple[str, ...] = ()
+    external_custody_sha256: str = ""
     recovery_observation_threshold: int = 1
     resolution_failure_code: PublicIngressFailureCode | None = None
     resolution_failure_summary: str = ""
@@ -301,6 +332,7 @@ class PublicIngressMonitorTarget:
     tls_stale_after: str = ""
     tls_provider_evidence: dict[str, str] | None = None
     deploy_fence: LaunchplaneIdempotencyRecord | None = None
+    provider_hold_snapshot: ProviderHoldLaneSnapshot | None = None
     preview_fence: bool = False
     testing_replacement: OdooStableTargetReplacementOperationRecord | None = None
 
@@ -311,6 +343,7 @@ class HttpObservation:
     final_url: str
     redirect_count: int
     payload: object = None
+    visited_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -320,6 +353,7 @@ class PublicIngressNotificationDelivery:
     external_url: str = ""
     external_id: str = ""
     error_message: str = ""
+    outcome_unknown: bool = False
 
 
 class PublicIngressNotificationDrivers(Protocol):
@@ -332,6 +366,10 @@ class PublicIngressNotificationDrivers(Protocol):
         observation: PublicIngressObservationRecord,
         previous_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = (),
     ) -> PublicIngressNotificationDelivery: ...
+
+
+INCIDENT_RESOLVED_SUPERSESSION_ACTION = "superseded_incident_resolved"
+INCIDENT_BACKLOG_SUPERSESSION_ACTION = "superseded_incident_backlog"
 
 
 class PublicIngressMonitorResult(BaseModel):
@@ -352,6 +390,10 @@ class PublicIngressMonitorResult(BaseModel):
     incident_events: tuple[PublicIngressIncidentEventRecord, ...] = ()
     reminder_states: tuple[PublicIngressIncidentReminderStateRecord, ...] = ()
     delivery_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = ()
+
+
+class PublicIngressIncidentChanged(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -391,7 +433,16 @@ def discover_public_ingress_monitor_targets(
         for profile in (profiles or record_store.list_product_profile_records())
         if profile.is_active
     )
-    held_deploy_fences = _held_generic_web_deploy_fences(record_store)
+    open_fence_incidents = record_store.list_public_ingress_incident_records(
+        check_name=DEPLOY_FENCE_CHECK_NAME,
+        check_kind="provider",
+        status="open",
+    )
+    held_deploy_fences = _held_generic_web_deploy_fences(
+        record_store,
+        profiles=product_profiles,
+        incidents=open_fence_incidents,
+    )
     read_replacements = getattr(
         record_store, "list_odoo_stable_target_replacement_operation_records", None
     )
@@ -399,7 +450,7 @@ def discover_public_ingress_monitor_targets(
         (operation.product, operation.context, operation.instance): operation
         for operation in (
             read_replacements(instance_name="testing", statuses=("reconciliation_required",))
-            if callable(read_replacements)
+            if callable(read_replacements) and held_deploy_fences is None
             else ()
         )
         if service_testing_operation(operation)
@@ -411,6 +462,9 @@ def discover_public_ingress_monitor_targets(
     )
     for profile in product_profiles:
         for lane in profile.lanes:
+            lane = split_ingress_monitoring_lane(
+                profile, lane, read_split_ingress_binding(record_store, profile, lane)
+            )
             for check in lane.health_monitoring.checks:
                 target = effective_health_check_monitor_target(
                     profile=profile,
@@ -427,13 +481,22 @@ def discover_public_ingress_monitor_targets(
                 lane=lane,
             ):
                 targets.append(tls_target)
-            if not _profile_uses_generic_web(profile):
-                continue
             # Only lanes with a fence, or an open fence incident to resolve, get a probe.
-            fence = (held_deploy_fences or {}).get((lane.context, lane.instance))
+            snapshot = (held_deploy_fences or {}).get(
+                (profile.product, lane.context, lane.instance)
+            )
+            fence = None
             replacement = held_replacements.get((profile.product, lane.context, lane.instance))
             if (
-                fence is not None
+                (
+                    snapshot is not None
+                    and bool(
+                        snapshot.holds
+                        or snapshot.references
+                        or snapshot.unavailable_references
+                        or snapshot.unsettled_replacements
+                    )
+                )
                 or replacement is not None
                 or ((profile.product, lane.context, lane.instance) in open_deploy_fence_lanes)
             ):
@@ -441,6 +504,7 @@ def discover_public_ingress_monitor_targets(
                     replace(
                         _deploy_fence_monitor_target(profile=profile, lane=lane, fence=fence),
                         testing_replacement=replacement,
+                        provider_hold_snapshot=snapshot,
                     )
                 )
     targets.extend(discover_preview_fence_monitor_targets(record_store, profiles=product_profiles))
@@ -506,32 +570,55 @@ def _open_deploy_fence_incident_lanes(
     }
 
 
-@runtime_checkable
-class _HeldReservationReader(Protocol):
-    def list_held_provider_target_reservations(
-        self,
-    ) -> tuple[LaunchplaneIdempotencyRecord, ...]: ...
-
-
 def _held_generic_web_deploy_fences(
     record_store: object,
-) -> dict[tuple[str, str], LaunchplaneIdempotencyRecord] | None:
-    if not isinstance(record_store, _HeldReservationReader):
+    *,
+    profiles: tuple[LaunchplaneProductProfileRecord, ...],
+    incidents: tuple[PublicIngressIncidentRecord, ...],
+) -> dict[tuple[str, str, str], ProviderHoldLaneSnapshot] | None:
+    read = getattr(record_store, "read_provider_hold_snapshots", None)
+    if not callable(read):
         return None
-    fences: dict[tuple[str, str], LaunchplaneIdempotencyRecord] = {}
-    for reservation in record_store.list_held_provider_target_reservations():
-        from control_plane.testing_activation import retained_fence_is_separated
-
-        if retained_fence_is_separated(record_store, reservation):
+    references = {}
+    for incident in incidents:
+        if incident.instance.startswith("preview-mutation-reservation-"):
             continue
-        try:
-            target = decode_generic_web_provider_reconciliation_target(
-                reservation.reconciliation_key
+        fingerprint = incident.material_fingerprint
+        refs = tuple(
+            ProviderOperationAttentionReference(attention.record_id).encode()
+            if (attention := ProviderOperationAttentionReference.parse(value)) is not None
+            else canonical_provider_operation_reference(value)
+            for value in (fingerprint.route_authority.target_keys if fingerprint else ())
+            if value.startswith("provider-operation:")
+        )
+        refs = tuple(sorted(set(refs)))
+        references[(incident.product, incident.context, incident.instance)] = refs or (
+            "provider-operation:unavailable",
+        )
+    lane_keys = tuple(
+        (profile.product, lane.context, lane.instance)
+        for profile in profiles
+        for lane in profile.lanes
+    )
+    try:
+        return cast(
+            dict[tuple[str, str, str], ProviderHoldLaneSnapshot],
+            read(lane_keys=lane_keys, references_by_lane=references),
+        )
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "Provider operation evidence is unavailable; provider observations will not be accepted. "
+            "Other health checks continue."
+        )
+        return {
+            lane: ProviderHoldLaneSnapshot(
+                *lane,
+                holds=(),
+                references=references.get(lane, ()),
+                unavailable_references=("provider-operation:unavailable",),
             )
-        except ValueError:
-            continue
-        fences[(target.context, target.instance)] = reservation
-    return fences
+            for lane in lane_keys
+        }
 
 
 def _deploy_fence_monitor_target(
@@ -600,11 +687,28 @@ def _health_check_monitor_target(
     private_endpoint_sha256 = ""
     private_endpoint_material_sha256 = ""
     private_tls_ca_pem = ""
+    binding = None
+    domain_check = False
     if check.kind == "public_http":
-        base_url = lane.base_url.strip().rstrip("/")
-        health_url = check.url.strip() or _monitor_health_url(
+        binding = read_split_ingress_binding(record_store, profile, lane)
+        domain_check = binding is not None and any(
+            check.name == split_ingress_check_name(domain.domain_name) for domain in binding.domains
+        )
+        base_url = "" if domain_check else lane.base_url.strip().rstrip("/")
+        health_url = check.url.strip() or monitor_health_url(
             profile=profile, lane=lane, base_url=base_url
         )
+        if domain_check and binding is not None:
+            base_url = split_ingress_check_base_url(lane, health_url)
+            policy = split_ingress_monitoring_policy(
+                profile,
+                lane,
+                tuple(domain.domain_name for domain in binding.domains),
+                urlsplit(health_url).hostname or "",
+            )
+            if policy.conflict:
+                resolution_failure_code = "invalid_url"
+                resolution_failure_summary = policy.conflict
         if not (base_url or health_url):
             health_url = f"invalid-health-check://{canonical_health_check_record_token(check.name) or 'public-ingress'}"
             resolution_failure_code = "invalid_url"
@@ -640,6 +744,15 @@ def _health_check_monitor_target(
         health_url=health_url,
         check_name=check.name,
         check_kind=check.kind,
+        route_binding_sha256=route_binding_record_sha256(binding)
+        if domain_check and binding is not None
+        else "",
+        allowed_https_hosts=split_ingress_custody_hosts(binding, health_url)
+        if domain_check
+        else (),
+        external_custody_sha256=binding.external_custody_sha256(urlsplit(health_url).hostname or "")
+        if domain_check and binding is not None
+        else "",
         profile_sha256=product_profile_record_sha256(profile),
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         incident_eligible=product_lane_monitoring_incident_eligible(
@@ -897,6 +1010,7 @@ def run_public_ingress_monitor_once(
             expected_private_endpoint_key=target.private_endpoint_key,
             expected_private_endpoint_sha256=target.private_endpoint_sha256,
             expected_route_binding_sha256=target.route_binding_sha256,
+            expected_provider_hold_snapshot=target.provider_hold_snapshot,
             recovery_observation_threshold=target.recovery_observation_threshold,
             notify=notify,
             notification_drivers=notification_drivers,
@@ -1067,6 +1181,7 @@ def _store_monitor_observation(
     expected_private_endpoint_key: str = "",
     expected_private_endpoint_sha256: str = "",
     expected_route_binding_sha256: str = "",
+    expected_provider_hold_snapshot: ProviderHoldLaneSnapshot | None = None,
     recovery_observation_threshold: int,
     notify: bool,
     notification_drivers: PublicIngressNotificationDrivers | None,
@@ -1090,7 +1205,9 @@ def _store_monitor_observation(
             expected_incident_sha256
             and plan.expected_open_incident_sha256 != expected_incident_sha256
         ):
-            raise ValueError("Incident changed during reconciliation; read its evidence again.")
+            raise PublicIngressIncidentChanged(
+                "Incident changed during reconciliation; read its evidence again."
+            )
         outbox_deliveries = (
             _public_ingress_notification_outbox_deliveries(
                 record_store=record_store,
@@ -1098,7 +1215,7 @@ def _store_monitor_observation(
                 incident_events=plan.incident_events,
                 observation=plan.observation,
             )
-            if notify
+            if notify and callable(transition_writer)
             else ()
         )
         if not callable(transition_writer):
@@ -1123,8 +1240,42 @@ def _store_monitor_observation(
             expected_private_endpoint_key=expected_private_endpoint_key,
             expected_private_endpoint_sha256=expected_private_endpoint_sha256,
             expected_route_binding_sha256=expected_route_binding_sha256,
+            **(
+                {"expected_provider_hold_snapshot": expected_provider_hold_snapshot}
+                if expected_provider_hold_snapshot is not None
+                else {}
+            ),
         )
         write_status = getattr(write_result, "status", "written")
+        if write_status == "provider_source_changed":
+            summary = (
+                "Provider operation evidence is unavailable; observation was not accepted."
+                if expected_provider_hold_snapshot is not None
+                and not expected_provider_hold_snapshot.source_sha256
+                else "Provider operation evidence changed before publication; observation was not accepted."
+            )
+            unavailable = record.model_copy(
+                update={
+                    "status": "skipped",
+                    "failure_code": None,
+                    "targets": tuple(
+                        target.model_copy(
+                            update={
+                                "status": "skipped",
+                                "failure_code": None,
+                                "summary": summary,
+                            }
+                        )
+                        for target in record.targets
+                    ),
+                    "summary": summary,
+                    "incident_id": "",
+                    "incident_event_id": "",
+                    "material_fingerprint": None,
+                    "material_fingerprint_sha256": "",
+                }
+            )
+            return _StoredMonitorTransition(unavailable, (), (), (), (), authority_changed=True)
         if write_status == "incident_changed":
             continue
         if write_status == "authority_changed":
@@ -1147,15 +1298,7 @@ def _store_monitor_observation(
         if not incident_event.delivery_eligible:
             continue
         incident = incidents_by_id[incident_event.incident_id]
-        if notify and notification_drivers is not None:
-            direct_destination_kinds: (
-                tuple[PublicIngressNotificationDestinationKind, ...] | None
-            ) = None
-            if callable(transition_writer) and any(
-                _outbox_incident_event_id(delivery) == incident_event.event_id
-                for delivery in outbox_deliveries
-            ):
-                direct_destination_kinds = ()
+        if notify and notification_drivers is not None and not callable(transition_writer):
             delivery_attempts.extend(
                 deliver_public_ingress_incident_notifications(
                     record_store=record_store,
@@ -1163,7 +1306,6 @@ def _store_monitor_observation(
                     incident=incident,
                     observation=plan.observation,
                     drivers=notification_drivers,
-                    destination_kinds=direct_destination_kinds,
                 )
             )
     return _StoredMonitorTransition(
@@ -1209,59 +1351,79 @@ def _monitoring_reconciliation_observations(
 ) -> tuple[tuple[PublicIngressObservationRecord, str], ...]:
     reconciliations: list[tuple[PublicIngressObservationRecord, str]] = []
     for profile in profiles:
-        for lane in profile.lanes:
+        lanes = {(lane.context, lane.instance): lane for lane in profile.lanes}
+        for incident in record_store.list_public_ingress_incident_records(
+            product=profile.product, status="open"
+        ):
+            lane = lanes.get((incident.context, incident.instance))
+            if lane is None and incident.instance not in {"prod", "testing"}:
+                continue
             if (
                 lane_keys is not None
-                and (profile.product, lane.context, lane.instance) not in lane_keys
+                and (incident.product, incident.context, incident.instance) not in lane_keys
             ):
                 continue
-            open_incidents = record_store.list_public_ingress_incident_records(
-                product=profile.product,
-                context_name=lane.context,
-                instance_name=lane.instance,
-                status="open",
-            )
-            for incident in open_incidents:
-                # Delivery has its own recovery evidence; HTTP target retirement cannot resolve it.
-                if incident.check_name.startswith(("production-delivery-", "testing-delivery-")):
-                    continue
-                target_key = _incident_target_key(incident)
-                monitored = monitored_check_identity(incident.check_name)
-                if monitored is not None:
-                    kind, name = monitored
-                    target_key = (
-                        incident.product,
-                        incident.context,
-                        incident.instance,
-                        canonical_health_check_record_token(name),
-                        kind,
-                    )
-                if target_key in eligible_target_keys:
-                    continue
-                reconciliations.append(
-                    (
-                        _monitoring_reconciliation_observation(
-                            incident=incident,
-                            monitoring_intent=lane.health_monitoring.monitoring_intent,
-                            observed_at=observed_at,
-                        ),
-                        product_profile_record_sha256(profile),
-                    )
+            if incident.check_name.startswith(("production-delivery-", "testing-delivery-")) or (
+                incident.check_name == DEPLOY_FENCE_CHECK_NAME and incident.check_kind == "provider"
+            ):
+                continue
+            target_key = _incident_target_key(incident)
+            monitored = monitored_check_identity(incident.check_name)
+            if monitored is not None:
+                kind, name = monitored
+                target_key = (
+                    incident.product,
+                    incident.context,
+                    incident.instance,
+                    canonical_health_check_record_token(name),
+                    kind,
                 )
+            if target_key in eligible_target_keys:
+                continue
+            previous = (
+                record_store.list_public_ingress_observation_records(
+                    product=incident.product,
+                    context_name=incident.context,
+                    instance_name=incident.instance,
+                    check_name=incident.check_name,
+                    check_kind=incident.check_kind,
+                    limit=1,
+                )
+                if lane is None
+                else ()
+            )
+            if lane is None and not previous:
+                continue
+            reconciliations.append(
+                (
+                    _monitoring_reconciliation_observation(
+                        incident=incident,
+                        monitoring_intent=lane.health_monitoring.monitoring_intent
+                        if lane
+                        else previous[0].monitoring_intent,
+                        observed_at=observed_at,
+                        lane_removed=lane is None,
+                    ),
+                    product_profile_record_sha256(profile),
+                )
+            )
     return tuple(reconciliations)
 
 
 def _monitoring_reconciliation_observation(
     *,
     incident: PublicIngressIncidentRecord,
-    monitoring_intent: ProductLaneMonitoringIntent,
+    monitoring_intent: ProductLaneMonitoringIntent | Literal["legacy"],
     observed_at: str,
+    lane_removed: bool = False,
 ) -> PublicIngressObservationRecord:
     summary = (
         f"Monitoring configuration changed for {incident.product}/{incident.instance}; "
         f"{incident.check_kind} check {incident.check_name!r} is no longer incident-eligible "
         f"under {monitoring_intent} intent."
     )
+    if lane_removed:
+        summary = f"Lane removed from the current profile for {incident.product}/{incident.instance}; prior {incident.check_kind} check {incident.check_name!r} is no longer incident-eligible."
     return PublicIngressObservationRecord(
         record_id=build_public_ingress_reconciliation_observation_id(
             product=incident.product,
@@ -1341,13 +1503,20 @@ def deliver_public_ingress_incident_notifications(
                     incident_id=incident.incident_id,
                     destination_kind=destination.kind,
                 )
-                delivery = drivers.send(
-                    destination=destination,
-                    event=event,
-                    incident=incident,
-                    observation=observation,
-                    previous_attempts=previous_attempts,
-                )
+                if event == "resolved" and not failure_notification_delivered(
+                    previous_attempts, policy.policy_id, destination.destination_id
+                ):
+                    delivery = PublicIngressNotificationDelivery(
+                        delivery_status="skipped", action=INCIDENT_RESOLVED_SUPERSESSION_ACTION
+                    )
+                else:
+                    delivery = drivers.send(
+                        destination=destination,
+                        event=event,
+                        incident=incident,
+                        observation=observation,
+                        previous_attempts=previous_attempts,
+                    )
             attempt = PublicIngressNotificationAttemptRecord(
                 attempt_id=attempt_id,
                 incident_id=incident.incident_id,
@@ -1391,6 +1560,8 @@ def _public_ingress_notification_outbox_deliveries(
         for policy in policies:
             for destination in policy.destinations:
                 if destination.status != "enabled":
+                    continue
+                if destination.kind == "discord" and not _discord_incident_pages(incident, event):
                     continue
                 attempt_id = build_public_ingress_notification_attempt_id(
                     incident_id=incident.incident_id,
@@ -1465,37 +1636,6 @@ def _public_ingress_notification_outbox_deliveries(
                     )
                 )
     return tuple(deliveries)
-
-
-def _outbox_incident_event_id(delivery: OutboxDeliveryRecord) -> str:
-    attempt = delivery.payload.get("attempt")
-    if not isinstance(attempt, dict):
-        return ""
-    value = attempt.get("incident_event_id")
-    return value.strip() if isinstance(value, str) else ""
-
-
-def reconcile_public_ingress_incident(
-    *,
-    record_store: PublicIngressMonitorStore,
-    record: PublicIngressObservationRecord,
-    incident_eligible: bool = True,
-    write_records: bool = True,
-) -> tuple[PublicIngressIncidentRecord, ...]:
-    plan = _plan_public_ingress_incident_transition(
-        record_store=record_store,
-        record=record,
-        incident_eligible=incident_eligible,
-        recovery_observation_threshold=1,
-    )
-    if write_records:
-        for incident in plan.incidents:
-            record_store.write_public_ingress_incident_record(incident)
-        for incident_event in plan.incident_events:
-            record_store.write_public_ingress_incident_event_record(incident_event)
-        for reminder_state in plan.reminder_states:
-            record_store.write_public_ingress_incident_reminder_state_record(reminder_state)
-    return plan.incidents
 
 
 def _plan_public_ingress_incident_transition(
@@ -2200,6 +2340,8 @@ def _reconcile_duplicate_incident(
             previous_material_fingerprint_sha256=incident.material_fingerprint_sha256,
             severity=incident.severity,
             summary=summary,
+            delivery_eligible=False,
+            suppression_reason="migration_reconciliation",
         ),
     )
 
@@ -2400,16 +2542,6 @@ def _incident_reminder_states(
     return tuple(reader(incident_id=incident_id))
 
 
-def _incident_event(*, incident: PublicIngressIncidentRecord) -> PublicIngressIncidentEvent:
-    if incident.status == "resolved":
-        return "resolved"
-    if incident.latest_material_event in {"opened", "updated"}:
-        return cast(PublicIngressIncidentEvent, incident.latest_material_event)
-    if incident.opened_observation_id == incident.latest_observation_id:
-        return "opened"
-    return "updated"
-
-
 def _matching_notification_policies(
     *, record_store: PublicIngressMonitorStore, incident: PublicIngressIncidentRecord
 ) -> tuple[PublicIngressNotificationPolicyRecord, ...]:
@@ -2462,7 +2594,11 @@ def check_public_ingress_target(
             tls_get=tls_get,
             checked_at=checked_at,
         )
-        if target.check_kind == "public_http":
+        if (
+            target.check_kind == "public_http"
+            and target.resolution_failure_code is None
+            and (not target.allowed_https_hosts or http_get is fetch_public_ingress_url)
+        ):
             expectation = next(
                 (
                     item
@@ -2475,6 +2611,10 @@ def check_public_ingress_target(
                 url_observation = url_observation.model_copy(
                     update={"dns": _observe_dns(url=url, expectation=expectation, dns_get=dns_get)}
                 )
+        if target.check_kind == "public_http" and target.external_custody_sha256:
+            url_observation = url_observation.model_copy(
+                update={"external_custody_sha256": target.external_custody_sha256}
+            )
         target_observations.append(url_observation)
     status, failure_code = _record_status(target_observations)
     summary = _record_summary(target=target, status=status, observations=target_observations)
@@ -2514,6 +2654,39 @@ def check_public_ingress_target(
         provider=target.provider,
         provider_check=target.provider_check,
     )
+    snapshot = target.provider_hold_snapshot
+    if snapshot is not None:
+        references = tuple(
+            sorted(
+                {
+                    *(hold.reference for hold in snapshot.holds if hold.reference),
+                    *(
+                        ProviderOperationAttentionReference(
+                            hold.reservation.record_id, state
+                        ).encode()
+                        for hold in snapshot.holds
+                        if not hold.reference
+                        for state in ("held", "unverified")
+                    ),
+                    *(
+                        TestingReplacementReference.from_record(record).encode()
+                        for record in snapshot.unsettled_replacements
+                    ),
+                    *snapshot.unavailable_references,
+                }
+            )
+        )
+        if references:
+            authority = material_fingerprint.route_authority.model_copy(
+                update={
+                    "target_keys": tuple(
+                        sorted({*material_fingerprint.route_authority.target_keys, *references})
+                    ),
+                }
+            )
+            material_fingerprint = material_fingerprint.model_copy(
+                update={"route_authority": authority}
+            )
     return observation.model_copy(
         update={
             "material_fingerprint": material_fingerprint,
@@ -2524,12 +2697,15 @@ def check_public_ingress_target(
     )
 
 
-def fetch_public_ingress_url(url: str, timeout_seconds: int) -> HttpObservation:
+def fetch_public_ingress_url(
+    url: str, timeout_seconds: int, *, allowed_https_hosts: tuple[str, ...] = ()
+) -> HttpObservation:
     response = request_public_http(
         url,
         headers={"User-Agent": USER_AGENT},
         timeout_seconds=timeout_seconds,
         max_redirects=MAX_REDIRECTS,
+        allowed_https_hosts=allowed_https_hosts,
     )
     payload: object = None
     if response.body and "json" in response.header("content-type").lower():
@@ -2541,6 +2717,7 @@ def fetch_public_ingress_url(url: str, timeout_seconds: int) -> HttpObservation:
         status_code=response.status_code,
         final_url=response.final_url,
         redirect_count=response.redirect_count,
+        visited_urls=response.visited_urls,
         payload=payload,
     )
 
@@ -2667,7 +2844,20 @@ def _check_url(
             summary=_failure_summary(public_url_error),
         )
     try:
-        observation = http_get(url, timeout_seconds)
+        if target.allowed_https_hosts and http_get is not fetch_public_ingress_url:
+            return _failed_target(
+                target_kind=target_kind,
+                url=url,
+                code="invalid_url",
+                summary="Custody checks require the default HTTPS transport; no request was sent.",
+            )
+        observation = (
+            fetch_public_ingress_url(
+                url, timeout_seconds, allowed_https_hosts=target.allowed_https_hosts
+            )
+            if target.allowed_https_hosts
+            else http_get(url, timeout_seconds)
+        )
     except HTTPError as error:
         return PublicIngressTargetObservation(
             target=target_kind,
@@ -2716,6 +2906,19 @@ def _check_url(
     is_health_response = target_kind in {"health_url", "private_health_url"} or (
         target_kind == "base_url" and url == target.health_url
     )
+    if target.allowed_https_hosts and not custody_redirects_match(
+        url=url,
+        final_url=observation.final_url,
+        redirect_count=observation.redirect_count,
+        visited_urls=observation.visited_urls,
+        hosts=target.allowed_https_hosts,
+    ):
+        return _failed_target(
+            target_kind=target_kind,
+            url=url,
+            code="invalid_url",
+            summary="Health redirects do not prove the recorded HTTPS custody.",
+        )
     dependency_health = (
         runtime_dependency_health_evidence(
             payload=observation.payload,
@@ -2724,6 +2927,9 @@ def _check_url(
         )
         if is_health_response and target.dependency_expectations is not None
         else None
+    )
+    sync = (
+        sync_cycle_health_evidence_from_payload(observation.payload) if is_health_response else None
     )
     if not 200 <= observation.status_code < 300:
         return PublicIngressTargetObservation(
@@ -2738,8 +2944,10 @@ def _check_url(
             http_status=observation.status_code,
             final_url=observation.final_url,
             redirect_count=observation.redirect_count,
+            visited_urls=observation.visited_urls,
             summary=f"HTTP {observation.status_code}",
             dependency_health=dependency_health,
+            sync=sync,
         )
     runtime_status: RuntimeIdentityStatus = "unchecked"
     runtime_detail = ""
@@ -2757,12 +2965,14 @@ def _check_url(
             http_status=observation.status_code,
             final_url=observation.final_url,
             redirect_count=observation.redirect_count,
+            visited_urls=observation.visited_urls,
             runtime_identity_status="unverifiable",
             runtime_identity_detail=(
                 "No expected runtime identity is recorded for this strict public health check."
             ),
             summary="Expected runtime identity is unavailable.",
             dependency_health=dependency_health,
+            sync=sync,
         )
     if (
         target_kind in {"health_url", "private_health_url"}
@@ -2787,11 +2997,13 @@ def _check_url(
                 http_status=observation.status_code,
                 final_url=observation.final_url,
                 redirect_count=observation.redirect_count,
+                visited_urls=observation.visited_urls,
                 runtime_identity_status=runtime_status,
                 runtime_identity_detail=runtime_detail,
                 observed_runtime_identity=observed_runtime_identity,
                 summary=runtime_detail or "Runtime identity did not match expected deployment.",
                 dependency_health=dependency_health,
+                sync=sync,
             )
     dependency_failure: PublicIngressFailureCode | None = None
     summary = _successful_target_summary(target)
@@ -2811,11 +3023,13 @@ def _check_url(
         http_status=observation.status_code,
         final_url=observation.final_url,
         redirect_count=observation.redirect_count,
+        visited_urls=observation.visited_urls,
         runtime_identity_status=runtime_status,
         runtime_identity_detail=runtime_detail,
         observed_runtime_identity=observed_runtime_identity,
         summary=summary,
         dependency_health=dependency_health,
+        sync=sync,
     )
 
 
@@ -2917,6 +3131,55 @@ def _check_deploy_fence(
                 "unknown provider outcomes require further reconciliation; no effects are replayed."
             ),
         )
+    snapshot = target.provider_hold_snapshot
+    if snapshot is not None:
+        stuck = tuple(
+            hold
+            for hold in snapshot.holds
+            if _deploy_fence_is_stuck(
+                hold.reservation,
+                checked_at=checked_at,
+            )
+        )
+        unavailable = bool(snapshot.unavailable_references) or any(
+            hold.origin is None for hold in snapshot.holds
+        )
+        replacements = snapshot.unsettled_replacements
+        if stuck or unavailable or replacements:
+            selected = stuck[0].reservation if stuck else None
+            detail = (
+                f" Operation {selected.record_id} remains {selected.state}, last phase "
+                f"{selected.provider_effect_phase or 'not recorded'}, since {selected.created_at}."
+                if selected
+                else ""
+            )
+            if replacements:
+                detail += (
+                    f" Testing replacement {replacements[0].operation_id} remains fenced; "
+                    "its exact typed operation has not reached a terminal state."
+                )
+            return PublicIngressTargetObservation(
+                target="provider",
+                url=url,
+                status="fail",
+                failure_code="deploy_fence_held",
+                summary=(
+                    f"{len(snapshot.holds)} shared provider operations remain held for this lane; "
+                    f"{len(stuck)} require reconciliation."
+                    + detail
+                    + (
+                        " Original operation or incarnation evidence is unavailable; settlement is unverified."
+                        if unavailable
+                        else ""
+                    )
+                ),
+            )
+        return PublicIngressTargetObservation(
+            target="provider",
+            url=url,
+            status="pass",
+            summary="No stuck shared provider operation is holding this lane. Completed operations do not prove verification succeeded.",
+        )
     fence = target.deploy_fence
     if fence is None or not _deploy_fence_is_stuck(fence, checked_at=checked_at):
         return PublicIngressTargetObservation(
@@ -2944,37 +3207,12 @@ def _check_deploy_fence(
         status="fail",
         failure_code="deploy_fence_held",
         summary=(
-            f"Deploy {fence.idempotency_key!r} started at {fence.created_at or 'an unknown time'} "
+            f"Operation {fence.record_id} started at {fence.created_at or 'an unknown time'} "
             f"and holds this target ({fence.state}, last at {phase}, since "
             f"{fence.updated_at or 'an unknown time'}). Every later deploy is refused until "
             "it is recovered with the generic-web deploy recovery dry-run."
         ),
     )
-
-
-def _deploy_fence_is_stuck(fence: LaunchplaneIdempotencyRecord, *, checked_at: str) -> bool:
-    observed_at = parse_launchplane_mutation_timestamp(checked_at, field_name="checked_at")
-    if fence.state == "running":
-        # The heartbeat renews a live deploy's lease, so an expired lease means it died.
-        return bool(fence.lease_expires_at) and (
-            parse_launchplane_mutation_timestamp(
-                fence.lease_expires_at, field_name="lease_expires_at"
-            )
-            <= observed_at
-        )
-    if not fence.updated_at:
-        return True
-    held_since = parse_launchplane_mutation_timestamp(fence.updated_at, field_name="updated_at")
-    if fence.lease_expires_at:
-        # A later refused deploy re-marks an expired fence and moves updated_at;
-        # the lease expiry it kept is when the fence really stopped.
-        held_since = min(
-            held_since,
-            parse_launchplane_mutation_timestamp(
-                fence.lease_expires_at, field_name="lease_expires_at"
-            ),
-        )
-    return held_since + DEPLOY_FENCE_RECONCILE_GRACE <= observed_at
 
 
 def _profile_uses_generic_web(profile: LaunchplaneProductProfileRecord) -> bool:
@@ -3245,9 +3483,11 @@ def _tls_monitor_targets(
                 tls_domain_name=domain.domain_name,
                 tls_domain_role=domain.role,
                 tls_route_binding_status=route_binding.status,
-                tls_owner=route_binding.tls.owner,
-                tls_ingress_provider=route_binding.ingress.provider,
-                tls_termination_kind=route_binding.ingress.termination_kind,
+                tls_owner=route_binding.tls_for_domain(domain.domain_name).owner,
+                tls_ingress_provider=route_binding.ingress_for_domain(domain.domain_name).provider,
+                tls_termination_kind=route_binding.ingress_for_domain(
+                    domain.domain_name
+                ).termination_kind,
                 tls_source_kind=route_binding.source.source_kind,
                 tls_source_label=route_binding.source.source_label,
                 tls_source_record_ids=route_binding.source.source_record_ids,
@@ -3256,7 +3496,9 @@ def _tls_monitor_targets(
                 tls_recorded_at=route_binding.updated_at,
                 tls_freshness_status=route_binding.source.freshness_status,
                 tls_stale_after=route_binding.source.stale_after,
-                tls_provider_evidence=dict(route_binding.tls.provider_evidence),
+                tls_provider_evidence=dict(
+                    route_binding.tls_for_domain(domain.domain_name).provider_evidence
+                ),
                 route_binding_sha256=route_binding_record_sha256(route_binding),
             )
         )
@@ -3349,23 +3591,6 @@ def _health_url(base_url: str, health_path: str) -> str:
     return f"{base_url.rstrip('/')}{normalized_health_path}"
 
 
-def _monitor_health_url(
-    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, base_url: str
-) -> str:
-    lane_health_url = lane.health_url.strip()
-    if profile.driver_id == "odoo":
-        if lane_health_url and not is_legacy_derived_odoo_health_url(
-            health_url=lane_health_url,
-            base_url=base_url,
-            profile_health_path=profile.health_path,
-        ):
-            return lane_health_url
-        return default_odoo_health_url(base_url=base_url)
-    if lane_health_url:
-        return lane_health_url
-    return _health_url(base_url, profile.health_path).strip()
-
-
 def _normalized_url(url: str) -> str:
     parsed = urlsplit(url.strip())
     path = parsed.path or "/"
@@ -3377,18 +3602,6 @@ def _normalized_url(url: str) -> str:
             parsed.query,
             "",
         )
-    )
-
-
-def public_http_health_check(
-    *,
-    name: str = "public-ingress",
-    require_runtime_identity: bool = False,
-) -> ProductLaneHealthCheck:
-    return ProductLaneHealthCheck(
-        name=name,
-        kind="public_http",
-        require_runtime_identity=require_runtime_identity,
     )
 
 
@@ -3438,7 +3651,7 @@ class PublicIngressNotificationDriverSet:
                     observation=observation,
                     email_sender=self.email_sender,
                     notification_body=notification_body,
-                    secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
+                    secret_resolver=lambda secret_name: self.resolve_secret(secret_name, incident),
                 )
             if destination.kind == "discord":
                 return _deliver_discord_notification(
@@ -3449,7 +3662,7 @@ class PublicIngressNotificationDriverSet:
                     discord_sender=self.discord_sender,
                     notification_body=notification_body,
                     drill=drill,
-                    secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
+                    secret_resolver=lambda secret_name: self.resolve_secret(secret_name, incident),
                 )
         except Exception as error:  # noqa: BLE001 - delivery failures are recorded per destination.
             return PublicIngressNotificationDelivery(
@@ -3463,7 +3676,7 @@ class PublicIngressNotificationDriverSet:
             error_message=f"Unsupported public ingress notification destination: {destination.kind}",
         )
 
-    def _resolve_secret(self, secret_name: str, incident: PublicIngressIncidentRecord) -> str:
+    def resolve_secret(self, secret_name: str, incident: PublicIngressIncidentRecord) -> str:
         if self.incident_secret_resolver is not None:
             return self.incident_secret_resolver(secret_name, incident)
         return self.secret_resolver(secret_name)
@@ -3526,56 +3739,127 @@ def public_ingress_notification_drivers(
     )
 
 
+def failure_notification_delivered(
+    attempts: tuple[PublicIngressNotificationAttemptRecord, ...],
+    policy_id: str,
+    destination_id: str,
+) -> bool:
+    return any(
+        attempt.delivery_status == "delivered"
+        and attempt.event != "resolved"
+        and attempt.policy_id == policy_id
+        and attempt.destination_id == destination_id
+        for attempt in attempts
+    )
+
+
+def is_matching_incident_resolution(
+    incident: PublicIngressIncidentRecord, attempt: dict[str, object]
+) -> bool:
+    return (
+        attempt.get("event") == "resolved"
+        and incident.status == "resolved"
+        and incident.resolution_reason in {"recovered", "monitoring_intent_changed"}
+        and attempt.get("observation_id") == incident.resolved_observation_id
+        and attempt.get("incident_event_id") == incident.latest_material_event_id
+    )
+
+
 def deliver_public_ingress_notification_outbox_delivery(
     *,
     record: OutboxDeliveryRecord,
     drivers: PublicIngressNotificationDriverSet,
-    mark_provider_started: Callable[[str, str], None],
+    mark_provider_started: Callable[[OutboxDeliveryRecord, str, str], None],
     record_store: PublicIngressNotificationOutboxStore | None = None,
 ) -> OutboxDeliveryRecord:
     delivery_record = record
     try:
+        if record.aggregate_type == RETIRED_DISCORD_SUMMARY_AGGREGATE_TYPE:
+            return record.model_copy(
+                update={
+                    "state": "failed" if record.provider_operation_key else "delivered",
+                    "action": record.action
+                    if record.provider_operation_key
+                    else "skipped_retired_discord_summary",
+                    "error_code": "delivery_outcome_unknown"
+                    if record.provider_operation_key
+                    else "",
+                    "lease_owner": "",
+                    "lease_expires_at": "",
+                }
+            )
         payload = record.payload
         attempt_payload = _dict_payload(payload.get("attempt"))
         destination_payload = _dict_payload(payload.get("destination"))
         if record_store is not None:
             incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
+            event = _public_ingress_event_value(attempt_payload.get("event"))
+            matching_resolution = is_matching_incident_resolution(incident, attempt_payload)
+            if matching_resolution:
+                matching_resolution = failure_notification_delivered(
+                    record_store.list_public_ingress_notification_attempt_records(
+                        incident_id=incident.incident_id,
+                        destination_kind=_required_payload_text(destination_payload, "kind"),
+                    ),
+                    _required_payload_text(attempt_payload, "policy_id"),
+                    _required_payload_text(attempt_payload, "destination_id"),
+                )
+                if (
+                    not matching_resolution
+                    and destination_payload.get("kind") == "github_issue"
+                    and destination_payload.get("github_issue_number") is None
+                ):
+                    matching_resolution = any(
+                        previous.provider_operation_key
+                        and _dict_payload(previous.payload.get("attempt")).get("event")
+                        != "resolved"
+                        and _dict_payload(previous.payload.get("attempt")).get("policy_id")
+                        == attempt_payload.get("policy_id")
+                        and _dict_payload(previous.payload.get("destination")).get("destination_id")
+                        == destination_payload.get("destination_id")
+                        and _dict_payload(previous.payload.get("destination")).get("kind")
+                        == "github_issue"
+                        for previous in record_store.list_outbox_delivery_records(
+                            kind="public_ingress_notification",
+                            aggregate_type="public_ingress_incident",
+                            aggregate_id=incident.incident_id,
+                        )
+                    )
             retired_refusal = (
                 incident.status == "resolved"
                 and incident.resolution_reason == PRODUCTION_REQUEST_REFUSED
             )
-            if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK or retired_refusal:
-                # An earlier send may have happened; preserve its uncertain outcome.
-                if record.provider_operation_key:
-                    return record.model_copy(
-                        update={
-                            "state": "failed",
-                            "error_code": "delivery_outcome_unknown",
-                            "lease_owner": "",
-                            "lease_expires_at": "",
-                        }
+            if (
+                (incident.status == "resolved" and not matching_resolution)
+                or (event == "resolved" and not matching_resolution)
+                or retired_refusal
+                or incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK
+            ):
+                if retired_refusal:
+                    reason = "retired_production_refusal"
+                elif incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK:
+                    reason = "retired_source_lag"
+                else:
+                    reason = INCIDENT_RESOLVED_SUPERSESSION_ACTION
+                return _superseded_incident_outbox_delivery(
+                    record=record,
+                    reason=reason,
+                )
+            if destination_payload.get("kind") == "discord":
+                if incident.notification_state != "active" and not matching_resolution:
+                    return _superseded_incident_outbox_delivery(
+                        record=record, reason="incident_not_active"
                     )
-                attempt = PublicIngressNotificationAttemptRecord.model_validate(
-                    {
-                        **attempt_payload,
-                        "delivery_status": "skipped",
-                        "action": "retired_production_refusal"
-                        if retired_refusal
-                        else "retired_source_lag",
-                    }
-                )
-                return record.model_copy(
-                    update={
-                        "state": "delivered",
-                        "action": "skipped_retired_production_refusal"
-                        if retired_refusal
-                        else "skipped_retired_source_lag",
-                        "error_code": "",
-                        "lease_owner": "",
-                        "lease_expires_at": "",
-                        "payload": {**payload, "attempt_result": attempt.model_dump(mode="json")},
-                    }
-                )
+                event = _public_ingress_event_value(attempt_payload.get("event"))
+                if not _discord_incident_pages(incident, event):
+                    return _superseded_incident_outbox_delivery(
+                        record=record, reason="discord_page_only"
+                    )
+        summary_delivery_id = payload.get(PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY)
+        if summary_delivery_id and summary_delivery_id != record.delivery_id:
+            return _superseded_incident_outbox_delivery(
+                record=record, reason=INCIDENT_BACKLOG_SUPERSESSION_ACTION
+            )
         if destination_payload.get("kind") in {"email", "discord"}:
             return _deliver_direct_notification_outbox(
                 record=record,
@@ -3665,7 +3949,7 @@ def deliver_public_ingress_notification_outbox_delivery(
                     response=reconciled_response,
                 )
         else:
-            mark_provider_started(provider_operation_key, "github")
+            mark_provider_started(delivery_record, provider_operation_key, "github")
         response = drivers.github_client(
             action,
             {
@@ -3685,6 +3969,10 @@ def deliver_public_ingress_notification_outbox_delivery(
             marker=marker,
             response=response,
         )
+    except DiscordNotificationSuperseded:
+        return _superseded_incident_outbox_delivery(
+            record=delivery_record, reason="state_changed_before_send"
+        )
     except (ValueError, KeyError) as error:
         return delivery_record.model_copy(
             update={
@@ -3701,7 +3989,55 @@ def deliver_public_ingress_notification_outbox_delivery(
         )
 
 
+def _superseded_incident_outbox_delivery(
+    *, record: OutboxDeliveryRecord, reason: str
+) -> OutboxDeliveryRecord:
+    if record.provider_operation_key:
+        return record.model_copy(
+            update={
+                "state": "failed",
+                "error_code": "delivery_outcome_unknown",
+                "lease_owner": "",
+                "lease_expires_at": "",
+            }
+        )
+    attempt = PublicIngressNotificationAttemptRecord.model_validate(
+        {
+            **_dict_payload(record.payload.get("attempt")),
+            "delivery_status": "skipped",
+            "action": reason,
+        }
+    )
+    return record.model_copy(
+        update={
+            "state": "delivered",
+            "action": reason if reason.startswith("superseded_") else f"skipped_{reason}",
+            "error_code": "",
+            "lease_owner": "",
+            "lease_expires_at": "",
+            "payload": {**record.payload, "attempt_result": attempt.model_dump(mode="json")},
+        }
+    )
+
+
 class PublicIngressNotificationOutboxStore(PublicIngressMonitorStore, Protocol):
+    def list_outbox_delivery_records(
+        self,
+        *,
+        states: tuple[str, ...] = (),
+        kind: str = "",
+        aggregate_type: str = "",
+        aggregate_id: str = "",
+        limit: int | None = None,
+        newest_first: bool = False,
+    ) -> tuple[OutboxDeliveryRecord, ...]: ...
+
+    def enqueue_outbox_delivery_with_idempotency(
+        self, request: OutboxWithIdempotencyRequest
+    ) -> OutboxDeliveryRecord: ...
+
+    def read_secret_record(self, secret_id: str) -> SecretRecord: ...
+
     def read_public_ingress_incident_record(
         self, incident_id: str
     ) -> PublicIngressIncidentRecord: ...
@@ -3716,7 +4052,7 @@ def _deliver_direct_notification_outbox(
     record: OutboxDeliveryRecord,
     drivers: PublicIngressNotificationDriverSet,
     record_store: PublicIngressNotificationOutboxStore | None,
-    mark_provider_started: Callable[[str, str], None],
+    mark_provider_started: Callable[[OutboxDeliveryRecord, str, str], None],
 ) -> OutboxDeliveryRecord:
     payload = record.payload
     attempt_payload = _dict_payload(payload.get("attempt"))
@@ -3734,9 +4070,31 @@ def _deliver_direct_notification_outbox(
     if record_store is None:
         raise ValueError("direct notification outbox requires record store")
     incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
-    observation = record_store.read_public_ingress_observation_record(
-        str(attempt_payload["observation_id"])
+    summary = (
+        payload.get(PUBLIC_INGRESS_BACKLOG_SUMMARY_DELIVERY_KEY) == record.delivery_id
+        and destination_payload.get("kind") != "discord"
     )
+    observation = record_store.read_public_ingress_observation_record(
+        incident.latest_observation_id if summary else str(attempt_payload["observation_id"])
+    )
+    if (
+        destination_payload.get("kind") == "discord"
+        and not summary
+        and observation.material_fingerprint_sha256
+        and incident.material_fingerprint_sha256 != observation.material_fingerprint_sha256
+    ):
+        return _superseded_incident_outbox_delivery(record=record, reason="material_state_changed")
+    event = _public_ingress_event_value(attempt_payload.get("event"))
+    body = _required_payload_text(payload, "body")
+    if summary:
+        body = "Current incident summary\n\n" + public_ingress_incident_notification_body(
+            event=event, incident=incident, observation=observation
+        )
+        attempt_payload = {
+            **attempt_payload,
+            "observation_id": observation.record_id,
+            "attempted_at": record.updated_at,
+        }
     destination = next(
         (
             destination
@@ -3761,13 +4119,19 @@ def _deliver_direct_notification_outbox(
             }
         )
     operation_key = str(attempt_payload["attempt_id"])
-    mark_provider_started(operation_key, destination.kind)
+    if destination.kind == "discord":
+        payload = {
+            **payload,
+            "incident_states": [[incident.incident_id, incident.material_fingerprint_sha256]],
+        }
+        record = record.model_copy(update={"payload": payload})
+    mark_provider_started(record, operation_key, destination.kind)
     delivery = drivers.send(
         destination=destination,
-        event=_public_ingress_event_value(attempt_payload.get("event")),
+        event=event,
         incident=incident,
         observation=observation,
-        notification_body=_required_payload_text(payload, "body"),
+        notification_body=body,
     )
     attempt = PublicIngressNotificationAttemptRecord.model_validate(
         {
@@ -3779,12 +4143,15 @@ def _deliver_direct_notification_outbox(
     )
     return record.model_copy(
         update={
-            "state": "pending" if delivery.delivery_status == "failed" else "delivered",
+            "state": "failed"
+            if delivery.outcome_unknown
+            else ("pending" if delivery.delivery_status == "failed" else "delivered"),
             "provider_id": destination.kind,
-            # A returned failure is retryable; a process interruption retains the durable marker.
-            "provider_operation_key": "",
+            "provider_operation_key": operation_key if delivery.outcome_unknown else "",
             "action": delivery.action,
-            "error_code": "provider_error" if delivery.delivery_status == "failed" else "",
+            "error_code": "delivery_outcome_unknown"
+            if delivery.outcome_unknown
+            else ("provider_error" if delivery.delivery_status == "failed" else ""),
             "lease_owner": "",
             "lease_expires_at": "",
             "payload": {**payload, "attempt_result": attempt.model_dump(mode="json")},
@@ -4024,6 +4391,14 @@ def _deliver_email_notification(
     return PublicIngressNotificationDelivery(delivery_status="delivered", action="sent_email")
 
 
+def _discord_incident_pages(
+    incident: PublicIngressIncidentRecord, event: PublicIngressIncidentEvent
+) -> bool:
+    return event == "resolved" or (
+        incident.severity == "critical" and event in {"opened", "updated"}
+    )
+
+
 def _deliver_discord_notification(
     *,
     destination: PublicIngressNotificationDestination,
@@ -4035,6 +4410,10 @@ def _deliver_discord_notification(
     notification_body: str = "",
     drill: bool = False,
 ) -> PublicIngressNotificationDelivery:
+    if not drill and not _discord_incident_pages(incident, event):
+        return PublicIngressNotificationDelivery(
+            delivery_status="skipped", action="skipped_discord_page_only"
+        )
     webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
     if not webhook_url:
         return PublicIngressNotificationDelivery(
@@ -4049,7 +4428,13 @@ def _deliver_discord_notification(
             action="invalid_discord_webhook",
             error_message=f"Discord webhook URL is not public: {public_url_error}",
         )
-    color = 0x2E7D32 if event == "resolved" else 0xC62828
+    color = (
+        0x2E7D32
+        if event == "resolved"
+        else 0xED9B20
+        if incident.severity == "warning" or event == "reminder"
+        else DISCORD_CRITICAL_ALERT_COLOR
+    )
     title = (
         "Testing delivery"
         if incident.check_name.startswith("testing-delivery-")
@@ -4075,10 +4460,18 @@ def _deliver_discord_notification(
     }
     if drill:
         payload["allowed_mentions"] = {"parse": []}
-    discord_sender(
-        webhook_url,
-        payload,
-    )
+    try:
+        discord_sender(webhook_url, payload)
+    except Exception as error:
+        return PublicIngressNotificationDelivery(
+            delivery_status="failed",
+            action="provider_error",
+            error_message=str(error) or error.__class__.__name__,
+            outcome_unknown=not isinstance(error, DiscordNotificationNotSentError)
+            and not (
+                isinstance(error, DiscordNotificationError) and 400 <= error.status_code < 500
+            ),
+        )
     return PublicIngressNotificationDelivery(delivery_status="delivered", action="posted_discord")
 
 

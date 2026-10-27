@@ -1,6 +1,7 @@
 """Inspect and adopt one existing Client release; never repeat a provider effect."""
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,7 +43,7 @@ from control_plane.generic_web_promotion_provider_adapter import (
 )
 from control_plane.provider_operations import build_provider_operation_key
 from control_plane.release_review import checklist_digest
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import MutationReservationAdoptionResult, PostgresRecordStore
 from control_plane.workflows.generic_web_deploy_provider import (
     GenericWebDeployRuntimeArtifactProvider,
     build_generic_web_provider_target_key,
@@ -65,6 +66,33 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 class PromotionRecoveryConflict(ValueError):
     """The stored release does not identify one authoritative promotion."""
+
+
+def adopt_inspected_promotion(
+    *,
+    store: PostgresRecordStore,
+    inspection: "PromotionInspection",
+    trace_id: str,
+    recovery_receipt: Mapping[str, object],
+) -> MutationReservationAdoptionResult:
+    if inspection.action not in {"adopt_promotion", "adopt_rollback"}:
+        raise ValueError("The original release outcome is unproved.")
+    return store.adopt_reconciled_mutation(
+        reservation=inspection.reservation,
+        response_status_code=202,
+        response_trace_id=trace_id,
+        response_payload={
+            "status": "accepted",
+            "trace_id": trace_id,
+            "records": {},
+            "result": inspection.result,
+            "recovery": dict(recovery_receipt),
+        },
+        expected_promotion_evidence=inspection.evidence,
+        promotion_recovery_inventory=inspection.inventory,
+        promotion_recovery_record=inspection.promotion,
+        promotion_recovery_deployments=inspection.deployments,
+    )
 
 
 @dataclass
@@ -321,6 +349,11 @@ def inspect_promotion(
                     update={
                         "artifact_id": effective.artifact_identity.artifact_id,
                         "source_git_ref": effective.source_git_ref,
+                        "deploy_reference": (
+                            effective.runtime_identity.image_reference
+                            if target.resolved_target.target_type == "application"
+                            else target.ship_request.deploy_reference
+                        ),
                     }
                 )
             }
@@ -332,6 +365,7 @@ def inspect_promotion(
             observation=runtime,
             expected_artifact_reference=effective.artifact_identity.artifact_id,
             expected_deployment_record_id=effective.record_id,
+            expected_provider_reference=effective_target.ship_request.deploy_reference,
         )
         checked = _verify_health_evidence_with_identity(
             _health_evidence_for_lane(
@@ -551,6 +585,7 @@ def inspect_rollback_drill(
             request_source_git_ref=planned.source_git_ref,
             request_timeout_seconds=planned.timeout_seconds,
             request_no_cache=planned.no_cache,
+            request_deploy_reference=planned.deploy_reference,
             lane=lane,
         )
         if build_generic_web_provider_target_key(target) != reservation.provider_target_key:
@@ -614,6 +649,7 @@ def inspect_rollback_drill(
             observation=runtime,
             expected_artifact_reference=planned.artifact_id,
             expected_deployment_record_id=deployed.record_id,
+            expected_provider_reference=target.ship_request.deploy_reference,
         )
         checked = _verify_health_evidence_with_identity(
             _health_evidence_for_lane(

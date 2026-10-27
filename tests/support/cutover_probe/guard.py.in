@@ -8,6 +8,9 @@ class CutoverGuard(models.AbstractModel):
     _name = "cutover.fixture.guard"
     _description = "Isolated cutover credential guard"
 
+    def _cutover_tick(self, role):
+        self.env.cr.execute("INSERT INTO ir_config_parameter(key,value) VALUES (%s,'1') ON CONFLICT(key) DO UPDATE SET value=(ir_config_parameter.value::int+1)::text", ('cutover.fixture.native_ticks.' + role,))
+
     def _register_hook(self):
         super()._register_hook()
         if not os.environ.get("CUTOVER_GUARD_REQUIRED"):

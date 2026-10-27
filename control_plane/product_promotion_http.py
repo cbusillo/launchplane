@@ -27,6 +27,7 @@ from control_plane.drivers.generic_web_dispatch import (
     GenericWebProdPromotionEnvelope,
     GenericWebPromotionWorkflowEnvelope,
 )
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.generic_web_promotion_http import (
     GenericWebProdPromotionRecords,
@@ -674,6 +675,9 @@ def _promotion_evidence(
     summary: LaunchplaneLaneSummary | None,
     now: datetime,
 ) -> ProductPromotionEvidence:
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+    )
     inventory = summary.inventory if summary is not None else None
     if inventory is None:
         return ProductPromotionEvidence(environment=lane.instance)
@@ -1022,16 +1026,6 @@ def _promotion_evidence_fingerprint(
             ),
         }
     )
-
-
-def _immutable_artifact_digest(value: str) -> str:
-    normalized = value.strip().lower()
-    if re.fullmatch(r"sha256:[0-9a-f]{64}", normalized):
-        return normalized
-    _repository, separator, digest = normalized.partition("@sha256:")
-    if separator and re.fullmatch(r"[0-9a-f]{64}", digest):
-        return f"sha256:{digest}"
-    return ""
 
 
 def _canonical_sha256(payload: dict[str, object]) -> str:

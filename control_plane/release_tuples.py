@@ -144,7 +144,16 @@ def require_source_release_tuple_for_promotion(
     artifact_id: str,
     context_name: str,
     from_channel_name: str,
+    record_store: object | None = None,
 ) -> ReleaseTupleRecord:
+    from control_plane.testing_serving_copy import require_published_testing_release
+
+    try:
+        require_published_testing_release(record_store, source_tuple)
+    except (FileNotFoundError, ValueError) as error:
+        raise click.ClickException(
+            "The current testing copy does not qualify its release record."
+        ) from error
     if source_tuple.context != context_name or source_tuple.channel != from_channel_name:
         raise click.ClickException(
             "Promotion source release tuple does not match the requested source lane. "

@@ -173,7 +173,11 @@ def plan_odoo_testing_route_binding_refresh(
         record_store,
         target_limit=target_limit,
     )
-    return _plan_refresh(record_store=record_store, targets=targets, evaluated_at=evaluated_at)
+    return _plan_refresh(
+        record_store=record_store,
+        targets=targets,
+        evaluated_at=evaluated_at,
+    )
 
 
 def plan_remaining_odoo_stable_route_binding_refresh(
@@ -235,46 +239,7 @@ def _plan_refresh(
                     evaluated_at=evaluated_at,
                 ),
             )
-        status: RouteBindingRefreshOutcomeStatus
-        operation: Literal["refresh", "none"] = "none"
-        if reconcile_plan.status == "unchanged":
-            status = "unchanged"
-        elif reconcile_plan.status == "ready" and reconcile_plan.operation == "refresh":
-            status = "planned_refresh"
-            operation = "refresh"
-        elif reconcile_plan.status == "blocked":
-            status = "blocked"
-        else:
-            status = "conflict"
-        findings = reconcile_plan.findings
-        if reconcile_plan.status == "ready" and reconcile_plan.operation != "refresh":
-            findings = (
-                RouteBindingReconcileFinding(
-                    code="route_binding_refresh_requires_manual_reconcile",
-                    detail=(
-                        f"The refresh-only controller refuses {reconcile_plan.operation}. "
-                        "Use separately reviewed exact-lane reconciliation to change authority."
-                    ),
-                ),
-            )
-        outcomes.append(
-            RouteBindingRefreshOutcome(
-                product=target.product,
-                context=target.context,
-                instance=target.instance,
-                status=status,
-                operation=operation,
-                findings=findings,
-                current_record_sha256=reconcile_plan.current_record_sha256,
-                candidate_record_sha256=reconcile_plan.candidate_record_sha256,
-                stale_after=(
-                    reconcile_plan.record.source.stale_after
-                    if reconcile_plan.record is not None
-                    else target.record.source.stale_after
-                ),
-                reconcile_plan=reconcile_plan,
-            )
-        )
+        outcomes.append(route_binding_refresh_outcome(target.record, reconcile_plan))
     return RouteBindingRefreshControllerPlan(
         status=(
             "attention"
@@ -284,4 +249,48 @@ def _plan_refresh(
         evaluated_at=evaluated_at,
         target_count=len(outcomes),
         outcomes=tuple(outcomes),
+    )
+
+
+def route_binding_refresh_outcome(
+    record: EnvironmentRouteBindingRecord,
+    reconcile_plan: RouteBindingReconcilePlan | ExternalRouteBindingReconcilePlan,
+) -> RouteBindingRefreshOutcome:
+    status: RouteBindingRefreshOutcomeStatus
+    operation: Literal["refresh", "none"] = "none"
+    if reconcile_plan.status == "unchanged":
+        status = "unchanged"
+    elif reconcile_plan.status == "ready" and reconcile_plan.operation == "refresh":
+        status = "planned_refresh"
+        operation = "refresh"
+    elif reconcile_plan.status == "blocked":
+        status = "blocked"
+    else:
+        status = "conflict"
+    findings = reconcile_plan.findings
+    if reconcile_plan.status == "ready" and reconcile_plan.operation != "refresh":
+        findings = (
+            RouteBindingReconcileFinding(
+                code="route_binding_refresh_requires_manual_reconcile",
+                detail=(
+                    f"The refresh-only controller refuses {reconcile_plan.operation}. "
+                    "Use separately reviewed exact-lane reconciliation to change authority."
+                ),
+            ),
+        )
+    return RouteBindingRefreshOutcome(
+        product=record.product,
+        context=record.context,
+        instance="testing" if record.instance == "testing" else "prod",
+        status=status,
+        operation=operation,
+        findings=findings,
+        current_record_sha256=reconcile_plan.current_record_sha256,
+        candidate_record_sha256=reconcile_plan.candidate_record_sha256,
+        stale_after=(
+            reconcile_plan.record.source.stale_after
+            if reconcile_plan.record is not None
+            else record.source.stale_after
+        ),
+        reconcile_plan=reconcile_plan,
     )

@@ -26,6 +26,7 @@ from control_plane.merge_train_github import (
     GitHubMergeTrainSnapshotReader,
     MergeTrainBranchRefreshReadStore,
     UrllibMergeTrainGitHubTransport,
+    requires_full_odoo_build,
 )
 from control_plane.workflows.merge_train_worker import (
     MergeTrainWorkerClients,
@@ -127,6 +128,14 @@ def execute_merge_train_run_once(
         base_branch=request.base_branch,
     )
     dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    odoo_controller_required = requires_full_odoo_build(review_store, repository=request.repository)
+    if odoo_controller_required:
+        dry_run_result = dry_run_result.model_copy(
+            update={
+                "intended_next_action": "wait_for_checks",
+                "next_action_detail": "Odoo requires an exact full-build candidate. Use POST /v1/work-graph/merge-train/controller/run-once.",
+            }
+        )
     route_result: dict[str, object] = {
         "repository": request.repository,
         "base_branch": request.base_branch,
@@ -134,7 +143,7 @@ def execute_merge_train_run_once(
         "dry_run_result": dry_run_result.model_dump(mode="json"),
     }
     worker_step_result = None
-    if request.mutate:
+    if request.mutate and not odoo_controller_required:
         if mutation_checkpoint is not None:
             mutation_checkpoint()
         github_client = GitHubMergeTrainClient(

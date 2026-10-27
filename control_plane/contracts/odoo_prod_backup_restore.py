@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.text_fields import require_text
 from control_plane.workflows.odoo_verification import OdooVerificationEvidence
 
 
@@ -31,15 +32,13 @@ class OdooProdBackupRestoreRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooProdBackupRestoreRequest":
-        self.product = _normalize_required(self.product, "Odoo backup restore requires product.")
-        self.context = _normalize_required(
-            self.context, "Odoo backup restore requires context."
-        ).lower()
-        self.backup_record_id = _normalize_required(
+        self.product = require_text(self.product, "Odoo backup restore requires product.")
+        self.context = require_text(self.context, "Odoo backup restore requires context.").lower()
+        self.backup_record_id = require_text(
             self.backup_record_id,
             "Odoo backup restore requires backup_record_id.",
         )
-        self.verification_record_id = _normalize_required(
+        self.verification_record_id = require_text(
             self.verification_record_id,
             "Odoo backup restore requires verification_record_id.",
         )
@@ -49,7 +48,7 @@ class OdooProdBackupRestoreRequest(BaseModel):
         ):
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", record_id):
                 raise ValueError(f"Odoo backup restore requires a path-safe {field_name}.")
-        self.expected_current_artifact_id = _normalize_required(
+        self.expected_current_artifact_id = require_text(
             self.expected_current_artifact_id,
             "Odoo backup restore requires expected_current_artifact_id.",
         )
@@ -61,7 +60,7 @@ class OdooProdBackupRestoreRequest(BaseModel):
         }
         normalized_volumes: dict[str, str] = {}
         for field_name, raw_value in volume_fields.items():
-            normalized_value = _normalize_required(
+            normalized_value = require_text(
                 raw_value,
                 f"Odoo backup restore requires {field_name}.",
             )
@@ -327,10 +326,3 @@ def build_odoo_prod_backup_restore_plan_fingerprint(
     }
     encoded = json.dumps(authority, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
-def _normalize_required(value: str, message: str) -> str:
-    normalized = value.strip()
-    if not normalized:
-        raise ValueError(message)
-    return normalized

@@ -206,6 +206,34 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
             )
         self.assertTrue(self.artifact_scanner.called)
 
+    def test_hold_placed_after_review_refuses_commit(self) -> None:
+        body = self.reviewed()
+        original = self.store.commit_testing_retry_rearm
+
+        def race(**kwargs: Any) -> Any:
+            self.hold_testing()
+            return original(**kwargs)
+
+        with patch.object(self.store, "commit_testing_retry_rearm", side_effect=race):
+            refused = self.post(body, "raced-hold")
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "testing_retry_held")
+        self.assertIsNone(self.store.read_testing_retry_rearm("site"))
+
+    def test_operation_started_after_review_refuses_commit(self) -> None:
+        body = self.reviewed()
+        original = self.store.commit_testing_retry_rearm
+
+        def race(**kwargs: Any) -> Any:
+            self.add_active_operation()
+            return original(**kwargs)
+
+        with patch.object(self.store, "commit_testing_retry_rearm", side_effect=race):
+            refused = self.post(body, "raced-active")
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "testing_retry_busy")
+        self.assertIsNone(self.store.read_testing_retry_rearm("site"))
+
     def test_same_key_replays_after_progress_and_desired_build_drift(self) -> None:
         body = self.reviewed()
         applied = self.post(body, "retry-original")
@@ -286,12 +314,37 @@ class TestingRetryTests(reconcile_fixtures.ProductReconcileTestCase):
         self.assertEqual(refused.state, "failed")
         self.assertNotIn("queued_operation_id", refused.last_plan)
 
+    def add_active_operation(self) -> None:
+        operation = self.store.list_odoo_stable_target_replacement_operation_records()[-1]
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            build_odoo_stable_target_replacement_operation_id,
+        )
+
+        original = operation
+        held_key = original.idempotency_key + ":stranded-original"
+        held = original.model_copy(
+            update={
+                "operation_id": build_odoo_stable_target_replacement_operation_id(
+                    product=original.product,
+                    context=original.context,
+                    instance=original.instance,
+                    created_at=original.created_at,
+                    idempotency_key=held_key,
+                    idempotency_scope=original.idempotency_scope,
+                ),
+                "idempotency_key": held_key,
+                "status": "reconciliation_required",
+                "finished_at": "",
+                "result": None,
+                "error_code": "provider_outcome_unknown",
+                "error_message": "Fixture original remains unverified.",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(held)
+
     def test_existing_active_operation_and_unprivileged_caller_refused(self) -> None:
         body = self.reviewed()
-        operation = self.store.list_odoo_stable_target_replacement_operation_records()[-1]
-        self.store.write_odoo_stable_target_replacement_operation_record(
-            operation.model_copy(update={"status": "reconciliation_required", "finished_at": ""})
-        )
+        self.add_active_operation()
         refused = self.post(body, "active-attempt")
         self.assertEqual(refused.status_code, 409, refused.text)
         self.assertEqual(self.store.read_product_reconcile_request("site:testing").state, "failed")

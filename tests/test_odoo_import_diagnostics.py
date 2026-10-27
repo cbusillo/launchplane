@@ -340,6 +340,13 @@ class DiagnosticTests(unittest.TestCase):
         result = run()
         self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
         self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
+        with patch.object(
+            diagnostic, "_decrypt_secret_value", side_effect=ValueError("unavailable")
+        ):
+            unavailable = run()
+        self.assertTrue(
+            all(source.binding == "missing_or_unsafe" for source in unavailable.sources)
+        )
 
         def drift(connection: object, sources: tuple[str, ...], **kwargs: object) -> dict[str, str]:
             self.fixture.bindings.clear()
@@ -373,7 +380,7 @@ class DiagnosticTests(unittest.TestCase):
         )
 
     def test_runtime_never_receives_mismatched_or_unsafe_sources(self) -> None:
-        self.environment[config_parameter_runtime_key("cm_data.db.user")] = "writer"
+        self.environment[config_parameter_secret_env_key("cm_data.db.password")] = "stale"
         self.environment[config_parameter_secret_env_key("repairshopr.sync_db.password")] = "stale"
         self.fixture.bindings[2] = self.fixture.bindings[2].model_copy(
             update={"declared_secret_class": "prod_only"}
@@ -394,7 +401,10 @@ class DiagnosticTests(unittest.TestCase):
                         diagnostic.import_authority(
                             self.fixture.store, self.fixture.profile.product
                         ).sources,
-                        self.environment,
+                        store=self.fixture.store,
+                        product=self.fixture.profile.product,
+                        control_plane_root=Path("fixture"),
+                        database_url=None,
                     ).values()
                 )
             )

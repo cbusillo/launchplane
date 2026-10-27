@@ -68,6 +68,7 @@ from control_plane.contracts.odoo_target_replacement_failures import (
     deploy_blocked_code_for_runtime_error,
     deploy_failure_description,
 )
+from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 from control_plane.contracts.odoo_runtime_environment import (
     LAUNCHPLANE_REQUIRED_ODOO_ADDON_PATHS,
     merge_required_odoo_addons_path,
@@ -111,8 +112,7 @@ from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
 from control_plane.workflows.odoo_verification import (
     OdooVerificationEvidence,
-    default_odoo_health_url,
-    is_legacy_derived_odoo_health_url,
+    resolve_odoo_health_url,
     verify_odoo_stable_readiness,
 )
 from control_plane.workflows.runtime_identity_health import (
@@ -891,14 +891,11 @@ def _target_health_url(
     public_hosts: tuple[str, ...] = (),
 ) -> str:
     base_url = _target_origin_base_url(lane=lane, domains=domains, public_hosts=public_hosts)
-    lane_health_url = lane.health_url.strip()
-    if lane_health_url and not is_legacy_derived_odoo_health_url(
-        health_url=lane_health_url,
+    return resolve_odoo_health_url(
         base_url=base_url,
+        lane_health_url=lane.health_url,
         profile_health_path=profile.health_path,
-    ):
-        return lane_health_url
-    return default_odoo_health_url(base_url=base_url)
+    )
 
 
 def _read_odoo_instance_override_record(
@@ -933,10 +930,6 @@ def _record_with_target_replacement_canonical(
             "source_label": "odoo-stable-target-replacement",
         }
     )
-
-
-def _merge_required_odoo_install_modules(raw_modules: str) -> str:
-    return merge_odoo_install_modules(LAUNCHPLANE_REQUIRED_ODOO_MODULES, raw_modules)
 
 
 def _normalize_domain(raw_domain: str) -> str:
@@ -1247,7 +1240,7 @@ def _deploy_step_failure(error: BaseException) -> RecordFailure:
         )
     if isinstance(error, LaneMovementRefused):
         return error.record_failure()
-    if isinstance(error, OdooFreshTestingIntentRefusedError):
+    if isinstance(error, (OdooFreshTestingIntentRefusedError, ScheduleMaterializationTooLarge)):
         code = error.code
     elif isinstance(error, OdooTargetReplacementStageError):
         code, keys = error.code, error.detail_keys
@@ -1942,6 +1935,7 @@ def execute_odoo_stable_target_replacement_apply(
     hold_uncertain_effects: bool = False,
     rollback: bool = False,
     release_website_settings: OdooWebsiteSettingsIntent | None = None,
+    restore_release_website_settings: bool = False,
     release_operation: bool = False,
 ) -> OdooStableTargetReplacementApplyResult:
     with _failure_stage("plan_build_failed"):
@@ -2571,7 +2565,7 @@ def execute_odoo_stable_target_replacement_apply(
                 application_runtime_keys.discard(key)
         provider_only_keys = _provider_only_keys(
             current_env=current_env_map,
-            application_keys=application_runtime_keys,
+            application_keys=application_runtime_keys | fresh_restore_source_environment.keys(),
             retired_keys=retired_provider_keys,
         )
         if provider_only_keys:
@@ -2734,6 +2728,11 @@ def execute_odoo_stable_target_replacement_apply(
                 compose_id=target_id_record.target_id,
                 domain_host=domain_host,
                 runtime_port=profile.runtime_port,
+                **(
+                    {"certificate_type": generation.certificate_type}
+                    if generation is not None
+                    else {}
+                ),
             )
         raw_domains = dokploy_request(
             host=host,
@@ -3019,6 +3018,7 @@ def execute_odoo_stable_target_replacement_apply(
                 ),
                 artifact_id=artifact_id,
                 release_website_settings=release_website_settings,
+                restore_release_website_settings=restore_release_website_settings,
                 release_operation=release_operation,
                 rollback=rollback,
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
@@ -3059,6 +3059,7 @@ def execute_odoo_stable_target_replacement_apply(
     except (
         OdooTargetReplacementStageError,
         OdooFreshTestingIntentRefusedError,
+        ScheduleMaterializationTooLarge,
         DurableOperationAuthorizationDeniedError,
     ) as error:
         _write_failed_deployment(
@@ -3127,6 +3128,7 @@ def execute_odoo_stable_target_replacement_apply(
                 ),
                 artifact_id=artifact_id,
                 release_website_settings=release_website_settings,
+                restore_release_website_settings=restore_release_website_settings,
                 release_operation=release_operation,
                 rollback=rollback,
                 run_destructive_restore=False,

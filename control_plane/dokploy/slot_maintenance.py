@@ -8,6 +8,7 @@ import json
 from typing import Any, TYPE_CHECKING
 
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooMaintenanceReceipt
+from control_plane.contracts.canonical_json import canonical_model_sha256
 from control_plane.dokploy.slot_website_settings import StartupSettings, run_slot_website_settings
 
 if TYPE_CHECKING:
@@ -47,6 +48,18 @@ def payload_digest(payload: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def slot_run_directory(plan: OdooCutoverPlan) -> str:
+    return "/volumes/data/.launchplane-cutovers/" + payload_digest(maintenance_payload(plan))
+
+
+def slot_run_marker(plan: OdooCutoverPlan) -> str:
+    return slot_run_directory(plan) + "/web-ready"
+
+
+def slot_run_stamp(plan: OdooCutoverPlan) -> str:
+    return canonical_model_sha256(plan.new)
+
+
 def run_planned_slot_maintenance(
     plan: OdooCutoverPlan,
     *,
@@ -56,14 +69,8 @@ def run_planned_slot_maintenance(
     workflow: str = "/volumes/scripts/run_odoo_data_workflows.py",
     configure_startup: StartupSettings | None = None,
     writers: ContainerSlotWriters | None = None,
+    maintenance_checkpoint: Callable[[OdooMaintenanceReceipt], None] | None = None,
 ) -> OdooMaintenanceReceipt:
-    """Read back before repeating; a running/failed attempt remains uncertain.
-
-    The existing SQL-only devkit boundary is the only credential policy. The
-    full planned entrypoint verifies the baked declaration/graph, commits that
-    boundary and creates its registry once. Never invoke the legacy install
-    pass, infer success from generic schedule text, or start candidate web here.
-    """
     if plan.website_settings is not None and (configure_startup is None or writers is None):
         raise ValueError("website settings require the bound startup configuration capability")
     if not runner_container:
@@ -75,12 +82,12 @@ def run_planned_slot_maintenance(
         raise ValueError("maintenance runner is not the candidate's immutable image")
     payload = maintenance_payload(plan)
     digest = payload_digest(payload)
-    directory = "/volumes/data/.launchplane-cutovers/" + digest
+    directory = slot_run_directory(plan)
     request = json.dumps({"directory": directory, "payload": payload})
     # This script does not import Odoo or load a registry. It owns a durable
     # attempt marker before the child, and exposes only its receipt/guard ID.
     program = """
-import json, os, subprocess, sys
+import hashlib, json, os, subprocess, sys, tempfile
 from pathlib import Path
 request = json.loads(sys.stdin.read())
 directory = Path(request['directory'])
@@ -99,8 +106,19 @@ previous_boundary=boundary()
 plan_file, receipt, attempt = (directory / name for name in ('plan.json', 'receipt.json', 'attempt.json'))
 attestation=directory/'boundary.json'
 payload = json.dumps(request['payload'], sort_keys=True, separators=(',', ':'))
+digest = hashlib.sha256(payload.encode()).hexdigest()
 if plan_file.exists() and plan_file.read_text() != payload:
     raise RuntimeError('immutable maintenance plan changed')
+if attempt.exists():
+    try:
+        outcome = json.loads(attempt.read_text())
+    except json.JSONDecodeError:
+        outcome = None
+    if isinstance(outcome, dict) and outcome.get('state') == 'failed':
+        if outcome.get('plan_sha256') != digest:
+            raise RuntimeError('maintenance failure differs from the immutable plan')
+        print(json.dumps(outcome, sort_keys=True))
+        sys.exit(0)
 if not attempt.exists():
     # Reuse the image's registry-free resolver against an independent SQL
     # inventory. Static roots may include optional uninstalled addons; exact
@@ -112,12 +130,24 @@ if not attempt.exists():
         states=dict(cursor.fetchall())
     graph={module['name']:set(module['depends']) for module in request['payload']['candidate_manifest']['release_compatibility']['modules']}
     expected=resolve_plan(request['payload'],database=request['payload']['database'],image=request['payload']['release']['candidate_image'],states=states,graph=graph)
-    plan_file.write_text(payload)
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix='.plan-')
+    try:
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(payload)
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, plan_file)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
     descriptor = os.open(attempt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, 'w') as stream:
         stream.write('started')
         stream.flush()
         os.fsync(stream.fileno())
+    for parent in (directory, *directory.parents):
+        descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(descriptor)
+        finally: os.close(descriptor)
+        if parent.is_mount(): break
     environment = dict(os.environ, ODOO_RELEASE_MODULE_PLAN_FILE=str(plan_file),
         ODOO_RELEASE_IMAGE=request['payload']['release']['candidate_image'],
         ODOO_RELEASE_MAINTENANCE_RECEIPT_FILE=str(receipt), ODOO_MAX_CRON_THREADS='0')
@@ -128,7 +158,19 @@ if not attempt.exists():
         stream.write(result.stdout + result.stderr)
         stream.flush(); os.fsync(stream.fileno())
     if result.returncode:
-        raise RuntimeError('full planned maintenance failed')
+        outcome = {'state': 'failed', 'plan_sha256': digest}
+        pending = attempt.with_suffix('.pending')
+        with os.fdopen(os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
+            json.dump(outcome, stream, sort_keys=True)
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(pending, attempt)
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        print(json.dumps(outcome, sort_keys=True))
+        sys.exit(0)
     committed=boundary()
     if not committed or committed==previous_boundary:
         raise RuntimeError('passing maintenance has no new committed boundary witness')
@@ -152,6 +194,10 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
         ("docker", "exec", "-i", runner_container, python, "-c", program, workflow), request
     )
     response = json.loads(output)
+    if response.get("state") == "failed":
+        if response.get("plan_sha256") != digest:
+            raise RuntimeError("maintenance failure differs from the immutable plan")
+        raise ValueError("full planned maintenance failed")
     result = response["receipt"]
     if (
         result.get("state") != "passed"
@@ -178,6 +224,8 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
         evidence_id=digest,
     )
     if plan.website_settings is not None:
+        if maintenance_checkpoint is not None:
+            maintenance_checkpoint(receipt)
         receipt = receipt.model_copy(
             update={
                 "website_settings": run_slot_website_settings(
@@ -194,7 +242,7 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
         )
     # Only the validated full-run receipt releases the candidate's startup
     # guard. No registry-capable web process can precede the SQL commit.
-    stamp = hashlib.sha256(plan.new.model_dump_json().encode()).hexdigest()
+    stamp = slot_run_stamp(plan)
     execute(
         (
             "docker",
@@ -206,7 +254,7 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
             "import os,sys; from pathlib import Path; p=Path(sys.argv[1]); "
             "t=p.with_suffix('.pending'); t.write_text(sys.stdin.read()); "
             "f=os.open(t,os.O_RDONLY); os.fsync(f); os.close(f); os.replace(t,p)",
-            directory + "/web-ready",
+            slot_run_marker(plan),
         ),
         stamp,
     )

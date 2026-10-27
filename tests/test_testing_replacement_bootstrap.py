@@ -1077,6 +1077,16 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private-value", result.text)
         self.assertNotIn(result.json()["error"]["code"], tuple(BootstrapPrerequisiteCode))
 
+    async def test_retired_certificate_repair_modes_are_rejected(self) -> None:
+        with patch(
+            "control_plane.http_routes.testing_replacement_bootstrap.TestingReplacementBootstrapAdapter"
+        ) as adapter:
+            for mode in ("route-repair-dry-run", "route-repair-apply", "route-repair-readback"):
+                with self.subTest(mode=mode):
+                    result = await self.post(mode=mode, reviewed_plan_sha256="a" * 64)
+                    self.assertEqual(result.status_code, 400, result.text)
+            adapter.assert_not_called()
+
     async def test_dry_run_returns_the_prerequisite_classification(self) -> None:
         prerequisite = TestingBootstrapPrerequisiteError(
             BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED

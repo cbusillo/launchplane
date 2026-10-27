@@ -63,7 +63,9 @@ def main() -> int:
             parser.error(
                 "Apply requires --reviewed-dry-run and the same --idempotency-key on every retry."
             )
-        reviewed = LaneServiceRestartResponse.model_validate_json(args.evidence_file.read_text())
+        reviewed = LaneServiceRestartResponse.model_validate_json(
+            args.evidence_file.read_text(), extra="ignore"
+        )
         plan = reviewed.result.plan
         if (
             reviewed.result.status != "ready"
@@ -99,7 +101,7 @@ def main() -> int:
             timeout=130,
             idempotency_key=args.idempotency_key,
         )
-        response = LaneServiceRestartResponse.model_validate(raw)
+        response = LaneServiceRestartResponse.model_validate(raw, extra="ignore")
     except urllib.error.HTTPError as error:
         transport["emit_http_error_payload"](
             operation="lane-service-restart",

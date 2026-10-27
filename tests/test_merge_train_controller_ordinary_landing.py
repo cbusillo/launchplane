@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import Mock, patch
 
@@ -37,6 +39,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubStaleHeadError,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from control_plane.storage.filesystem import FilesystemRecordStore
 
 
 REPOSITORY = "example/merge-train-repo"
@@ -126,12 +129,6 @@ class _NonReturningLandingStore:
         return tuple(self.records)
 
 
-class _StackStore:
-    def list_merge_train_stack_collapse_plan_records(self, **kwargs: object) -> tuple[object, ...]:
-        del kwargs
-        return ()
-
-
 class _OrdinaryLandingClient:
     def __init__(self, *, stale: bool = False, cleanup: bool | Exception = False) -> None:
         self.transport = object()
@@ -187,6 +184,7 @@ class _OrdinaryLandingClient:
 
 class OrdinaryLandingControllerTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.stack_store = FilesystemRecordStore(Path(self.enterContext(TemporaryDirectory())))
         self.binding = OrdinaryAgentJobBinding(
             request_id="ordinary_request",
             scope_sha256="a" * 64,
@@ -478,7 +476,7 @@ class OrdinaryLandingControllerTests(unittest.TestCase):
                     trace_id="ordinary-landing-test",
                     recorded_at=NOW,
                     github_client=client,  # type: ignore[arg-type]
-                    stack_collapse_store=_StackStore(),  # type: ignore[arg-type]
+                    stack_collapse_store=self.stack_store,
                     landed_record=terminal,
                     lease=lease,
                 )
@@ -517,7 +515,7 @@ class OrdinaryLandingControllerTests(unittest.TestCase):
             candidate_store=candidate_store
             or _CandidateStore(candidate_record or self.candidate_record),  # type: ignore[arg-type]
             landing_store=landing_store,
-            stack_collapse_store=_StackStore(),  # type: ignore[arg-type]
+            stack_collapse_store=self.stack_store,
             admission_store=Mock(),
             admission_evaluator=Mock(),
             active_landing_record=record,

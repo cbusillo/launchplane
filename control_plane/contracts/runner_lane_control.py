@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.runner_lane_baseline import RunnerLaneBaselineReadiness
 from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
+from control_plane.contracts.text_fields import require_text
 
 
 RunnerLaneControlAction = Literal["create", "drain", "restart", "remove"]
@@ -57,7 +58,7 @@ class RunnerLaneControlRequest(BaseModel):
     @model_validator(mode="after")
     def _normalize_request(self) -> "RunnerLaneControlRequest":
         self.repository = _normalized_repository(self.repository)
-        self.lane_name = _required_text(self.lane_name, "runner lane control requires lane_name")
+        self.lane_name = require_text(self.lane_name, "runner lane control requires lane_name")
         if not self.repository:
             raise ValueError("runner lane control requires repository")
         return self
@@ -71,7 +72,7 @@ class RunnerLaneControlBlocker(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_blocker(self) -> "RunnerLaneControlBlocker":
-        self.message = _required_text(self.message, "runner lane control blocker requires message")
+        self.message = require_text(self.message, "runner lane control blocker requires message")
         return self
 
 
@@ -90,15 +91,13 @@ class RunnerLaneControlPlan(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_plan(self) -> "RunnerLaneControlPlan":
-        self.repository = _required_text(
+        self.repository = require_text(
             self.repository, "runner lane control plan requires repository"
         )
-        self.lane_name = _required_text(
-            self.lane_name, "runner lane control plan requires lane_name"
-        )
+        self.lane_name = require_text(self.lane_name, "runner lane control plan requires lane_name")
         self.blockers = tuple(sorted(self.blockers, key=lambda blocker: blocker.code))
         self.next_steps = tuple(step.strip() for step in self.next_steps if step.strip())
-        self.summary = _required_text(self.summary, "runner lane control plan requires summary")
+        self.summary = require_text(self.summary, "runner lane control plan requires summary")
         if self.status == "ready" and self.blockers:
             raise ValueError("ready runner lane control plan cannot include blockers")
         if self.status == "blocked" and not self.blockers:
@@ -268,10 +267,3 @@ def _normalized_repository(value: str) -> str:
 
 def _normalized_token(value: str) -> str:
     return value.strip().lower()
-
-
-def _required_text(value: str, message: str) -> str:
-    normalized_value = value.strip()
-    if not normalized_value:
-        raise ValueError(message)
-    return normalized_value

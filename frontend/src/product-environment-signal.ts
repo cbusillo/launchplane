@@ -1,4 +1,4 @@
-import type { DataProvenance, ProductEnvironmentDetail, ProductEnvironmentSummary, ProductSiteOverview } from "./generated/openapi.ts";
+import type { DataProvenance, ProductEnvironmentDetail, ProductEnvironmentSummary, ProductIncidentSummary, ProductSiteOverview } from "./generated/openapi.ts";
 
 function expireProvenance(provenance: DataProvenance, now: number): DataProvenance {
   return ["verified", "recorded"].includes(provenance.freshness_status) && Date.parse(provenance.stale_after) < now
@@ -120,22 +120,80 @@ export function publicObservationGap(topology: Topology): string | null {
       observed.days_remaining > 0)) ? null : "Public DNS/TLS observation incomplete";
 }
 
+function readable(value: string | null | undefined): string {
+  return (value ?? "").replaceAll("_", " ").trim();
+}
+
+function productionDeliveryWarning(environment: ProductEnvironmentSummary, incident: ProductIncidentSummary): boolean {
+  return environment.environment === "prod" && incident.failure_layer === "provider" &&
+    incident.severity === "warning";
+}
+
+export function operationalWarningReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
+  return operationalSignal(environment, now).warningReasons;
+}
+
+export function operationalAttentionReasons(environment: ProductEnvironmentSummary | null, now = Date.now()): string[] {
+  return operationalSignal(environment, now).attentionReasons;
+}
+
+function operationalSignal(environment: ProductEnvironmentSummary | null, now: number): {
+  tone: SignalTone; attentionReasons: string[]; warningReasons: string[];
+} {
+  if (!environment) return { tone: "missing", attentionReasons: [], warningReasons: [] };
+  environment = expireEnvironmentEvidence(environment, now);
+  const reasons = new Set<string>();
+  const incidents = environment.health_monitoring.open_incidents;
+  for (const check of environment.health_monitoring.checks.filter(check => check.probe_effective)) {
+    if (check.status === "fail") {
+      reasons.add(check.summary?.trim() || `Health check ${check.name} failed: ${readable(check.failure_code) || "unknown failure"}`);
+    } else if (check.incident_status === "open" && !incidents.some(incident => incident.check_name === check.name)) {
+      reasons.add(`Health check ${check.name} has an open incident`);
+    }
+  }
+  const identity = environment.topology.observed.placement?.runtime_identity_status ?? "unchecked";
+  if (failedRuntimeIdentityStates.has(identity)) reasons.add(`Runtime identity ${identity}`);
+  healthWarnings(environment).filter(warning => warning.severity === "error")
+    .forEach(warning => reasons.add(warning.detail));
+  environment.topology.observed.tls_domains.filter(domain => negativeTlsStates.has(domain.status))
+    .forEach(domain => reasons.add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
+  const runtimeTone = environmentRuntimeTone(environment, now);
+  const deliveryOnly = incidents.length > 0 && reasons.size === 0 && runtimeTone === "verified" &&
+    incidents.every(incident => productionDeliveryWarning(environment, incident));
+  if (!deliveryOnly) {
+    for (const incident of incidents) {
+      const severity = readable(incident.severity) || "Open";
+      reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
+    }
+  }
+  return {
+    tone: reasons.size ? "danger" : deliveryOnly ? "warning" : runtimeTone,
+    attentionReasons: [...reasons],
+    warningReasons: deliveryOnly
+      ? incidents.map(incident => `${readable(incident.failure_code)}; the current production release is healthy`)
+      : [],
+  };
+}
+
+export const deployHoldNotices: Record<NonNullable<ProductEnvironmentSummary["deploy_hold"]>, string> = {
+  isolation_staging: "Deploys held until testing is proven separate from production",
+  staff_testing: "Deploys held while staff test",
+};
+
+export function deployHoldNotice(environment: ProductEnvironmentSummary | null): string | null {
+  return environment?.deploy_hold ? deployHoldNotices[environment.deploy_hold] : null;
+}
+
 export function environmentOperationalTone(environment: ProductEnvironmentSummary | null, now = Date.now()): SignalTone {
-  if (!environment) return "missing";
+  return operationalSignal(environment, now).tone;
+}
+
+function environmentRuntimeTone(environment: ProductEnvironmentSummary, now: number): SignalTone {
   environment = expireEnvironmentEvidence(environment, now);
   const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
   const warnings = healthWarnings(environment);
   const otherWarnings = environment.warnings.filter(detail =>
     !environment.topology.warnings.some(warning => warning.detail === detail));
-  if (
-    environment.health_monitoring.open_incidents.length > 0 ||
-    checks.some(check => check.status === "fail" || check.incident_status === "open") ||
-    failedRuntimeIdentityStates.has(
-      environment.topology.observed.placement?.runtime_identity_status ?? "unchecked",
-    ) ||
-    warnings.some(warning => warning.severity === "error") ||
-    environment.topology.observed.tls_domains.some(domain => negativeTlsStates.has(domain.status))
-  ) return "danger";
   if (!checks.length && environment.provenance.freshness_status === "missing") return "missing";
   if (
     otherWarnings.length || warnings.some(warning => warning.severity !== "info") ||

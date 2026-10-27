@@ -75,9 +75,11 @@ class ActionEffectTests(unittest.TestCase):
             for action, allowed in (
                 ("product_profile.read", True),
                 ("product_config.plan", True),
+                ("preview_lifecycle.cleanup", False),
                 ("ingress_route.audit", True),
                 ("product_profile.health_monitoring.apply", True),
                 ("product_review.withdraw", True),
+                ("repository_inventory.write", True),
                 ("ingress_route.apply", False),
                 ("product_config.apply", False),
                 ("dokploy_target.repair_domain_authority", False),
@@ -231,7 +233,7 @@ class ActionEffectTests(unittest.TestCase):
     def test_driver_read_effects_agree_with_driver_execution_contract(self) -> None:
         for descriptor in list_driver_descriptors():
             for action in descriptor.actions:
-                if ACTION_EFFECTS[action.authz_action] in {"read", "plan"}:
+                if ACTION_EFFECTS[action.authz_action] == "read":
                     with self.subTest(action=action.authz_action):
                         self.assertEqual(action.safety, "read")
                         self.assertFalse(action.writes_records)

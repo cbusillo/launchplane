@@ -93,8 +93,3 @@ def backup_failure_description(code: str) -> str:
     if not code:
         return ""
     return BACKUP_FAILURE_DESCRIPTIONS.get(code, _UNKNOWN_BACKUP_FAILURE)
-
-
-def known_backup_failure_code(code: str) -> str:
-    """``code`` when Launchplane describes it, otherwise the generic failure code."""
-    return code if code in BACKUP_FAILURE_DESCRIPTIONS else BACKUP_FAILED_CODE

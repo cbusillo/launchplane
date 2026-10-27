@@ -2,15 +2,70 @@
 title: Client release review
 ---
 
+An Odoo testing copy published by a native rebuild must match its ordinary
+testing release tuple before candidate review, website-settings preparation or
+promotion source selection. A different served artifact or unavailable native
+publication/custody refuses that selection. The supported next ordinary ship
+retains the copy's data, applies its normal overrides and records the matching
+tuple. This check neither mints a tuple nor changes acceptance. Legacy lanes
+retain their existing qualification path.
+
+## Completed release records
+
+The notification worker posts a short outcome on each saved release record and
+closes its issue once the release's persisted operations have passed, failed or
+been cancelled. The outcome distinguishes a successful rejection rollback from a released
+version or a failed forward release, including one whose automatic recovery
+restored the previous version. Pending, running and reconciliation-required operations
+keep the record open. This also settles older completed releases after a worker
+restart or deployment, independently of the current lane versions or invitation.
+Stopped outcomes name each failed or cancelled step and reuse its recorded,
+redacted failure reason. They separately report the version currently recorded
+in production, identifying the reviewed, previous or another version by commit.
+Unavailable reasons or production evidence are stated explicitly; a past
+successful promotion is never used to infer what production runs now.
+Temporary-hotfix review requests remain open for the Client to decide. Already
+closed records are left alone. The saved decision and original issue body remain
+unchanged. Retries reuse the
+outcome receipt and the invitation's confirmed issue-closure path.
+
 ## Odoo business hours
 
-An admin selects `odoo_business_hours.company_id` in a product profile through
-the existing product-profile API. This selects that company's
-`resource_calendar_id` in Odoo; Launchplane stores no copy of the hours.
+An authorized caller selects the company through the standalone
+`odoo_business_hours` section of `POST /v1/product-config/apply`. First use
+`operation: inspect` in dry-run mode to read the verified prod runtime's permitted
+company IDs, private labels and calendar references. That visibility scope is
+not proof of every company in the database or of which company serves the
+intended business. Select that company deliberately; ambiguous business identity
+needs clarification before configuration. The same read works before live
+activation and does not change production classification.
+
+Then dry-run `operation: set` with explicit `company_id` and
+`expected_calendar_id`, plus an existing `private_endpoint_key` when needed.
+The current company-to-calendar relation must match that assertion. Apply carries
+the returned `plan_digest` as `reviewed_plan_sha256`, the same reviewed request
+and a stable Idempotency-Key. It needs the same caller's stored dry-run and
+unchanged profile/runtime/transport authority. Read the stored policy through
+`GET /v1/product-profiles/{product}`. Installed caller delivery is tracked in
+[codex-skills#2538](https://github.com/cbusillo/codex-skills/issues/2538);
+source capability alone does not prove that caller or deployment is available.
+
+Only `company_id` and the optional endpoint key are stored in the profile.
+`expected_calendar_id` is a configuration assertion, not calendar authority:
+release reads follow that company's current `resource_calendar_id` in Odoo.
+Launchplane stores no copy of the hours.
 The policy applies only when that product's `production_use` is `live`.
 Configure it for staff-facing Odoo products before live activation; website
-products remain unselected. Removing the policy disables scheduling for that
-product. Existing release holds and exact-candidate acceptance still apply.
+products remain unselected. A reviewed `operation: clear` disables scheduling for that
+product without requiring a healthy calendar read. Whole-profile POST cannot
+set, change or clear the policy; an omitted field preserves the stored selection.
+An explicit null is still a policy change and requires the reviewed clear operation.
+Re-onboarding and explicitly acknowledged
+bootstrap/recovery profile CLI upserts preserve the existing policy and refuse
+concurrent profile changes. The CLI preserves profile fields outside its supported
+flags, including nested image and preview settings. Its direct-DB acknowledgement
+does not authorize routine shared or production mutations. Existing release holds
+and exact-candidate acceptance still apply.
 
 For a private Odoo site, `odoo_business_hours.private_endpoint_key` references
 an existing active private health endpoint for the same product's prod lane.
@@ -64,6 +119,49 @@ testing site and the **`Client test notes`** from every merged pull request in t
 commit range at `/ui/owner-review?product=<product>`. No GitHub interaction is
 required to read the checklist, accept it, or request changes.
 
+A product recorded with `public_website: none` needs no testing website URL;
+every other release gate is unchanged.
+
+For generic-web testing lanes, candidate construction reads the inventory's
+referenced deployment record as well as the inventory. That record must pass
+deployment, post-deploy and destination-health qualification and match the
+lane, artifact, source revision, runtime identity and provider target evidence.
+A copied passing inventory cannot qualify a missing, mismatched or failed
+deployment. The physical recipient must also match the current provider-target
+binding. A running or reconciliation-required operation on that testing recipient
+refuses fresh admission, including an expired or receiptless original whose effects
+remain uncertain. A hold on a different retired recipient does not disqualify a
+qualified replacement. These facts are read together under the existing authority
+fence; supported original observation, terminal continuation and retesting remain
+available.
+
+The accepted-release worker and direct promotion path recheck this
+source evidence after backup waits and before admitting the first forward
+production effect, including a recipient cutover resumed before dispatch. The final source check runs
+inside the native first-effect checkpoint, serialized with testing reservation
+insertion, reacquisition and current authority publication. No provider I/O runs
+under that short read/checkpoint boundary.
+Once that accepted production attempt starts, testing may advance to a newer
+qualified build without aborting it. Acceptance and backup checks continue;
+an already started gated rollback keeps its existing recovery authority.
+Recipient resumption uses that original attempt's dispatch evidence. A new
+repromotion must qualify its source again, regardless of older dispatch facts.
+The testing lane must still name the current stored context and instance under
+an applicable generic-web driver; a removed or rebound source cannot keep
+using a cached inventory from its former lane.
+
+Losing qualification before a fresh promotion's first provider effect holds
+that step without changing the saved Client or Director acceptance, including
+`director_standing`. Run the normal supported testing deployment and
+qualification again. A qualified retest of the same accepted artifact and
+revision can retry that unstarted promotion while its verified backup remains
+current, unconsumed and bound to unchanged production authority. A different
+release needs its own acceptance. This does not restart a failed backup or
+replace expired backup evidence; the separate continuation capability is
+tracked in [#4236](https://github.com/cbusillo/launchplane/issues/4236).
+The source check does not impose testing qualification on production baselines
+or replace Odoo's release-tuple contract.
+
 Checklist reads retry an individual GitHub GET once after a transport failure,
 invalid JSON response, timeout, or HTTP 408/500/502/503/504. Authorization,
 not-found, and rate-limit responses are not retried. Each failed attempt logs
@@ -99,40 +197,52 @@ changes the digest and requires review of the displayed checklist. Unaffected
 items omit the false marker, preserving historical digests. Prior preview
 acceptance annotations still do not change the digest.
 
-When the checklist is complete, only the Client's approval remains, and the
-candidate contains a Client-facing change, the
-stable worker posts a release-review request mentioning the recorded Client,
-through the existing Launchplane Delivery App's release-record access. It links
-the Client review page and explains whether Accept starts the gated production
-release or records approval while releases are held. Incomplete or unavailable
-checklists, prelaunch/retired products, standing Director acceptance and candidates
-with a recorded decision receive no request. An engineering-only candidate (no
-included change has Client-facing evidence, defined below) never opens a request,
-creates the requests issue, or notifies the Client: it waits on testing and ships
-with the next release that contains a Client-facing change, under that release's
-single acceptance. When an engineering-only release must reach production sooner,
-such as a security or reliability fix, an admin opens it deliberately from the
-review page's **Ask the Client now** section
-(`POST /v1/release-review/urgent-openings`, `product_profile.write`, bound to the
-checklist digest) with a plain-language reason. The invitation shows that reason
-on a **Why now:** line, kept through later silent updates, and the Client accepts
-it like any other release. Opening records no decision and starts nothing; an
-already open request keeps its original reason without a new notification. The
-page confirms that a request is open; a delivery error asks the admin to reload
-and retry because the request may already have reached the Client. The urgent
-opening control is hidden while a temporary hotfix awaits review or production
-already runs the testing version. Missing access is reported; no grant
-or credential is created. The worker uses Launchplane's own bootstrap
-`LAUNCHPLANE_PUBLIC_URL` for the review link and checks at most every five minutes
-per unchanged profile and lane versions until delivery. After a confirmed receipt,
-the worker remembers delivery in memory until the reminder is due or the candidate
-changes; a replica restart reads the durable receipt again. Once the single
-reminder is delivered, unchanged candidates need no further GitHub reads. A decision on unchanged
-lane versions is settled only while its checklist digest matches the current checklist; each worker
-rechecks that at most every 30 minutes. Edited test notes that change the checklist send the
-Client a fresh request when the candidate contains a Client-facing change. An engineering-only
-candidate still waits on testing; an admin can deliberately reopen it with a current reason
-and checklist digest. This cache never supplies acceptance or bypasses release checks.
+A merge never asks the Client to release. Docs-only changes, engineering changes,
+and Client-accepted changes wait for a decided release. A differing testing
+artifact is not a release decision.
+
+`POST /v1/release-review/requests` records either a `director_request` or a
+`finish_line` decision and uses the same invitation sender. It takes `product`,
+`checklist_digest`, `reason`, `source` (defaults to `director_request`) and
+`decision_reference`. A finish-line request cites its recorded agreement;
+an agent also cites the recorded Director request when using that source.
+People use the existing product-scoped `product_profile.write` permission and
+session CSRF checks. Authenticated Director agents use their standing authority
+for this bounded request record, with its required decision reference; other agents and workflow identities cannot open requests.
+This operation records a request for review, never Client acceptance or permission
+to promote.
+
+The decision is stored in the product record's optional `release_request`
+field, with its actor, reason, source, reference, time, reviewed lane versions,
+checklist digest and preceding Client decision. Compare-and-write preserves
+concurrent profile edits. The general profile upsert preserves an omitted
+request and refuses changed request data; request provenance comes only from the
+bounded request route. Full request metadata is visible to admins and Director
+agents on release-review reads; the Client receives the invitation's reason.
+A retry of the same reviewed release preserves the original decision and reason. The worker sends and maintains invitations only
+from that saved decision. A changed checklist, lane version, repository, Client
+or intervening Client decision cannot renew it. Deciding the next release uses
+this same operation again; merges never record the decision themselves.
+
+The review page's **Ask the Client now** button records a `director_request`
+through this route. The invitation uses the Delivery App's existing release-record
+access and keeps the reason on its **Why now:** line. It links the Client review
+page and explains whether Accept starts the gated production release or records
+approval while releases are held. Opening starts no release. Delivery errors ask
+the admin to reload because the decision is saved and a request may already have
+reached the Client; the worker can continue delivery after a restart. The control
+is hidden while a temporary hotfix awaits review or production already runs the
+testing version. Missing access is reported; no grant or credential is created.
+The public review link uses Launchplane's bootstrap `LAUNCHPLANE_PUBLIC_URL`.
+
+The publisher refuses incomplete or unavailable checklists, prelaunch/retired
+products, standing Director acceptance and candidates with a current Client
+decision. An accepted release sends no new request or reminder while it waits
+on unchanged production/testing versions or has started and still awaits a step
+or reconciliation. The acceptance covers its entire started run, including its
+rollback drill and re-promotion. Publication rechecks the run after looking up
+its destination. Once the run finishes, the worker reconciles invitations for
+that released version without asking the Client again.
 
 The product repository keeps one issue for these requests. Launchplane finds it
 by a standalone `release_request_issue_marker(product)` line in the issue body;
@@ -154,14 +264,23 @@ checked-in destination catalog.
 
 The publisher reconciles an invitation only if the current Client's saved
 acceptance names the exact candidate now in production and its saved release
-run has passed. Equal versions alone, held
-approval, a running/stopped release, and missing evidence cannot complete an
-invitation. The existing invitation is marked released without another mention,
+run has finished: it passed, or it stopped on a failed or cancelled step with
+nothing still running or awaiting reconciliation. A stopped run settles with a
+line saying whether its promotion went live and which step did not complete, and
+that nothing is needed from the Client. It claims only what the run recorded, not
+what production serves now; the release record reports that. A stopped release that never reached
+production keeps its request open, since the Client can Accept again. Equal
+versions alone, held approval, a running release, and missing evidence cannot
+complete an invitation. The existing invitation is marked settled without another mention,
 with the saved acceptance linked and the original text and delivery receipts
 retained in a collapsed history section. Historical mentions are neutralized.
 Completed or replaced comments and their preserved receipts are excluded from
-later open request, replacement and reminder scans, including renewed requests bound to
-the same saved decision; a later review gets its own reminder.
+later open request and replacement scans, including renewed requests bound to
+the same saved decision.
+The latest open request also settles when the Client accepted a newer testing
+version in that same review and that accepted version reached production.
+The saved acceptance, rather than the original request marker, identifies what
+released. Earlier rejected requests remain history.
 The marked issue closes only when testing matches production and there is no
 other outstanding invitation. Older decided invitations remain history;
 newer requests remain pending until the Client decides. A newer testing
@@ -180,14 +299,9 @@ while a newer review waits; a restart recovers
 the durable completion receipts. They do not compile a new checklist for a
 release already completed. No acceptance or release record is
 changed by invitation reconciliation.
-An unavailable historical completion is logged and cannot block publication
-for a newer candidate. Deliberate urgent openings skip historical settlement;
-the routine worker reconciles it separately.
-
 Each request includes `release_invitation_marker(product, candidate)`, derived
-from the candidate's artifact, commit and shared-input identity. The worker
-serializes publication across replicas using the existing release-publication
-lock and checks for that receipt before posting. A retry after a lost response
+from the candidate's artifact, commit and shared-input identity. The publisher serializes deliberate requests across replicas using the existing
+release-publication lock and checks for that receipt before posting. A retry after a lost response
 adopts the existing comment; edits to checklist notes do not notify again.
 Receipt-only adoption is the migration prerequisite for the receipt-trust
 hardening tracked in #3085. The ordinary publisher still accepts its existing
@@ -197,7 +311,7 @@ preparation first, inventory/adopt the existing requests, then deliver the
 separate trust-enforcement source. Marker text alone is not an acceptance.
 
 For an already-sent manual request or a request from a former App, a signed-in
-admin uses `POST /v1/release-review/urgent-openings` with the current
+admin uses `POST /v1/release-review/requests` with the current
 `product`, `checklist_digest`, `reason`, `adopt_issue_number`,
 `adopt_comment_id` and `dry_run: true`. After reviewing that result, the same
 request with `dry_run: false` posts only an App receipt to the selected issue.
@@ -208,8 +322,7 @@ mention, original edit or new invitation is created. Retries discover the same
 adoption marker; the ordinary publisher can then update its own receipt silently.
 An App attestation on a manual destination supplies trust without trusting its
 human author or borrowing another App's credential. Adoption refuses when another
-App-attested destination already exists. The adoption receipt begins a new
-three-day reminder clock; it does not send a reminder on adoption. The original
+App-attested destination already exists. The original
 manual comment is retained unchanged, including after release completion.
 The invitation greets the Client, shows the Client test notes for changes they
 reviewed or were asked to review on preview, and asks them to open the release
@@ -221,22 +334,18 @@ working with these changes so they can go live. This is the site's release
 decision, separate from the one-change preview decision described in
 [Client review](owner-acceptance.md).
 
-Before the Client decides, a candidate containing new Client-facing changes posts
-one new invitation mentioning the Client and naming only the additions. A batch
+On a deliberate publication before the Client decides, a candidate containing
+new Client-facing changes posts one new invitation mentioning the Client and naming only the additions. A batch
 of changes gets one invitation. Client-facing evidence is an existing product
 preview decision or a bound per-PR review request in Launchplane's persisted
 preview feedback; titles, labels and the existence of a preview are not classifiers.
 Valid engineering release-test notes under the
 [shared notes contract](https://github.com/cbusillo/codex-skills/blob/main/skills/github/references/cli-reference.md#ready-handoffs)
-also appear in an existing mixed request or a deliberately opened urgent request.
+also appear in an existing mixed request or a decided release request.
 The Client sees the real test steps and the source change, without the engineering
 directive. Those steps alone never open an automatic request or send a new ping;
-only the preview-review evidence above supplies that notification trigger.
-An addition note still names only the Client-facing additions; the next silent
-update restores the full testing list, including the release-test steps.
-Existing requests refresh missing or corrected release-test steps silently before
-their receipt is reused or a reminder is sent. Adoption receipts record only the
-changes with preview-review evidence, so a later material addition can still notify.
+preview-review evidence classifies additions within a deliberate publication.
+Neither kind of change starts publication from the worker.
 For a batch landing, the stored landing plan binds the batch PR and merge commit
 to its constituent PRs; each constituent uses its own review evidence and its
 section of the batch's Client test notes.
@@ -262,10 +371,7 @@ train membership and current source notes on every read, so correcting the notes
 clears it across worker restarts without a second failure record. It changes no
 checklist digest, completeness, acceptance or release gate. An inconsistent
 batch provenance record still refuses invitation publication without making the
-release checklist unavailable through this diagnostic read. The worker logs the
-same bounded reason at its existing five-minute retry cadence for unchanged
-profile/lane versions; it never logs the PR body or arbitrary exception text.
-Missing lane versions use the same per-product, exception-type diagnostic bound.
+release checklist unavailable through this diagnostic read. Missing lane versions use the same per-product, exception-type diagnostic bound.
 Version reads continue every pass, and a successful pass clears the diagnostic
 backoff so a new failure is visible.
 
@@ -276,19 +382,13 @@ lookup blocked while the next release pass runs within the configured worker
 cadence. Shutdown joins both threads; this is scheduling isolation, not a
 provider latency guarantee. All existing checklist, candidate and release gates
 still apply.
-Durable `release-client-change` receipts record which PRs have been announced in
-this open review. Engineering-only candidates update an already open invitation
-silently, with no new comment or mention. Notes edits and already-announced changes
-do not notify again. The `release-request` marker binds the open review to the
-product, repository, Client identity and latest Client decision. A new candidate
-with a Client-facing change after acceptance or a request for changes opens a new
-review and mentions the Client.
-The worker adopts the newest legacy candidate-marked request created after that
-decision (or the newest one if there has been no decision). Legacy PR links,
-including batch links bound to their constituents, seed the announcement history.
-An adopted manual receipt for the exact current candidate covers its included
-changes even without individual PR links. Bound request evidence compares
-repository names without case sensitivity, as GitHub does.
+The `release-request` marker binds an open review to its product, repository,
+Client identity and latest Client decision. Durable `release-client-change`
+receipts retain which PRs were announced in that review. Legacy PR links,
+including batch links bound to their constituents, seed announcement history on
+a deliberate publication. An adopted receipt for the exact current candidate
+covers its included changes even without individual PR links. Repository names
+compare without case sensitivity, as GitHub does.
 The publisher updates the wording and marks older invitations in the same open
 review replaced once, collapsing the earlier wording and neutralizing its
 mentions while retaining delivery receipts and historical text. Release decision
@@ -298,16 +398,11 @@ in the open review is current. Lost post or replacement responses are recovered 
 cleanup is completed before delivery is cached. Missing timestamps or identities
 refuse publication. No manual live-thread cleanup is needed.
 
-An undecided request gets at most one reminder, no sooner than three days after
-the current invitation's creation. Silent candidate updates do not reset that
-clock or send a reminder during the update. A fresh Client-facing addition resets
-the reminder deadline; the open review still gets at most one reminder. A reminder
-also replaces the older invitation. A separate `release-reminder` marker binds the
-reminder to the open request, so retries and worker restarts cannot send it twice,
-even when another candidate arrives. A decided or incomplete review gets no
-reminder. Markers are delivery
-receipts only and never supply release acceptance. Preserve them during edits;
-deleting a receipt permits another notification.
+A saved, still-current release request gets at most one reminder per open review
+after three days. Its durable receipt prevents duplicate reminders after restarts or lost
+responses. A direct request retry confirms the existing invitation without
+sending a due reminder. This maintains the decided request; it never starts a
+new release request because time passed.
 
 Legacy marker-only requests need the receipt-only admin adoption above before
 App-only discovery is enabled. The following read-only command can identify the
@@ -378,9 +473,8 @@ fail closed. Every successful production promotion writes production's
 environment record from the deployment it made, so the next review starts from
 the version actually running. When the checklist cannot be compiled, the
 response carries one fixed `unavailable_reason` code, shown on the review page
-with the trace ID and logged with it: `testing_lane_missing`,
-`source_control_access_unavailable`, `production_identity_missing`,
-`candidate_identity_missing`, `release_record_missing`, or `github_read_failed`.
+with the trace ID and logged with it. The `ReleaseEvidenceReason` contract in
+[release_review.py](../control_plane/contracts/release_review.py) defines those codes.
 Provider error text is never returned or logged, because it can contain private
 URLs. Missing test notes and commits without a merged pull request are
 visible checklist blockers. The [Client notes contract](owner-acceptance.md)
@@ -555,19 +649,26 @@ The Client's decision route uses the same creation and publication operations,
 so a Client retry cannot upsert a stale unpublished snapshot over the worker's
 publication. An already published winner needs no further source-control lookup.
 Missing notes, missing lane identities or a Client, a held or prelaunch product,
-and a request for changes or admin override on that checklist start nothing. A failed
-release is not automatically retried with another acceptance of the same
-checklist. No agent receives a promotion grant and no product workflow calls
-Launchplane. Enabling this setting is a production-release activation; prepare
+and a request for changes or admin override on that checklist start nothing.
+After a stopped release, a ready candidate receives a fresh standing acceptance,
+including when its checklist is unchanged, once its normal testing deployment
+has qualified it again after the failure. Run the supported testing deployment
+for the same artifact after fixing the failed prerequisite; no new Accept click
+is needed. A persistent failure waits for another passing testing deployment
+instead of creating releases on each worker tick. An explicit step cancellation
+does not automatically start a replacement release of that checklist.
+The fresh decision publishes its own
+release record and starts with a new verified backup; it never replays or changes
+the failed release's operations. Outstanding provider effects and rollback
+reconciliation still block a new release. No agent receives a promotion grant
+and no product workflow calls Launchplane. Enabling this setting is a production-release activation; prepare
 and verify the Client, testing lane and backup policy before applying it.
-Changing unrelated profile metadata does not re-accept or retry that checklist.
-Settled decisions on unchanged lane versions are rechecked against the current checklist at most
-every 30 minutes on each worker.
 Incomplete standing reviews back off for five minutes on each worker; changing
 the profile or lane versions triggers a fresh review. This timer never supplies
 acceptance or replaces the checks immediately before a release effect.
-A Client can explicitly Accept again after a stopped release; a repeated Accept
-while a release is running still returns the original decision.
+A product using explicit Client acceptance still needs its Client to Accept
+again after a stopped release; a repeated Accept while a release is running
+still returns the original decision.
 
 The stable worker advances Client releases on one background thread per replica,
 so a generic-web deploy or rollback wait does not block queued Odoo operations.
@@ -698,20 +799,14 @@ or caching that poll as a completed idempotent response. Repeat the same payload
 and key until it returns `requested`. The Deploy Launchplane workflow does this
 with its existing request action. Each drain poll renews a two-minute pre-effect
 fence; an abandoned drain expires without stranding pending Client releases.
-The drain also has an absolute ten-minute pre-effect budget. Its persisted
-`drain_started_at` and `drain_deadline_at` survive polling and process restart;
-legacy drains anchor those fields to their last stored observation on first
-updated poll. At the deadline the route returns `409/self_deploy_drain_timeout`
-with remaining blocker IDs, expires its admission pause and admits no provider
-write. That request cannot later dispatch; retry after diagnosis with a new
-intent and fresh marker. Product recovery fences are retained. This budget is
-independent of the longer worker stop/provider/health budget after dispatch.
+The bounded deadline, timeout alert and supported fresh-request continuation are
+documented in [operations](operations.md#self-deploy-drain-timeout-and-continuation).
 Final admission rechecks the fence and running operations under the same lock.
 The typed Odoo and shared backup queues also contain workflow-started operations;
 their claims pause at this worker boundary and resume after replacement. Worker
-debug logs report that pause, and the runtime read exposes its cause. Generic-web
-workflow requests outside Client releases retain their existing reservations;
-this boundary covers Client-started generic-web releases and product-event effects.
+debug logs report that pause, and the runtime read exposes its cause. Agent-started
+rehearsals also participate through their route, independently of caller scope.
+Other families keep their existing request and worker-claim boundaries.
 An active provider request returns pollable `dispatch_in_progress`, also without
 caching the intermediate response. Running reservations remain blockers even
 after lease expiry: losing a heartbeat does not prove a provider call ended.
@@ -721,6 +816,17 @@ Its lane reservation and unknown outcome remain held; replacement does not
 authorize replay, retry or retirement. Occupied locks, active leases and effect
 families without that exclusion proof still block, ending in the bounded
 diagnostic refusal if they cannot settle. Terminal records do not block.
+The durable provider runner records an exit receipt after its adapter, heartbeat
+and final settlement attempt have ended. A matching receipt makes a
+`reconcile_required` reservation diagnostic, even while its former lease is
+unexpired. The receipt binds the request fingerprint, attempt and `lease_owner`;
+a retry cannot inherit it. The unknown product outcome and exclusive target
+reservation remain unchanged. This proof survives service restart without
+replaying or settling the product operation. Historical holds and interrupted
+executors without a receipt keep the existing drain behavior.
+Receipt persistence failure logs a bounded diagnostic and preserves the runner's
+original result or exception; missing proof remains a blocker. Completed or
+released reservations do not take the drain lock for a receipt.
 Exact-request replay, expiry reconciliation, provider
 observation, admitted heartbeats and terminal writes remain usable during the
 drain; fresh/retried effects are refused. Matching image/marker startup admits
@@ -762,6 +868,9 @@ the container health checks; failed deployment health starts a new repair fence,
 and already admitted effects must still finish before that replacement.
 Automatic service rollback
 uses the same marker-bound repair, including same-image configuration failures.
+After acquiring its fence, a repair polls that same request's draining fence
+until admitted operations finish; the original superseded marker remains bound
+to the repair intent rather than being compared with the repair's new marker.
 For a cancelled run, manually dispatch Deploy Launchplane with the compatible
 `image_reference`, a new `self_deploy_idempotency_key` and the exact
 `supersedes_deployment_marker` from `runtime.release_drain`; this uses the existing
@@ -844,6 +953,25 @@ accepted checklist, backup, reservation, target and durable promotion outcome.
 Both reads require the existing product-scoped `product_environment.read`
 capability and write no records or provider state.
 
+The product's production **Actions** tab offers **Recover promotion** to a
+signed-in administrator for generic-web products. Enter the original release
+decision, promotion attempt, step and reason, then select **Review recovery**.
+The card reads the stored original before the dry-run and shows its opaque
+operation reference, state, checkpoint, proposed action and reviewed digest.
+Input changes invalidate the review. Confirm the exact review, then select
+**Apply reviewed recovery** once. The existing route checks current authority
+and compares the reviewed digest again; any refusal or uncertain response stops
+Apply. The browser records the attempt before dispatch, retaining the original
+review for separate **Read back original operation**, including after reload.
+An unavailable browser session store blocks dispatch. **Choose another
+operation** permits other recoveries while the original remains unavailable
+for another Apply in that browser session. Returning to that decision, step
+and attempt restores its readback. No automatic retry or readback is sent.
+Completed readback establishes reservation settlement, not release success.
+Session and CSRF values are used only by the existing request transport and
+never rendered or saved with the review. This card does not operate the
+separate production-recipient recovery route or its writer-fence procedure.
+
 Separately reviewed `/apply` requires the same reason, `recovery_reference`,
 `expected_recovery_digest`, and current production-scoped
 `generic_web_prod_promotion.execute` authority. Browser writes use the existing
@@ -874,8 +1002,16 @@ failed health checks are retained as failures. Older interrupted rollback record
 without the saved target evidence remain held. Successful recovery settles the
 existing accepted release step; the release worker can continue any remaining
 steps under that decision's normal acceptance and hold checks.
-The current Dokploy runtime observer proves compose targets only; application
-targets remain held until their provider supports the same exact runtime proof.
+The Dokploy observer supports Compose and Docker-backed application targets.
+Application recovery requires the original saved provider reference, actual
+service image, independently inspected immutable running images and this
+operation's deployment identity, with converged processes and a settled rollout.
+Missing, ambiguous or changed evidence stays fenced; apply observes again and
+requires the reviewed proof to remain current. Automatic rollback uses the
+effective durable deployment's provider reference, while a drill uses its
+captured plan. Compose behavior remains unchanged. Runtime identity proof
+supplies neither volume recovery nor permission to retry an uncertain deployment
+or perform a live recovery operation.
 
 With `promote_with_rollback_drill` it then runs the rollback drill:
 
@@ -888,11 +1024,16 @@ With `promote_with_rollback_drill` it then runs the rollback drill:
 
 The rollback restores the checklist's production version, so the checklist
 recompiles to the digest the Client accepted, and that acceptance covers the
-second promotion and nothing else. A product drills once. After a release's
-drill passes, both `promote_with_rollback_drill` and `director_standing` behave as
-`promote`. Standing acceptance records the same drill sequence until a drill has
-passed for that product; the first promotion alone or a failed drill does not
-qualify it. Each decision retains the release sequence stamped when it was accepted.
+second promotion and nothing else. A product drills once per version of the
+rollback code. After a release's drill passes, both `promote_with_rollback_drill`
+and `director_standing` behave as `promote`. A drill counts only when its
+acceptance was recorded at or after `ROLLBACK_DRILL_CODE_CHANGED_AT` in
+`control_plane/client_release.py`; a change to the rollback or promotion path
+moves that marker forward in the same pull request, so each product's next
+accepted release drills again on the new code. Standing acceptance records the
+same drill sequence until a drill has passed for that product; the first
+promotion alone or a failed drill does not qualify it. Each decision retains the
+release sequence stamped when it was accepted.
 
 Odoo and generic-web products use this same sequence and acceptance checks.
 Generic web redeploys the explicitly selected passing production deployment's
@@ -902,6 +1043,29 @@ same provider fence and durable step reservation as promotion; an unknown
 rollback outcome stops the run for reconciliation. A failed drill or second
 backup never starts re-promotion. Automatic rollback after a failed promotion
 remains permitted even when the Client's forward release authority is revoked.
+
+Generic-web testing qualification admits each fresh forward production attempt.
+After that attempt starts, a newer or failed testing deployment does not interrupt
+its accepted production work. The generic drill's rollback checks Client release
+authority until its own first marked effect. The recipient inverse checks until
+its own replacement-writer pause dispatch; earlier peer parking still requires
+authority. After the relevant boundary, they finish the bound restore or protective
+cleanup under the original lease and target/publication fences, even if a newer
+decision or hold stops fresh work.
+They do not depend on testing. Separate recovery Apply still requires the current
+accepted release and the original operation key. The second backup and promotion
+still require the accepted artifact and source to qualify in testing again. A
+same-artifact qualified retest uses the existing acceptance and checklist digest
+for an unstarted source-held promotion with still-current backup evidence.
+Failed backup operations and expired or consumed captures retain their existing
+fail-closed outcomes; a retest does not recapture or restart them.
+
+A typed source refusal before any promotion provider effect leaves that accepted
+promotion step unstarted.
+The service can retry it after testing qualifies, including after repeated
+refusals. Repeated refusals do not turn an unstarted step into an interrupted
+deployment. An existing or dispatched attempt keeps its original recovery fence;
+a qualified retest cannot stand in for proof that its uncertain effects ended.
 
 Before the first backup, a generic-web drill requires a deployable passing
 production record for the checklist's exact artifact and source commit. A
@@ -916,8 +1080,20 @@ reservations, missing or changed records, failed health and unproven runtime
 stay held; a completed adoption replays. Normal acceptance and hold checks
 still gate the second backup and re-promotion.
 
+A queued generic-web backup keeps its existing saved-pair authority. A new testing
+operation or current-recipient rebind alone does not terminally fail that admitted
+capture. Its worker still rechecks the current decision, Client, release hold,
+production boundary and complete saved testing pair at every stage; failed or
+changed saved qualification still refuses. Fresh backup queueing and promotion
+admission use the stronger current-recipient and unresolved-operation checks.
+An unresolved testing operation reports `candidate_operation_unresolved`, while
+fresh release work waits for it to finish. A waiting accepted release retains its
+merge-train hold while its saved pair and continuation checks still qualify.
+Permanent decision, lane, inverse and drill blockers retain their previous effects
+on that hold; the public release view still explains fresh admission waits.
+
 Each step runs under a `client_release_acceptance` grant that names the
-decision. Before a step is queued, the worker checks all of the following:
+decision. Before a fresh backup or promotion is queued, the worker checks all of the following:
 
 - the decision is still the product's newest one, `accepted`, published, and by
   the product's recorded Client;
@@ -933,12 +1109,37 @@ remains allowed to restore the admitted previous deployment even if acceptance
 is withdrawn. A crash or uncertain provider outcome keeps the provider operation
 fenced for reconciliation rather than repeating the release.
 
-A changed candidate, a newer decision, or a hold therefore stops the release
-before its next step and never falls back to a newer testing build. A failed or
+A changed testing candidate stops the next fresh backup or promotion, and never
+falls back to a newer testing build. A newer decision or a hold stops fresh planned
+release work. Once a generic rollback starts, or a recipient inverse dispatches its
+own replacement-writer pause, its protective restore finishes under its original
+fences. A failed or
 cancelled step stops forward progress; the successful rollback drill never runs
 for a failed promotion. An admin override never starts a release; it stays a hand
 promotion from the Release panel. No automated identity gains a promote right,
 and an automation token still cannot submit a decision.
+
+Accepted-release advancement has its own serial worker loop. An unrelated Odoo
+reconciliation, provider wait or preview sweep cannot delay its next pass. A pass
+that is still running finishes before another begins, and shutdown joins admitted
+promotion or rollback work. Queued Odoo operations still use their normal worker;
+generic-web steps executed by the release pass can continue independently.
+
+The worker also reconciles an already accepted generic-web promotion or rollback
+under that step's original key. It checks the current decision, Client and release
+hold before each scan. Native recipient observers may adopt a proved terminal
+outcome or retry only a positively absent, retry-safe original attempt through
+the durable runner. Standard promotion and drill recovery share the admin
+surface's exact provider inspection and atomic adoption. Unknown outcomes and
+active leases remain held. Reconciliation scans are rate-limited per product;
+they never mint a replacement step or grant a caller promotion access.
+
+During self-deploy drain, original observation and completion adoption remain
+available. Fresh or reacquired provider effects still require drain admission
+and the existing acceptance, source, backup, lease and writer checks. A permanently
+fenced writer attempt is adopted as failed with no writer effect; it is never
+replayed or reported as a successful release. Failed and cancelled steps still
+stop forward progress. Existing reviewed admin recovery remains supported.
 
 For Odoo, promotion admission pins the checklist's production artifact and its
 passing deployment in the operation's initial checkpoint. The worker verifies
@@ -992,6 +1193,35 @@ trace after settling.
 The activity read derives stopped-step events from those same operations, with
 the reason in `summary` and record, operation, decision and available trace IDs
 in `records`. Reading this evidence never retries a stopped release.
+An admin can continue the original accepted generic-web release after a backup
+failed while preparing its capture credentials, using
+`POST /v1/products/{product}/releases/{decision_record_id}/backup-continuation`.
+Send a concrete `reason` first; this review changes no operation or provider.
+Send the same reason with `apply: true` and its `expected_digest` to requeue the
+same first backup operation. The Director's authenticated agent or an existing
+admin applies through `client_release_backup.continue`, a write control covered
+by the Director agent's existing standing authority. Review uses
+`product_environment.read` and reports `apply_authorized` for the current caller.
+No direct capture or promotion permission is supplied and no acceptance is
+recorded. The normal worker performs fresh capture, verification,
+promotion, checks and the decision's rollback drill.
+
+Only a terminal `backup_preflight_unavailable` failure with the exact retained
+`backup_preflight` stage, no result and no cancellation qualifies. Empty progress
+is unknown. Snapshot or archive evidence, changed backup authority, a newer
+decision, held releases, changed source pair, missing rollback baseline or a
+later started step refuses. Apply compares the exact reviewed operation and
+failed backup evidence transactionally. The operation retains its complete prior
+attempt and failed backup record, review digest, authenticated actor, reason and time. Repeating an applied
+review returns its receipt, even after the worker advances, without requeueing.
+Expired or consumed passing captures and stopped promotions need their own
+supported recovery; this control cannot reset them. Inspecting release progress
+alone never retries anything. Refusals return a bounded cause such as
+`backup_capture_outcome_not_proven_absent`, `release_acceptance_no_longer_current`
+or `backup_continuation_review_changed`; unexpected evidence errors retain the
+generic `backup_continuation_held` response. Planning inspects credential metadata
+without decrypting capture values.
+
 `GET /v1/release-review` returns
 `release_on_acceptance` (what the next acceptance would do), `live_site_url`,
 and `release_run`, derived from the step operations, whose ids come from the
@@ -1030,3 +1260,34 @@ file storage reserved for tests and rehearsal. Deployments must migrate the
 database before serving the new routes. The retired change-impact, `product-owner-policy`, and manager-preview evaluators
 and administration routes are deleted. Their historical records remain readable
 and cannot satisfy this release gate.
+
+### Product issue release waits
+
+The planning writer attaches a `release` pointer with `wait` or `create`,
+using `--release-product`, `--release-commit` and `--release-next-action`.
+It binds the first `--waiting-for` / `--ends-when` pair, shows the product and
+source commit in the visible summary and preserves independent waits.
+
+After a passed accepted forward release matches production, the completion
+worker searches for that visible summary in repositories covered by the
+product repository's existing planning authority. Full trusted wait records
+remain authoritative. The required source commit must equal or precede the
+released commit; another product or a later commit stays waiting. Failed runs,
+temporary hotfix decisions and rollback runs do not resolve these waits.
+
+Only the current production decision is rechecked, at thirty-minute intervals;
+a changed production version is checked immediately. Historical release records remain settled. Search indexing is eventual:
+a newly recorded or newly indexed wait is found on a later pass without a cutoff.
+Incomplete search coverage and individual failures remain explicit and retryable;
+independent repositories can progress. The adapter uses the existing GraphQL
+reader and search pagination, without crawling every open issue or comment.
+
+The configured planning token's provider-confirmed bot identity must already be
+a trusted wait author before any comment is posted. Resolution records the
+release evidence and conditional next action, then reuses status reconciliation.
+It does not close the issue or claim production verification. Its marker applies
+only to the previous wait state it observed, preserving a newer recorded wait;
+selected states remain self-contained when copied by claim or status writers.
+A later rollback does not retract a completed release event or its follow-up.
+Update catalog readers and deploy the matching planning-package pin before
+recording release pointers.

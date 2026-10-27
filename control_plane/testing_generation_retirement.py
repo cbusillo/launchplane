@@ -36,7 +36,7 @@ class TestingGenerationRetirementRequest(BaseModel):
     context: str = Field(min_length=1)
     instance: Literal["testing"] = "testing"
     operation_id: str = Field(min_length=1)
-    mode: Literal["dry-run", "apply", "readback"] = "dry-run"
+    mode: Literal["dry-run", "apply", "readback", "inspect"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
 
@@ -68,6 +68,36 @@ class RetainedTestingGeneration(BaseModel):
     retired_at: str
     retired_by: str
     reason: str
+
+
+class RetainedTestingHostnameReservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_kind: Literal["retained_generation", "retained_allocation"]
+    product: str | None
+    context: str
+    operation_id: str
+    target_id: str | None
+    hostname: str
+    custody_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class TestingGenerationCustodyInspection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan: TestingGenerationRetirementPlan
+    reservations: tuple[RetainedTestingHostnameReservation, ...] = Field(max_length=1000)
+    qualification: Literal["not_evaluated"] = "not_evaluated"
+    hostname_release_authorized: Literal[False] = False
+
+
+def inspect_retained_testing_custody(
+    store: "PostgresRecordStore", retained: RetainedTestingGeneration
+) -> TestingGenerationCustodyInspection:
+    return TestingGenerationCustodyInspection(
+        plan=retained.plan,
+        reservations=store.read_retained_testing_hostname_reservations(retained.plan.context),
+    )
 
 
 def retirement_snapshot(

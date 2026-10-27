@@ -21,6 +21,7 @@ from control_plane.contracts.product_retirement import (
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.product_retirement import (
+    _guest_capture_secret_ids,
     BoundProductRetirement,
     DokployProductRetirementAdapter,
     ProductRetirementBlockedError,
@@ -135,6 +136,7 @@ def bind_no_target_retirement(
             for name in sorted(contexts)
             for record in store.list_secret_records(context_name=name)
         ),
+        guest_capture_secret_ids=_guest_capture_secret_ids(store),
         previews=previews,
     )
 

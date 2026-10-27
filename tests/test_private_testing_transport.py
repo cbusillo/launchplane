@@ -417,23 +417,27 @@ class PrivateTestingTransportTests(unittest.TestCase):
 
     def test_foreign_provider_metadata_and_attached_shared_network_are_refused(self) -> None:
         original = deepcopy(self.compose)
+        change: dict[str, Any]
         for change in (
             {"labels": {"dokploy.application.id": "foreign", "dokploy.service": "bridge"}},
             {"labels": {"dokploy.application.id": "fixture-testing", "dokploy.service": "foreign"}},
             {"labels": ["malformed"]},
             {"networks": ["dokploy-network"]},
+            {"networks": {}},
+            {"networks": ["${RECIPIENT_NET:-dokploy-network}"]},
         ):
             self.compose = deepcopy(original)
             self.compose["services"]["bridge"].update(change)
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.plan()
-        self.compose = deepcopy(original)
-        self.compose["networks"] = {
-            "dokploy-network": {"external": True},
-            "foreign": {"external": True},
-        }
-        with self.assertRaises(ValueError):
-            self.plan()
+        for networks in (
+            {"dokploy-network": {"external": True}, "foreign": {"external": True}},
+            {"dokploy-network": {"external": 1}},
+        ):
+            self.compose = deepcopy(original)
+            self.compose["networks"] = networks
+            with self.subTest(networks=networks), self.assertRaises(ValueError):
+                self.plan()
 
     def test_cli_validates_before_http_and_forwards_only_inert_mode(self) -> None:
         path = self.root / "plan.json"

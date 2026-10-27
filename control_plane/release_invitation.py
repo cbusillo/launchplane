@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 from time import monotonic
 from threading import Event
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 from control_plane.client_test_notes import _markdown_lines
@@ -18,6 +19,7 @@ from control_plane.launchplane_github_delivery import resolve_delivery_github_ap
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import (
+    ReleaseChecklist,
     ReleaseReviewDecisionRecord,
     ReleaseReviewStatus,
     ReleaseVersion,
@@ -37,10 +39,13 @@ from control_plane.workflows.launchplane import (
     launchplane_github_token,
 )
 
+if TYPE_CHECKING:
+    from control_plane.client_release import ClientReleaseRunView
 
-# How often a worker confirms that a decision on unchanged lane versions still covers
-# the current checklist. Changed test notes can invalidate it without a new candidate.
-SETTLED_DECISION_RECHECK_SECONDS = 1800
+WEBSITE_SETTINGS_REVIEW_NOTE = (
+    "- Website settings: review the prepared search indexing, analytics and cookie "
+    "consent settings on the release page. They apply only after you accept."
+)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -48,9 +53,19 @@ _LOGGER = logging.getLogger(__name__)
 class ReleaseInvitationBackoff:
     next_reads: dict[str, tuple[str, float]] = field(default_factory=dict)
     delivered: dict[tuple[str, str], tuple[str, float]] = field(default_factory=dict)
-    settled: dict[str, tuple[str, float]] = field(default_factory=dict)
     completions: dict[str, tuple[str, float]] = field(default_factory=dict)
     diagnostics: dict[str, tuple[type[Exception], float]] = field(default_factory=dict)
+    release_records: dict[str, float] = field(default_factory=dict)
+    release_waits: dict[str, tuple[str, float]] = field(default_factory=dict)
+
+
+def _client_release_requests_enabled(profile: LaunchplaneProductProfileRecord) -> bool:
+    return (
+        profile.is_active
+        and profile.production_use != "prelaunch"
+        and profile.release_on_acceptance != "director_standing"
+        and profile.owner.is_set
+    )
 
 
 def advance_release_invitations(
@@ -62,7 +77,6 @@ def advance_release_invitations(
 ) -> None:
     """Cold notification reads never occupy the accepted-release worker."""
     from control_plane.storage.postgres import PostgresRecordStore
-    from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
 
     if not isinstance(store, PostgresRecordStore):
         return
@@ -70,9 +84,46 @@ def advance_release_invitations(
         if stop_event is not None and stop_event.is_set():
             break
         try:
-            publish_release_invitation(
-                store=store, control_plane_root=control_plane_root, profile=profile, backoff=backoff
+            _settle_release_records(
+                store=store,
+                control_plane_root=control_plane_root,
+                profile=profile,
+                backoff=backoff,
+                stop_event=stop_event,
             )
+            from control_plane.release_event_waits import advance_product_release_waits
+
+            try:
+                advance_product_release_waits(
+                    store=store,
+                    control_plane_root=control_plane_root,
+                    profile=profile,
+                    next_checks=backoff.release_waits if backoff is not None else None,
+                    should_stop=stop_event.is_set if stop_event is not None else lambda: False,
+                )
+            except Exception as error:
+                _LOGGER.warning(
+                    "release waits unavailable product=%s error_type=%s",
+                    profile.product,
+                    type(error).__name__,
+                )
+            if _client_release_requests_enabled(profile):
+                if profile.release_request is not None:
+                    publish_release_invitation(
+                        store=store,
+                        control_plane_root=control_plane_root,
+                        profile=profile,
+                        backoff=backoff,
+                    )
+                else:
+                    _settle_completed_invitation(
+                        store=store,
+                        control_plane_root=control_plane_root,
+                        profile=profile,
+                        production=release_version(store=store, profile=profile, instance="prod"),
+                        candidate=release_version(store=store, profile=profile, instance="testing"),
+                        backoff=backoff,
+                    )
         except Exception as error:
             now = monotonic()
             previous, next_log = (
@@ -84,19 +135,11 @@ def advance_release_invitations(
                 continue
             if backoff is not None:
                 backoff.diagnostics[profile.product] = (type(error), now + 300)
-            if isinstance(error, ReleaseInvitationNotesUnavailable):
-                _LOGGER.warning(
-                    "release invitation unavailable product=%s error_type=%s reason=%s",
-                    profile.product,
-                    type(error).__name__,
-                    error,
-                )
-            else:
-                _LOGGER.warning(
-                    "release invitation unavailable product=%s error_type=%s",
-                    profile.product,
-                    type(error).__name__,
-                )
+            _LOGGER.warning(
+                "release invitation unavailable product=%s error_type=%s",
+                profile.product,
+                type(error).__name__,
+            )
         else:
             if backoff is not None:
                 backoff.diagnostics.pop(profile.product, None)
@@ -135,6 +178,18 @@ def _timestamp(value: object) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _settings_invitation_key(checklist: ReleaseChecklist) -> str:
+    if (
+        checklist.website_settings is None
+        or checklist.candidate.website_settings_sha256
+        == checklist.production.website_settings_sha256
+    ):
+        return ""
+    return hashlib.sha256(
+        f"website-settings:{checklist.candidate.website_settings_sha256}".encode()
+    ).hexdigest()
+
+
 def _change_link(change: InvitationChange) -> str:
     # Keep Client instructions; name constituents instead of their batch PR.
     item = change.item
@@ -148,17 +203,20 @@ def _change_link(change: InvitationChange) -> str:
 
 
 def _announced_changes(
-    request: dict[str, object] | None, changes: dict[str, InvitationChange], candidate_marker: str
+    request: dict[str, object] | None,
+    changes: dict[str, InvitationChange],
+    candidate_markers: set[str],
+    settings_key: str = "",
 ) -> set[str]:
     if request is None:
         return set()
     lines = _comment_lines(request)
-    if candidate_marker in lines and not any(
+    if candidate_markers.intersection(lines) and not any(
         line.startswith("<!-- launchplane:release-request:") for line in lines
     ):
         # A manually adopted receipt for this exact candidate already requested
         # every included change, even when its prose has no individual PR links.
-        return set(changes)
+        return set(changes) | ({settings_key} if settings_key else set())
     keys = {
         match[1]
         for line in lines
@@ -325,6 +383,33 @@ def _request_marker(
     return f"<!-- launchplane:release-request:{key} -->"
 
 
+def _accepted_release_in_progress(
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord | None,
+    production: ReleaseVersion,
+    candidate: ReleaseVersion,
+) -> bool:
+    if decision is None or decision.decision != "accepted" or not decision.release_start:
+        return False
+    from control_plane.client_release import read_client_release_run
+
+    run = read_client_release_run(store=store, profile=profile, decision=decision)
+    return run is not None and (
+        any(step.status in {"pending", "running", "reconciliation_required"} for step in run.steps)
+        or (
+            run.state == "waiting"
+            and (
+                any(step.status == "pass" for step in run.steps)
+                or (
+                    production == decision.checklist.production
+                    and candidate == decision.checklist.candidate
+                )
+            )
+        )
+    )
+
+
 def _open_request(
     comments: list[dict[str, object]],
     marker: str,
@@ -364,14 +449,25 @@ def release_request_issue_marker(product: str) -> str:
 
 
 def release_invitation_marker(product: str, candidate: ReleaseVersion) -> str:
-    identity = (
+    identity: tuple[str, ...] = (
         product,
         candidate.artifact_id,
         candidate.source_commit,
         candidate.shared_addons_digest,
     )
+    if candidate.website_settings_sha256:
+        identity += (candidate.website_settings_sha256,)
     key = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
     return f"<!-- launchplane:release-invitation:{key} -->"
+
+
+def _release_invitation_markers(product: str, candidate: ReleaseVersion) -> set[str]:
+    return {
+        release_invitation_marker(product, candidate),
+        release_invitation_marker(
+            product, candidate.model_copy(update={"website_settings_sha256": ""})
+        ),
+    }
 
 
 def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord) -> bool:
@@ -386,7 +482,7 @@ def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord
         and checklist.repository == profile.repository
         and checklist.owner_github_id == profile.owner.github_id
         and checklist.production != checklist.candidate
-        and not checklist_blockers(checklist)
+        and not checklist_blockers(checklist, profile=profile)
         and review.blockers == (CLIENT_APPROVAL_REQUIRED,)
     )
 
@@ -438,6 +534,214 @@ def _pages(
     raise ValueError("Release invitation lookup exceeds the supported size.")
 
 
+def _close_issue(*, path: str, token: str, number: int) -> None:
+    result = github_api_request(path=path, token=token, method="PATCH", body={"state": "closed"})
+    if (
+        not isinstance(result, dict)
+        or result.get("number") != number
+        or result.get("state") != "closed"
+    ):
+        raise ValueError("Release issue closure was not confirmed.")
+
+
+def _finished(run: "ClientReleaseRunView") -> bool:
+    if run.state == "passed":
+        return True
+    return (
+        run.state == "stopped"
+        and any(step.status in {"fail", "cancelled"} for step in run.steps)
+        and not any(
+            step.status in {"pending", "running", "reconciliation_required"} for step in run.steps
+        )
+    )
+
+
+def _settled_invitation_line(run: "ClientReleaseRunView") -> str:
+    from control_plane.client_release import _DRILL_STEPS
+
+    if run.state == "passed":
+        return (
+            "**Released** — this version reached production through its accepted release. "
+            "No action is needed on this invitation."
+        )
+    drill_steps = {step.name for step in _DRILL_STEPS}
+    went_live = any(step.kind == "promote" and step.status == "pass" for step in run.steps)
+    if any(step.status in {"fail", "cancelled"} and step.step in drill_steps for step in run.steps):
+        stopped = "A follow-up safety check (the rollback drill) did not complete"
+    else:
+        stopped = "A release step did not complete"
+    went = "It went live in production. " if went_live else ""
+    return f"**Accepted.** {went}{stopped} and is being fixed; nothing is needed from you."
+
+
+def _settle_release_records(
+    *,
+    store: ReleaseReviewStore,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    backoff: ReleaseInvitationBackoff | None,
+    stop_event: Event | None,
+) -> None:
+    for decision in store.list_release_review_decision_records(product=profile.product):
+        if stop_event is not None and stop_event.is_set():
+            break
+        if (
+            decision.decision == "temporary_hotfix"
+            or not decision.release_start
+            or not decision.release_issue_url
+            or decision.checklist.repository != profile.repository
+        ):
+            continue
+        if backoff is not None:
+            if monotonic() < backoff.release_records.get(decision.record_id, 0):
+                continue
+            backoff.release_records[decision.record_id] = monotonic() + 300
+        try:
+            settled = _settle_release_record(
+                store=store,
+                control_plane_root=control_plane_root,
+                profile=profile,
+                decision=decision,
+            )
+        except Exception as error:
+            _LOGGER.warning(
+                "release record completion unavailable product=%s record=%s error_type=%s",
+                profile.product,
+                decision.record_id,
+                type(error).__name__,
+            )
+            continue
+        if settled and backoff is not None:
+            backoff.release_records[decision.record_id] = float("inf")
+
+
+def _stopped_release_outcome(
+    *,
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    run: "ClientReleaseRunView",
+) -> str:
+    names = {
+        "backup": "verified backup",
+        "promote": "deployment of the reviewed version",
+        "rollback": "rollback safety check"
+        if run.rollback_drill
+        else "rollback to the last accepted release",
+        "recovery": "automatic recovery",
+    }
+    failures = [
+        f"The {names[step.kind]} step ({step.step}) stopped: "
+        + (step.failure.reason if step.failure else "No failure reason was recorded for this step.")
+        for step in run.steps
+        if step.status in {"fail", "cancelled"}
+    ]
+    try:
+        production = release_version(store=store, profile=profile, instance="prod")
+    except (FileNotFoundError, ValueError):
+        live = "The version currently recorded in production could not be verified."
+    else:
+        version = (
+            ("rejected" if decision.release_start == "rollback" else "reviewed")
+            if production == decision.checklist.candidate
+            else "previous"
+            if production == decision.checklist.production
+            else "another"
+        )
+        live = (
+            f"Production is currently recorded as running the {version} version "
+            f"({production.source_commit[:7]})."
+        )
+    return "\n\n".join([*failures, live]).replace("@", "@\u200b")
+
+
+def _settle_release_record(
+    *,
+    store: ReleaseReviewStore,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+) -> bool:
+    from control_plane.client_release import read_client_release_run
+    from control_plane.release_review_record import release_decision_marker
+
+    with store.release_review_publication_lock(record_id=decision.record_id):
+        run = read_client_release_run(store=store, profile=profile, decision=decision)
+        if run is None or run.decision_record_id != decision.record_id or not _finished(run):
+            return False
+        outcome = (
+            ("Rolled back" if decision.release_start == "rollback" else "Released")
+            if run.state == "passed"
+            else "Failed"
+        )
+        match = re.fullmatch(
+            rf"https://github\.com/{re.escape(profile.repository)}/issues/([1-9][0-9]*)",
+            decision.release_issue_url,
+        )
+        if match is None:
+            raise ValueError("Release record destination does not match its repository.")
+        number = int(match[1])
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        with launchplane_github_token(
+            token_resolver=resolve_launchplane_github_token,
+            api_request=github_api_request,
+            control_plane_root=control_plane_root,
+            context_name=lane.context,
+            repository=profile.repository,
+            purpose="release_record",
+        ) as token:
+            if not token:
+                raise ValueError("Release record source-control access is unavailable.")
+            path = f"/repos/{quote(profile.repository)}/issues/{number}"
+            issue = github_api_request(path=path, token=token)
+            if (
+                not isinstance(issue, dict)
+                or issue.get("number") != number
+                or "pull_request" in issue
+                or not isinstance(issue.get("body"), str)
+                or _comment_lines(issue)[:1] != [release_decision_marker(decision.record_id)]
+            ):
+                raise ValueError("Release record identity was not confirmed.")
+            if issue.get("state") == "closed":
+                return True
+            if (
+                store.read_product_profile_record(profile.product) != profile
+                or store.read_release_review_decision_record(
+                    product=profile.product, record_id=decision.record_id
+                )
+                != decision
+                or read_client_release_run(store=store, profile=profile, decision=decision) != run
+            ):
+                return False
+            marker = f"<!-- launchplane:release-outcome:{decision.record_id} -->"
+            comments = _pages(
+                f"{path}/comments",
+                token,
+                app_id=resolve_delivery_github_app_id(control_plane_root=control_plane_root),
+                marker=marker,
+            )
+            if not any(marker in _receipt_lines(comment) for comment in comments):
+                details = (
+                    "\n\n"
+                    + _stopped_release_outcome(
+                        store=store, profile=profile, decision=decision, run=run
+                    )
+                    if run.state == "stopped"
+                    else ""
+                )
+                result = github_api_request(
+                    path=f"{path}/comments",
+                    token=token,
+                    method="POST",
+                    body={"body": f"{marker}\n{outcome}: this release has finished.{details}\n"},
+                )
+                if not isinstance(result, dict) or not isinstance(result.get("id"), int):
+                    raise ValueError("Release outcome publication was not confirmed.")
+            _close_issue(path=path, token=token, number=number)
+            return True
+    return False
+
+
 def _settle_completed_invitation(
     *,
     store: ReleaseReviewStore,
@@ -470,12 +774,12 @@ def _settle_completed_invitation(
         ):
             return
 
-        def completed() -> bool:
+        def completed() -> "ClientReleaseRunView | None":
             run = read_client_release_run(store=store, profile=profile, decision=decision)
-            return bool(
+            if (
                 run is not None
                 and run.decision_record_id == decision.record_id
-                and run.state == "passed"
+                and _finished(run)
                 and store.read_product_profile_record(profile.product) == profile
                 and _last_client_decision(store, profile) == last_decision
                 and store.read_release_review_decision_record(
@@ -484,9 +788,11 @@ def _settle_completed_invitation(
                 == decision
                 and release_version(store=store, profile=profile, instance="prod") == production
                 and release_version(store=store, profile=profile, instance="testing") == candidate
-            )
+            ):
+                return run
+            return None
 
-        if not completed():
+        if completed() is None:
             return
         previous_decision = _last_client_decision(store, profile, before=decision)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
@@ -522,6 +828,7 @@ def _settle_completed_invitation(
             )
             comments = [comment for comment in comments if comment.get("id") not in preserved]
             marker = release_invitation_marker(profile.product, production)
+            candidate_markers = _release_invitation_markers(profile.product, production)
             completion = (
                 COMPLETED_PREFIX + hashlib.sha256(decision.record_id.encode()).hexdigest() + " -->"
             )
@@ -534,7 +841,7 @@ def _settle_completed_invitation(
                 # without another invitation. Settle only its newest open receipt.
                 for comment in reversed(comments):
                     lines = _comment_lines(comment)
-                    if marker not in lines or REPLACED_MARKER in lines:
+                    if not candidate_markers.intersection(lines) or REPLACED_MARKER in lines:
                         continue
                     if any(line.startswith(COMPLETED_PREFIX) for line in lines):
                         continue
@@ -560,7 +867,10 @@ def _settle_completed_invitation(
                 ):
                     continue
                 created_at = _timestamp(comment.get("created_at"))
-                if marker not in lines or (
+                reviewed_request = _request_marker(
+                    profile, previous_decision
+                ) in lines and created_at <= _timestamp(decision.decided_at)
+                if not (candidate_markers.intersection(lines) or reviewed_request) or (
                     previous_decision is not None
                     and created_at <= _timestamp(previous_decision.decided_at)
                     and comment is not continued_request
@@ -569,7 +879,8 @@ def _settle_completed_invitation(
                     if last_decision is None or created_at > _timestamp(last_decision.decided_at):
                         pending = True
                     continue
-                if not completed():
+                run = completed()
+                if run is None:
                     return
                 comment_id = comment.get("id")
                 if not isinstance(comment_id, int) or comment_id < 1:
@@ -578,8 +889,7 @@ def _settle_completed_invitation(
                 # Neutralize historical mentions instead of notifying the Client again.
                 body = (
                     f"{completion}\n{marker}\n\n"
-                    "**Released** — this version reached production through its accepted release. "
-                    "No action is needed on this invitation.\n\n"
+                    f"{_settled_invitation_line(run)}\n\n"
                     f"[Saved acceptance]({decision.release_issue_url})\n\n"
                     "<details><summary>Original invitation and delivery receipts</summary>\n\n"
                     + "\n".join(lines).replace("@", "@\u200b")
@@ -595,21 +905,10 @@ def _settle_completed_invitation(
                     raise ValueError("Release invitation completion was not confirmed.")
                 matched = True
             if matched and not pending and production == candidate:
-                if not completed():
+                if completed() is None:
                     return
                 if issues[0].get("state") != "closed":
-                    result = github_api_request(
-                        path=f"{path}/{number}",
-                        token=token,
-                        method="PATCH",
-                        body={"state": "closed"},
-                    )
-                    if (
-                        not isinstance(result, dict)
-                        or result.get("number") != number
-                        or result.get("state") != "closed"
-                    ):
-                        raise ValueError("Release invitation issue closure was not confirmed.")
+                    _close_issue(path=f"{path}/{number}", token=token, number=number)
             # Nothing remains to settle for this production snapshot, even when
             # a different candidate waits for its own decision.
             if backoff is not None:
@@ -622,28 +921,14 @@ def publish_release_invitation(
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
     backoff: ReleaseInvitationBackoff | None = None,
-    urgent_reason: str = "",
-    urgent_checklist_digest: str = "",
+    send_reminder: bool = True,
 ) -> bool:
-    """Keep the Client's release request current; return whether one is open.
-
-    Only a Client-facing change opens a request. An engineering-only candidate
-    waits for the next Client-facing release unless an admin deliberately opens
-    it with ``urgent_reason`` for the exact checklist the admin reviewed
-    (``urgent_checklist_digest``). The Client still has to accept it either way.
-    """
     origin = launchplane_public_origin_from_env()
-    if (
-        not origin
-        or not profile.is_active
-        or profile.production_use == "prelaunch"
-        or profile.release_on_acceptance == "director_standing"
-        or not profile.owner.is_set
-    ):
+    if not origin or not _client_release_requests_enabled(profile):
         return False
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
-    if not urgent_reason:
+    if send_reminder:
         try:
             _settle_completed_invitation(
                 store=store,
@@ -663,14 +948,28 @@ def publish_release_invitation(
                 profile.product,
                 type(error).__name__,
             )
-    if production == candidate:
+    request_decision = profile.release_request
+    if request_decision is None or production == candidate:
         return False
     last_decision = _last_client_decision(store, profile)
+    if (
+        request_decision.product != profile.product
+        or request_decision.repository != profile.repository
+        or request_decision.owner_github_id != profile.owner.github_id
+        or request_decision.production != production
+        or request_decision.candidate != candidate
+        or request_decision.client_decision_record_id
+        != (last_decision.record_id if last_decision else "")
+    ):
+        return False
     request_marker = _request_marker(profile, last_decision)
+    decision_marker = f"<!-- launchplane:release-request-decision:{request_decision.record_id} -->"
     receipt = (
         profile.product,
         profile.repository,
-        request_marker + release_invitation_marker(profile.product, candidate),
+        request_marker
+        + request_decision.record_id
+        + release_invitation_marker(profile.product, candidate),
     )
     receipt_due = False
     if backoff is not None:
@@ -696,40 +995,8 @@ def publish_release_invitation(
         if not receipt_due and previous_fingerprint == fingerprint and monotonic() < next_read:
             return False
         backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
-    # A person already decided about these versions. The decision still settles the
-    # review only while it covers the current checklist; edited test notes change the
-    # checklist without a new candidate, and the Client then needs a fresh request.
-    settled = next(
-        (
-            decision
-            for decision in store.list_release_review_decision_records(
-                product=profile.product, limit=1
-            )
-            if decision.checklist.production == production
-            and decision.checklist.candidate == candidate
-            and decision.checklist.repository == profile.repository
-            and decision.checklist.owner_github_id == profile.owner.github_id
-        ),
-        None,
-    )
-    if settled is not None:
-        if backoff is not None:
-            checked, next_check = backoff.settled.get(profile.product, ("", 0))
-            if checked == settled.record_id and monotonic() < next_check:
-                return False
-        current_review = current_release_review(
-            control_plane_root=control_plane_root, record_store=store, profile=profile
-        )
-        if current_review.unavailable_reason is not None or current_review.checklist_digest in (
-            "",
-            settled.checklist_digest,
-        ):
-            if backoff is not None:
-                backoff.settled[profile.product] = (
-                    settled.record_id,
-                    monotonic() + SETTLED_DECISION_RECHECK_SECONDS,
-                )
-            return False
+    if _accepted_release_in_progress(store, profile, last_decision, production, candidate):
+        return False
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}", profile.owner.github_login):
         raise ValueError("Release invitation requires a GitHub login.")
     # Product-wide serialization also prevents competing candidates creating
@@ -744,13 +1011,19 @@ def publish_release_invitation(
         if not _ready(review, profile):
             return False
         # The admin's reason applies only to the checklist they reviewed.
-        if urgent_reason and review.checklist_digest != urgent_checklist_digest:
+        if review.checklist_digest != request_decision.checklist_digest:
             return False
         assert review.checklist is not None
         client_changes = client_invitation_changes(store, profile, review.checklist)
         notification_changes = {
             key: change for key, change in client_changes.items() if change.client_review_requested
         }
+        settings_key = _settings_invitation_key(review.checklist)
+        change_links = {key: _change_link(change) for key, change in client_changes.items()}
+        notification_links = {key: change_links[key] for key in notification_changes}
+        if settings_key:
+            change_links[settings_key] = WEBSITE_SETTINGS_REVIEW_NOTE
+            notification_links[settings_key] = change_links[settings_key]
         marker = release_invitation_marker(profile.product, review.checklist.candidate)
         issue_marker = release_request_issue_marker(profile.product)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
@@ -774,8 +1047,6 @@ def publish_release_invitation(
             if len(issues) > 1:
                 raise ValueError("Release invitation destination is ambiguous.")
             if not issues:
-                if not notification_changes and not urgent_reason:
-                    return False
                 created = github_api_request(
                     path=path,
                     token=token,
@@ -798,10 +1069,6 @@ def publish_release_invitation(
                 and not any(line.startswith(COMPLETED_PREFIX) for line in _comment_lines(comment))
             ]
             request = _open_request(comments, request_marker, last_decision)
-            # Engineering-only changes never open a release review on their own;
-            # they ride with the next Client-facing release or an urgent opening.
-            if request is None and not notification_changes and not urgent_reason:
-                return False
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
             reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
             # Recompile after destination lookup: a concurrent acceptance or testing
@@ -815,6 +1082,13 @@ def publish_release_invitation(
                 not _ready(latest, profile)
                 or latest.checklist_digest != review.checklist_digest
                 or _last_client_decision(store, profile) != last_decision
+                or _accepted_release_in_progress(
+                    store,
+                    profile,
+                    last_decision,
+                    review.checklist.production,
+                    review.checklist.candidate,
+                )
             ):
                 return False
             if issues[0].get("state") == "closed":
@@ -844,10 +1118,13 @@ def publish_release_invitation(
                 if request
                 else _now() + timedelta(days=3)
             )
-            announced = _announced_changes(request, notification_changes, marker)
-            added = {
-                key: item for key, item in notification_changes.items() if key not in announced
-            }
+            announced = _announced_changes(
+                request,
+                notification_changes,
+                _release_invitation_markers(profile.product, review.checklist.candidate),
+                settings_key,
+            )
+            added = {key: link for key, link in notification_links.items() if key not in announced}
             # A matching candidate receipt still needs the one-time migration
             # to plain wording and cleanup of older duplicate invitations.
             formatted = (
@@ -858,14 +1135,18 @@ def publish_release_invitation(
             # An unchanged candidate can still have a request from before release
             # steps were displayed, or corrected notes on its source PR. Refresh
             # that content silently before trusting or reminding from the receipt.
-            release_steps_changed = request is not None and any(
-                _change_link(change) not in _comment_lines(request)
-                for change in client_changes.values()
-                if change.release_test_notes
+            release_steps_changed = request is not None and (
+                (WEBSITE_SETTINGS_REVIEW_NOTE in _comment_lines(request)) != bool(settings_key)
+                or any(
+                    link not in _comment_lines(request)
+                    for key, link in change_links.items()
+                    if key == settings_key or client_changes[key].release_test_notes
+                )
             )
             if (
                 request
                 and marker in _comment_lines(request)
+                and decision_marker in _comment_lines(request)
                 and formatted
                 and not added
                 and not release_steps_changed
@@ -879,9 +1160,7 @@ def publish_release_invitation(
                     last_decision=last_decision,
                     control_plane_root=control_plane_root,
                 )
-                # An explicit urgent-open retry only confirms the existing request;
-                # routine workers retain the scheduled reminder behavior.
-                if reminded or _now() < due or urgent_reason:
+                if reminded or _now() < due or not send_reminder:
                     _remember_delivery(backoff, receipt, due, reminded)
                     return True
                 # One durable reminder per open request. A lost response is
@@ -908,10 +1187,7 @@ def publish_release_invitation(
                 _remember_delivery(backoff, receipt, due, True)
                 return True
             notify = not request or bool(added)
-            changes = [
-                _change_link(change)
-                for change in (added if request and added else client_changes).values()
-            ]
+            changes = list((added if request and added else change_links).values())
             if not changes:
                 changes = ["- Engineering updates only; no new Client change needs checking."]
             client = f"@{profile.owner.github_login}" if notify else profile.owner.github_login
@@ -920,7 +1196,7 @@ def publish_release_invitation(
             )
             receipts = "\n".join(
                 f"<!-- launchplane:release-client-change:{key} -->"
-                for key in sorted(announced | notification_changes.keys())
+                for key in sorted(announced | notification_links.keys())
             )
             if reminded:
                 receipts += f"\n{reminder_marker}"
@@ -941,23 +1217,21 @@ def publish_release_invitation(
                         )
                     )
                 )
-            # The admin's reason for opening early stays on the request through
-            # later silent updates; neutralize mentions in it like Client notes.
-            why_now = (
-                next((line for line in _comment_lines(request) if line.startswith(WHY_NOW)), "")
-                if request
-                else ""
-            )
-            if not request and urgent_reason:
-                why_now = WHY_NOW + " ".join(urgent_reason.split()).replace("@", "@\u200b")
+            why_now = WHY_NOW + " ".join(request_decision.reason.split()).replace("@", "@\u200b")
             display_time = _display_time()
             action = (
                 "check the changes on the testing site, then press **Accept** or **Request changes**."
                 if client_changes
                 else "there is nothing new to test. Read the release summary, then press **Accept** or **Request changes**."
             )
+            if settings_key:
+                action = (
+                    "review the prepared website settings on the release page"
+                    + (" and check the changes on the testing site" if client_changes else "")
+                    + ", then press **Accept** or **Request changes**."
+                )
             body = (
-                f"{request_marker}\n{marker}\n{receipts}\n\n"
+                f"{request_marker}\n{decision_marker}\n{marker}\n{receipts}\n\n"
                 "**Release review** — is the site working with these changes, so they can go live?\n\n"
                 f"Hi {client},\n\n"
                 + (f"{why_now}\n\n" if why_now else "")
@@ -1032,6 +1306,11 @@ def adopt_release_invitation(
             + " -->"
         )
         changes = client_invitation_changes(store, profile, review.checklist)
+        notification_keys = {
+            key for key, change in changes.items() if change.client_review_requested
+        }
+        if settings_key := _settings_invitation_key(review.checklist):
+            notification_keys.add(settings_key)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
         with launchplane_github_token(
             token_resolver=resolve_launchplane_github_token,
@@ -1056,7 +1335,9 @@ def adopt_release_invitation(
                 or original.get("id") != comment_id
                 or original.get("issue_url") != f"https://api.github.com{path}/{issue_number}"
                 or issue_marker not in _receipt_lines(issue)
-                or candidate_marker not in _receipt_lines(original)
+                or not _release_invitation_markers(
+                    profile.product, review.checklist.candidate
+                ).intersection(_receipt_lines(original))
                 or REPLACED_MARKER in _receipt_lines(original)
                 or any(line.startswith(COMPLETED_PREFIX) for line in _receipt_lines(original))
                 or (
@@ -1100,8 +1381,7 @@ def adopt_release_invitation(
                     ADOPTED_ORIGINAL_PREFIX + str(comment_id) + " -->",
                     *(
                         f"<!-- launchplane:release-client-change:{key} -->"
-                        for key, change in sorted(changes.items())
-                        if change.client_review_requested
+                        for key in sorted(notification_keys)
                     ),
                     "",
                     "Existing release request adopted; no new Client action or decision.",

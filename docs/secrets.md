@@ -9,6 +9,11 @@ title: Secrets
 
 ## Client credential input
 
+The same form also accepts the Director's service-owned artifact scan credential
+at the [artifact credential path](artifact-security.md#verified-artifact-scanning).
+That fixed service request writes the managed-secret bindings directly; the
+product-requested Client flow below remains a submission for admin application.
+
 An admin can request a credential by setting `owner_input` on one managed-secret
 requirement in the stored product profile. It contains a human-readable `label` and
 `instructions` and requires an explicit product context. An optional instance
@@ -177,7 +182,10 @@ uv run python scripts/reconcile-odoo-secret-references.py apply <same arguments>
 
 Dry-run saves the value-free review outside the repository. Apply sends that
 review's keys and digest with the lane confirmation, then reads the plan again
-and passes only when every entry is `already_agrees`.
+and passes only when the readback is nonempty, contains exactly the reviewed
+key set and every entry is `already_agrees`. Empty, missing or extra keys leave
+the correction `accepted_unverified`; preserve its trace and inspect the lane
+before considering another apply.
 
 Use the service route
 `/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile`:
@@ -247,7 +255,8 @@ secret, private-key input or process-wide trust change. The receiver's CA bundle
 and real issuer/key provisioning remain the custodian's reviewed steps.
 
 The [testing local-consumer path](testing-local-consumer.md) delivers one exact
-testing bridge binding through a human-reviewed recipient-encrypted envelope.
+testing bridge binding through a reviewed recipient-encrypted envelope issued by
+an administrator or an agent with existing exact-testing-lane authority.
 It exposes no plaintext read and creates no client service credential or grant.
 The local receiver verifies current custody and actual testing-server
 authentication before creating a separate private token file.
@@ -336,6 +345,13 @@ authentication before creating a separate private token file.
   env. Missing managed bindings are a hard error.
 - Secret status surfaces return metadata only. Launchplane does not expose
   routine plaintext read commands or service endpoints.
+  `GET /v1/secrets/{secret_id}` and context/instance secret inventories expose
+  `current_version_value_origin` from the exact current immutable version,
+  without decryption. A null value means origin is unknown or the current
+  version is missing; a missing version also has an empty current-version
+  timestamp. Neither mutable binding metadata nor another version certifies
+  origin. This diagnostic does not qualify external-resource isolation or change
+  observer/deploy gates.
 - Credentials that only Launchplane's own jobs use for one lane, such as the
   production backup and VeriReel Proxmox SSH keys, live in the
   `launchplane_worker` integration, stored for exactly that lane. They are not
@@ -530,11 +546,11 @@ decryption key state denies the reveal or resolution.
 - Runtime key-safety gates classify managed secret bindings by binding key and
   Launchplane metadata, not by plaintext value. The initial classification
   contract is `prod_only`, `testing`, `preview`, `non_prod`, and `shared_safe`.
-- Deploy-time runtime key-safety reconciliation accepts admin-supplied
-  `LAUNCHPLANE_RUNTIME_KEY_SAFETY_RULES_JSON` metadata for runtime secret
-  bindings that need Launchplane-managed storage. It writes binding key,
-  `secret_class`, and target-scope metadata only; admins still supply or
-  rotate secret values through product-config managed secret writes.
+- The active DB policy record is the only source of key-safety rules. Deploys
+  do not import rules. Admins change a rule through
+  `POST /v1/runtime-key-safety/policies/apply`, or declare a lane secret's class
+  in product-config; secret values still go through product-config managed
+  secret writes.
 - Shared and production runtime mutations must execute through the deployed
   Launchplane service API or a Launchplane UI path backed by that API. Do not use
   local CLI live-target mutation commands from arbitrary checkouts as a fallback
@@ -667,11 +683,9 @@ decryption key state denies the reveal or resolution.
   records with `launchplane runtime-key-safety list-policies`, and run a
   metadata-only check with `launchplane runtime-key-safety evaluate` before a
   workflow mutates runtime keys.
-- The Launchplane deploy workflow may reconcile known runtime binding
-  classifications through `POST /v1/runtime-key-safety/policies/apply`. That
-  service path is OIDC-authenticated, DB-backed, additive by binding key, and
-  carries only binding metadata such as class, context, and instance scope. It
-  must not carry secret plaintext or provider env dumps.
+- `POST /v1/runtime-key-safety/policies/apply` is DB-backed, additive by
+  binding key, and carries only binding metadata such as class, context, and
+  instance scope. It must not carry secret plaintext or provider env dumps.
 - Evaluation reads only Launchplane managed secret bindings for the requested
   context and instance. If no active policy record exists, the gate fails closed
   instead of falling back to service-host env or product-local scripts.
@@ -712,7 +726,6 @@ decryption key state denies the reveal or resolution.
     `LAUNCHPLANE_ENGINEERING_REVIEW_WORKER_HOST`; request bodies cannot
     override them
   - route-specific webhook ingress secrets such as
-    `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` and
     `LAUNCHPLANE_MANAGER_PREVIEW_GITHUB_WEBHOOK_SECRET`
 - Treat these as DB-backed Launchplane-owned data instead of live service-host
   env once the shared store is available:
@@ -886,12 +899,13 @@ A product-config secret entry can use `copy_from` instead of `value`:
 ```
 
 The top-level product-config target is the destination lane. The source must be
-a stable lane of that same product, and the destination must be lane-exact
+a configuration scope of that same product, and the destination must be exact
 in `runtime_environment`. The source binding key is the destination binding key;
 renaming a token to bypass integration key safety is not supported. Neither a
 source product nor another secret store can be supplied. Site-shared sources
 may be selected when that source lane has no configured exact binding. Ambiguous,
-disabled, missing or superseded sources are refused. Copies to previews are refused.
+disabled, missing or superseded sources are refused. Copies to the managed
+`preview` scope use the same checks and must pass preview key-safety policy.
 An explicit class on the source must allow the destination lane; a `prod_only`
 source cannot be copied to testing by relabelling its destination `shared_safe`.
 
@@ -923,6 +937,26 @@ unchanged. Product ownership and source record/binding changes before commit
 abort the copy. Both database-backed and filesystem bundles also abort if the
 reviewed product profile changes before commit. The
 audit records the source secret and version IDs.
+Each immutable managed value version records its service-computed `value_origin`:
+`supplied`, `provider`, `generated`, or unknown for historical values. Copies inherit
+the exact reviewed source version's origin; re-encryption preserves it. Caller
+metadata, binding names, relabels and onboarding updates cannot certify or change
+value origin. The binding's method remains `copy`, so a copy earns neither fresh
+local-generation credit nor the independently supplied key-safety exception.
+The external-resource observer accepts only known supplied/provider versions.
+Generated and unknown values, including copies, remain unavailable. A supported
+product-config value write creates a new version with origin computed by the
+service; historical origin is never inferred from mutable binding metadata.
+Any required secret entry stays in that private value-writing flow, never comments
+or agent evidence.
+Provider adoption reads retained managed history after capturing the provider
+environment. A matching value-backed key in the lane's current or declared
+historical contexts leaves origin unknown, including disabled and retired
+bindings: the provider may still hold an earlier generated value. Empty onboarding
+placeholders without a secret record do not count as prior values. Other exact
+lanes and unrelated contexts do not taint the lane. Adoption still works; a
+product-config supplied-value write is the supported way to establish origin
+when retained history prevents certifying the adopted value.
 Completed retries replay before resolving or decrypting the source. Request,
 response and audit metadata contain no secret value; subsequent live runtime
 sync or deployment remains a separate operation.
@@ -972,3 +1006,8 @@ deployed: the provider copy stays in place and already holds the same value, and
 a later live-target runtime sync delivers it from the managed secret. A
 production secret adopted as `shared_safe` with a sharing reason can then be
 copied to testing by reference, as described above.
+
+## Shared preview settings
+
+See [preview runtime settings](preview-settings.md) for the managed `preview`
+scope, precedence, UI and helper usage, and migration from profile overrides.

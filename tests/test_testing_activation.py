@@ -130,11 +130,812 @@ class ComposeQualificationTests(unittest.TestCase):
 
 
 class ActivationTests(unittest.TestCase):
+    def retained_collection_fixture(self) -> Any:
+        from datetime import datetime, timezone
+        from control_plane.workflows.generic_web_deploy import _build_runtime_identity
+        from control_plane.workflows.dokploy_deploy import (
+            update_dokploy_target_artifact,
+            dokploy_deploy_artifact_reference,
+        )
+        from tests.test_generic_web_deploy_recovery import _generic_web_recovery_target
+        from control_plane.dokploy import api
+        from control_plane.workflows.inventory import build_environment_inventory
+        from tests.test_evidence_ingestion import _deployment_record
+        from control_plane.testing_activation import preparation_resources
+        from tests.test_testing_compose_resources import ComposeResourceFixture
+
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        record = activation_record(self.store, self.product, self.context)
+        assert record is not None
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        target = target.model_copy(
+            update={"policies": target.policies.model_copy(update={"staff_testing_hold": None})}
+        )
+        self.store.write_dokploy_target_record(target)
+        profile = self.store.read_product_profile_record(self.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        ship_request = _generic_web_recovery_target().ship_request.model_copy(
+            update={
+                "artifact_id": record.image_reference.partition("@")[0] + "@sha256:" + "b" * 64,
+                "deploy_reference": record.image_reference.partition("@")[0] + ":sha-fixture",
+                "context": self.context,
+                "instance": "testing",
+            }
+        )
+        pending_identity = _build_runtime_identity(
+            profile=profile,
+            lane=lane,
+            ship_request=ship_request,
+            deployment_record_id="current-testing",
+        )
+        update_dokploy_target_artifact(
+            host="https://fixture.invalid",
+            token="fixture",
+            target_type="compose",
+            target_id=record.target_id,
+            artifact_id=dokploy_deploy_artifact_reference(
+                ship_request=ship_request, target_type="compose"
+            ),
+            runtime_identity=pending_identity,
+        )
+        identity = _build_runtime_identity(
+            profile=profile,
+            lane=lane,
+            ship_request=ship_request,
+            deployment_record_id="current-testing",
+            deployed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        deployment = _deployment_record(
+            record_id=identity.deployment_record_id,
+            context=self.context,
+            instance="testing",
+            artifact_id=identity.artifact_id,
+        ).model_copy(
+            update={
+                "runtime_identity": identity,
+                "source_git_ref": identity.source_git_ref,
+                "deployed_target": self.store.read_provider_target_record(
+                    context_name=self.context, instance_name="testing"
+                ).to_deployed_target_reference(),
+            }
+        )
+        self.store.write_deployment_record(deployment)
+        self.store.write_environment_inventory(
+            build_environment_inventory(
+                deployment_record=deployment, updated_at=datetime.now(timezone.utc).isoformat()
+            )
+        )
+        resources, _ = preparation_resources(self.store, self.product, record.request, record.scope)
+        values = api.parse_dokploy_env_text(self.payloads[record.target_id]["env"])
+        from control_plane.runtime_environments import SiteRuntimeEnvironment
+        from tests.support.stores import _seed_generic_web_deploy_target_records
+
+        for production_lane in profile.lanes:
+            if production_lane.instance != "prod":
+                continue
+            try:
+                production = self.store.read_provider_target_record(
+                    context_name=production_lane.context, instance_name="prod"
+                )
+            except FileNotFoundError:
+                _seed_generic_web_deploy_target_records(
+                    store=self.store,
+                    context=production_lane.context,
+                    instance="prod",
+                    target_id="fixture-production",
+                    target_name="production",
+                )
+                production = self.store.read_provider_target_record(
+                    context_name=production_lane.context, instance_name="prod"
+                )
+            self.payloads[production.target_id] = {"env": "DB_PASSWORD=production-only-password"}
+
+        def real_runtime(store: Any, root: Any, current: Any, allocation: Any) -> dict[str, str]:
+            with patch(
+                "control_plane.testing_activation.runtime_environments.resolve_site_runtime_environment",
+                return_value=SiteRuntimeEnvironment(
+                    values=self.values(store, root, current, allocation),
+                    secret_keys=frozenset({"DB_PASSWORD"}),
+                ),
+            ):
+                return resolve_activation_runtime(store, root, current, allocation)
+
+        self.enterContext(
+            patch(
+                "control_plane.testing_compose_resources.runtime_values", side_effect=real_runtime
+            )
+        )
+        from control_plane.dokploy import native_copy_stream
+
+        host = ComposeResourceFixture(
+            self.root / "physical",
+            {
+                "app_name": record.app_name,
+                "render": interpolate(json.loads(record.compose_source), values),
+                "volumes": {value: key for key, value in resources.volumes.items()},
+                "resources_sha256": resources.binding_sha256,
+                "ports": [int(values[key]) for key in record.request.port_keys],
+                "credentials": [values["DB_PASSWORD"]],
+            },
+        )
+        self.enterContext(patch.object(native_copy_stream, "_read_remote", side_effect=host.read))
+        return host
+
+    def test_retained_populated_compose_collects_current_facts_for_existing_guard(self) -> None:
+        from datetime import datetime, timezone
+        from control_plane.disposable_lane_collection import collect_testing_resource_facts
+        from control_plane.disposable_lanes import require_disposable_lane
+        from tests.support.disposable_lanes import record_safety
+
+        self.retained_collection_fixture()
+        before = deepcopy(self.writes)
+        facts = collect_testing_resource_facts(
+            self.store,
+            root=self.root,
+            product=self.product,
+            context=self.context,
+            now=datetime.now(timezone.utc),
+        )
+        assert facts is not None
+        self.assertEqual(facts.get("data"), "reproducible")
+        self.assertEqual(facts.get("production_resources"), "isolated")
+        self.assertNotIn("usage", facts)
+        record_safety(self.store, self.product, self.context, "testing", usage="unknown", **facts)
+        self.assertTrue(
+            require_disposable_lane(
+                self.store,
+                product=self.product,
+                context=self.context,
+                instance="testing",
+                recovery=True,
+            )
+        )
+        self.assertEqual(self.writes, before)
+        record = activation_record(self.store, self.product, self.context)
+        assert record is not None
+        self.assertEqual(record.retained_target, self.preparation.retained)
+        self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
+
+    def retained_deploy_adapter(self) -> Any:
+        from control_plane.generic_web_deploy_provider_adapter import (
+            GenericWebDeployProviderMutationAdapter,
+        )
+        from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
+        from tests.test_generic_web_deploy_recovery import _generic_web_recovery_target
+
+        profile = self.store.read_product_profile_record(self.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        identity = inventory.runtime_identity
+        assert identity is not None
+        envelope = GenericWebDeployEnvelope.model_validate(
+            {
+                "schema_version": 1,
+                "product": self.product,
+                "deploy": {
+                    "schema_version": 1,
+                    "product": self.product,
+                    "instance": "testing",
+                    "artifact_id": identity.artifact_id,
+                    "source_git_ref": identity.source_git_ref,
+                },
+            }
+        )
+        adapter = GenericWebDeployProviderMutationAdapter(
+            control_plane_root=self.root,
+            record_store=self.store,
+            deploy_request=envelope,
+            profile=profile,
+            lane=lane,
+            trace_id="retained-compose",
+            standing_testing_permission=True,
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        target = _generic_web_recovery_target().model_copy(
+            update={"deployed_target": provider.to_deployed_target_reference()}
+        )
+        target = target.model_copy(
+            update={
+                "resolved_target": target.resolved_target.model_copy(
+                    update={
+                        "target_id": provider.target_id,
+                        "target_name": provider.display_name,
+                        "target_type": "compose",
+                    }
+                )
+            }
+        )
+        target = target.model_copy(
+            update={
+                "ship_request": target.ship_request.model_copy(
+                    update={
+                        "context": self.context,
+                        "instance": "testing",
+                        "artifact_id": identity.artifact_id,
+                        "source_git_ref": identity.source_git_ref,
+                        "target_name": provider.display_name,
+                        "target_type": "compose",
+                        "target_category": "compose",
+                        "provider_target_type": "compose",
+                    }
+                )
+            }
+        )
+        adapter._resolved_deploy_target = target
+        adapter.require_standing_testing_retry()
+        return adapter
+
+    def test_http_collection_qualifies_retained_compose_and_first_effect_rechecks_it(self) -> None:
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.test_service import _invoke_app
+        from control_plane.contracts.disposable_lane import DISPOSABLE_LANE_OBSERVATION_ROUTE
+        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+
+        host = self.retained_collection_fixture()
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        body = {
+            "mode": "inspect",
+            "product": self.product,
+            "context": self.context,
+            "instance": "testing",
+        }
+        status, inspection = _invoke_app(
+            app,
+            method="POST",
+            path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
+            authorization="Bearer local-operator-token",
+            payload=body,
+        )
+        self.assertEqual(status, 202, inspection)
+        status, collected = _invoke_app(
+            app,
+            method="POST",
+            path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
+            authorization="Bearer local-operator-token",
+            payload={
+                **body,
+                "mode": "collect",
+                "expected_binding_sha256": inspection["result"]["binding_sha256"],
+            },
+        )
+        self.assertEqual(status, 202, collected)
+        self.assertEqual(collected["result"]["usage"], "unknown")
+        self.assertEqual(collected["result"]["data"], "reproducible")
+        self.assertEqual(collected["result"]["production_resources"], "isolated")
+        self.assertIs(collected["result"]["provider_mutation"], False)
+        adapter = self.retained_deploy_adapter()
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        adapter.require_standing_testing_retry()
+        adapter._require_compose_effect_preflight()
+        adapter._require_effect_admission()
+        from datetime import datetime, timedelta, timezone
+        from control_plane.dokploy import native_copy_stream
+
+        safety = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+        assert safety is not None
+        for protection in ("in_use", "only_copy", "shared", "expired"):
+            with self.subTest(protection=protection):
+
+                def protect(**arguments: Any) -> None:
+                    host.read(**arguments)
+                    update: dict[str, Any] = (
+                        {"usage": "in_use", "usage_evidence": "new-staff-use"}
+                        if protection == "in_use"
+                        else {"data": "only_copy", "data_evidence": "needed-copy"}
+                        if protection == "only_copy"
+                        else {
+                            "production_resources": "shared",
+                            "isolation_evidence": "new-shared-resource",
+                        }
+                        if protection == "shared"
+                        else {
+                            "observed_at": datetime.now(timezone.utc) - timedelta(minutes=6),
+                            "expires_at": datetime.now(timezone.utc) - timedelta(minutes=1),
+                        }
+                    )
+                    self.store.write_disposable_lane_safety(safety.model_copy(update=update))
+
+                with patch.object(native_copy_stream, "_read_remote", side_effect=protect):
+                    with self.assertRaises(DisposableLaneSafetyUnknown):
+                        adapter._require_compose_effect_preflight()
+                self.store.write_disposable_lane_safety(safety)
+        active_payload = self.payloads[provider.target_id]
+        original_server = active_payload["serverId"]
+        active_payload["serverId"] = "different-registered-server"
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            adapter._require_compose_effect_preflight()
+        active_payload["serverId"] = original_server
+        before = deepcopy(self.writes)
+        foreign = deepcopy(next(iter(host.rows.values())))
+        foreign["Id"] = "f" * 64
+        foreign["Config"]["Labels"] = {"com.docker.compose.project": "production"}
+        host.rows[foreign["Id"]] = foreign
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            adapter._require_compose_effect_preflight()
+        self.assertEqual(self.writes, before)
+
+    def test_compose_first_effect_preflight_preserves_concurrency_and_rechecks_authority(
+        self,
+    ) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        from datetime import datetime, timezone, timedelta
+        from control_plane.disposable_lane_collection import collect_testing_resource_facts
+        from control_plane.dokploy import native_copy_stream
+        from control_plane.storage.postgres import PostgresRecordStore
+        from tests.support.disposable_lanes import record_safety
+        from tests.test_generic_web_http import _generic_web_deploy_result
+
+        host = self.retained_collection_fixture()
+        facts = collect_testing_resource_facts(
+            self.store,
+            root=self.root,
+            product=self.product,
+            context=self.context,
+            now=datetime.now(timezone.utc),
+        )
+        assert facts is not None
+        record_safety(self.store, self.product, self.context, "testing", usage="unknown", **facts)
+        second = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(second.close)
+        profile = self.store.read_product_profile_record(self.product)
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        safety = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+        assert safety is not None
+        policy = self.store.list_runtime_key_safety_policy_records(status="active", limit=1)[0]
+        for drift in ("none", "inventory", "evidence", "policy"):
+            second.write_environment_inventory(inventory)
+            second.write_disposable_lane_safety(safety)
+            second.write_runtime_key_safety_policy_record(policy)
+            with self.subTest(drift=drift):
+                adapter = self.retained_deploy_adapter()
+                entered, release, renewed = Event(), Event(), Event()
+                reads, provider_writes = [], []
+                real_renew = self.store.renew_mutation_reservation
+                real_checkpoint = self.store.checkpoint_mutation_provider_effect
+
+                def renew(**arguments: Any) -> Any:
+                    result = real_renew(**arguments)
+                    if entered.is_set() and not release.is_set() and result.status == "updated":
+                        renewed.set()
+                    return result
+
+                def inspect(**arguments: Any) -> None:
+                    self.assertIsNone(
+                        getattr(
+                            self.store._disposable_authority_context,
+                            "observation_read_session",
+                            None,
+                        )
+                    )
+                    reads.append("physical")
+                    entered.set()
+                    if not release.wait(10):
+                        raise AssertionError("Physical preflight barrier timed out")
+                    host.read(**arguments)
+
+                def checkpoint(**arguments: Any) -> Any:
+                    if drift == "inventory":
+                        second.write_environment_inventory(
+                            inventory.model_copy(
+                                update={
+                                    "updated_at": (
+                                        datetime.fromisoformat(
+                                            inventory.updated_at.replace("Z", "+00:00")
+                                        )
+                                        + timedelta(seconds=1)
+                                    ).isoformat()
+                                }
+                            )
+                        )
+                    elif drift == "evidence":
+                        second.write_disposable_lane_safety(
+                            safety.model_copy(
+                                update={
+                                    "isolation_evidence": "service:testing-resource-inspection:"
+                                    + "0" * 64
+                                }
+                            )
+                        )
+                    elif drift == "policy":
+                        second.write_runtime_key_safety_policy_record(
+                            policy.model_copy(
+                                update={
+                                    "rules": tuple(
+                                        rule.model_copy(update={"secret_class": "prod_only"})
+                                        for rule in policy.rules
+                                    )
+                                }
+                            )
+                        )
+                    return real_checkpoint(**arguments)
+
+                def execute(**arguments: Any) -> Any:
+                    arguments["provider_effect_checkpoint"]("target_update")
+                    provider_writes.append("image")
+                    arguments["provider_effect_checkpoint"]("records_commit")
+                    return _generic_web_deploy_result(
+                        deployment_record_id=arguments["deployment_record_id"]
+                    ).model_copy(
+                        update={
+                            "product": self.product,
+                            "context": self.context,
+                            "target_category": "compose",
+                            "provider_target_type": "compose",
+                        }
+                    )
+
+                with (
+                    patch.object(native_copy_stream, "_read_remote", side_effect=inspect),
+                    patch.object(self.store, "renew_mutation_reservation", side_effect=renew),
+                    patch.object(
+                        self.store, "checkpoint_mutation_provider_effect", side_effect=checkpoint
+                    ),
+                    patch(
+                        "control_plane.generic_web_deploy_http.execute_generic_web_deploy",
+                        side_effect=execute,
+                    ),
+                    ThreadPoolExecutor(max_workers=2) as workers,
+                ):
+                    future = workers.submit(
+                        run_durable_provider_operation,
+                        store=self.store,
+                        scope=self.scope,
+                        route_path="/v1/drivers/generic-web/deploy",
+                        idempotency_key=f"compose-preflight-{drift}",
+                        request_fingerprint="c" * 64,
+                        lease_owner="compose-preflight-worker",
+                        response_trace_id="compose-preflight",
+                        adapter=adapter,
+                        heartbeat_interval_seconds=0.02,
+                    )
+                    try:
+                        self.assertTrue(entered.wait(10))
+                        self.assertTrue(
+                            renewed.wait(10),
+                            "Heartbeat must renew while physical inspection is paused",
+                        )
+                        workers.submit(second.write_product_profile_record, profile).result(
+                            timeout=10
+                        )
+                    finally:
+                        release.set()
+                    if drift != "none":
+                        from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+
+                        with self.assertRaises(DisposableLaneSafetyUnknown):
+                            future.result(timeout=20)
+                        result = None
+                    else:
+                        result = future.result(timeout=20)
+                self.assertEqual(reads, ["physical"])
+                self.assertEqual(provider_writes, [] if drift != "none" else ["image"])
+                reservation = self.store.read_idempotency_record(
+                    scope=self.scope,
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key=f"compose-preflight-{drift}",
+                )
+                if drift != "none":
+                    if reservation is not None:
+                        self.assertFalse(reservation.provider_effect_phase)
+                        self.assertFalse(reservation.provider_effect_started_at)
+                else:
+                    assert reservation is not None
+                    assert result is not None
+                    self.assertEqual(result.response_status_code, 202)
+                    self.assertTrue(reservation.provider_effect_started_at)
+
+    def test_compose_preflight_denial_preserves_no_effect_operation(self) -> None:
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        from control_plane.disposable_lane_collection import collect_testing_resource_facts
+        from control_plane.dokploy import native_copy_stream
+        from tests.support.disposable_lanes import record_safety
+
+        self.retained_collection_fixture()
+        facts = collect_testing_resource_facts(
+            self.store,
+            root=self.root,
+            product=self.product,
+            context=self.context,
+            now=datetime.now(timezone.utc),
+        )
+        assert facts is not None
+        record_safety(self.store, self.product, self.context, "testing", usage="unknown", **facts)
+        adapter = self.retained_deploy_adapter()
+        adapter._recorded_artifact = True
+        effects = []
+
+        def execute(**arguments: Any) -> None:
+            arguments["before_provider_mutation"]("provider_dispatch_prepared")
+            arguments["before_provider_mutation"]("target_update")
+            effects.append("provider-write")
+
+        adapter._deploy_provider = SimpleNamespace(
+            provider_id="dokploy",
+            delegated_executor="control-plane.dokploy",
+            execute_artifact_deploy=execute,
+        )
+        before = self.store.list_deployment_records()
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        denial = native_copy_stream.NativeSourceAuthorizationDenied("fixture-read-denied")
+        with patch.object(native_copy_stream, "_read_remote", side_effect=denial):
+            with self.assertRaises(native_copy_stream.NativeSourceAuthorizationDenied) as refused:
+                run_durable_provider_operation(
+                    store=self.store,
+                    scope=self.scope,
+                    route_path="/v1/drivers/generic-web/deploy",
+                    idempotency_key="compose-preflight-denied",
+                    request_fingerprint="d" * 64,
+                    lease_owner="compose-preflight-worker",
+                    response_trace_id="preflight-denied",
+                    adapter=adapter,
+                )
+        self.assertIs(refused.exception, denial)
+        new_records = [row for row in self.store.list_deployment_records() if row not in before]
+        self.assertEqual(len(new_records), 1)
+        self.assertEqual(new_records[0].deploy.status, "pending")
+        self.assertEqual(
+            self.store.read_environment_inventory(
+                context_name=self.context, instance_name="testing"
+            ),
+            inventory,
+        )
+        self.assertEqual(effects, [])
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=self.scope,
+                route_path="/v1/drivers/generic-web/deploy",
+                idempotency_key="compose-preflight-denied",
+            )
+        )
+
+    def test_retained_compose_read_failures_preserve_denials_and_unknown_facts(self) -> None:
+        import click
+        from datetime import datetime, timezone
+        from control_plane.dokploy import native_copy_stream
+        from control_plane.disposable_lane_collection import collect_testing_resource_facts
+        from control_plane.testing_compose_resources import collect_compose_resource_facts
+
+        self.retained_collection_fixture()
+        with patch.object(
+            native_copy_stream,
+            "_read_remote",
+            side_effect=click.ClickException("private-source-error"),
+        ):
+            self.assertEqual(
+                collect_testing_resource_facts(
+                    self.store,
+                    root=self.root,
+                    product=self.product,
+                    context=self.context,
+                    now=datetime.now(timezone.utc),
+                ),
+                {},
+            )
+            with self.assertRaises(ValueError) as refusal:
+                collect_compose_resource_facts(
+                    self.store, root=self.root, product=self.product, context=self.context
+                )
+            self.assertNotIn("private-source-error", str(refusal.exception))
+        with patch.object(
+            native_copy_stream,
+            "_read_remote",
+            side_effect=native_copy_stream.NativeSourceAuthorizationDenied("read-denied"),
+        ):
+            with self.assertRaises(native_copy_stream.NativeSourceAuthorizationDenied):
+                collect_testing_resource_facts(
+                    self.store,
+                    root=self.root,
+                    product=self.product,
+                    context=self.context,
+                    now=datetime.now(timezone.utc),
+                )
+
+    def test_changed_retained_custody_stays_unknown(self) -> None:
+        from datetime import datetime, timezone
+        from control_plane.disposable_lane_collection import collect_testing_resource_facts
+
+        self.retained_collection_fixture()
+        record = activation_record(self.store, self.product, self.context)
+        assert record is not None
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"env": {**target.env, "DB_VOLUME": "other-custody"}})
+        )
+        self.assertEqual(
+            collect_testing_resource_facts(
+                self.store,
+                root=self.root,
+                product=self.product,
+                context=self.context,
+                now=datetime.now(timezone.utc),
+            ),
+            {},
+        )
+
+    def test_nested_source_sites_keep_each_exception_raise_location(self) -> None:
+        from traceback import walk_tb
+        from control_plane import http_error_evidence
+        from control_plane.contracts import canonical_json
+
+        payload: object = 0.5
+        for _ in range(12):
+            payload = [payload]
+        try:
+            canonical_json.canonical_json_bytes(payload)
+        except ValueError as root:
+            root_line = list(walk_tb(root.__traceback__))[-1][1]
+            try:
+                canonical_json.canonical_json_bytes(object())
+            except TypeError as error:
+                outer_line = list(walk_tb(error.__traceback__))[-1][1]
+                with self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs:
+                    http_error_evidence.log_handled_error_cause(error, "nested-source-test")
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(
+            evidence["sites"],
+            [
+                {"module": canonical_json.__name__, "line": outer_line},
+                {"module": canonical_json.__name__, "line": root_line},
+            ],
+        )
+
+    def test_dependency_refusal_logs_source_sites_without_private_error_data(self) -> None:
+        import asyncio
+        from control_plane import http_error_evidence
+        from control_plane import npmplus
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+        from tests.test_npmplus import _Opener, _credentials
+
+        private = "private-provider-diagnostic-sentinel"
+
+        def fail_dependency() -> None:
+            opener = _Opener()
+            opener.host_details["certificate_id"] = private
+            opener.host_details["meta"] = {private: private}
+            npmplus.NpmplusClient(credentials=_credentials(), opener=opener).get_proxy_host(78)
+
+        bearer_config = _local_operator_bearer_config(token_label="local-owner-write")
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=bearer_config,
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        body = self.request.model_copy(
+            update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+        ).model_dump(mode="json")
+        with (
+            patch.object(TestingActivationAdapter, "current", side_effect=fail_dependency),
+            self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs,
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={"Authorization": f"Bearer {bearer_config.local_operator_token}"},
+                    payload=body,
+                )
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            TestingActivationRefusalCode.DEPENDENCY_UNVERIFIED.value,
+        )
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(evidence["trace_id"], response.json()["trace_id"])
+        self.assertTrue(
+            any(site["module"] == npmplus.__name__ for site in evidence["sites"]),
+            evidence,
+        )
+        self.assertTrue(evidence["validation"])
+        self.assertTrue(
+            all(type(site["line"]) is int and site["line"] > 0 for site in evidence["sites"])
+        )
+        self.assertNotIn(private, response.text + str(logs.output))
+        self.assertNotIn(bearer_config.local_operator_token, str(logs.output))
+        self.assertTrue(
+            all(record.exc_info is None and record.stack_info is None for record in logs.records)
+        )
+        self.assertEqual(self.writes, [])
+
+    def test_native_external_refusal_keeps_backoff_through_http(self) -> None:
+        import asyncio
+        from control_plane.discord_identity import DiscordIdentityResult
+        from control_plane.contracts.testing_external_resources import (
+            DiscordBotResourceObservation,
+            DiscordRateLimitEvidence,
+        )
+        from control_plane.testing_external_capabilities import ExternalCapabilityReadRefusal
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        result = DiscordIdentityResult(
+            observation=DiscordBotResourceObservation(
+                started_at="2026-10-23T00:00:00Z",
+                finished_at="2026-10-23T00:00:01Z",
+                http_status=429,
+                rate_limits=(
+                    DiscordRateLimitEvidence(phase="guilds", retry_after=120, global_limit=True),
+                ),
+            )
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with patch.object(
+            TestingActivationAdapter, "current", side_effect=ExternalCapabilityReadRefusal(result)
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "external-refusal",
+                    },
+                    payload=self.request.model_copy(
+                        update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+                    ).model_dump(mode="json"),
+                )
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        body = response.json()
+        self.assertEqual(
+            body["error"]["code"], TestingActivationRefusalCode.EXTERNAL_CAPABILITY_UNVERIFIED
+        )
+        self.assertEqual(
+            DiscordIdentityResult.model_validate_json(body["records"]["discord_identity"]), result
+        )
+
     database_url = ""
     private_product = True
     local_credential_fixture = False
 
     def setUp(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+
+        self.capacity_read = self.enterContext(
+            patch(
+                "control_plane.dokploy.network_capacity.read_bridge_network_capacity",
+                return_value=BridgeNetworkCapacity(total_slots=16, free_slots=16),
+            )
+        )
         self.preparation = preparation.SeparationResourceTests()
         self.preparation.database_url = self.database_url
         self.preparation.setUp()
@@ -399,7 +1200,7 @@ class ActivationTests(unittest.TestCase):
 
     def values(self, store: Any, root: Any, record: Any, resources: Any) -> dict[str, str]:
         return {
-            "DOCKER_IMAGE_REFERENCE": "ghcr.io/example/site@sha256:" + "a" * 64,
+            "DOCKER_IMAGE_REFERENCE": record.image_reference,
             "DB_PASSWORD": "safe-test-password",
             "DB_VOLUME": resources.volumes["database"],
             "CONFIG_VOLUME": resources.volumes["config"],
@@ -471,6 +1272,25 @@ class ActivationTests(unittest.TestCase):
             response_trace_id="launchplane_req_fixture",
             adapter=self.adapter,
         )
+
+    def test_capacity_refusal_leaves_no_custody_and_original_key_can_continue(self) -> None:
+        from control_plane.contracts.host_network_capacity import BridgeNetworkCapacity
+        from control_plane.dokploy.network_capacity import (
+            BRIDGE_NETWORK_CAPACITY_MARGIN,
+            BridgeNetworkCapacityRefused,
+        )
+
+        for free in (0, BRIDGE_NETWORK_CAPACITY_MARGIN):
+            self.capacity_read.return_value = BridgeNetworkCapacity(total_slots=16, free_slots=free)
+            with self.subTest(free=free), self.assertRaises(BridgeNetworkCapacityRefused):
+                self.run_activation()
+            self.assertEqual(self.writes, [])
+            self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.capacity_read.return_value = BridgeNetworkCapacity(
+            total_slots=16, free_slots=1 + BRIDGE_NETWORK_CAPACITY_MARGIN
+        )
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(self.capacity_read.call_args.kwargs["server_id"], "server")
 
     def test_unencodable_input_retains_allocation_fences_without_configure_checkpoint(self) -> None:
         from control_plane.dokploy import api
@@ -615,6 +1435,26 @@ class ActivationTests(unittest.TestCase):
         versions = local.store.list_secret_versions(secret_id="testing-password")
         local.assertEqual(local.run_activation().response_status_code, 202)
         local.assertEqual(local.store.list_secret_versions(secret_id="testing-password"), versions)
+
+    def test_private_source_network_survives_unused_provider_metadata(self) -> None:
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        document: dict[str, Any] = deepcopy(COMPOSE)
+        document["networks"] = {"backend": {"internal": True}}
+        document["services"]["web"]["networks"] = ["backend"]
+        with patch(
+            "control_plane.testing_activation.read_product_compose",
+            return_value=json.dumps(document),
+        ):
+            self.adapter.request = self.request.model_copy(
+                update={"reviewed_plan_sha256": self.adapter.current().plan_sha256}
+            )
+            self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
+            production,
+        )
 
     def test_activation_and_original_key_replay_preserve_production_old_target_hold_and_fence(
         self,
@@ -1280,6 +2120,51 @@ class ActivationTests(unittest.TestCase):
                         )
         self.assertEqual(self.writes, [])
 
+    def test_new_staff_use_correction_refuses_initial_custody(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from control_plane.contracts.disposable_lane import DisposableLaneSafety
+        from control_plane.disposable_lanes import resolve_disposable_observation_binding
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        second = PostgresRecordStore(
+            database_url=self.store._engine.url.render_as_string(hide_password=False)
+        )
+        self.addCleanup(second.close)
+        write = self.store.write_testing_activation
+        observed: list[DisposableLaneSafety] = []
+
+        def correction(**kwargs: Any) -> None:
+            if kwargs["expected"] is None and not observed:
+                binding = resolve_disposable_observation_binding(
+                    second, product=self.product, context=self.context, instance="testing"
+                )
+                now = datetime.now(timezone.utc)
+                record = DisposableLaneSafety(
+                    product=self.product,
+                    context=self.context,
+                    instance="testing",
+                    observed_by=self.actor,
+                    observer_kind="director_agent",
+                    binding_sha256=binding.binding_sha256,
+                    usage="in_use",
+                    usage_evidence="A fresh staff-use correction.",
+                    observed_at=now,
+                    expires_at=now + timedelta(minutes=5),
+                )
+                self.assertTrue(second.publish_collected_disposable_lane_safety(record))
+                observed.append(record)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=correction):
+            result = self.run_activation()
+        self.assertTrue(observed)
+        self.assertEqual(result.response_status_code, 409)
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.assertFalse(self.writes)
+        self.assertEqual(
+            second.read_disposable_lane_safety(self.product, self.context, "testing"), observed[0]
+        )
+
     def test_hold_continuation_requires_exact_caller_and_preserves_later_staff_hold(self) -> None:
         from control_plane.testing_activation import require_activation_hold_lift
         from control_plane.testing_lane_hold import TestingHoldApplyRequest
@@ -1343,6 +2228,61 @@ class ActivationTests(unittest.TestCase):
         target.env[self.request.port_keys[0]] = "3307"
         self.store.write_dokploy_target_record(target)
         self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+
+    def test_provider_monitor_source_recheck_refuses_published_separation_drift(self) -> None:
+        from dataclasses import replace
+        from unittest.mock import Mock
+        from control_plane.workflows.public_ingress_monitor import (
+            _deploy_fence_monitor_target,
+            check_public_ingress_target,
+        )
+
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
+        profile = self.store.read_product_profile_record(self.product)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        snapshot = self.store.read_provider_hold_snapshot(
+            product=self.product,
+            context=self.context,
+            instance="testing",
+        )
+        self.assertEqual(snapshot.holds, ())
+        target = replace(
+            _deploy_fence_monitor_target(profile=profile, lane=lane, fence=None),
+            provider_hold_snapshot=snapshot,
+        )
+        observation = check_public_ingress_target(
+            target=target,
+            checked_at=self.preparation.fixture.now(),
+            timeout_seconds=1,
+            http_get=Mock(),
+            tls_get=Mock(),
+        )
+        self.assertEqual(observation.status, "pass")
+        current = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        current.env[self.request.port_keys[0]] = "3307"
+        self.store.write_dokploy_target_record(current)
+        self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+        result = self.store.write_public_ingress_transition_with_outbox(
+            observation=observation,
+            incidents=(),
+            expected_provider_hold_snapshot=snapshot,
+        )
+        self.assertEqual(result.status, "provider_source_changed")
+        self.assertEqual(self.store.list_public_ingress_observation_records(), ())
+        self.assertEqual(
+            tuple(
+                hold.reservation
+                for hold in self.store.read_provider_hold_snapshot(
+                    product=self.product,
+                    context=self.context,
+                    instance="testing",
+                ).holds
+            ),
+            (self.preparation.original,),
+        )
 
     def test_supported_http_lift_replays_and_requests_only_testing_reconcile(self) -> None:
         import asyncio
@@ -1438,9 +2378,13 @@ class ActivationTests(unittest.TestCase):
             self.store.list_held_provider_target_reservations(), (self.preparation.original,)
         )
         self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
-        self.assertNotIn(
-            (self.context, "testing"), _held_generic_web_deploy_fences(self.store) or {}
+        snapshots = _held_generic_web_deploy_fences(
+            self.store,
+            profiles=self.store.list_product_profile_records(),
+            incidents=(),
         )
+        assert snapshots is not None
+        self.assertEqual(snapshots[(self.product, self.context, "testing")].holds, ())
         from control_plane.workflows.generic_web_deploy_provider import (
             build_generic_web_provider_reconciliation_key,
         )
@@ -1449,23 +2393,43 @@ class ActivationTests(unittest.TestCase):
         record = activation_record(self.store, self.product, self.context)
         assert record is not None
         target.resolved_target.target_id = record.target_id
-        current_fence = self.preparation.original.model_copy(
-            update={
-                "idempotency_key": "new-recipient-outcome-unknown",
-                "reconciliation_key": build_generic_web_provider_reconciliation_key(
-                    target, product=self.product
-                ),
-            }
+        from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
+        from control_plane.workflows.generic_web_deploy_provider import (
+            build_generic_web_provider_target_key,
         )
-        with patch.object(
+
+        current_fence = self.store.reserve_mutation(
+            scope=self.preparation.original.scope,
+            route_path=self.preparation.original.route_path,
+            idempotency_key="new-recipient-outcome-unknown",
+            request_fingerprint="new-recipient",
+            lease_owner="new-recipient",
+            reconciliation_key=build_generic_web_provider_reconciliation_key(
+                target, product=self.product
+            ),
+            provider_target_key=build_generic_web_provider_target_key(target),
+            provider_target_origin=ProviderTargetOrigin(
+                product=self.product,
+                context=self.context,
+                instance="testing",
+                provider_id=target.ship_request.provider_id,
+                target_type=target.resolved_target.target_type,
+                target_id=target.resolved_target.target_id,
+            ),
+        ).record
+        snapshots = _held_generic_web_deploy_fences(
             self.store,
-            "list_held_provider_target_reservations",
-            return_value=(self.preparation.original, current_fence),
-        ):
-            self.assertEqual(
-                (_held_generic_web_deploy_fences(self.store) or {})[(self.context, "testing")],
-                current_fence,
-            )
+            profiles=self.store.list_product_profile_records(),
+            incidents=(),
+        )
+        assert snapshots is not None
+        self.assertEqual(
+            tuple(
+                hold.reservation
+                for hold in snapshots[(self.product, self.context, "testing")].holds
+            ),
+            (current_fence,),
+        )
 
     def reconcile_target_key(self) -> str:
         from control_plane.contracts.product_reconcile import ProductReconcileTarget
@@ -1629,6 +2593,8 @@ class ActivationTests(unittest.TestCase):
         aliased_network["networks"]["default"] = {"name": "dokploy-network"}
         changed_network = deepcopy(converted)
         changed_network["networks"]["dokploy-network"]["name"] = "foreign-network"
+        malformed_network = deepcopy(converted)
+        malformed_network["networks"]["dokploy-network"]["external"] = 1
         foreign_network = deepcopy(converted)
         foreign_network["networks"]["foreign-network"] = {"external": True}
         code = TestingActivationRefusalCode
@@ -1647,6 +2613,7 @@ class ActivationTests(unittest.TestCase):
             ({}, interpolated_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, aliased_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, changed_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, malformed_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, foreign_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, "null", code.RECIPIENT_SOURCE_UNMATERIALIZED),
             ({}, "services: [" + private, code.RECIPIENT_RENDER_UNVERIFIED),
@@ -1932,6 +2899,12 @@ class ActivationPortProgramTests(unittest.TestCase):
         from control_plane.odoo_testing_resources import GenericWebTestingResources
         from control_plane.testing_activation import inspect_new_resources
 
+        from control_plane.host_package import host_invocation
+        from control_plane.host_package_runtime import (
+            HOST_PACKAGE_VERSION_MARKER,
+            HOST_PROGRAM_VERSION_MARKER,
+        )
+
         resources = GenericWebTestingResources(
             product="fixture-product",
             context="fixture-context",
@@ -1970,6 +2943,17 @@ class ActivationPortProgramTests(unittest.TestCase):
         for name, program_status, port_output, storage_output, inline, accepted in cases:
             log_lines = [*storage_output, *port_output.splitlines()]
 
+            def upsert(**arguments: Any) -> dict[str, str]:
+                invocation = host_invocation(arguments["schedule_payload"]["script"])
+                assert invocation is not None
+                log_lines.extend(
+                    [
+                        HOST_PACKAGE_VERSION_MARKER + "=" + invocation.package_version,
+                        HOST_PROGRAM_VERSION_MARKER + "=" + invocation.program_version,
+                    ]
+                )
+                return {"scheduleId": "fixture-schedule"}
+
             def run_schedule(**_kwargs: Any) -> str:
                 if program_status:
                     raise dokploy_api.DokployScheduleExecutionFailed(
@@ -1982,6 +2966,7 @@ class ActivationPortProgramTests(unittest.TestCase):
 
             with (
                 self.subTest(name=name),
+                patch("control_plane.dokploy.host_package.ensure_schedule_host_package"),
                 patch(
                     "control_plane.testing_activation.source.read_dokploy_config",
                     return_value=("https://provider.example.invalid", "fixture-token"),
@@ -2001,7 +2986,7 @@ class ActivationPortProgramTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.dokploy.api.upsert_dokploy_schedule",
-                    return_value={"scheduleId": "fixture-schedule"},
+                    side_effect=upsert,
                 ),
                 patch(
                     "control_plane.dokploy.api.run_dokploy_schedule",
@@ -2016,7 +3001,7 @@ class ActivationPortProgramTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
-                    return_value=tuple(log_lines),
+                    side_effect=lambda **_: tuple(log_lines),
                 ),
                 patch(
                     "control_plane.dokploy.api.dokploy_request",

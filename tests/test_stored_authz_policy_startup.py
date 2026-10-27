@@ -90,7 +90,11 @@ class StoredAuthzPolicyStartupTests(unittest.TestCase):
                     repository=identity.repository,
                     products=("example-site",),
                     contexts=("example-site",),
-                    actions=("live_target_runtime.plan", "live_target_runtime.apply"),
+                    actions=(
+                        "live_target_runtime.plan",
+                        "live_target_runtime.apply",
+                        "generic_web_rollback.execute",
+                    ),
                 ),
                 GitHubActionsPolicyRule(
                     repository=identity.repository,
@@ -223,7 +227,11 @@ class StoredAuthzPolicyStartupTests(unittest.TestCase):
             self.assertIsNotNone(captured_runtime)
             assert captured_runtime is not None
             policy_available = not corruption or request_refresh
-            for action in ("live_target_runtime.plan", "live_target_runtime.apply"):
+            for action in (
+                "live_target_runtime.plan",
+                "live_target_runtime.apply",
+                "generic_web_rollback.execute",
+            ):
                 self.assertEqual(
                     policy_available,
                     captured_runtime.policy.allows(

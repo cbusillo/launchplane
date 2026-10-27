@@ -1,5 +1,3 @@
-"""Continue only the original caller's fresh, undeployed testing application."""
-
 from pathlib import Path
 from collections.abc import Callable
 
@@ -51,6 +49,7 @@ def qualify_application_staging_lift(
     inspect_provider: bool,
     inspect_storage: bool = False,
     before_inspection: Callable[[str], None] | None = None,
+    runtime_binding: dict[str, object] | None = None,
 ) -> str:
     """Return a current DB binding after all unchanged allocation checks pass."""
     if not is_application_staging_lift(store, request):
@@ -85,6 +84,19 @@ def qualify_application_staging_lift(
     provider = store.read_provider_target_record(
         context_name=request.context, instance_name=request.instance
     )
+    from control_plane.contracts.testing_activation import TestingActivationRecord
+
+    activations = list(store.list_testing_application_activations(request.product, request.context))
+    legacy = store.read_testing_activation(request.product, request.context)
+    if legacy is not None:
+        activations.append(legacy)
+    for payload in activations:
+        activation = TestingActivationRecord.model_validate(payload)
+        if (
+            not activation.published
+            and activation.retained_target_id.target_id == target_id.target_id
+        ):
+            raise ValueError("An unpublished activation retains this application's interlock.")
     physical_targets: tuple[ProviderTargetRecord | DokployTargetIdRecord, ...] = (
         *store.list_physical_provider_target_records(),
         *store.list_dokploy_target_id_records(),
@@ -111,22 +123,21 @@ def qualify_application_staging_lift(
         raise DisposableLaneSafetyUnknown(
             "Recorded person use or protected resources must be resolved."
         )
-    for deployment in store.list_deployment_records(
-        context_name=request.context, instance_name=request.instance
-    ):
-        if deployment.deploy.status == "pass" or (
-            deployment.deployed_target is not None
-            and deployment.deployed_target.target_id == target_id.target_id
-        ):
-            raise ValueError("The application already has deployment history.")
     try:
-        store.read_environment_inventory(
+        inventory = store.read_environment_inventory(
             context_name=request.context, instance_name=request.instance
         )
     except FileNotFoundError:
-        pass
-    else:
-        raise ValueError("The testing lane already has a current artifact.")
+        inventory = None
+    if inventory is None:
+        for deployment in store.list_deployment_records(
+            context_name=request.context, instance_name=request.instance
+        ):
+            if deployment.deploy.status == "pass" or (
+                deployment.deployed_target is not None
+                and deployment.deployed_target.target_id == target_id.target_id
+            ):
+                raise ValueError("Application history has no qualified current artifact.")
     key = dokploy_generic_web_provider_target_key(provider)
     if (
         _target_reservations(
@@ -135,6 +146,7 @@ def qualify_application_staging_lift(
             context=request.context,
             target_key=key,
             target_id=target_id.target_id,
+            require_complete=inventory is not None,
         )
         or any(
             row.provider_target_key
@@ -155,7 +167,24 @@ def qualify_application_staging_lift(
     adapter = ApplicationStateVolumeAdapter.completed_for_testing_lane(
         root, store, product=request.product, context=request.context, scope=scope, trace=trace
     )
-    binding = adapter.qualify_testing_continuation(inspect_provider=inspect_provider)
+    serving = None
+    inputs = ""
+    if inventory is not None:
+        from control_plane.application_serving_hold import current_application_deployment
+        from control_plane.generic_web_testing_inputs import testing_input_authority
+
+        serving = current_application_deployment(adapter)
+        lane = next(
+            lane
+            for lane in profile.lanes
+            if (lane.context, lane.instance) == (request.context, "testing")
+        )
+        inputs = testing_input_authority(store, profile, lane)
+    binding = adapter.qualify_testing_continuation(
+        inspect_provider=inspect_provider,
+        serving_deployment=serving,
+        runtime_binding=runtime_binding,
+    )
     if inspect_storage:
         from control_plane.application_testing_storage import inspect_application_testing_storage
 
@@ -163,5 +192,19 @@ def qualify_application_staging_lift(
             raise ValueError(
                 "Host inspection requires its live execution and authority checkpoint."
             )
-        inspect_application_testing_storage(adapter, checkpoint=before_inspection)
-    return binding
+        inspect_application_testing_storage(
+            adapter,
+            checkpoint=before_inspection,
+            serving_deployment=serving,
+            runtime_binding=runtime_binding,
+        )
+    from control_plane.http_routes.mutation_support import request_fingerprint
+
+    return request_fingerprint(
+        {
+            "allocation": binding,
+            "inventory": inventory.model_dump(mode="json") if inventory else None,
+            "deployment": serving.model_dump(mode="json") if serving else None,
+            "inputs": inputs,
+        }
+    )

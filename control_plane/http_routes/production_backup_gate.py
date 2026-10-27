@@ -1,7 +1,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path as FilePath
 from typing import Annotated, Literal
 
+import click
+from control_plane.action_effects import BACKUP_CONTINUATION_ACTION
 from fastapi import Depends, Header, Path, Query
 from pydantic import BaseModel, ConfigDict
 
@@ -27,7 +30,24 @@ from control_plane.durable_operation_authorization import (
 from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.operation_status_read import safe_operation_error_code
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+    LocalAdminIdentity,
+    LocalOperatorIdentity,
+    GitHubHumanIdentity,
+    TerminalAgentIdentity,
+    director_agent_identity,
+)
+from control_plane.client_release_backup_continuation import (
+    BACKUP_CONTINUATION_ROUTE,
+    BackupContinuationReview,
+    BackupContinuationResult,
+    BackupContinuationRefused,
+    continue_release_backup,
+)
+from control_plane.client_release import ClientReleaseNotReady
+from control_plane.odoo_business_hours import BusinessHoursHeld
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.production_backup_gate import enqueue_production_backup_gate
 from control_plane.workflows.ship import utc_now_timestamp
@@ -41,7 +61,9 @@ PRODUCTION_BACKUP_GATE_OPERATION_ROUTE = "/v1/production-backup-gates/operations
 class ProductionBackupGateRouteDependencies:
     common: ReadRouteDependencies
     read_mutation_identity: Callable[..., LaunchplaneIdentity]
+    read_continuation_identity: Callable[..., LaunchplaneIdentity]
     cancel_pending_operation: Callable[..., VeriReelProdBackupGateOperationRecord]
+    control_plane_root: FilePath
 
 
 class ProductionBackupGateResponse(BaseModel):
@@ -114,6 +136,113 @@ def register_production_backup_gate_routes(
     dependencies: ProductionBackupGateRouteDependencies,
 ) -> None:
     common = dependencies.common
+
+    def continue_backup(
+        product: str,
+        decision_record_id: str,
+        review: BackupContinuationReview,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_continuation_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+    ) -> BackupContinuationResult:
+        trace = common.next_trace_id()
+        trusted = (
+            director_agent_identity(identity)
+            or isinstance(identity, LocalAdminIdentity)
+            or (isinstance(identity, GitHubHumanIdentity) and identity.role == "admin")
+        )
+        if review.apply and not trusted:
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="Release continuation requires a scoped admin.",
+            )
+        if not isinstance(record_store, PostgresRecordStore):
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace,
+                code="database_storage_required",
+                message="Release continuation requires database storage.",
+            )
+        try:
+            profile = record_store.read_product_profile_record(product)
+            lane = next(item for item in profile.lanes if item.instance == "prod")
+        except (FileNotFoundError, StopIteration) as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace,
+                code="not_found",
+                message="Release continuation was not found.",
+            ) from error
+        apply_authorized = trusted and common.authorization_allows(
+            identity=identity,
+            action=BACKUP_CONTINUATION_ACTION,
+            product=product,
+            context=lane.context,
+            target=AuthorizationTarget(scope="instance", instances=("prod",)),
+            inherit_agent_read_role=True,
+        )
+        if (review.apply and not apply_authorized) or not common.authorization_allows(
+            identity=identity,
+            action="product_environment.read",
+            product=product,
+            context=lane.context,
+            target=AuthorizationTarget(scope="instance", instances=("prod",)),
+            inherit_agent_read_role=True,
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace,
+                code="authorization_denied",
+                message="Identity cannot continue this accepted release's backup.",
+            )
+        actor = (
+            f"github:{identity.github_id}"
+            if isinstance(identity, GitHubHumanIdentity)
+            else f"{type(identity).__name__}:{identity.subject}:{identity.token_label}"
+            if isinstance(
+                identity, LocalAdminIdentity | LocalOperatorIdentity | TerminalAgentIdentity
+            )
+            else ""
+        )
+        try:
+            result = continue_release_backup(
+                store=record_store,
+                root=dependencies.control_plane_root,
+                product=product,
+                decision_record_id=decision_record_id,
+                review=review,
+                actor=actor,
+                trace_id=trace,
+            )
+            return result.model_copy(update={"apply_authorized": apply_authorized})
+        except BackupContinuationRefused as error:
+            raise common.http_error(
+                status_code=404 if error.code == "release_record_not_found" else 409,
+                trace_id=trace,
+                code=error.code,
+                message="The original backup or accepted release is not qualified for continuation.",
+            ) from error
+        except (
+            ValueError,
+            FileNotFoundError,
+            ClientReleaseNotReady,
+            BusinessHoursHeld,
+            click.ClickException,
+        ) as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace,
+                code="backup_continuation_held",
+                message="The original backup or accepted release is not qualified for continuation.",
+            ) from error
+
+    app.add_api_route(
+        BACKUP_CONTINUATION_ROUTE,
+        continue_backup,
+        methods=["POST"],
+        response_model=BackupContinuationResult,
+    )
 
     def enqueue_backup(
         request: ProductionBackupGateRequest,

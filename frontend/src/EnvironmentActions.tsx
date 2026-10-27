@@ -18,6 +18,7 @@ import {
 import type { BrowserActionKind } from "./browser-operation";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { OdooReleasePanel } from "./OdooReleasePanel";
+import { PromotionRecoveryPanel } from "./PromotionRecoveryPanel";
 import { ServiceRestartPanel } from "./ServiceRestartPanel";
 import { TestingRebuildPanel } from "./TestingRebuildPanel";
 import { HealthMonitoringPanel } from "./HealthMonitoringPanel";
@@ -71,6 +72,9 @@ export function EnvironmentActionsView({
     <section className="environment-actions-view">
       <RouteRecordRepairPanel key={`route-repair:${detail.product}:${detail.context}:${detail.environment}`}
         detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh} refreshToken={refreshToken} />
+      {detail.environment === "prod" && detail.driver_id === "generic-web" ? <PromotionRecoveryPanel
+        key={`promotion-recovery:${detail.product}`} product={detail.product} fixtureMode={!!fixtureMode}
+      /> : null}
       {testingRebuild ? <TestingRebuildPanel
         key={`rebuild:${detail.product}:${detail.context}`} detail={detail} fixtureMode={!!fixtureMode} onRefresh={onRefresh}
       /> : null}
