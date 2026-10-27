@@ -218,25 +218,59 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(self.fixture.effects, [])
 
     async def test_director_operator_can_queue_native_testing_without_an_apply_rule(self) -> None:
-        from control_plane.service_auth import BearerIdentityConfig
+        from control_plane.service_auth import (
+            BearerIdentityConfig,
+            configured_local_operator_identity,
+            launchplane_identity_actor,
+        )
         from control_plane.odoo_target_replacement_apply_http import (
             ODOO_TARGET_REPLACEMENT_APPLY_ROUTE,
         )
+        from control_plane.odoo_target_replacement_plan_http import (
+            ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+        )
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            OdooStableTargetReplacementRequest,
+        )
 
+        config = BearerIdentityConfig(
+            local_operator_token="fixture-operator",
+            local_operator_subject="fixture-agent",
+            local_operator_token_label="fixture-agent-token",
+        )
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=self.policy,
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.fixture.root,
-            bearer_identity_config=BearerIdentityConfig(
-                local_operator_token="fixture-operator",
-                local_operator_subject="fixture-agent",
-                local_operator_token_label="fixture-agent-token",
-            ),
+            bearer_identity_config=config,
         )
         replacement = self.fixture.operation.request.model_copy(
             update={"reason": "Rebuild the disposable testing copy"}
         )
+        identity = configured_local_operator_identity(config)
+        assert identity is not None
+        hold = self.fixture.apply_staff_hold(
+            True,
+            "Stage an independent empty copy",
+            purpose="isolation_staging",
+            actor=launchplane_identity_actor(identity),
+        )
+        intent = self.fixture.intent.model_copy(update={"before": self.fixture.current()})
+        with patch.object(preflight, "capture_rebuild_intent", return_value=intent):
+            inspected = await request(
+                app,
+                "POST",
+                ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+                headers={"Authorization": "Bearer fixture-operator"},
+                payload={
+                    "product": self.product,
+                    "replacement": replacement.model_dump(
+                        mode="json", include=set(OdooStableTargetReplacementRequest.model_fields)
+                    ),
+                },
+            )
+        self.assertEqual(inspected.status_code, 202, inspected.text)
         ordinary = await request(
             app,
             "POST",
@@ -268,6 +302,7 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(saved.request, replacement)
         self.assertTrue(saved.is_native_testing_rebuild)
         self.assertEqual(self.fixture.effects, [])
+        self.assertEqual(self.fixture.current().target.policies.staff_testing_hold, hold)
         cancelled = await request(
             app,
             "POST",
@@ -563,6 +598,24 @@ class TestingRebuildHttpTests(TestingRebuildHttpFixture, unittest.IsolatedAsynci
         self.assertEqual(self.store.list_odoo_stable_target_replacement_operation_records(), before)
         with self.assertRaises(FileNotFoundError):
             self.store.read_artifact_manifest(self.manifest.artifact_id)
+        self.assertEqual(self.fixture.effects, [])
+
+    async def test_signed_in_staging_preflight_and_submit_keep_the_original_hold(self) -> None:
+        from control_plane.service_auth import launchplane_identity_actor
+
+        hold = self.fixture.apply_staff_hold(
+            True,
+            "Prepare the independent empty testing copy",
+            purpose="isolation_staging",
+            actor=launchplane_identity_actor(self.session.identity),
+        )
+        intent = self.fixture.intent.model_copy(update={"before": self.fixture.current()})
+        with patch.object(preflight, "capture_rebuild_intent", return_value=intent):
+            inspected = await self.call("GET", path=self.url + "/inputs")
+            submitted = await self.call("POST", self.payload)
+        self.assertEqual(inspected.status_code, 200, inspected.text)
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        self.assertEqual(self.fixture.current().target.policies.staff_testing_hold, hold)
         self.assertEqual(self.fixture.effects, [])
 
     async def test_snapshot_hold_without_budget_refuses_before_enqueue(self) -> None:

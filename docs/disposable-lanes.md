@@ -217,6 +217,13 @@ copies keep their actual storage/configuration witness without requiring an old
 runtime identity or starting a process. Fully absent containers leave any old
 storage custody unknown and preserved. Holds, positive use, needed-copy evidence,
 production isolation and unresolved provider effects keep their existing gates.
+An empty native rebuild can retain its caller's `isolation_staging` hold when
+it exactly matches the hold captured in the original serving snapshot. Staff
+testing, foreign and changed holds still block forward effects and retirement.
+Publication and inverse publication preserve the current lane hold, so automatic
+testing stays excluded until the separately reviewed lift. Activate matching API
+and worker images together; older readers reject held publication plans and
+fail closed without changing their original records.
 The database and other owned dependencies may still be running. Their custody is
 retained, and the ordinary fenced stop runs after the candidate passes public
 health and metadata publication. A fresh retained-copy read immediately before
