@@ -75,6 +75,13 @@ Private readiness executes the selected image's shipped readiness helper.
 Synthetic cutover images inherit that helper from their immutable base without
 installing a separate readiness implementation.
 
+The local synthetic image builder accepts an explicit `target_platform` for a
+published multi-platform base. Select an already-local immutable parent and an
+available `linux/amd64` or `linux/arm64` child; inspection, graph/version probes,
+wheel selection and builds use that same platform. A missing or unsupported
+selection refuses without guessing the host architecture or another child.
+Concrete single-platform images keep the existing default inspection path.
+
 A compatible release runs the full planned credential/settings/readback
 sequence with no install or update, warms the candidate, and obtains fresh
 private database/Host/render/asset/browser/identity evidence. The old slot keeps
