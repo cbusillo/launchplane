@@ -379,6 +379,45 @@ class BusinessValidationAdapterTests(unittest.TestCase):
             "fixture-trace",
         )
 
+    def test_verify_requires_passing_candidate_business_validation_before_effects_and_publication(
+        self,
+    ) -> None:
+        verify = self.fixture.adapter("verify")
+        with self.assertRaises(RehearsalRefused):
+            verify.inputs()
+        snapshot: dict[str, object] = {
+            "state": "verified",
+            "copies": [
+                *(copy.model_dump(mode="json") for copy in self.record.copies),
+                self.fixture.copy("final_upgrade").model_dump(mode="json"),
+            ],
+            "elapsed_seconds": {},
+        }
+        with self.assertRaises(RehearsalRefused):
+            verify.publish(self.record, snapshot)
+        self.assertEqual(
+            self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id), self.record
+        )
+        verify.request = verify.request.model_copy(update={"mode": "readback"})
+        self.assertEqual(verify.inputs()[0], self.record)
+
+    def test_verify_refuses_business_receipt_for_another_candidate(self) -> None:
+        verify = self.fixture.adapter("verify")
+        validation = BusinessValidationReceipt.model_validate(receipt(self.plan))
+        for field, changed in (
+            ("product", "another-product"),
+            ("artifact_id", "another-artifact"),
+            ("source_commit", "f" * 40),
+        ):
+            previous = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+            assert previous is not None
+            current = self.record.model_copy(
+                update={"business_validations": (validation.model_copy(update={field: changed}),)}
+            )
+            self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(previous, current)
+            with self.subTest(field=field), self.assertRaises(RehearsalRefused):
+                verify.inputs()
+
     def test_validation_requires_switched_copy_and_cannot_rewrite_a_prior_attempt(self) -> None:
         result: dict[str, Any] = {
             "state": "switched",

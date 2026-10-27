@@ -1012,6 +1012,8 @@ def main():
                 validate_snapshots(spec,root,containers,record['copies'])
                 if action=='validate-business':
                     business_validation_precheck(spec,containers)
+                if action=='verify':
+                    require_passing_business_validation(record)
                 if action in {'execute','simulate-final','verify'} and not rehearsal_storage_capacity(
                     spec,root,containers,action):
                     code='rehearsal_storage_capacity_insufficient'

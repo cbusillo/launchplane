@@ -3697,8 +3697,12 @@ key and new evidence file:
    upgrade nor seals a snapshot.
 4. `verify` probes health identity and the login page inside the private
    network, stops the disposable web writer, and preserves the final upgraded
-   database/filestore tuple. Product business validation remains part of the
-   consuming rehearsal; health/login proof is not Client acceptance.
+   database/filestore tuple. Admission, host execution and publication require
+   a passing committed post-switch business receipt for this exact product,
+   rehearsal, artifact, source commit and final database. An empty journal,
+   a failing latest receipt or abandonment without a subsequent validation
+   refuses verification. The final snapshot seals the complete business history.
+   Historical readback stays available; health/login proof is not Client acceptance.
 5. Without a consumer confirmation, `retire` stops web, runner and database and preserves all recovery custody.
    It requires both final source and upgraded tuples. It does not delete
    volumes, provider placement, snapshots or keys. Keep their recorded custody;
