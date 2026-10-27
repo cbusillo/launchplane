@@ -16,6 +16,8 @@ than repeating the effect; provider-specific reconciliation stays behind the
 
 from __future__ import annotations
 
+from control_plane.http_error_evidence import log_handled_error_cause
+
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -771,6 +773,14 @@ def _apply_acquired(
             )
         except ProviderMutationUnknownError as error:
             current_reservation, _ = heartbeat.stop()
+            reconciled = _mark_reconcile_required(
+                store=store,
+                reservation=current_reservation,
+                reconciliation_key=reconciliation_key,
+            )
+            log_handled_error_cause(
+                error, response_trace_id, operation_id=current_reservation.record_id
+            )
             cause = error.__cause__
             cause_type = (
                 type(cause).__name__
@@ -785,11 +795,7 @@ def _apply_acquired(
                 current_reservation.provider_effect_phase,
                 cause_type,
             )
-            return _mark_reconcile_required(
-                store=store,
-                reservation=current_reservation,
-                reconciliation_key=reconciliation_key,
-            )
+            return reconciled
         except BaseException:
             current_reservation, _ = heartbeat.stop()
             _mark_reconcile_required(

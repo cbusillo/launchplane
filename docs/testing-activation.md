@@ -377,6 +377,15 @@ underlying exception. Preserve the original receipt and choose a fresh evidence
 path for each inspection or readback. The caller rejects an already-used output
 path before making the service read; `--evidence-file` may name a fresh path for
 either read while retaining the original request and key.
+When route custody exists, inspection also projects the original forward and
+inverse child receipts and their exact physical writer receipts from stored
+records. It reports bound, unbound or missing custody, state, attempt, coarse
+checkpoint and closed writer outcomes. Recorded private and public health appear
+once at activation level. Unknown outcome
+text is withheld. A missing child or writer is not physical absence. These reads
+make no provider call, settle no writer and grant no continuation authority;
+they expose no route URL, script, credential or private intent. The original
+apply remains the supported route for an evidenced original-child reconciliation.
 New retained-capability failures also emit bounded numeric locations in the
 generated Python program. Inspection exposes those locations and that recognized
 Python body's SHA-256 only for a matching, disabled, terminal capability run with
