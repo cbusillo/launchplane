@@ -9,6 +9,8 @@ from control_plane.testing_compose_resources import (
     inspect_retained_compose,
     COMPOSE_RESOURCE_PROGRAM,
 )
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
+from control_plane.dokploy.native_copy_stream import NATIVE_PROGRAM_SOURCE_SITE_LIMIT
 
 
 class RetainedComposeInspectionTests(unittest.TestCase):
@@ -99,10 +101,13 @@ class RetainedComposeInspectionTests(unittest.TestCase):
             return json.dumps(str(self.root))
         if arguments == ("info", "--format", "{{json .Swarm.LocalNodeState}}"):
             return json.dumps("active" if self.swarm_services else "inactive")
-        if arguments == ("service", "ls", "-q", "--no-trunc"):
-            return "\n".join(self.swarm_services)
+        if arguments == ("service", "ls", "-q"):
+            return "\n".join(identifier[:12] for identifier in self.swarm_services)
         if arguments[:2] == ("service", "inspect"):
-            return json.dumps([self.swarm_services[arguments[2]]])
+            rows = [row for key, row in self.swarm_services.items() if key.startswith(arguments[2])]
+            if len(rows) != 1:
+                raise ValueError("Service identity is unavailable or ambiguous")
+            return json.dumps(rows)
         self.calls.append(arguments)
         if arguments == ("ps", "-aq", "--no-trunc"):
             return "\n".join(self.rows)
@@ -349,6 +354,47 @@ class RetainedComposeInspectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             inspect_retained_compose(self.spec, drift)
 
+    def test_swarm_short_ids_resolve_to_stable_full_identities(self) -> None:
+        identifier = "a" * 25
+        self.swarm_services = {
+            identifier: {"ID": identifier, "Spec": {"TaskTemplate": {"ContainerSpec": {}}}}
+        }
+        self.assertTrue(inspect_retained_compose(self.spec, self.docker))
+
+    def test_swarm_identity_replacement_with_the_same_prefix_refuses(self) -> None:
+        identifier = "a" * 25
+        row = {"ID": identifier, "Spec": {"TaskTemplate": {"ContainerSpec": {}}}}
+        self.swarm_services = {identifier: row}
+        reads = 0
+
+        def replace(*arguments: str) -> str:
+            nonlocal reads
+            if arguments == ("service", "ls", "-q"):
+                reads += 1
+                if reads > 1:
+                    replacement = identifier[:12] + "b" * 13
+                    self.swarm_services = {replacement: {**row, "ID": replacement}}
+            return self.docker(*arguments)
+
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, replace)
+
+    def test_swarm_mismatched_full_identity_refuses(self) -> None:
+        self.swarm_services = {
+            "a" * 25: {"ID": "b" * 25, "Spec": {"TaskTemplate": {"ContainerSpec": {}}}}
+        }
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+
+    def test_swarm_ambiguous_listed_identity_refuses(self) -> None:
+        first, second = "a" * 25, "a" * 12 + "b" * 13
+        self.swarm_services = {
+            identifier: {"ID": identifier, "Spec": {"TaskTemplate": {"ContainerSpec": {}}}}
+            for identifier in (first, second)
+        }
+        with self.assertRaises(ValueError):
+            inspect_retained_compose(self.spec, self.docker)
+
     def test_transported_program_executes_the_same_inspector(self) -> None:
         import base64
         import io
@@ -363,19 +409,39 @@ class RetainedComposeInspectionTests(unittest.TestCase):
                 returncode=0, stdout=self.docker(*arguments[1:]).encode(), stderr=b""
             )
 
-        output = io.StringIO()
-        with (
-            patch.object(subprocess, "run", side_effect=run),
-            patch(
-                "sys.argv",
-                ["program", base64.b64encode(json.dumps(self.spec).encode()).decode(), "frame:"],
-            ),
-            redirect_stdout(output),
-        ):
-            exec(COMPOSE_RESOURCE_PROGRAM, {})
-        result = json.loads(output.getvalue().removeprefix("frame:"))
-        self.assertEqual(result["type"], "complete")
-        self.assertEqual(result["sha256"], inspect_retained_compose(self.spec, self.docker))
+        for qualified in (True, False):
+            with self.subTest(qualified=qualified):
+                if not qualified:
+                    next(iter(self.volumes.values()))["Driver"] = "unqualified"
+                output = io.StringIO()
+                with (
+                    patch.object(subprocess, "run", side_effect=run),
+                    patch(
+                        "sys.argv",
+                        [
+                            "program",
+                            base64.b64encode(json.dumps(self.spec).encode()).decode(),
+                            "frame:",
+                        ],
+                    ),
+                    redirect_stdout(output),
+                ):
+                    exec(COMPOSE_RESOURCE_PROGRAM, {})
+                result = json.loads(output.getvalue().removeprefix("frame:"))
+                if qualified:
+                    self.assertEqual(result["type"], "complete")
+                    self.assertEqual(
+                        result["sha256"], inspect_retained_compose(self.spec, self.docker)
+                    )
+                else:
+                    self.assertEqual(result["type"], "failed")
+                    self.assertEqual(result["predicate"], ReadbackPredicate.NATIVE_READ.value)
+                    self.assertTrue(result["sites"])
+                    self.assertLessEqual(len(result["sites"]), NATIVE_PROGRAM_SOURCE_SITE_LIMIT)
+                    self.assertTrue(
+                        all(isinstance(line, int) and line > 0 for line in result["sites"])
+                    )
+                    self.assertNotIn(self.spec["credentials"][0], output.getvalue())
 
 
 class ComposeResourceFixture:
@@ -453,10 +519,13 @@ class ComposeResourceFixture:
             return json.dumps(str(self.root))
         if arguments == ("info", "--format", "{{json .Swarm.LocalNodeState}}"):
             return json.dumps("active" if self.swarm_services else "inactive")
-        if arguments == ("service", "ls", "-q", "--no-trunc"):
-            return "\n".join(self.swarm_services)
+        if arguments == ("service", "ls", "-q"):
+            return "\n".join(identifier[:12] for identifier in self.swarm_services)
         if arguments[:2] == ("service", "inspect"):
-            return json.dumps([self.swarm_services[arguments[2]]])
+            rows = [row for key, row in self.swarm_services.items() if key.startswith(arguments[2])]
+            if len(rows) != 1:
+                raise ValueError("Service identity is unavailable or ambiguous")
+            return json.dumps(rows)
         if arguments == ("ps", "-aq", "--no-trunc"):
             return "\n".join(self.rows)
         if arguments[0] == "inspect":

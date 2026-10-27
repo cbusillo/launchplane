@@ -11,6 +11,7 @@ from control_plane.dokploy import api, native_copy_stream, source
 from control_plane import runtime_environments
 from control_plane.runtime_platform_credentials import looks_like_credential
 from control_plane.docker_errors import docker_daemon_authorization_denied
+from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_activation import (
     TestingActivationAdapter,
@@ -44,6 +45,26 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
         ):
             raise ValueError("Incomplete container inventory")
         return sorted(values)
+
+    def service_inventory() -> dict[str, Any]:
+        prefixes = docker("service", "ls", "-q").splitlines()
+        if (
+            len(prefixes) > 10000
+            or len(set(prefixes)) != len(prefixes)
+            or any(not value for value in prefixes)
+        ):
+            raise ValueError("Service inventory incomplete")
+        result = {}
+        for prefix in prefixes:
+            inspected = read("service", "inspect", prefix)
+            if not isinstance(inspected, list) or len(inspected) != 1:
+                raise ValueError("Service inventory incomplete")
+            inspected_service = inspected[0]
+            full_id = inspected_service["ID"]
+            if not isinstance(full_id, str) or not full_id.startswith(prefix) or full_id in result:
+                raise ValueError("Service identity changed")
+            result[full_id] = inspected_service
+        return result
 
     def published_ports(value: object) -> set[int]:
         if value == "":
@@ -327,19 +348,8 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
     swarm = read("info", "--format", "{{json .Swarm.LocalNodeState}}")
     if swarm not in {"active", "inactive"}:
         raise ValueError("Service inventory unavailable")
-    service_ids = (
-        sorted(docker("service", "ls", "-q", "--no-trunc").splitlines())
-        if swarm == "active"
-        else []
-    )
-    if len(service_ids) > 10000 or len(set(service_ids)) != len(service_ids):
-        raise ValueError("Service inventory incomplete")
-    service_rows = {}
-    for identifier in service_ids:
-        service_row = read("service", "inspect", identifier)[0]
-        if service_row["ID"] != identifier:
-            raise ValueError("Service identity changed")
-        service_rows[identifier] = service_row
+    service_rows = service_inventory() if swarm == "active" else {}
+    for service_row in service_rows.values():
         for template in (service_row["Spec"], service_row.get("PreviousSpec")):
             if template is None:
                 continue
@@ -381,13 +391,8 @@ def inspect_retained_compose(spec: dict[str, Any], docker: Callable[..., str]) -
                 spec["ports"]
             ):
                 raise ValueError("Service shares effective testing listener")
-    if (
-        read("info", "--format", "{{json .Swarm.LocalNodeState}}") != swarm
-        or (
-            swarm == "active"
-            and sorted(docker("service", "ls", "-q", "--no-trunc").splitlines()) != service_ids
-        )
-        or any(read("service", "inspect", key)[0] != row for key, row in service_rows.items())
+    if read("info", "--format", "{{json .Swarm.LocalNodeState}}") != swarm or (
+        swarm == "active" and service_inventory() != service_rows
     ):
         raise ValueError("Service inventory changed")
     if set(owned) != set(services) or len(projects) != 1 or ports != set(spec["ports"]):
@@ -629,6 +634,8 @@ def _collect_compose_resource_facts(
 
 COMPOSE_RESOURCE_PROGRAM = (
     "import base64,hashlib,hmac,json,re,subprocess,sys,time\nfrom pathlib import Path\nfrom typing import Any,Callable\n"
+    + f"NATIVE_PROGRAM_SOURCE_SITE_LIMIT={native_copy_stream.NATIVE_PROGRAM_SOURCE_SITE_LIMIT}\n"
+    + f"NATIVE_READ_PREDICATE={ReadbackPredicate.NATIVE_READ.value!r}\n"
     + inspect.getsource(docker_daemon_authorization_denied)
     + "\n"
     + inspect.getsource(inspect_retained_compose)
@@ -646,7 +653,12 @@ try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     digest = inspect_retained_compose(spec, docker)
     print(sys.argv[2] + json.dumps({'type':'complete','sha256':digest}), flush=True)
-except Exception:
-    print(sys.argv[2] + json.dumps({'type':'failed'}), flush=True)
+except Exception as error:
+    sites=[]
+    failure_traceback=error.__traceback__
+    while failure_traceback is not None:
+        if failure_traceback.tb_frame.f_code.co_filename=='<string>': sites.append(failure_traceback.tb_lineno)
+        failure_traceback=failure_traceback.tb_next
+    print(sys.argv[2]+json.dumps({'type':'failed','kind':'unavailable','predicate':NATIVE_READ_PREDICATE,'sites':sites[-NATIVE_PROGRAM_SOURCE_SITE_LIMIT:]}), flush=True)
 """
 )
