@@ -5495,7 +5495,6 @@ def _required_checks_observation(
     filtered_requirements = _effective_technical_requirements(
         required_checks, config_comparison=config_comparison
     )
-    full_ci_required = any(name.casefold() == "ci-gate" for name, _ in filtered_requirements)
     status_payload = _list_commit_statuses(
         transport=transport,
         repository_path=repository_path,
@@ -5521,7 +5520,7 @@ def _required_checks_observation(
     raw_statuses = status_payload.get("statuses")
     if (
         source_screening
-        and full_ci_required
+        and any(name.casefold() == "ci-gate" for name, _ in filtered_requirements)
         and isinstance(raw_checks, list)
         and isinstance(raw_statuses, list)
     ):
@@ -5557,7 +5556,7 @@ def _required_checks_observation(
             required_checks=filtered_requirements,
             status_payload=status_payload,
             check_runs_payload=check_runs_payload,
-            require_successful_runs=focused_source or full_ci_required,
+            require_successful_runs=focused_source,
         )
         if filtered_requirements
         else ("pass" if config_comparison else "unknown", ())
@@ -6304,7 +6303,10 @@ def _required_check_evidence_verdict(
     return evaluate_required_checks(
         requirements=tuple(CheckRequirement(name, app_id) for name, app_id in required_checks),
         signals=signals,
-        successful_signals=successful_signals if require_successful_runs else None,
+        successful_signals=successful_signals
+        if require_successful_runs
+        else successful_signals
+        + [signal for signal in signals if signal.name.casefold() != "ci-gate"],
     )
 
 

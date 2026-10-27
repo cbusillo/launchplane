@@ -1086,8 +1086,8 @@ and reports only `candidate-ci-delegated`, identifying its head SHA and branch.
 That routing check supplies no validation evidence and never publishes a
 `ci-gate`, even when the push is missing, pending or failed. The full workflow
 produces the candidate's required `ci-gate`; an informational PR check cannot
-satisfy or supersede it. Observation and protected landing require a successful
-full gate, never a skipped or neutral one. A new candidate SHA requires its own
+satisfy or supersede it. Candidate observation and head-check reuse require a
+successful full gate, never a skipped or neutral one. A new candidate SHA requires its own
 full validation. Ordinary PRs, including forks using the same branch
 spelling, keep their full CI path. Security, CodeQL and the required-check policy
 are unchanged. Normally Actions records two workflow events for a batch
