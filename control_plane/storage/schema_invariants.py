@@ -16,6 +16,8 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retired_delivery,
     b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
     f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
+    c8d2e4f6a9b1_add_integration_attestations as integration_attestations,
+    d1a5b7c9d2e4_join_attestations_compatibility as attestations_compatibility_join,
 )
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
@@ -25,7 +27,7 @@ def _migration_head() -> str:
     head = ScriptDirectory(str(Path(__file__).parent / "migrations")).get_current_head()
     if head is None:
         raise ValueError("Launchplane migration graph has no head.")
-    if head != idle_compatibility_join.revision:
+    if head != attestations_compatibility_join.revision:
         raise ValueError(
             "The prepared retired-delivery migration hold must be reconciled before "
             "advancing the migration head. See docs/operations.md#prepared-retired-"
@@ -39,6 +41,8 @@ EXPECTED_ALEMBIC_HEAD_REVISION = _migration_head()
 PRE_RETIREMENT_ALEMBIC_REVISION = retired_delivery.down_revision
 RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (
     idle_hostnames_join.revision,
+    idle_compatibility_join.revision,
+    integration_attestations.revision,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"
