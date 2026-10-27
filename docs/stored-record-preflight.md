@@ -99,7 +99,8 @@ data: its scoped addon payload is validated, decoded, scrubbed with the same
 salt and encoded again. Literal values and binding identifiers are replaced;
 the preview instance and canonical secret transport relationships survive.
 The same key in an arbitrary map receives no exemption. A malformed or unsafe
-preview payload refuses export without exposing its values.
+preview payload keeps its ordinary pseudonym so the candidate still refuses it
+when it migrates; releases that do not activate that migration remain deployable.
 
 ## Candidate rehearsal
 

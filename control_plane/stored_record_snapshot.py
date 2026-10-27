@@ -135,6 +135,7 @@ class _Scrubber:
         self._used_numbers: set[int] = set()
         self._scrubbed_items_by_source: dict[tuple[int, int, str, bool, bytes], _ScrubbedItem] = {}
         self._cached_source_bytes = 0
+        self._preview_payload_schema = OdooPostDeployPayload.model_json_schema()
 
     def _digest(self, value: str) -> str:
         return hmac.new(self._salt, value.encode(), hashlib.sha256).hexdigest()
@@ -144,11 +145,15 @@ class _Scrubber:
         values = preview.get("override_env") or {}
         if ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY not in values:
             return
-        validate_preview_scope(values, context=preview["context"])
-        raw = json.loads(base64.b64decode(values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))
-        schema = OdooPostDeployPayload.model_json_schema()
-        payload = self.scrub(raw, schema, schema)
-        payload["instance"] = raw["instance"]
+        try:
+            validated = validate_preview_scope(values, context=preview["context"])
+        except ValueError:
+            return
+        if validated is None:
+            return
+        raw = validated.model_dump(mode="json", exclude_unset=True)
+        payload = self.scrub(raw, self._preview_payload_schema, self._preview_payload_schema)
+        payload["instance"] = validated.instance
         from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
 
         for source, item in zip(raw.get("addon_settings", ()), payload.get("addon_settings", ())):

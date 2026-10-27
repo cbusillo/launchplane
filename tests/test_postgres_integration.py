@@ -3139,7 +3139,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             addon = "private_connector"
             setting = "api_token"
             encoded_payload = {
-                "context": preview["context"],
+                "context": f" {str(preview['context']).upper()} ",
                 "instance": "preview",
                 "addon_settings": [
                     {
@@ -3216,7 +3216,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     )
                     target = PostgresRecordStore(database_url=target_url)
                     self.addCleanup(target.close)
-                    self.assertIn(revision, (profile_archive.revision, preview_settings.revision))
+                    self.assertEqual(revision, SCHEMA_MIGRATION_TARGET_REVISION)
                     restored_profile = target.list_product_profile_records()[0]
                     self.assertFalse(restored_profile.preview.override_env)
                     restored_settings = target.list_runtime_environment_records()[0]
