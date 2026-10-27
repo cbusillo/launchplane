@@ -9288,6 +9288,47 @@ class _ClaimOrderStore:
 
 
 class ProductReconcileWorkerTests(ProductReconcileTestCase):
+    def test_persists_queue_planning_and_feedback_boundaries(self) -> None:
+        from control_plane.product_reconcile import ReconcileOutcome
+
+        target = self.request()
+        requested = self.store.read_product_reconcile_request(target).requested_at
+        queue_wait, planning, publication = (timedelta(seconds=value) for value in (20, 7, 3))
+        clock = [datetime.fromisoformat(requested) + queue_wait]
+
+        def reconcile(**_kwargs: object) -> ReconcileOutcome:
+            clock[0] += planning
+            return ReconcileOutcome({"target": "testing", "action": "none"})
+
+        def feedback(**_kwargs: object) -> None:
+            clock[0] += publication
+
+        with (
+            patch(
+                "control_plane.product_reconcile._utc_now", side_effect=lambda: clock[0].isoformat()
+            ),
+            patch(
+                "control_plane.product_reconcile.reconcile_product_request", side_effect=reconcile
+            ),
+            patch("control_plane.product_reconcile.post_reconcile_feedback", side_effect=feedback),
+        ):
+            completed = self.run_once()
+
+        timing = cast(dict[str, str], completed.last_plan["timing"])
+        boundaries = [
+            datetime.fromisoformat(timing[key])
+            for key in (
+                "requested_at",
+                "started_at",
+                "planning_finished_at",
+                "feedback_finished_at",
+            )
+        ]
+        self.assertEqual(
+            [end - start for start, end in zip(boundaries, boundaries[1:])],
+            [queue_wait, planning, publication],
+        )
+
     def test_worker_tries_reconcile_only_after_every_operation_kind(self) -> None:
         store = _ClaimOrderStore()
 

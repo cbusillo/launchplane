@@ -3047,6 +3047,7 @@ def run_product_reconcile_once(
     request = record_store.claim_next_product_reconcile_request(lease_owner, lease_seconds)
     if request is None:
         return None
+    started_at = _utc_now()
     try:
         with _LeaseHeartbeat(
             record_store=record_store,
@@ -3109,6 +3110,12 @@ def run_product_reconcile_once(
                 if key in request.last_plan:
                     outcome.plan[key] = request.last_plan[key]
     plan = dict(outcome.plan)
+    timing = {
+        "requested_at": request.requested_at,
+        "started_at": started_at,
+        "planning_finished_at": _utc_now(),
+    }
+    plan["timing"] = timing
     if (
         request.target_kind == "preview"
         and not outcome.error
@@ -3142,6 +3149,7 @@ def run_product_reconcile_once(
             ),
         ),
     )
+    timing["feedback_finished_at"] = _utc_now()
     if feedback is not None:
         plan[PR_FEEDBACK_PLAN_KEY] = feedback
     retired_failure = False

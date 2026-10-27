@@ -999,6 +999,7 @@ def run_odoo_stable_operation_worker_loop(
     error_count = 0
     consecutive_errors = 0
     last_sweep_at: float | None = None
+    sweep_thread: Thread | None = None
     client_release_stop_event = Event()
     invitation_thread: Thread | None = None
     last_invitation_advance_at: float | None = None
@@ -1054,6 +1055,16 @@ def run_odoo_stable_operation_worker_loop(
         except Exception:
             logging.exception("Product config-authority scan failed.")
 
+    def sweep_reconciles() -> None:
+        try:
+            request_product_reconcile_sweep(
+                cast(ProductReconcileStore, record_store),
+                _utc_now_timestamp(),
+                control_plane_root=control_plane_root_path,
+            )
+        except Exception:
+            logging.exception("Product reconcile sweep failed.")
+
     client_release_thread = Thread(
         target=advance_releases, name="client-release-advance", daemon=False
     )
@@ -1075,19 +1086,18 @@ def run_odoo_stable_operation_worker_loop(
                     target=resume_rehearsals, name="rehearsal-checkpoint-resume", daemon=False
                 )
                 rehearsal_resume_thread.start()
-            if hasattr(record_store, "request_product_reconcile") and (
-                last_sweep_at is None or monotonic() - last_sweep_at >= reconcile_sweep_seconds
+            if (
+                hasattr(record_store, "request_product_reconcile")
+                and (
+                    last_sweep_at is None or monotonic() - last_sweep_at >= reconcile_sweep_seconds
+                )
+                and (sweep_thread is None or not sweep_thread.is_alive())
             ):
-                # In-memory timer: another replica's sweep only folds into the same requests.
                 last_sweep_at = monotonic()
-                try:
-                    request_product_reconcile_sweep(
-                        cast(ProductReconcileStore, record_store),
-                        _utc_now_timestamp(),
-                        control_plane_root=control_plane_root_path,
-                    )
-                except Exception:
-                    logging.exception("Product reconcile sweep failed.")
+                sweep_thread = Thread(
+                    target=sweep_reconciles, name="product-reconcile-sweep", daemon=False
+                )
+                sweep_thread.start()
             if (
                 last_invitation_advance_at is None
                 or monotonic() - last_invitation_advance_at >= CLIENT_RELEASE_ADVANCE_SECONDS
@@ -1147,6 +1157,8 @@ def run_odoo_stable_operation_worker_loop(
             invitation_thread.join()
         if config_scan_thread is not None:
             config_scan_thread.join()
+        if sweep_thread is not None:
+            sweep_thread.join()
         if rehearsal_resume_thread is not None:
             rehearsal_resume_thread.join()
     return OdooStableOperationWorkerLoopResult(
