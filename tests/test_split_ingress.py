@@ -2,7 +2,7 @@ import json
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
@@ -35,6 +35,8 @@ from control_plane.lane_runtime_verification import (
     read_check_runtime_verification,
     read_lane_runtime_verification,
 )
+from control_plane.product_promotion_http import _promotion_evidence
+from control_plane.production_delivery_monitor import _resolve_guard_refusal
 from control_plane.outbound_http import (
     PublicHttpResponse,
     PublicHttpDestinationError,
@@ -72,6 +74,8 @@ from tests.test_product_topology_read_model import (
     _lane_summary,
     _strict_public_profile,
     _TopologyStore,
+    _tls_observation,
+    _tls_incident,
 )
 from tests.test_route_binding_record import (
     _dokploy_target_record,
@@ -144,7 +148,192 @@ def lane_with_checks(
     )
 
 
+def split_tls_observation(
+    binding: EnvironmentRouteBindingRecord, domain: str
+) -> PublicIngressObservationRecord:
+    payload = _tls_observation(domain_name=domain, status="valid").model_dump(mode="json")
+    payload["targets"][0]["tls"]["recorded"].update(
+        domain_role=next(d.role for d in binding.domains if d.domain_name == domain),
+        owner=binding.tls_for_domain(domain).owner,
+        ingress_provider=binding.ingress_for_domain(domain).provider,
+        termination_kind=binding.ingress_for_domain(domain).termination_kind,
+        source_record_ids=binding.source.source_record_ids,
+        source_versions=binding.source.source_versions,
+    )
+    return PublicIngressObservationRecord.model_validate(payload)
+
+
 class SplitIngressTests(unittest.TestCase):
+    def test_recovery_observations_warn_without_blocking_business_evidence(self) -> None:
+        binding = split_binding().model_copy(
+            update={"product": "example-site", "context": "example-context", "instance": "prod"}
+        )
+        profile = _strict_public_profile(domain_name="business.example.test")
+        lane = profile.lanes[0]
+        summary = _lane_summary()
+        assert summary.provider_target is not None
+        summary = summary.model_copy(
+            update={
+                "provider_target": summary.provider_target.model_copy(
+                    update={
+                        "provider_id": binding.provider_target.provider_id,
+                        "target_category": binding.provider_target.target_category,
+                        "provider_target_type": binding.provider_target.provider_target_type,
+                        "display_name": binding.provider_target.target_name,
+                    }
+                )
+            }
+        )
+        healthy = tuple(split_observation(binding, profile, d.domain_name) for d in binding.domains)
+        tls = tuple(split_tls_observation(binding, d.domain_name) for d in binding.domains)
+        store = _TopologyStore(route_binding=binding)
+        for index in (0, 2):
+            domain = binding.domains[index].domain_name
+            for state in ("missing", "mismatch", "stale"):
+                with self.subTest(domain=domain, state=state):
+                    failing = split_observation(binding, profile, domain, status="mismatch")
+                    if state == "stale":
+                        failing = healthy[index].model_copy(
+                            update={
+                                "observed_at": (
+                                    _NOW
+                                    - timedelta(
+                                        seconds=health_monitor_freshness_seconds(lane.instance) + 1
+                                    )
+                                ).isoformat()
+                            }
+                        )
+                    store.observations = (
+                        tuple(o for i, o in enumerate(healthy) if i != index)
+                        + (() if state == "missing" else (failing,))
+                        + tls
+                    )
+                    verification = read_lane_runtime_verification(
+                        record_store=store, profile=profile, lane=lane, summary=summary, now=_NOW
+                    )
+                    promotion = _promotion_evidence(
+                        record_store=store, profile=profile, lane=lane, summary=summary, now=_NOW
+                    )
+                    topology = build_product_environment_topology(
+                        record_store=store,
+                        profile=profile,
+                        lane=lane,
+                        lane_summary=summary,
+                        now=_NOW,
+                    )
+                    warning = next(
+                        w
+                        for w in topology.warnings
+                        if w.scope == "observation" and w.domain_name == domain
+                    )
+                    self.assertEqual(warning.severity, "warning" if index == 2 else "error")
+                    self.assertEqual(
+                        verification.provenance.freshness_status == "verified", index == 2
+                    )
+                    self.assertEqual(promotion.health_status == "pass", index == 2)
+                    with (
+                        patch.object(
+                            store,
+                            "read_environment_inventory",
+                            create=True,
+                            return_value=summary.inventory,
+                        ),
+                        patch(
+                            "control_plane.production_delivery_monitor._is_refusal_only_incident",
+                            return_value=True,
+                        ),
+                        patch("control_plane.production_delivery_monitor._observe") as observe,
+                    ):
+
+                        def resolve_guard() -> str:
+                            return _resolve_guard_refusal(
+                                cast(Any, store),
+                                incident=_tls_incident(),
+                                profile=profile,
+                                lane=lane,
+                                now=_NOW,
+                                health_after=_NOW
+                                - timedelta(
+                                    seconds=health_monitor_freshness_seconds(lane.instance)
+                                ),
+                                summary="Fresh business checks verified. ",
+                            )
+
+                        if index == 2:
+                            resolve_guard()
+                            observe.assert_called_once()
+                        else:
+                            with self.assertRaises(ValueError):
+                                resolve_guard()
+                            observe.assert_not_called()
+                    if index == 2:
+                        self.assertEqual(topology.observed.ingress.status, "pass")
+                    readiness = build_product_operational_readiness(
+                        replace(_inputs(), topology=topology)
+                    )
+                    self.assertEqual(
+                        next(d.state for d in readiness.dimensions if d.dimension == "topology"),
+                        "ready" if index == 2 else "blocked",
+                    )
+
+    def test_recovery_http_and_tls_failures_have_advisory_material_severity(self) -> None:
+        binding = split_binding().model_copy(
+            update={"product": "example-site", "context": "example-context", "instance": "prod"}
+        )
+        profile = _strict_public_profile(domain_name="business.example.test")
+        store = _TopologyStore(route_binding=binding)
+        with patch.object(
+            store, "list_route_binding_records", create=True, return_value=(binding,)
+        ):
+            targets = discover_public_ingress_monitor_targets(
+                record_store=cast(Any, store), profiles=(profile,)
+            )
+        self.assertEqual(
+            {t.tls_domain_name for t in targets if t.check_kind == "tls"},
+            {d.domain_name for d in binding.domains},
+        )
+        for target in targets:
+            if target.check_kind not in {"public_http", "tls"}:
+                continue
+            host = target.tls_domain_name or urlsplit(target.health_url).hostname
+            recovery = host == "operator.example.test"
+            with (
+                self.subTest(host=host, kind=target.check_kind),
+                patch(
+                    "control_plane.workflows.public_ingress_monitor.request_public_http",
+                    side_effect=PublicHttpDestinationError("invalid_url", "Redirect refused"),
+                ),
+            ):
+                observation = check_public_ingress_target(
+                    target=target,
+                    checked_at=_NOW.isoformat(),
+                    timeout_seconds=5,
+                    http_get=fetch_public_ingress_url,
+                    tls_get=lambda _host, _timeout: PublicTlsProbeResult(
+                        status="unreachable", failure_code="tls_failure", summary="Unreachable"
+                    ),
+                )
+            self.assertEqual(observation.status, "fail")
+            assert observation.material_fingerprint is not None
+            self.assertEqual(
+                observation.material_fingerprint.severity, "warning" if recovery else "critical"
+            )
+        for domain in binding.domains:
+            observation = _tls_observation(domain_name=domain.domain_name, status="expired")
+            store.observations = (observation,)
+            topology = build_product_environment_topology(
+                record_store=store,
+                profile=profile,
+                lane=profile.lanes[0],
+                lane_summary=_lane_summary(),
+                now=_NOW,
+            )
+            warning = next(w for w in topology.warnings if w.code == "tls_expired")
+            self.assertEqual(
+                warning.severity,
+                "warning" if domain.domain_name == "operator.example.test" else "error",
+            )
+
     def test_split_projection_retains_checks_dns_and_recovery_policy(self) -> None:
         profile = _strict_public_profile(domain_name="business.example.test")
         lane = profile.lanes[0]

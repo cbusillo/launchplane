@@ -36,6 +36,35 @@ function environment() {
 test("a fresh identity and health verification makes a monitored lane green", () =>
   assert.equal(environmentOperationalTone(environment()), "verified"));
 
+test("recovery failures stay yellow while business failures stay red", () => {
+  const lane = environment();
+  lane.environment = "prod";
+  lane.health_monitoring.open_incidents = [];
+  const business = lane.topology.provider_recorded.domains[0].domain_name;
+  const recoveryHost = "recovery.example.test";
+  lane.topology.provider_recorded.external_ingress = { domains: [business], custodian: "Office", evidence_url: "https://example.test/evidence" };
+  lane.topology.provider_recorded.domains.push({ domain_name: recoveryHost, role: "alias", tls_expected: true });
+  const recovery = { ...structuredClone(lane.health_monitoring.checks[0]), name: "Recovery path", advisory: true };
+  lane.health_monitoring.checks.push(recovery);
+  for (const state of ["fail", "missing", "stale"]) {
+    Object.assign(recovery, { status: state === "stale" ? "pass" : state, trust_state: state === "stale" ? "stale" : "verified" });
+    assert.equal(environmentOperationalTone(lane), "warning");
+    assert.notEqual(sidebarStatus(lane, "Production").tone, "danger");
+    assert.equal(operationalAttentionReasons(lane).length, 0);
+    assert.ok(operationalWarningReasons(lane).length);
+  }
+  Object.assign(recovery, { status: "pass", trust_state: "verified" });
+  const tls = { ...structuredClone(lane.topology.observed.tls_domains[0]), domain_name: recoveryHost, status: "expired" };
+  lane.topology.observed.tls_domains.push(tls);
+  assert.equal(environmentOperationalTone(lane), "warning");
+  tls.domain_name = business;
+  assert.equal(environmentOperationalTone(lane), "danger");
+  lane.topology.observed.tls_domains.pop();
+  lane.health_monitoring.checks[0].status = "fail";
+  assert.equal(environmentOperationalTone(lane), "danger");
+  assert.equal(sidebarStatus(lane, "Production").tone, "danger");
+});
+
 test("monitored production cannot hide unknown runtime behind an empty incident list", () => {
   const updates = [
     lane => { lane.topology.observed.placement.runtime_identity_status = "unchecked"; },

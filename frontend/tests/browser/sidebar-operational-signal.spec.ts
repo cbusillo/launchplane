@@ -1,7 +1,7 @@
 import { setClockTime, expect, test } from "./state";
 import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
-const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "delivery-warning", "production-unknown", "stale", "unknown", "absent"] as const;
+const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "delivery-warning", "recovery-warning", "production-unknown", "stale", "unknown", "absent"] as const;
 
 for (const theme of ["dark", "light"] as const) {
 
@@ -37,6 +37,11 @@ for (const state of cases) {
       check.trust_state = "verified";
       check.incident_status = "";
       check.provenance.stale_after = lane.provenance.stale_after;
+      if (state === "recovery-warning") {
+        lane.environment = "prod";
+        lane.health_monitoring.open_incidents = [];
+        lane.health_monitoring.checks.push({ ...structuredClone(check), name: "Recovery path", advisory: true, status: "fail", summary: "Recovery route is unavailable." });
+      }
       if (state === "delivery-warning") {
         const incident = structuredClone(product.environments.find((lane: { environment: string }) => lane.environment === "prod").health_monitoring.open_incidents[0]);
         lane.environment = "prod";
@@ -109,7 +114,7 @@ for (const state of cases) {
     const dot = railLink.locator(`[data-lane="${fixtures.laneName}"]`);
     const signal = page.locator(".signal-tile").filter({ hasText: new RegExp(`^${fixtures.laneLabel}`, "i") });
     const healthy = state === "healthy" || state === "missing-route" || state === "expired-route";
-    const tone = healthy ? "verified" : state === "failed" || state === "incident" || state === "production-unknown" ? "danger" : state === "stale" || state === "delivery-warning" ? "warning" : "missing";
+    const tone = healthy ? "verified" : state === "failed" || state === "incident" || state === "production-unknown" ? "danger" : state === "stale" || state === "delivery-warning" || state === "recovery-warning" ? "warning" : "missing";
     await expect(signal).toHaveAttribute("data-tone", tone);
     await expect(dot).toHaveAttribute("data-tone", state === "stale" ? "stale" : tone);
     await expect(dot).toHaveAttribute("title", fixtures.testingDescription);

@@ -129,11 +129,18 @@ function productionDeliveryWarning(environment: ProductEnvironmentSummary, incid
     incident.severity === "warning";
 }
 
+function recoveryDomain(topology: Topology, domain: string): boolean {
+  const recorded = topology.provider_recorded;
+  return Boolean(recorded.external_ingress &&
+    !recorded.external_ingress.domains.includes(domain) &&
+    recorded.domains.some(item => item.domain_name === domain));
+}
+
 function runtimeVerificationGap(environment: ProductEnvironmentSummary, now: number, { requireChecks = true } = {}): string | null {
   const placement = environment.topology.observed.placement;
   if (placement.runtime_identity_status !== "match" || placement.trust_state !== "verified")
     return "The running production release is not verified";
-  const checks = environment.health_monitoring.checks.filter(check => check.probe_effective);
+  const checks = environment.health_monitoring.checks.filter(check => check.probe_effective && !check.advisory);
   if (requireChecks && !checks.length || checks.some(check =>
     check.status !== "pass" || check.trust_state !== "verified" || Date.parse(check.provenance.stale_after) < now))
     return "Current production health is not verified";
@@ -155,8 +162,14 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
   if (!environment) return { tone: "missing", attentionReasons: [], warningReasons: [] };
   environment = expireEnvironmentEvidence(environment, now);
   const reasons = new Set<string>();
+  const warnings = new Set<string>();
   const incidents = environment.health_monitoring.open_incidents;
   for (const check of environment.health_monitoring.checks.filter(check => check.probe_effective)) {
+    if (check.advisory) {
+      if (check.status !== "pass" || check.trust_state !== "verified" || check.incident_status === "open")
+        warnings.add(check.summary?.trim() || `Recovery check ${check.name} is not verified`);
+      continue;
+    }
     if (check.status === "fail") {
       reasons.add(check.summary?.trim() || `Health check ${check.name} failed: ${readable(check.failure_code) || "unknown failure"}`);
     } else if (check.incident_status === "open" && !incidents.some(incident => incident.check_name === check.name)) {
@@ -168,25 +181,34 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
   healthWarnings(environment).filter(warning => warning.severity === "error")
     .forEach(warning => reasons.add(warning.detail));
   environment.topology.observed.tls_domains.filter(domain => negativeTlsStates.has(domain.status))
-    .forEach(domain => reasons.add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
+    .forEach(domain => (recoveryDomain(environment.topology, domain.domain_name) ? warnings : reasons)
+      .add(`TLS for ${domain.domain_name}: ${readable(domain.status)}`));
   const runtimeTone = environmentRuntimeTone(environment, now);
   const runtimeGap = runtimeVerificationGap(environment, now);
   if (environment.environment === "prod" && environment.health_monitoring.monitoring_intent !== "prelaunch" && runtimeGap)
     reasons.add(runtimeGap);
-  const deliveryOnly = incidents.length > 0 && reasons.size === 0 && runtimeTone === "verified" &&
-    incidents.every(incident => productionDeliveryWarning(environment, incident));
+  const blockingIncidents = incidents.filter(incident => {
+    const recovery = incident.severity === "warning" && (
+      environment.health_monitoring.checks.some(check => check.advisory && check.name === incident.check_name && check.kind === incident.check_kind) ||
+      incident.check_kind === "tls" && environment.topology.observed.tls_domains.some(domain =>
+        domain.incident_id === incident.incident_id && recoveryDomain(environment.topology, domain.domain_name)));
+    if (recovery) warnings.add(`Recovery path: ${readable(incident.failure_code)}`);
+    return !recovery;
+  });
+  const deliveryOnly = blockingIncidents.length > 0 && reasons.size === 0 && runtimeTone === "verified" &&
+    blockingIncidents.every(incident => productionDeliveryWarning(environment, incident));
   if (!deliveryOnly) {
-    for (const incident of incidents) {
+    for (const incident of blockingIncidents) {
       const severity = readable(incident.severity) || "Open";
       reasons.add(`${severity[0].toUpperCase()}${severity.slice(1)} incident open: ${readable(incident.failure_code) || "unknown failure"}`);
     }
   }
   return {
-    tone: reasons.size ? "danger" : deliveryOnly ? "warning" : runtimeTone,
+    tone: reasons.size ? "danger" : deliveryOnly || warnings.size ? "warning" : runtimeTone,
     attentionReasons: [...reasons],
-    warningReasons: deliveryOnly
-      ? incidents.map(incident => `${readable(incident.failure_code)}; the current production release is healthy`)
-      : [],
+    warningReasons: reasons.size ? [] : [...warnings, ...(deliveryOnly
+      ? blockingIncidents.map(incident => `${readable(incident.failure_code)}; the current production release is healthy`)
+      : [])],
   };
 }
 

@@ -55,6 +55,9 @@ from control_plane.route_binding_reconcile import read_unchanged_route_binding_e
 from control_plane.split_ingress import (
     split_ingress_check_name,
     split_ingress_monitoring_lane,
+    split_ingress_recovery_check,
+    split_ingress_recovery_domain,
+    read_split_ingress_binding,
 )
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
@@ -499,7 +502,9 @@ def _split_ingress_warnings(
             _warning(
                 code=code,
                 scope="observation",
-                severity="error",
+                severity="warning"
+                if split_ingress_recovery_domain(binding, domain.domain_name)
+                else "error",
                 domain_name=domain.domain_name,
                 detail="This split ingress hostname has no current passing strict runtime-identity observation.",
             )
@@ -815,8 +820,11 @@ def _observed_topology(
     observed_tls_by_domain = {
         evidence.projection.domain_name: evidence.projection for evidence in tls_evidence
     }
+    binding = read_split_ingress_binding(record_store, profile, lane)
     if lane.health_monitoring.monitoring_intent != "private":
         for domain_name in expected_tls_domains:
+            if split_ingress_recovery_domain(binding, domain_name):
+                continue
             observation = observed_tls_by_domain.get(domain_name)
             if observation is not None:
                 states.append(observation.trust_state)
@@ -972,13 +980,23 @@ def _strict_public_ingress_confirms_placement(
 
 
 def select_public_probe_observations(
-    *, lane: ProductLaneProfile, records: tuple[object, ...]
+    *,
+    lane: ProductLaneProfile,
+    records: tuple[object, ...],
+    binding: EnvironmentRouteBindingRecord | None = None,
 ) -> tuple[PublicIngressObservationRecord | None, PublicIngressObservationRecord | None]:
     """Select current effective public evidence, retaining history as a fallback."""
+    recovery_names = {
+        check.name
+        for check in lane.health_monitoring.checks
+        if split_ingress_recovery_check(binding, check)
+    }
     observations = tuple(
         record
         for record in records
-        if isinstance(record, PublicIngressObservationRecord) and record.purpose == "probe"
+        if isinstance(record, PublicIngressObservationRecord)
+        and record.purpose == "probe"
+        and record.check_name not in recovery_names
     )
     effective_names = {
         canonical_health_check_record_token(check.name)
@@ -1037,7 +1055,10 @@ def _observed_ingress(
         check_kind="public_http",
         limit=50,
     )
-    latest, newest_observation = select_public_probe_observations(lane=lane, records=records)
+    binding = read_split_ingress_binding(record_store, profile, lane)
+    latest, newest_observation = select_public_probe_observations(
+        lane=lane, records=records, binding=binding
+    )
     if latest is None:
         projection = ProductObservedIngress(
             monitoring_intent=monitoring_intent,
@@ -1819,6 +1840,13 @@ def _tls_warnings(
                 detail="The TLS endpoint requires an unsupported protocol or capability.",
             )
         )
+    if split_ingress_recovery_domain(route_binding, projection.domain_name):
+        warnings = [
+            warning.model_copy(update={"severity": "warning"})
+            if warning.scope == "tls" and warning.severity == "error"
+            else warning
+            for warning in warnings
+        ]
     return tuple(warnings)
 
 

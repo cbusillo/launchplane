@@ -168,6 +168,7 @@ from control_plane.split_ingress import (
     split_ingress_monitoring_lane,
     split_ingress_check_base_url,
     split_ingress_monitoring_policy,
+    split_ingress_recovery_domain,
 )
 from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.workflows.ship import utc_now_timestamp
@@ -299,6 +300,7 @@ class PublicIngressMonitorTarget:
     incident_eligible: bool
     expected_runtime_identity: RuntimeIdentity | None
     require_runtime_identity: bool
+    advisory: bool = False
     dependency_expectations: RuntimeDependencyExpectations | None = None
     dependency_policy: RuntimeDependencyHealthPolicy | None = None
     expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] = ()
@@ -765,6 +767,9 @@ def _health_check_monitor_target(
             instance_name=lane.instance,
         ),
         require_runtime_identity=check.require_runtime_identity,
+        advisory=split_ingress_recovery_domain(binding, urlsplit(health_url).hostname or "")
+        if domain_check
+        else False,
         dependency_expectations=derive_runtime_dependencies(
             profile=profile, lane=lane, record_store=record_store
         )
@@ -2654,6 +2659,8 @@ def check_public_ingress_target(
         provider=target.provider,
         provider_check=target.provider_check,
     )
+    if target.advisory:
+        material_fingerprint = material_fingerprint.model_copy(update={"severity": "warning"})
     snapshot = target.provider_hold_snapshot
     if snapshot is not None:
         references = tuple(
@@ -3483,6 +3490,7 @@ def _tls_monitor_targets(
                 tls_domain_name=domain.domain_name,
                 tls_domain_role=domain.role,
                 tls_route_binding_status=route_binding.status,
+                advisory=split_ingress_recovery_domain(route_binding, domain.domain_name),
                 tls_owner=route_binding.tls_for_domain(domain.domain_name).owner,
                 tls_ingress_provider=route_binding.ingress_for_domain(domain.domain_name).provider,
                 tls_termination_kind=route_binding.ingress_for_domain(
