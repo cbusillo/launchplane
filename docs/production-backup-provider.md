@@ -177,32 +177,29 @@ multiline commands remain denied. Storage commands follow the
 
 ## Evidence and rollout
 
-### Recorded lane qualification, October 27, 2026
+### Reading lane readiness
 
-This dated checkpoint covers the six production lanes in the
-[backup rollout](https://github.com/cbusillo/launchplane/issues/2309), not an
-independent product census. Runtime policy and target records remain authoritative.
-The [saved authority/preflight receipt](https://github.com/cbusillo/launchplane/issues/2309#issuecomment-6441602342)
-records the read traces; it changes no policy and starts no capture.
+The installed Launchplane skill exposes the current policy/target read and
+capture-free qualification as bounded commands. Replace the skill path and
+scope placeholders with the installed skill location and recorded lane:
 
-| Product / production context | Active policy record at this checkpoint | Capture-free check | Latest successful release proof located |
-| --- | --- | --- | --- |
-| Odoo CM / `cm` | `production-backup-policy-13f1d4fd2a4c6fffd247faaa-r1` | pass | None; [production adoption](https://github.com/cbusillo/odoo-tenant-cm/issues/120) remains open. |
-| CM Website / `cm_website` | `production-backup-policy-15bd25c68be9c9e207119680-r1` | pass | [October 9 readback](https://github.com/cbusillo/launchplane/issues/2309#issuecomment-6089008871): two verified shared captures and the accepted release drill. |
-| Discord Blue / `discord-blue` | `production-backup-policy-f70bc94fd11c229b2ba2207c-r1` | pass | [October 25 release](https://github.com/cbusillo/discord-blue/issues/266): both snapshot/PBS captures, both promotions and rollback passed. |
-| Odoo OPW / `opw` | `production-backup-policy-67d079f819830cf7126461d1-r1` | unavailable | None; [accepted release/drill](https://github.com/cbusillo/launchplane/issues/3756) remains open. |
-| SellYourOutboard / `sellyouroutboard` | `production-backup-policy-844dc7aae19824e03fc33465-r1` | pass | [October 9 readback](https://github.com/cbusillo/launchplane/issues/2309#issuecomment-6089008871): separate verified shared captures and the accepted release drill. |
-| VeriReel / `verireel` | `production-backup-policy-9a7231acf58794fc57ed5e29-r1` | pass | [October 24 release](https://github.com/cbusillo/launchplane/issues/4718#issuecomment-6392338729): both verified backups, both promotions and rollback passed. |
+```bash
+uv run <launchplane-skill>/scripts/launchplane-write-action.py \
+  production-backup-authority-read --product PRODUCT --context CONTEXT \
+  --instance prod --promotion-action ACTION
+uv run <launchplane-skill>/scripts/launchplane-write-action.py \
+  production-backup-preflight-read --product PRODUCT --context CONTEXT \
+  --instance prod --promotion-action ACTION
+```
 
-All six authority reads were ready, with active revision-1 source/destination
-targets. Each passing preflight reported `match_capture_only`, `active_pbs` and
-`capture_started=false`. OPW returned HTTP 409 `backup_preflight_unavailable`;
-the missing prerequisite remains unknown. This is not proof that a new key is
-needed. The linked release proofs are historical receipts freshly read from
-GitHub; no release or capture-operation read ran during this checkpoint.
-VeriReel's [ten-setting retirement readback](https://github.com/cbusillo/launchplane/issues/4760#issuecomment-6418971270)
-also preserves its worker references and passing preflight. Legacy caller
-retirement remains on [its owning plan](https://github.com/cbusillo/launchplane/issues/3019).
+The authority read identifies current policy and target revisions; preflight
+checks the capture-only boundary and active PBS without capturing. Neither
+command enumerates products or supplies real backup/release proof. A
+`backup_preflight_unavailable` response does not identify the missing
+prerequisite or establish that a new credential is needed. The
+[rollout evidence](https://github.com/cbusillo/launchplane/issues/2309)
+keeps dated qualification receipts and links to actual capture/release proof;
+it does not replace current service records or a complete lane inventory.
 
 ### Capture evidence
 
@@ -243,10 +240,11 @@ until promotion runs from Launchplane itself (#2682 for the CM website, #2792
 for generic-web) and #2606 deletes the call-in path; the gate itself stays.
 
 The Launchplane reusable Odoo and generic-web promotion workflows first enforce
-the current release-review requirement, then enqueue the shared capture and poll the same
-idempotent request until it completes. The service checks release approval again
-before deployment. A prelaunch product whose review explicitly says `required=false`
-follows the service's existing exemption; absent review metadata does not grant it.
+the current release-review requirement, then enqueue the shared capture and
+poll the same idempotent request until it completes. The service checks release
+approval again before deployment. A prelaunch product whose review explicitly
+says `required=false` follows the service's existing exemption; absent review
+metadata does not grant it.
 Failure or cancellation stops the workflow before promotion. Generic-web reads
 the production context from the current product profile. Odoo's thin workflow
 then sends `run.infrastructure_backup_record_id`; Launchplane resolves the
