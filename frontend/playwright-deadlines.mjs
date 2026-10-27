@@ -1,8 +1,11 @@
 // Failure watchdogs only. Browser tests observe state or drive controlled time.
+export const browserWorkers = 2;
+
 export const browserDeadlines = {
   assertion: 10_000,
   test: 30_000,
   server: 120_000,
+  suite: 15 * 60_000,
 };
 
 // An isolation probe can reach its peer only after that peer starts its server

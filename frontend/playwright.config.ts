@@ -1,23 +1,24 @@
 import { defineConfig, devices } from "@playwright/test";
 import { smokeArtifact } from "./browser-smoke-paths.mjs";
-import { browserDeadlines } from "./playwright-deadlines.mjs";
+import { browserDeadlines, browserWorkers } from "./playwright-deadlines.mjs";
 
 export default defineConfig({
   testDir: "./tests/browser",
   testMatch: "**/*.spec.ts",
   outputDir: smokeArtifact("test-results"),
-  // Tests mock their own API reads in fresh contexts. CI runners can share a
-  // host, so keep browser fan-out bounded independently of its CPU count.
   fullyParallel: true,
-  workers: process.env.CI ? 4 : undefined,
+  workers: browserWorkers,
   retries: 0,
   forbidOnly: Boolean(process.env.CI),
   timeout: browserDeadlines.test,
+  globalTimeout: browserDeadlines.suite,
   reporter: "line",
   expect: {
     timeout: browserDeadlines.assertion,
   },
   use: {
+    actionTimeout: browserDeadlines.assertion,
+    navigationTimeout: browserDeadlines.assertion,
     baseURL: process.env.BROWSER_SMOKE_URL,
     colorScheme: "dark",
     locale: "en-US",

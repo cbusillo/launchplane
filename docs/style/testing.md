@@ -404,13 +404,13 @@ It runs as part of `test:browser`; the standalone command above is for focused
 diagnosis. Its scratch folders live under the OS temp directory and are removed
 after the run.
 
-CI uses a bounded worker count in `frontend/playwright.config.ts`, including
-self-hosted candidate lanes. Shared-host CPU count is not a per-job browser
-budget. Local runs retain Playwright's default concurrency; use its `--workers`
-option for a measured diagnostic comparison.
+Local runs and CI shards use the same two-worker budget in
+`frontend/playwright-deadlines.mjs`, including self-hosted candidate lanes.
+Shared-host CPU count is not a per-job browser budget. Use `--workers=1` to
+reduce a diagnostic run further; do not increase concurrency on a shared host.
 
 CI partitions the unchanged suite across the [browser matrix](../../.github/workflows/ci.yml)
-with Playwright's built-in `--shard` option. Each job retains four workers, zero
+with Playwright's built-in `--shard` option. Each job retains the shared worker budget, zero
 retries, the isolation probe and browser diagnostics. `BROWSER_SMOKE_SHARD` carries
 the job's one-based index and matrix total through `(cd frontend && pnpm test:browser)`; without it,
 the local command still runs the whole browser suite and checks all screenshots.
@@ -462,24 +462,31 @@ failure deadlines live in `playwright-deadlines.mjs`: they bound a broken test,
 not successful synchronization. Do not add a sleep, retry or larger timeout
 to hide a flake.
 
+Assertions, actions and navigation have a 10-second watchdog, each test has a
+30-second watchdog, and each Playwright run has a 15-minute watchdog. Server
+startup retains its separate two-minute watchdog. These limits fail incomplete
+work; they never turn it into a pass. Local and CI configuration are checked
+through Playwright's actual config loader without launching browsers.
+The shared persistent-profile helper applies the same action and navigation
+deadlines to the contexts it creates.
+
 The server-isolation harness uses a watchdog derived from the shared server
 startup and test deadlines. Its peer wait includes the peer's cold server
 startup; it cannot assume both independent servers become ready together.
-Ordinary browser assertion, test and server deadlines are unchanged.
-
-Use Playwright's built-in repetition with zero retries to qualify the complete
-suite under representative sibling host load. Record the revision, worker
-count, load samples and pass/fail totals on the owning issue or PR. For example:
+Full-suite qualification belongs in CI. For local diagnosis, use a short focused
+run with zero retries and at most a few browser workers. For example:
 
 ```bash
-(cd frontend && CI=true pnpm exec playwright test --repeat-each=5 --workers=4 --retries=0)
+(cd frontend && pnpm exec playwright test backup-credentials product-setup --repeat-each=2 --workers=2)
 ```
 
-Use a focused repetition for diagnosis:
-
-```bash
-(cd frontend && CI=true pnpm exec playwright test sidebar-freshness --repeat-each=30)
-```
+Use the smallest load that reproduces the failure. Do not deliberately saturate
+the shared host. Stop every owned load generator as soon as its run ends and
+check that no owned load processes remain before another run. Record the
+revision, worker count, host load and pass/fail totals on the owning issue or PR.
+Under [Q967](https://github.com/cbusillo/launchplane/issues/3754#issuecomment-6447670525),
+an upstream symbol request is deferred unless a stall reproduces on an idle
+host; that requires a new Director question with the exact proposed text.
 
 The suite uses only repo-local
 development fixtures. Product-detail journeys use `?fixture=products`; product

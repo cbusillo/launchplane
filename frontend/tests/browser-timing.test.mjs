@@ -64,4 +64,9 @@ test("browser timing gate prevents bypassing the shared page fixture", () => {
   assert.ok(checkBrowserTiming('import { test } from "./another-helper";', "tests/browser/new.spec.ts").length);
   assert.deepEqual(check('import type { Page } from "@playwright/test";'), []);
   assert.deepEqual(checkBrowserTiming('import { test } from "../state";', "tests/browser/nested/example.spec.ts"), []);
+  assert.deepEqual(checkBrowserTiming(`
+    context.setDefaultTimeout(browserDeadlines.assertion);
+    context.setDefaultNavigationTimeout(browserDeadlines.assertion);
+  `, "tests/browser/state.ts"), []);
+  assert.ok(checkBrowserTiming("await page.waitForTimeout(500)", "tests/browser/state.ts").length);
 });
