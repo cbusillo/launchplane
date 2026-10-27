@@ -431,9 +431,10 @@ publication. A deployed historical recipient that cannot qualify retains the
 existing explicit-refusal exit.
 
 Private HTTP checks resolve the published service name from the existing proxy
-with an explicit IPv4 DNS query and require its complete unique address set to
+with an absolute IPv4 DNS query and require its complete unique address set to
 identify the single owned task,
-before and after the request. They connect through that same name and verify
+before and after the request. They connect through that same name, preserve the numeric task-IP HTTP Host
+header, and verify
 full runtime identity, then recheck service, task and container continuity.
 A healthy task-IP probe cannot substitute for a failed service backend.
 Unavailable samples return the existing terminal failed frame with bounded
@@ -442,7 +443,9 @@ waiting out a transport timeout. Private error text is never returned.
 The complete HTTP response is parsed without following redirects. The
 selected-image rehearsal in `qualityGate.test.testingRouteReaderRehearsal` runs
 the emitted program against real DNS and name-based HTTP in an isolated internal
-Docker network. A two-address alias must be rejected. It checks healthy, redirect, HTTP
+Docker network. With a DNS search suffix configured, two owners of the canonical alias must be
+rejected before HTTP; removing the address-ownership check makes this case
+incorrectly reach a healthy response. It checks healthy, redirect, HTTP
 failure, malformed, truncated and wrong-identity responses. Set the existing
 `LAUNCHPLANE_TEST_TRAEFIK_IMAGE` to an already-local immutable image to run it
 locally. Its Swarm ownership remains a finite fixture; it is no live-lane proof.

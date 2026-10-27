@@ -240,7 +240,7 @@ try:
         if not isinstance(path,str) or not path.startswith('/') or path.startswith('//') or any(character.isspace() for character in path) or '?' in path or '#' in path:
             raise ValueError('private HTTP path unavailable')
         def require_owned_backend_address():
-            resolved=docker('exec',proxies[0],'nslookup','-type=A',spec['application'])
+            resolved=docker('exec',proxies[0],'nslookup','-type=A',spec['application']+'.')
             addresses=set()
             answered=False
             for line in resolved.splitlines():
@@ -257,7 +257,7 @@ try:
         if spec['qualify_backend']: require_owned_backend_address()
         backend_host=spec['application'] if spec['qualify_backend'] else endpoint_address
         address='http://'+backend_host+':'+str(spec['port'])+path
-        request=('GET '+path+' HTTP/1.1\r\nHost: '+backend_host+':'+str(spec['port'])+'\r\nConnection: close\r\nAccept: application/json\r\nAccept-Encoding: identity\r\n\r\n').encode('ascii')
+        request=('GET '+path+' HTTP/1.1\r\nHost: '+endpoint_address+':'+str(spec['port'])+'\r\nConnection: close\r\nAccept: application/json\r\nAccept-Encoding: identity\r\n\r\n').encode('ascii')
         reply=subprocess.run(['docker','exec','-i',proxies[0],'nc',*([] if spec['qualify_backend'] else ['-n']),'-w','10',backend_host,str(spec['port'])],input=request,capture_output=True,timeout=15,check=True)
         if len(reply.stdout)>327680: raise ValueError('private HTTP response exceeds bound')
         class Socket:

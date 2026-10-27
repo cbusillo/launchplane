@@ -1320,7 +1320,6 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
             ]
         )
         self.addCleanup(lambda: command(["docker", "network", "rm", network]))
-        ambiguous = "ambiguous-runtime"
 
         def create_container(aliases: tuple[str, ...]) -> str:
             arguments = [
@@ -1333,6 +1332,8 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
                 "launchplane.fixture=application-http",
                 "--network",
                 network,
+                "--dns-search",
+                "invalid.example",
                 "--read-only",
                 "--cap-drop",
                 "ALL",
@@ -1359,8 +1360,8 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
             command(["docker", "start", identifier])
             return identifier
 
-        identifier = create_container((record.app_name, ambiguous))
-        other = create_container((ambiguous,))
+        identifier = create_container((record.app_name,))
+        other = create_container((record.app_name,))
 
         def address(container: str) -> str:
             networks = json.loads(
@@ -1381,7 +1382,7 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
             specification.network_name
         ]["IPAddress"] = private
         resolved = command(
-            ["docker", "exec", identifier, "nslookup", "-type=A", ambiguous]
+            ["docker", "exec", identifier, "nslookup", "-type=A", record.app_name + "."]
         ).stdout.decode()
         self.assertIn(private, resolved.split())
         self.assertIn(address(other), resolved.split())
@@ -1408,7 +1409,8 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
         def ambiguous_dns(arguments: list[str], **kwargs: Any) -> Any:
             if arguments[1:5] == ["exec", "proxy", "nslookup", "-type=A"]:
                 actual = [*arguments]
-                actual[2], actual[-1] = identifier, ambiguous
+                self.assertEqual(arguments[-1], record.app_name + ".")
+                actual[2] = identifier
                 return native_run(actual, **kwargs)
             return fixture_docker(arguments, **kwargs)
 
@@ -1417,6 +1419,7 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             inspect()
+        command(["docker", "network", "disconnect", network, other])
         cases = [
             ("healthy", 200, {"runtime_identity": identity}, None),
             ("redirect", 302, b"", ValueError),
@@ -1449,9 +1452,12 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
                     + "\r\n"
                 ).encode() + body
                 script = (
-                    "#!/bin/sh\nIFS= read -r request || exit 1\nprintf %s "
-                    + shlex.quote(response.decode())
-                    + "\n"
+                    "#!/bin/sh\nIFS= read -r request || exit 1\n"
+                    "printf '%s\\n' \"$request\" > /fixture/request\n"
+                    "while IFS= read -r header; do\n"
+                    "printf '%s\\n' \"$header\" >> /fixture/request\n"
+                    'if [ "${#header}" -le 1 ]; then break; fi\ndone\n'
+                    "printf %s " + shlex.quote(response.decode()) + "\n"
                 )
                 command(
                     ["docker", "exec", "-i", identifier, "tee", "/fixture/reply"],
@@ -1497,7 +1503,7 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
 
                     def actual_http(arguments: list[str], **kwargs: Any) -> Any:
                         if arguments[1:5] == ["exec", "proxy", "nslookup", "-type=A"]:
-                            self.assertEqual(arguments[-1], record.app_name)
+                            self.assertEqual(arguments[-1], record.app_name + ".")
                             actual = [*arguments]
                             actual[2] = identifier
                             return native_run(actual, **kwargs)
@@ -1522,6 +1528,13 @@ class ApplicationRuntimeImageTests(unittest.TestCase):
                                 expected_error is VerifiedApplicationRuntimeFailure,
                             )
                     self.assertEqual(len(calls), 1)
+                    observed_request = command(
+                        ["docker", "exec", identifier, "cat", "/fixture/request"]
+                    ).stdout.decode()
+                    self.assertIn(
+                        "Host: " + private + ":" + str(specification.runtime_port),
+                        observed_request.splitlines(),
+                    )
                     server.communicate(timeout=15)
                     self.assertEqual(server.returncode, 0)
                 finally:

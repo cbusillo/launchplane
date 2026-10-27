@@ -823,7 +823,7 @@ class ApplicationFlowTests(unittest.TestCase):
                 }
             ]
         elif args[:4] == ["exec", "proxy", "nslookup", "-type=A"]:
-            name = args[-1]
+            name = args[-1].rstrip(".")
             addresses = [
                 network["IPAddress"]
                 for row in self.containers.values()
