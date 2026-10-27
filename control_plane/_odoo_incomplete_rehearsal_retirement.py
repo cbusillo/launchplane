@@ -190,6 +190,14 @@ def incomplete_retirement_locked(spec,root):
     refusals=root/(prefix+'-refusals.json')
     binding={'intent':record['intent_sha256'],'record':spec['record_binding_sha256'],
         'attempt':spec['attempt_sha256'],'resources':spec['resources_binding_sha256']}
+    if spec.get('execute_never_started'):
+        binding['execute_never_started']=True
+        forbidden=['execute.started','execute.json','capture.json','capture.pending','raw-source',
+            *database_names(spec).values()]
+        if any((root/name).exists() or (root/name).is_symlink() for name in forbidden):
+            raise RuntimeError('An execute effect or capture prevents unused rehearsal disposal')
+        if any(path.name.endswith('.started') and path.name!='prepare.started' for path in root.iterdir()):
+            raise RuntimeError('Another effect prevents unused rehearsal disposal')
     if retain: binding['retain_final_recovery']=True
     progress=record.get('incomplete_retirement') or {}
     review=progress.get('reviewed_plan_sha256')
@@ -228,7 +236,7 @@ def incomplete_retirement_locked(spec,root):
         database,image=current(spec)
         containers=inspection(spec,database,image)
     else:
-        if not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists():
+        if not spec.get('execute_never_started') and (not (root/'execute.started').is_file() or (root/'execute.started').is_symlink() or (root/'execute.json').exists()):
             raise RuntimeError('Original execute is not incomplete')
         names=database_names(spec)
         runners=[item for item in all_containers if
@@ -237,6 +245,8 @@ def incomplete_retirement_locked(spec,root):
         if len(runners)!=1: raise RuntimeError('Incomplete runtime selection is unverified')
         environment=dict(value.split('=',1) for value in runners[0]['Config'].get('Env',[]) if '=' in value)
         database=environment.get('ODOO_DB_NAME')
+        if spec.get('execute_never_started') and database!=names['source']:
+            raise RuntimeError('Unused runtime must still select its source database')
         snapshot=incomplete_initial_snapshot(spec,root,allow_partial=database==names['source'])
         if database==names['source']:
             image=spec['source_image']

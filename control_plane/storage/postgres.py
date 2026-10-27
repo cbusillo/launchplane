@@ -12935,6 +12935,7 @@ class PostgresRecordStore(HumanSessionStore):
         """
         from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
         from control_plane.odoo_incomplete_rehearsal_retirement import (
+            completed_prepared_original,
             later_phase_copies,
             require_abandonable_validation,
         )
@@ -12978,9 +12979,9 @@ class PostgresRecordStore(HumanSessionStore):
                 == {"switched": "validate-business", "rebuilding": "rebuild-final"}[expected.state]
             )
         else:
-            admitted = (
-                expected.state == "prepared"
-                and original.state in {"running", "reconcile_required"}
+            admitted = expected.state == "prepared" and (
+                completed_prepared_original(expected, original)
+                or original.state in {"running", "reconcile_required"}
                 and original.provider_effect_phase == "execute"
                 and bool(original.provider_effect_started_at)
             )
@@ -13050,7 +13051,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "Original rehearsal custody changed before retirement publication."
                 )
             require_unaliased_rehearsal(self, expected)
-            if (later or abandoning) and session.scalar(
+            if (later or abandoning or original.state == "completed") and session.scalar(
                 select(LaunchplaneIdempotencyRow.record_id)
                 .where(
                     LaunchplaneIdempotencyRow.provider_target_key == expected.rehearsal_id,
@@ -13090,7 +13091,7 @@ class PostgresRecordStore(HumanSessionStore):
             if provider_row is None or provider_row.target_id != expected.compose_id:
                 raise ValueError("Rehearsal placement ownership changed.")
             session.delete(provider_row)
-            if not later:
+            if not later and original.state != "completed":
                 self._sync_idempotency_row(operation_row, completed)
             row.payload = self._payload_dict(replacement)
             session.commit()

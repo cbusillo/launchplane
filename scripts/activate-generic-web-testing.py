@@ -47,7 +47,9 @@ def external_refusal(raw: bytes) -> DiscordIdentityResult | None:
             payload.get("error", {}).get("code")
             == TestingActivationRefusalCode.EXTERNAL_CAPABILITY_UNVERIFIED
         ):
-            return DiscordIdentityResult.model_validate_json(payload["records"]["discord_identity"])
+            return DiscordIdentityResult.model_validate_json(
+                payload["records"]["discord_identity"], extra="ignore"
+            )
     except (ValueError, KeyError, TypeError, AttributeError):
         return None
     return None
@@ -96,7 +98,7 @@ def main() -> int:
             if evidence["request"] != body or evidence["path"] != path:
                 raise ValueError("The review belongs to another activation.")
             body["reviewed_plan_sha256"] = TestingActivationPlan.model_validate(
-                evidence["result"]
+                evidence["result"], extra="ignore"
             ).plan_sha256
         if args.mode in {"receipt", "inspect"} and not args.idempotency_key.strip():
             raise ValueError("Receipt read requires the original activation key.")
@@ -134,7 +136,9 @@ def main() -> int:
             if args.mode == "dry-run"
             else TestingActivationResult
         )
-        result = result_model.model_validate(response["result"]).model_dump(mode="json")
+        result = result_model.model_validate(response["result"], extra="ignore").model_dump(
+            mode="json"
+        )
         save(
             output,
             {
