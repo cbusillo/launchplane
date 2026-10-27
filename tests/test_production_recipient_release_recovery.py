@@ -800,7 +800,6 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
                 app,
                 method="POST",
                 path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
-                authorization="Bearer valid-token",
                 headers={"Idempotency-Key": "fixture-custody-http-hold"},
                 payload={
                     "schema_version": 1,
