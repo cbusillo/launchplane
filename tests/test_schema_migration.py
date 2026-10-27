@@ -62,10 +62,10 @@ from control_plane.storage.schema_migration import (
 
 
 class SchemaMigrationTests(unittest.TestCase):
-    def test_compatibility_image_reads_additive_schema_without_activating_it(self) -> None:
+    def test_preceding_target_reads_additive_schema_without_downgrading_it(self) -> None:
         with TemporaryDirectory() as temporary:
             url = f"sqlite+pysqlite:///{Path(temporary) / 'compatibility.db'}"
-            command.upgrade(alembic_config(url), SCHEMA_MIGRATION_TARGET_REVISION)
+            command.upgrade(alembic_config(url), integration_attestations.down_revision)
             engine = create_engine(url)
             self.addCleanup(engine.dispose)
             before = set(inspect(engine).get_table_names())
@@ -73,7 +73,10 @@ class SchemaMigrationTests(unittest.TestCase):
             self.assertNotIn("launchplane_integration_attestations", before)
             command.upgrade(alembic_config(url), integration_attestations.revision)
             self.assertEqual(
-                schema_migration_action(current_revision=integration_attestations.revision),
+                schema_migration_action(
+                    current_revision=integration_attestations.revision,
+                    target_revision=integration_attestations.down_revision,
+                ),
                 "compatible_ahead",
             )
             self.assertTrue(before <= set(inspect(engine).get_table_names()))
