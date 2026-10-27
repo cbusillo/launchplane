@@ -3,13 +3,27 @@ from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast, get_args
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
+from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.idempotency_record import (
+    LaunchplaneIdempotencyRecord,
+    LaunchplaneMutationReservationState,
+)
+from control_plane.contracts.promotion_record import ReleaseStatus
+from control_plane.contracts.runtime_identity import RuntimeIdentityStatus
 from control_plane.contracts.testing_activation import (
+    TestingActivationRecord,
     TestingActivationRequest,
     TestingActivationRefusal,
+)
+from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+from control_plane.dokploy.testing_route import route_document
+from control_plane.dokploy.testing_route_execution import (
+    TestingRouteExecutionIntent,
+    TestingRouteWriterAttempt,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.provider_operations import ProviderObservation, build_provider_operation_key
@@ -19,8 +33,208 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesStatus,
     SeparationProgramInspection,
 )
+from control_plane.testing_route_effects import (
+    ROUTE_PREPARING,
+    ROUTE_WRITING,
+    ROUTE_WRITER_RECEIPT,
+)
 
 _logger = logging.getLogger(__name__)
+
+RouteCheckpoint = Literal["not_recorded", "preparing", "writing", "unrecognized"]
+RouteWriterOutcome = Literal[
+    "applied", "excluded", "busy", "unknown", "retired", "superseded", "unrecognized"
+]
+
+
+class TestingActivationRouteInspection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    direction: Literal["forward", "inverse"]
+    status: Literal["not_found", "unbound", "bound"]
+    state: LaunchplaneMutationReservationState | None = None
+    attempt: int | None = Field(default=None, ge=1)
+    checkpoint: RouteCheckpoint | None = None
+    updated_at: str = ""
+    route_write_not_started: bool | None = None
+    writer_status: Literal["not_read", "not_found", "unbound", "bound"] = "not_read"
+    writer_state: LaunchplaneMutationReservationState | None = None
+    writer_attempt: int | None = Field(default=None, ge=1)
+    writer_checkpoint: RouteCheckpoint | None = None
+    writer_updated_at: str = ""
+    writer_outcome: RouteWriterOutcome | None = None
+    private_health_status: ReleaseStatus | None = None
+    private_health_verified: bool | None = None
+    private_identity_status: RuntimeIdentityStatus | None = None
+    public_health_status: ReleaseStatus | None = None
+    public_health_verified: bool | None = None
+    public_identity_status: RuntimeIdentityStatus | None = None
+
+
+def route_checkpoint(phase: str) -> RouteCheckpoint:
+    if not phase:
+        return "not_recorded"
+    if phase == ROUTE_PREPARING:
+        return "preparing"
+    if phase == ROUTE_WRITING:
+        return "writing"
+    return "unrecognized"
+
+
+def route_receipt_matches(
+    row: LaunchplaneIdempotencyRecord,
+    *,
+    scope: str,
+    path: str,
+    key: str,
+    fingerprint: str,
+    target: str,
+) -> bool:
+    return (
+        row.scope,
+        row.route_path,
+        row.idempotency_key,
+        row.request_fingerprint,
+        row.reconciliation_key,
+        row.provider_target_key,
+    ) == (scope, path, key, fingerprint, fingerprint, target)
+
+
+def inspect_route_writer(
+    store: PostgresRecordStore,
+    execution: TestingRouteExecutionIntent,
+    observed: TestingActivationRouteInspection,
+) -> TestingActivationRouteInspection:
+    assert observed.attempt is not None
+    key = execution.key(attempt=observed.attempt)
+    writer = store.read_idempotency_record(
+        scope=REBUILD_SCOPE, route_path=ROUTE_WRITER_RECEIPT, idempotency_key=key
+    )
+    if writer is None:
+        return observed.model_copy(update={"writer_status": "not_found"})
+    unbound = observed.model_copy(update={"writer_status": "unbound"})
+    try:
+        original = TestingRouteWriterAttempt.model_validate(
+            store.read_original_mutation_intent(writer).get("route_writer")
+        )
+    except (FileNotFoundError, ValueError, TypeError):
+        return unbound
+    if (
+        original.execution != execution
+        or original.key != key
+        or not route_receipt_matches(
+            writer,
+            scope=REBUILD_SCOPE,
+            path=ROUTE_WRITER_RECEIPT,
+            key=key,
+            fingerprint=canonical_json_sha256(original.model_dump(mode="json")),
+            target="testing-route-writer:" + key,
+        )
+    ):
+        return unbound
+    outcome = writer.response_payload.get("writer_outcome") if writer.state == "completed" else None
+    return observed.model_copy(
+        update={
+            "writer_status": "bound",
+            "writer_state": writer.state,
+            "writer_attempt": writer.attempt,
+            "writer_checkpoint": route_checkpoint(writer.provider_effect_phase),
+            "writer_updated_at": writer.updated_at,
+            "writer_outcome": None
+            if outcome is None
+            else cast(RouteWriterOutcome, outcome)
+            if outcome in get_args(RouteWriterOutcome)
+            else "unrecognized",
+        }
+    )
+
+
+def inspect_application_route_receipts(
+    store: PostgresRecordStore, record: TestingActivationRecord
+) -> tuple[TestingActivationRouteInspection, ...]:
+    readiness = record.application_readiness
+    if readiness is None or readiness.route is None or readiness.route_execution is None:
+        return ()
+    result = []
+    for inverse in (False, True):
+        observed = TestingActivationRouteInspection(
+            direction="inverse" if inverse else "forward",
+            status="not_found",
+            private_health_status=readiness.private_health.status
+            if readiness.private_health
+            else None,
+            private_health_verified=readiness.private_health.verified
+            if readiness.private_health
+            else None,
+            private_identity_status=readiness.private_health.runtime_identity_status
+            if readiness.private_health
+            else None,
+            public_health_status=readiness.public_health.status
+            if readiness.public_health
+            else None,
+            public_health_verified=readiness.public_health.verified
+            if readiness.public_health
+            else None,
+            public_identity_status=readiness.public_health.runtime_identity_status
+            if readiness.public_health
+            else None,
+        )
+        suffix = ":route-inverse" if inverse else ":route"
+        path, key = ROUTE.format(product=record.product) + suffix, record.plan_sha256 + suffix
+        child = store.read_idempotency_record(
+            scope=record.scope, route_path=path, idempotency_key=key
+        )
+        if child is None:
+            result.append(observed)
+            continue
+        observed = observed.model_copy(update={"status": "unbound"})
+        expected = readiness.route_execution
+        if inverse:
+            expected = expected.model_copy(
+                update={
+                    "backend": readiness.route.old_backend,
+                    "document_sha256": canonical_json_sha256(
+                        route_document(readiness.route, readiness.route.old_backend)
+                    ),
+                }
+            )
+        try:
+            execution = TestingRouteExecutionIntent.model_validate(
+                store.read_original_mutation_intent(child).get("route_execution")
+            )
+        except (FileNotFoundError, ValueError, TypeError):
+            result.append(observed)
+            continue
+        exclude = {"custody"} if inverse else set()
+        if execution.model_dump(exclude=exclude) != expected.model_dump(
+            exclude=exclude
+        ) or not route_receipt_matches(
+            child,
+            scope=record.scope,
+            path=path,
+            key=key,
+            fingerprint=readiness.route.digest,
+            target="testing-activation-route:" + record.product + ":" + record.context,
+        ):
+            result.append(observed)
+            continue
+        not_started = (
+            child.response_payload.get("route_write_not_started")
+            if child.state == "completed"
+            else None
+        )
+        observed = observed.model_copy(
+            update={
+                "status": "bound",
+                "state": child.state,
+                "attempt": child.attempt,
+                "checkpoint": route_checkpoint(child.provider_effect_phase),
+                "updated_at": child.updated_at,
+                "route_write_not_started": not_started if isinstance(not_started, bool) else None,
+            }
+        )
+        result.append(inspect_route_writer(store, execution, observed))
+    return tuple(result)
 
 
 class TestingActivationInspection(SeparationResourcesStatus):
@@ -30,6 +244,7 @@ class TestingActivationInspection(SeparationResourcesStatus):
     programs: tuple[SeparationProgramInspection, ...]
     inspected_at: AwareDatetime
     qualification: Literal["not_evaluated"] = "not_evaluated"
+    routes: tuple[TestingActivationRouteInspection, ...] = Field(default=(), max_length=2)
 
 
 def inspect_application_activation(
@@ -120,4 +335,5 @@ def inspect_application_activation(
         external_capability_count=len(record.external_capabilities),
         programs=tuple(programs),
         inspected_at=datetime.now(timezone.utc),
+        routes=inspect_application_route_receipts(store, record),
     )

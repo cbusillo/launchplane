@@ -2230,6 +2230,11 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(
             restored.model_dump(exclude={"custody"}), expected.model_dump(exclude={"custody"})
         )
+        from control_plane.testing_activation_inspection import inspect_application_route_receipts
+
+        inspected = inspect_application_route_receipts(self.store, refused)
+        self.assertEqual(inspected[1].status, "bound")
+        self.assertEqual(inspected[1].state, inverse.state)
         self.assertEqual(self.activate().status, "replayed")
         self.assertEqual(routing.effect_count, changed[0])
         self.assertEqual(self.canonical_password(), "retained-only-password")
@@ -4691,6 +4696,117 @@ class ApplicationFlowTests(unittest.TestCase):
 
     def test_supported_http_dry_run_and_original_receipt(self) -> None:
         self.assert_supported_http_activation(native_apply=False)
+
+    def test_original_route_inspection_reads_bound_receipts_without_provider_or_writes(
+        self,
+    ) -> None:
+        from control_plane.testing_activation_inspection import inspect_application_route_receipts
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+        from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT
+
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        record = self.adapter.current()
+        readiness = record.application_readiness
+        assert readiness is not None and readiness.route_execution is not None
+        assert readiness.private_health is not None and readiness.public_health is not None
+        forward = self.store.read_idempotency_record(
+            scope=record.scope,
+            route_path=ROUTE.format(product=self.product) + ":route",
+            idempotency_key=record.plan_sha256 + ":route",
+        )
+        assert forward is not None
+        writer = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=ROUTE_WRITER_RECEIPT,
+            idempotency_key=readiness.route_execution.key(attempt=forward.attempt),
+        )
+        assert writer is not None
+        before = deepcopy(
+            (self.writes, self.schedules, self.schedule_history, routing.effect_count)
+        )
+        read = self.store.read_idempotency_record
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=AssertionError),
+            patch("control_plane.secrets._decrypt_secret_value", side_effect=AssertionError),
+        ):
+            observed = inspect_application_route_receipts(self.store, record)
+            self.assertEqual(observed[0].state, forward.state)
+            self.assertEqual(observed[0].attempt, forward.attempt)
+            self.assertEqual(observed[0].status, "bound")
+            self.assertEqual(observed[0].writer_status, "bound")
+            self.assertEqual(observed[0].writer_state, writer.state)
+            self.assertEqual(observed[0].writer_outcome, writer.response_payload["writer_outcome"])
+            self.assertEqual(observed[0].private_health_status, readiness.private_health.status)
+            self.assertEqual(observed[0].public_health_status, readiness.public_health.status)
+            self.assertEqual(observed[1].status, "not_found")
+            for original, changes in (
+                (forward, {"request_fingerprint": "foreign-private-fingerprint"}),
+                (writer, {"request_fingerprint": "foreign-private-fingerprint"}),
+                (writer, {"response_payload": {"writer_outcome": "private-provider-message"}}),
+                (writer, {"state": "reconcile_required"}),
+                (
+                    forward,
+                    {
+                        "state": "reconcile_required",
+                        "response_payload": {"route_write_not_started": True},
+                    },
+                ),
+            ):
+                with self.subTest(changes=changes, record=original.record_id):
+                    replacement = original.model_copy(update=changes)
+
+                    def changed_read(**kwargs: Any) -> Any:
+                        found = read(**kwargs)
+                        return replacement if found == original else found
+
+                    with patch.object(
+                        self.store, "read_idempotency_record", side_effect=changed_read
+                    ):
+                        changed = inspect_application_route_receipts(self.store, record)[0]
+                    if "state" in changes:
+                        self.assertEqual(changed.status, "bound")
+                        if original == forward:
+                            self.assertIsNone(changed.route_write_not_started)
+                        else:
+                            self.assertIsNone(changed.writer_outcome)
+                    elif original == forward:
+                        self.assertEqual(changed.status, "unbound")
+                        self.assertIsNone(changed.state)
+                        self.assertEqual(changed.writer_status, "not_read")
+                    elif "request_fingerprint" in changes:
+                        self.assertEqual(changed.writer_status, "unbound")
+                        self.assertIsNone(changed.writer_state)
+                        self.assertIsNone(changed.writer_outcome)
+                    else:
+                        self.assertEqual(changed.writer_outcome, "unrecognized")
+                    serialized = changed.model_dump_json()
+                    self.assertNotIn("private-provider-message", serialized)
+                    self.assertNotIn("foreign-private-fingerprint", serialized)
+            serialized = "".join(item.model_dump_json() for item in observed)
+            self.assertNotIn(readiness.backend, serialized)
+            self.assertNotIn("retained-only-password", serialized)
+        self.assertEqual(
+            (self.writes, self.schedules, self.schedule_history, routing.effect_count), before
+        )
+        self.assertEqual(self.adapter.current(), record)
+        self.assertEqual(
+            read(
+                scope=forward.scope,
+                route_path=forward.route_path,
+                idempotency_key=forward.idempotency_key,
+            ),
+            forward,
+        )
+        self.assertEqual(
+            read(
+                scope=writer.scope,
+                route_path=writer.route_path,
+                idempotency_key=writer.idempotency_key,
+            ),
+            writer,
+        )
 
     def test_original_activation_inspection_retains_negative_program_evidence_without_writes(
         self,
