@@ -302,22 +302,9 @@ _validate_catalog(INTEGRATION_FAMILIES)
 # query returns only key names, counts or booleans: values are compared inside
 # PostgreSQL. Table names and predicates come from the fixed catalog above, never
 # from records or admin input.
-INTEGRATION_READBACK_PROGRAM = (
+INTEGRATION_READBACK_LIBRARY = (
     connection_isolation_library()
-    + """import base64
-import json
-import os
-import sys
-
-import psycopg2
-
-database_name = sys.argv[1]
-spec = json.loads(base64.b64decode(sys.argv[2]))
-report_only = len(sys.argv) > 3 and sys.argv[3] == "dry-run"
-allowed_integrations = set(spec["allowed_integrations"])
-if spec["connection_isolation_required"] and os.environ.get("PLATFORM_INSTANCE", "").strip().lower() in {"prod", "production"}:
-    raise SystemExit("Non-production readback refuses a production runner")
-
+    + r"""
 # Trims every kind of whitespace, as Python's str.strip() does; btrim() trims only spaces.
 TRIMMED_VALUE_SQL = "regexp_replace(coalesce(value, ''), '^[[:space:]]+|[[:space:]]+$', '', 'g')"
 STORE_KEY_HANDLE_SQL = (
@@ -356,9 +343,52 @@ def protected_store_key_present(cursor, handles):
     return bool(cursor.fetchone()[0])
 
 
-refused = []
-allowed = []
-checked = 0
+def read_integration_settings(cursor, spec):
+    refused, allowed, checked = [], [], 0
+    allowed_integrations = set(spec["allowed_integrations"])
+    if spec["connection_isolation_required"]:
+        refused.extend(connection_isolation(cursor, apply=False))
+    handles = spec["protected_shopify_store_handles"]
+    if handles:
+        checked += 1
+        if protected_store_key_present(cursor, handles):
+            refused.append("shopify/shopify.shop_url_key:protected")
+    for family in spec["families"]:
+        integration = family["integration"]
+        settings = []
+        if family["config_parameters"]:
+            checked += len(family["config_parameters"])
+            settings.extend(present_config_parameters(cursor, family["config_parameters"]))
+        for table in family["tables"]:
+            checked += 1
+            if table_is_configured(cursor, table):
+                settings.append(table["table"])
+        for setting in settings:
+            entry = integration + "/" + setting
+            if integration in allowed_integrations:
+                allowed.append(entry)
+            else:
+                refused.append(entry)
+    return refused, allowed, checked
+"""
+)
+
+
+INTEGRATION_READBACK_PROGRAM = (
+    INTEGRATION_READBACK_LIBRARY
+    + """import base64
+import json
+import os
+import sys
+
+import psycopg2
+
+database_name = sys.argv[1]
+spec = json.loads(base64.b64decode(sys.argv[2]))
+report_only = len(sys.argv) > 3 and sys.argv[3] == "dry-run"
+if spec["connection_isolation_required"] and os.environ.get("PLATFORM_INSTANCE", "").strip().lower() in {"prod", "production"}:
+    raise SystemExit("Non-production readback refuses a production runner")
+
 connection = psycopg2.connect(
     host=(os.environ.get("ODOO_DB_HOST") or "database").strip(),
     port=(os.environ.get("ODOO_DB_PORT") or "5432").strip(),
@@ -369,29 +399,7 @@ connection = psycopg2.connect(
 try:
     with connection.cursor() as cursor:
         cursor.execute("SET TRANSACTION READ ONLY")
-        if spec["connection_isolation_required"]:
-            refused.extend(connection_isolation(cursor, apply=False))
-        handles = spec["protected_shopify_store_handles"]
-        if handles:
-            checked += 1
-            if protected_store_key_present(cursor, handles):
-                refused.append("shopify/shopify.shop_url_key:protected")
-        for family in spec["families"]:
-            integration = family["integration"]
-            settings = []
-            if family["config_parameters"]:
-                checked += len(family["config_parameters"])
-                settings.extend(present_config_parameters(cursor, family["config_parameters"]))
-            for table in family["tables"]:
-                checked += 1
-                if table_is_configured(cursor, table):
-                    settings.append(table["table"])
-            for setting in settings:
-                entry = integration + "/" + setting
-                if integration in allowed_integrations:
-                    allowed.append(entry)
-                else:
-                    refused.append(entry)
+        refused, allowed, checked = read_integration_settings(cursor, spec)
 finally:
     connection.close()
 

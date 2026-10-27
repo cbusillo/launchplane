@@ -998,6 +998,31 @@ def restore_main():
                 raise CopyReadbackRefused(ReadbackPredicate.WEB_GATE)
             print(prefix+json.dumps(__LP_COPY_VERIFICATION_FRAME__),flush=True)
             return
+        if spec.get('aggregate_query') is not None:
+            if present != '1':
+                raise CopyReadbackRefused(ReadbackPredicate.DATABASE_PRESENT)
+            if any(item[1].get('State',{}).get('Status') != 'running' for item in containers.values()):
+                raise CopyReadbackRefused(ReadbackPredicate.RUNTIME)
+            own = {item[1]['Id'] for item in containers.values()}
+            network = one_inspection(next(iter(containers['database'][1]['NetworkSettings']['Networks'])))
+            if not isinstance(network.get('Containers'), dict) or not set(network['Containers']) <= own:
+                raise CopyReadbackRefused(ReadbackPredicate.NETWORK_MEMBERS)
+            for service in ('web', 'script-runner'):
+                env = dict(item.split('=',1) for item in containers[service][1]['Config']['Env'] if '=' in item)
+                if any(value and key.startswith(('ODOO_UPSTREAM_', 'DATA_WORKFLOW_SSH_')) for key,value in env.items()):
+                    raise CopyReadbackRefused(ReadbackPredicate.CREDENTIALS)
+            inspection_predicate = ReadbackPredicate.AGGREGATES
+            payload = {key: spec[key] for key in ('aggregate_query','database_name','copy_binding_sha256','readback')}
+            payload['witness_key'] = '__LP_COPY_WITNESS__'
+            output = docker('exec','-i',runner,'timeout','--kill-after=2s','30s','python3','-I','-',
+                base64.b64encode(json.dumps(payload).encode()).decode(), stdin=spec['aggregate_program'].encode())
+            if len(output) > 512:
+                raise RuntimeError('Aggregate output exceeds its bound')
+            after = inspect_copy_runtime(spec, expected_instance='testing')
+            if after != containers:
+                raise CopyReadbackRefused(ReadbackPredicate.CUSTODY)
+            print(prefix+json.dumps({'type':'complete','counts':json.loads(output)}),flush=True)
+            return
         if spec.get('task_account_cleanup') is True:
             if present != '1':
                 raise CopyReadbackRefused(ReadbackPredicate.CLEANUP_DATABASE)
@@ -1216,13 +1241,13 @@ def main():
     namespace = spec["generation"]["namespace"]
     if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
         raise RuntimeError("Invalid testing host lock identity")
-    if spec.get('inspection_only') and not spec.get('verification_only'):
+    if spec.get('inspection_only') and not spec.get('verification_only') and spec.get('aggregate_query') is None:
         restore_main()
         return
     path = restore_lock_path(namespace)
     # This coordination file is disposable across host reboot/tmp cleanup. Its
     # existence is not copy evidence; every execution uses the same flock inode.
-    descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW) if spec.get('aggregate_query') is not None else os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         inherited_lock_descriptors = (descriptor,)
@@ -1290,6 +1315,7 @@ def read_current_testing_generation(
     bootstrap_preparation: bool = False,
     task_account_cleanup: bool = False,
     resource_qualification: bool = False,
+    read_only_inspection: bool = False,
 ) -> FreshOdooTestingGeneration | None:
     if instance != "testing":
         return None
@@ -1303,7 +1329,7 @@ def read_current_testing_generation(
             target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
             if _testing_generation_hold_blocks_read(
                 target,
-                task_account_cleanup=task_account_cleanup,
+                task_account_cleanup=task_account_cleanup or read_only_inspection,
                 resource_qualification=resource_qualification,
             ):
                 raise ValueError("The adopted testing copy has a staff testing hold.")
@@ -1347,7 +1373,7 @@ def read_current_testing_generation(
     if (
         _testing_generation_hold_blocks_read(
             target,
-            task_account_cleanup=task_account_cleanup,
+            task_account_cleanup=task_account_cleanup or read_only_inspection,
             resource_qualification=resource_qualification,
         )
     ) or target.pending_public_host_effects:

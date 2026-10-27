@@ -10,6 +10,8 @@ from fastapi import Depends, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
+from control_plane import odoo_copy_aggregates as aggregates
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.odoo_runtime_source_prerequisites import (
     PrerequisiteStore,
     SourcePrerequisiteResult,
@@ -90,6 +92,14 @@ class OdooImportDiagnosticResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     result: ImportDiagnosticResult
+
+
+class AggregateCountsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    result: aggregates.AggregateEvidence
 
 
 class ShopifyIdentityResponse(BaseModel):
@@ -515,6 +525,65 @@ def register_odoo_runtime_read_routes(
                 trace_id=trace_id,
                 result=result,
             )
+
+    def read_aggregate_counts(
+        product: str,
+        environment: str,
+        query: aggregates.AggregateQuery,
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> AggregateCountsResponse:
+        trace_id = common.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if environment != "testing" or request.query_params:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Aggregate reads require testing and accept only aggregate identifiers.",
+            )
+        with errors(trace_id):
+            profile = resolve_odoo_product_route(
+                record_store=record_store, product=product, instance="testing"
+            )
+            lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+            if not common.authorization_allows(
+                identity=identity,
+                action="operations.read",
+                product=profile.product,
+                context=lane.context,
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+            ):
+                raise common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The caller cannot read this product's testing aggregates.",
+                )
+            if not isinstance(record_store, PostgresRecordStore):
+                raise ValueError("Aggregate provenance requires the service record store.")
+            return AggregateCountsResponse(
+                trace_id=trace_id,
+                result=aggregates.read_aggregates(
+                    store=record_store,
+                    product=profile.product,
+                    query=query,
+                ),
+            )
+
+    app.add_api_route(
+        aggregates.ROUTE,
+        read_aggregate_counts,
+        methods=["POST"],
+        response_model=AggregateCountsResponse,
+        operation_id="read_odoo_copy_aggregates",
+        summary="Read bounded counts from a qualified sanitized testing copy without data writes",
+        responses={
+            code: {"model": common.error_response_model} for code in (400, 401, 403, 404, 503)
+        },
+    )
 
     for path, endpoint, model, operation_id, summary in (
         (
