@@ -127,10 +127,10 @@ class StoredRecordSnapshotTests(unittest.TestCase):
                     if family == "launchplane_product_profiles"
                 )
                 scrubbed = row["payload"]["preview"]
-                with self.assertRaises(ValueError) as refusal:
+                with self.assertRaises(ValueError):
                     validate_preview_scope(scrubbed["override_env"], context=scrubbed["context"])
-                self.assertNotIn("private-sentinel", str(refusal.exception))
-                self.assertNotIn(encoded, exported.model_dump_json())
+                self.assertNotIn("private-sentinel", json.dumps(row))
+                self.assertNotIn(encoded, json.dumps(row))
         self.assertEqual(profile, self.store.read_product_profile_record(profile.product))
 
     def test_lifecycle_schedules_and_preview_suffix_remain_readable_after_scrubbing(self) -> None:

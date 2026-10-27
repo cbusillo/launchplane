@@ -158,6 +158,9 @@ render validator. It restores no legacy writer. After a fresh exported snapshot
 passes the guarded migration, the activation release advances the startup target
 and removes that transitional reader. The migration's validation, ownership,
 conflict and atomicity guards remain unchanged in both releases.
+While legacy entries remain, the existing profile-write guard stays enforced
+and new preview configuration writes report `preview_settings_migration_pending`.
+The normal activation deployment clears those entries and enables the writes.
 
 The exporter and candidate module must land and deploy first through the
 existing path. The Supervisor then dispatches this same deploy workflow on the
