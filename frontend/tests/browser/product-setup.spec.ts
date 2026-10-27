@@ -101,6 +101,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "p
         await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
         releaseProfileRead();
         await expect(panel.getByRole("button", { name: "Retry setup read" })).toBeVisible();
+        await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
         state.incompleteProfile = false;
         await panel.getByRole("button", { name: "Retry setup read" }).click();
       }
