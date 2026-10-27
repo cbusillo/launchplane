@@ -801,12 +801,15 @@ class PreviewIdleOperationTests(unittest.TestCase):
                 kwargs["receive"] = Mock(side_effect=RuntimeError("Response lost"))
             self.transport(**kwargs)
 
-        with patch.object(self.remote, "side_effect", lose_response):
+        with patch("control_plane.preview_idle._read_remote", side_effect=lose_response):
             with self.assertRaisesRegex(RuntimeError, "Response lost"):
                 self.run_preview()
         self.value["gateway"]["idle_seconds"] = 0
         effects = len(self.effects)
+        self.scheduler = PreviewIdleScheduler(self.store, control_plane_root=self.root)
+        self.remote.reset_mock()
         self.scheduler.run_once()
+        self.assertTrue(self.remote.called)
         self.assertEqual(len(self.effects), effects)
         self.assertTrue(all(item["running"] for item in self.value["services"].values()))
         self.assertFalse(self.store.list_held_provider_target_reservations())
