@@ -502,6 +502,41 @@ plan, current preview history or a missing tracked target. Executor exclusion,
 expired grace and original data-schedule quiescence remain separate recovery
 requirements.
 
+An interrupted clean-snapshot restore is replaced through those same service-issued
+destroy and refresh operations. Its host retry does not drop the database or clear
+private overlay writes. The reconciler observes the retained original and inspects
+its exact physical volume bindings and pinned snapshot. Newer issued snapshots do
+not replace that pin. Discovery makes one host check only when work is needed;
+an already-serving preview does not inspect failed history. Only a native receipt that records
+the start of this never-served restore returns the distinct disposal result.
+Historical incomplete receipts without that proof remain held with a distinct
+custody diagnostic: resolve use and needed-copy ownership, then use supported
+preservation or qualified preview destroy. The native start
+is recorded only after verifying the empty database and private upper, with web
+held behind its gate; its writes can be reproduced from the bound snapshot/build.
+
+For that qualified case, the reconciler issues the ordinary destroy plan/apply and
+rechecks native custody under the execution lock. Current usage, needed-copy,
+staff-testing and shared-resource protections are checked at every provider effect.
+The existing expired lease, original schedule quiescence, target ownership and
+resource inspection remain mandatory. An uncertain destroy is observed on its
+original key until provider absence and the destroyed lifecycle are verified.
+Only then does ordinary reconciliation rebuild an open PR on new storage.
+An unattempted disposal refusal releases its selection so the next tick can plan
+from current evidence; it does not retain an uncertain provider effect.
+If the same verified build fails both before and after that reconstruction,
+reconciliation leaves it failed until a new build or CI run attempt. The bound
+issued times and successful service destroy receipt establish this limit; there
+is no separate retry counter. Closed-PR cleanup remains available.
+There is no new grant, caller assertion or provider-direct cleanup path.
+
+Preparation pins the source before first restore and records that restore has
+not started. Restore records its start before dispatching database work. Only
+an unstarted allocation may continue preparation; an interrupted started restore
+requires disposal. Historical incomplete receipts without start evidence remain
+held. Completed receipts and their physical database witness continue to preserve
+preview edits after a lost service completion reply.
+
 Held-reservation classification distinguishes the original plan's
 `pull_request_number` from `target_pull_request_number`, attributed only by an
 exact recorded reconciliation-key and provider-key match against the current
