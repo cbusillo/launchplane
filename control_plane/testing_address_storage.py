@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
@@ -28,6 +29,7 @@ from control_plane.contracts.testing_publication import (
     TestingServingSnapshot,
 )
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy.testing_route import TestingLaneRoute
 from control_plane.testing_generation_retirement import RetainedTestingGeneration
 from control_plane.storage.postgres import PostgresRecordStore
@@ -38,6 +40,51 @@ from control_plane.storage.product_authority_bundle import (
 )
 
 ADDRESS_PLAN_ROUTE = ADDRESS_ROUTE + ":plan"
+
+
+def canonical_health_url(url: str, route: TestingLaneRoute, previous_host: str) -> str:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return url
+    if parsed.hostname != previous_host:
+        return url
+    return parsed._replace(scheme="https", netloc=route.host).geturl()
+
+
+def testing_health_url_correction_allowed(
+    existing: LaunchplaneProductProfileRecord | None,
+    replacement: LaunchplaneProductProfileRecord,
+) -> bool:
+    if existing is None or not existing.is_active or existing.driver_id != "odoo":
+        return False
+    for index, lane in enumerate(existing.lanes):
+        if lane.instance != "testing" or not lane.health_url:
+            continue
+        try:
+            origin, health = urlsplit(lane.base_url), urlsplit(lane.health_url)
+        except ValueError:
+            continue
+        if (
+            origin.scheme != "https"
+            or not origin.hostname
+            or origin.username is not None
+            or origin.password is not None
+            or origin.path not in {"", "/"}
+            or origin.query
+            or origin.fragment
+            or health.scheme != "https"
+            or not health.hostname
+            or health.username is not None
+            or health.password is not None
+            or health.netloc == origin.netloc
+        ):
+            continue
+        expected = existing.model_copy(deep=True)
+        expected.lanes[index].health_url = health._replace(netloc=origin.netloc).geturl()
+        if replacement == expected:
+            return True
+    return False
 
 
 def read_testing_address_recovery_copy(
@@ -360,7 +407,14 @@ def commit_testing_address(
         profile = plan.profile.model_copy(
             update={
                 "lanes": tuple(
-                    lane.model_copy(update={"base_url": "https://" + plan.route_after.host})
+                    lane.model_copy(
+                        update={
+                            "base_url": "https://" + plan.route_after.host,
+                            "health_url": canonical_health_url(
+                                lane.health_url, plan.route_after, plan.route_before.host
+                            ),
+                        }
+                    )
                     if (lane.context, lane.instance) == (plan.context, "testing")
                     else lane
                     for lane in plan.profile.lanes

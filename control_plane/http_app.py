@@ -770,6 +770,7 @@ from control_plane.preview_override_authorization import (
     director_preview_snapshot_allowed,
 )
 from control_plane.product_testing_restore_policy import director_testing_storage_allowed
+from control_plane.testing_address_storage import testing_health_url_correction_allowed
 from control_plane import artifact_scan as control_plane_artifact_scan
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
@@ -12436,6 +12437,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        dry_run: bool = False,
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
         try:
@@ -12575,8 +12577,11 @@ def create_launchplane_fastapi_app(
         storage_update = director_conditional_write and director_testing_storage_allowed(
             existing_profile, profile
         )
+        health_url_correction = (director_conditional_write or dry_run) and (
+            testing_health_url_correction_allowed(existing_profile, profile)
+        )
         if director_conditional_write and not (
-            scan_activation or snapshot_activation or storage_update
+            scan_activation or snapshot_activation or storage_update or health_url_correction
         ):
             try:
                 integration_key_markers = latest_active_runtime_key_safety_policy(
@@ -12597,7 +12602,7 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message=(
                         "Director agents may conditionally change only bounded preview settings "
-                        "or testing storage requirements."
+                        "or testing storage requirements and health fallback corrections."
                     ),
                 )
         if profile.release_request != (
@@ -12696,6 +12701,25 @@ def create_launchplane_fastapi_app(
                         "the reviewed prelaunch-rebuild apply endpoint."
                     ),
                 )
+        if dry_run:
+            if not health_url_correction:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="testing_health_url_correction_required",
+                    message="Profile dry run supports only a testing health fallback correction.",
+                )
+            assert existing_profile is not None
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={"product_profile": profile.product},
+                result={
+                    "dry_run": True,
+                    "testing_health_url_correction": True,
+                    "profile_sha256": product_profile_record_sha256(existing_profile),
+                    "replacement_sha256": product_profile_record_sha256(profile),
+                },
+            )
         if scan_activation:
             try:
                 scan = await run_in_threadpool(

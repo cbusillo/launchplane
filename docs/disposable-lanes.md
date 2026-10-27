@@ -1413,12 +1413,28 @@ entry so its certificate order and renewal remain independent; see
 [Traefik ACME domain definition](https://doc.traefik.io/traefik/reference/install-configuration/tls/certificate-resolvers/acme/#domain-definition).
 Original-attempt receipts settle an uncertain writer before another
 dispatch. Both HTTPS origins must return the current testing runtime identity
-before one transaction updates the lane base URL, binding provenance and canonical
-Odoo override intent. The original publication, candidate, restore generation,
+before one transaction updates the lane base URL, its same-host health fallback,
+binding provenance and canonical Odoo override intent. The health fallback keeps
+its path and query; an empty fallback or a separately declared health host stays
+unchanged. The original publication, candidate, restore generation,
 retirement and resources remain unchanged. A lost metadata reply resolves from
 the committed address receipt. Preserve the original request and key on any
 unknown outcome; do not clear old operation fences or edit publication history.
 The metadata transaction checks the original lease again immediately before commit.
+
+An already-completed address operation replays its original receipt and does not
+repair a previously stored health fallback. To correct only that fallback, read
+the current product profile and its ETag, replace one Odoo testing lane's HTTPS
+health origin with its existing base origin while preserving the path and query,
+and submit the otherwise unchanged profile to `POST /v1/product-profiles?dry_run=true`.
+Send its exact `If-Match` and an `Idempotency-Key`. Review the returned source and
+replacement profile digests, then submit the same profile and headers to
+`POST /v1/product-profiles`. Read the profile back and wait for the ordinary
+monitor's TLS and runtime observations. The Director-agent conditional write
+allows this exact metadata correction; scoped Client callers and production
+URL changes keep their existing authorization. This updates no route, runtime,
+credential, monitoring policy, accepted release or data, and concurrent profile
+changes refuse rather than being overwritten.
 
 If the unpublished amendment cannot finish, send `mode: apply` with
 `operation: cancel`, the original reviewed hash, reason and `Idempotency-Key`.
