@@ -326,8 +326,13 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
             self.client.proxy_hosts[0].npmplus_location_config, original.npmplus_location_config
         )
 
-    def test_owned_legacy_route_upgrades_and_adopts_a_lost_reply(self) -> None:
+    def assert_legacy_upgrade_adopts_lost_reply(self, *, disabled: bool = False) -> None:
         self.create_legacy_private_route()
+        if disabled:
+            digest = self.adapter(operation="disable").plan()["plan_sha256"]
+            self.adapter(operation="disable", reviewed_plan_sha256=digest).apply(
+                "disable-legacy", self.lease
+            )
         original = self.client.proxy_hosts[0]
         digest = self.adapter().plan()["plan_sha256"]
         update = self.client.update_proxy_host
@@ -346,14 +351,81 @@ class PrivateTestingIngressTests(PrivateIngressFixture):
         self.assertEqual(applied.id, original.id)
         self.assertNotEqual(applied.npmplus_location_config, original.npmplus_location_config)
         writes = tuple(self.client.calls)
-        observed = self.adapter(reviewed_plan_sha256=digest).observe(
+        adapter = self.adapter(reviewed_plan_sha256=digest)
+        observed = adapter.observe(
             "bearer-upgrade", "apply_private_testing_edge", "fixture-reconciliation"
         )
+        if disabled:
+            self.assertEqual(observed.outcome, "absent")
+            self.assertTrue(observed.retry_safe)
+            adapter.apply("bearer-upgrade", self.lease)
+            observed = adapter.observe(
+                "bearer-upgrade", "apply_private_testing_edge", "fixture-reconciliation"
+            )
+            self.assertTrue(self.client.proxy_hosts[0].enabled)
         self.assertEqual(observed.outcome, "present")
         self.assertEqual(
             tuple(call for call in self.client.calls if call.startswith("update:")),
             tuple(call for call in writes if call.startswith("update:")),
         )
+
+    def test_owned_legacy_route_upgrades_and_adopts_a_lost_reply(self) -> None:
+        self.assert_legacy_upgrade_adopts_lost_reply()
+
+    def test_disabled_legacy_route_resumes_enable_after_a_lost_update_reply(self) -> None:
+        self.assert_legacy_upgrade_adopts_lost_reply(disabled=True)
+
+    def test_legacy_activation_binding_survives_source_delivery(self) -> None:
+        from control_plane.testing_application_private_route import private_ingress_snapshot
+
+        self.create_legacy_private_route()
+        desired_builder = TestingPrivateIngressAdapter._desired
+
+        def legacy_desired(
+            adapter: TestingPrivateIngressAdapter, authority: dict[str, object]
+        ) -> NpmplusProxyHostPayload:
+            return desired_builder(adapter, authority).model_copy(
+                update={"npmplus_location_config": ""}
+            )
+
+        with patch(
+            "control_plane.workflows.ingress_provider.build_npmplus_ingress_client_from_env",
+            return_value=self.client,
+        ):
+            with patch.object(TestingPrivateIngressAdapter, "_desired", legacy_desired):
+                original = private_ingress_snapshot(
+                    self.root, self.store, product=self.profile.product, context=self.context
+                )
+            current = private_ingress_snapshot(
+                self.root, self.store, product=self.profile.product, context=self.context
+            )
+        self.assertEqual(current, original)
+
+    def test_legacy_pending_operation_preserves_its_original_forwarding_intent(self) -> None:
+        desired_builder = TestingPrivateIngressAdapter._desired
+        create = self.client.create_proxy_host
+
+        def legacy_desired(
+            adapter: TestingPrivateIngressAdapter, authority: dict[str, object]
+        ) -> NpmplusProxyHostPayload:
+            return desired_builder(adapter, authority).model_copy(
+                update={"npmplus_location_config": ""}
+            )
+
+        def lost_create(payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
+            create(payload)
+            raise TimeoutError("Lost legacy reply")
+
+        with patch.object(TestingPrivateIngressAdapter, "_desired", legacy_desired):
+            digest = self.adapter().plan()["plan_sha256"]
+            with patch.object(self.client, "create_proxy_host", side_effect=lost_create):
+                with self.assertRaises(ProviderMutationUnknownError):
+                    self.adapter(reviewed_plan_sha256=digest).apply("legacy-key", self.lease)
+        observed = self.adapter(reviewed_plan_sha256=digest).observe(
+            "legacy-key", "apply_private_testing_edge", "fixture-reconciliation"
+        )
+        self.assertEqual(observed.outcome, "present")
+        self.assertFalse(self.client.proxy_hosts[0].npmplus_location_config)
 
     async def test_private_dependency_refusal_keeps_safe_trace_evidence(self) -> None:
         from control_plane import http_error_evidence

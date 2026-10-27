@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import click
 
@@ -245,6 +246,21 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
             "# odoo config",
         )
         self.assertEqual(client.calls, ["list", "update:78"])
+
+    def test_generic_update_omits_unowned_location_configuration(self) -> None:
+        client = _FakeNpmplusClient(
+            (
+                _proxy_host(forward_port=8080).model_copy(
+                    update={"npmplus_location_config": "return 204;"}
+                ),
+            )
+        )
+        with patch.object(client, "update_proxy_host", wraps=client.update_proxy_host) as write:
+            result = apply_npmplus_ingress_route(client=client, request=_request(mode="apply"))
+        self.assertEqual(result.status, "applied")
+        self.assertNotIn(
+            "npmplus_location_config", write.call_args.kwargs["payload"].to_api_payload()
+        )
 
     def test_explicit_empty_advanced_config_clears_existing_proxy_host_value(self) -> None:
         client = _FakeNpmplusClient((_proxy_host(advanced_config="# odoo config"),))

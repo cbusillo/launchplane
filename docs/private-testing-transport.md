@@ -50,6 +50,10 @@ Basic authentication and its credential stripping stay unchanged. A reviewed
 `create` can upgrade the exact receipt-owned legacy route to this setting; it
 cannot overwrite other configuration differences. An uncertain update retains
 its original operation key for observation and readback before any continuation.
+Source delivery preserves legacy activation bindings and the original header
+intent of a pending route operation. Finish that original operation before
+reviewing a forwarding upgrade; the upgrade creates a new route receipt and
+changes the binding that a later activation must capture.
 The NPMplus collection read validates every host ID and hostname claim before
 selection, retaining duplicate claims across hosts, wildcards and regex claims. Malformed claims
 refuse the read. Configuration on unrelated hosts is not qualified as a

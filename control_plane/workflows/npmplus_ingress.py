@@ -10,6 +10,7 @@ from control_plane.npmplus import (
     NpmplusLocationPayload,
     NpmplusProxyHost,
     NpmplusProxyHostPayload,
+    PRIVATE_BEARER_FORWARDING,
 )
 
 
@@ -301,7 +302,9 @@ def _inherit_existing_npmplus_fields(
 ) -> NpmplusProxyHostPayload:
     if existing_host is None:
         return desired_payload
-    inherited = {"npmplus_location_config": existing_host.npmplus_location_config}
+    inherited = {}
+    if existing_host.npmplus_location_config == PRIVATE_BEARER_FORWARDING:
+        inherited["npmplus_location_config"] = existing_host.npmplus_location_config
     if "advanced_config" not in route.model_fields_set:
         inherited["advanced_config"] = existing_host.advanced_config
     return desired_payload.model_copy(update=inherited)

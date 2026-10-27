@@ -370,7 +370,14 @@ class TestingPrivateIngressAdapter:
                 in ({None, candidate.id} if recovery_key else {candidate.id})
                 and audit.requested_domains == desired.domain_names
                 and audit.edge_endpoint_key == self.request.edge_endpoint_key
-                and audit.provider_route_sha256 == canonical_json_sha256(_host_payload(candidate))
+                and (
+                    audit.provider_route_sha256 == canonical_json_sha256(_host_payload(candidate))
+                    or (
+                        audit.status == "pending"
+                        and _host_payload(candidate)
+                        == _host_payload(desired.model_copy(update={"enabled": candidate.enabled}))
+                    )
+                )
             ):
                 return True
         return False
@@ -444,6 +451,29 @@ class TestingPrivateIngressAdapter:
             )
         else:
             desired = self._desired(authority)
+            original = None
+            if self.request.reviewed_plan_sha256:
+                try:
+                    original = self.store.read_ingress_route_audit_record(
+                        _PREFIX + self.request.reviewed_plan_sha256
+                    )
+                except FileNotFoundError:
+                    original = None
+            legacy_desired = desired.model_copy(update={"npmplus_location_config": ""})
+            if (
+                original is not None
+                and original.product == self.product
+                and original.context == self.request.context
+                and original.edge_endpoint_key == self.request.edge_endpoint_key
+                and original.requested_domains == legacy_desired.domain_names
+                and original.mode == "apply"
+                and not original.dry_run
+                and (not recovery_key or original.idempotency_key == recovery_key)
+                and original.testing_authority_sha256 == self._receipt_authority_sha256(authority)
+                and original.provider_route_sha256
+                == canonical_json_sha256(_host_payload(legacy_desired))
+            ):
+                desired = legacy_desired
         desired.to_api_payload()
         if existing is not None and not self._owned(existing, desired, authority, recovery_key):
             raise ValueError("The existing edge route has no matching private testing receipt.")
@@ -816,7 +846,7 @@ class TestingPrivateIngressAdapter:
                 nonlocal started
                 check_execution()
                 lease.assert_current()
-                if self._snapshot()[0] != snapshot:
+                if self._snapshot(provider_operation_key)[0] != snapshot:
                     raise ValueError("Private hostname authority changed before apply.")
                 if not snapshot["domain_present"]:
                     host, token = source.read_dokploy_config(control_plane_root=self.root)

@@ -247,6 +247,12 @@ def private_ingress_snapshot(
         != adapter._receipt_authority_sha256(cast(dict[str, object], snapshot["authority"]))
     ):
         raise ValueError("The original private testing ingress receipt changed.")
+    snapshot = {
+        **snapshot,
+        "desired": _host_payload(
+            desired.model_copy(update={"npmplus_location_config": current.npmplus_location_config})
+        ),
+    }
     binding = {
         "endpoint_key": endpoint.endpoint_key,
         "server_id": str(cast(dict[str, object], snapshot["authority"])["server_id"]),
