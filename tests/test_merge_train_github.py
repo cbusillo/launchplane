@@ -1766,6 +1766,36 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(observed_candidate.status, "ready_for_checks")
         self.assertEqual(observed_candidate.required_checks_status, "pending")
 
+    def test_full_ci_requires_success_without_changing_other_check_semantics(self) -> None:
+        for full_gate, other_gate, expected in (
+            ("skipped", "success", "unknown"),
+            ("neutral", "success", "unknown"),
+            ("success", "skipped", "pass"),
+            ("success", "neutral", "pass"),
+        ):
+            with self.subTest(full_gate=full_gate, other_gate=other_gate):
+                candidate = _batch_candidate().model_copy(
+                    update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+                )
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks(),
+                        [],
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                _required_check_run("ci-gate", "completed", full_gate),
+                                _required_check_run("security-gate", "completed", other_gate),
+                            ]
+                        },
+                    )
+                )
+                observed = GitHubMergeTrainClient(
+                    transport=transport
+                ).observe_batch_candidate_checks(candidate=candidate)
+                self.assertEqual(observed.required_checks_status, expected)
+                self.assertEqual(observed.status == "passed", expected == "pass")
+
     def test_observe_batch_candidate_checks_requires_every_protected_check(self) -> None:
         missing = "missing-security-check"
         candidate = _batch_candidate().model_copy(

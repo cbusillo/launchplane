@@ -6303,7 +6303,10 @@ def _required_check_evidence_verdict(
     return evaluate_required_checks(
         requirements=tuple(CheckRequirement(name, app_id) for name, app_id in required_checks),
         signals=signals,
-        successful_signals=successful_signals if require_successful_runs else None,
+        successful_signals=successful_signals
+        if require_successful_runs
+        else successful_signals
+        + [signal for signal in signals if signal.name.casefold() != "ci-gate"],
     )
 
 
