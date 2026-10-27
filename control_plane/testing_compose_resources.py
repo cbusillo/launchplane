@@ -418,7 +418,7 @@ def compose_custody_sha256(
     adapter = TestingActivationAdapter(
         root, store, product, record.request, record.actor, record.scope, "testing-custody-read"
     )
-    adapter.require_unchanged(record)
+    adapter.require_recipient_custody(record)
     resources, preparation_id = preparation_resources(store, product, record.request, record.scope)
     if preparation_id != record.preparation_record_id:
         raise ValueError("Retained preparation changed")
@@ -496,8 +496,11 @@ def _collect_compose_resource_facts(
         record.scope,
         "testing-resource-collection",
     )
-    adapter.require_unchanged(record)
+    adapter.require_recipient_custody(record)
     authority = adapter.bindings()
+    configuration = configuration_digest(
+        store, product, context, version=record.configuration_version
+    )
     resources, preparation_id = preparation_resources(store, product, record.request, record.scope)
     if preparation_id != record.preparation_record_id:
         raise ValueError("Retained allocation changed")
@@ -585,10 +588,12 @@ def _collect_compose_resource_facts(
         or re.fullmatch(r"[a-f0-9]{64}", str(frames[0]["sha256"])) is None
     ):
         raise ValueError("Physical Compose qualification unavailable")
-    adapter.require_unchanged(record)
+    adapter.require_recipient_custody(record)
     adapter.verify_compose_provider(current, values=values)
     if (
         authority != adapter.bindings()
+        or configuration
+        != configuration_digest(store, product, context, version=record.configuration_version)
         or inventory
         != store.read_environment_inventory(context_name=context, instance_name="testing")
         or binding
@@ -608,6 +613,7 @@ def _collect_compose_resource_facts(
             "activation": record.model_dump(mode="json"),
             "allocation": resources.binding_sha256,
             "binding": binding.binding_sha256,
+            "configuration": configuration,
             "inventory": inventory.model_dump(mode="json"),
             "physical": frames[0]["sha256"],
             "provider": adapter.recipient_configuration_sha256(payload),
