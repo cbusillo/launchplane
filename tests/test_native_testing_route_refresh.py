@@ -438,6 +438,15 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             {(item.domain_name, item.role) for item in testing_route_domains(fixture.route)},
         )
         self.assertNotIn("domain_divergence", {item.code for item in topology.warnings})
+        http_intent = project_topology(
+            lane.model_copy(
+                update={
+                    "base_url": lane.base_url.replace("https://", "http://"),
+                    "health_url": lane.health_url.replace("https://", "http://"),
+                }
+            )
+        )
+        self.assertFalse(any(item.tls_expected for item in http_intent.desired.domains))
         for receipt in (None, published.model_copy(update={"state": "planned"})):
             with patch(
                 "control_plane.testing_publication_storage.read_publication", return_value=receipt

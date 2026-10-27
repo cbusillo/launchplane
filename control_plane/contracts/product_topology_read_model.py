@@ -529,17 +529,21 @@ def _desired_topology(
     domains = product_lane_public_domains(lane)
     aliases = _published_testing_aliases(record_store, profile, lane, binding)
     domains += tuple(
-        ProductTopologyDomain(domain_name=name, role="alias", tls_expected=True)
+        ProductTopologyDomain(
+            domain_name=name, role="alias", tls_expected=_url_domain(lane.base_url)[1]
+        )
         for name in aliases
         if name not in {domain.domain_name for domain in domains}
     )
-    detail = "Launchplane product-profile public website and URL intent for this environment."
+    detail = "Launchplane product-profile URL intent; timestamps shown belong to the profile."
     if aliases and binding is not None:
         detail += (
             " Retained aliases from applied native testing publication "
             + binding.source.source_versions["testing_publication"]
-            + " and its effective address receipt."
+            + "."
         )
+        if address_key := binding.source.source_versions.get("testing_address"):
+            detail += " Effective address receipt " + address_key + "."
     trust_state: FreshnessStatus = (
         "recorded"
         if profile.public_website == "none" or lane.base_url or lane.health_url
@@ -569,8 +573,7 @@ def _published_testing_aliases(
     binding: EnvironmentRouteBindingRecord | None,
 ) -> tuple[str, ...]:
     from control_plane.storage.postgres import PostgresRecordStore
-    from control_plane.testing_address_storage import effective_testing_route
-    from control_plane.testing_publication_storage import read_publication
+    from control_plane.testing_publication_storage import retained_testing_route
 
     if (
         not isinstance(record_store, PostgresRecordStore)
@@ -579,17 +582,8 @@ def _published_testing_aliases(
         or binding is None
     ):
         return ()
-    key = binding.source.source_versions.get("testing_publication")
-    if not key:
-        return ()
-    try:
-        publication = read_publication(record_store, key)
-        if publication is None or publication.state != "applied":
-            return ()
-        route = effective_testing_route(record_store, publication, binding=binding)
-    except (ValueError, FileNotFoundError):
-        return ()
-    if _url_domain(lane.base_url)[0] != route.host:
+    route = retained_testing_route(record_store, binding)
+    if route is None or _url_domain(lane.base_url)[0] != route.host:
         return ()
     return route.aliases
 
