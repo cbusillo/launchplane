@@ -160,7 +160,34 @@ class LaneHealthHistoryHttpTests(unittest.IsolatedAsyncioTestCase):
                         paths[0] + "?" + urlencode({"historical_context": context}),
                         headers={"Authorization": "Bearer valid-token"},
                     )
-                    self.assertEqual(response.status_code, 404, response.text)
+                    self.assertEqual(response.status_code, 403, response.text)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context="unowned-context"),
+                record_store_factory=lambda: store,
+            )
+            response = await request(
+                app,
+                "GET",
+                paths[0] + "?historical_context=unowned-context",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(response.status_code, 404, response.text)
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=_product_environment_read_policy(context=retired_context),
+                record_store_factory=object,
+            )
+            for path in paths:
+                response = await request(
+                    app,
+                    "GET",
+                    path
+                    + ("&" if "?" in path else "?")
+                    + urlencode({"historical_context": retired_context}),
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+                self.assertEqual(response.status_code, 503, response.text)
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=_product_environment_read_policy(context="example-site"),

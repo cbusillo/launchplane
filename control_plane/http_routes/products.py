@@ -509,6 +509,26 @@ def _build_product_incident_scope(
     historical_context: str = "",
 ) -> ProductIncidentEnvironmentScope:
     if historical_context:
+        if not dependencies.authorization_allows(
+            identity=identity,
+            action="product_environment.read",
+            product=product,
+            context=historical_context,
+            target=AuthorizationTarget(scope="instance", instances=(environment,)),
+        ):
+            raise dependencies.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Identity cannot read this product's historical lane evidence.",
+            )
+        _require_database_read_store_methods(
+            record_store,
+            dependencies=dependencies,
+            trace_id=trace_id,
+            method_names=("read_product_profile_record",),
+            message="Historical lane evidence requires retained product profile reads.",
+        )
         try:
             profile = require_product_profile_read_store(record_store).read_product_profile_record(
                 product
@@ -527,19 +547,6 @@ def _build_product_incident_scope(
                 trace_id=trace_id,
                 code="not_found",
                 message="Product has no retained historical context for this read.",
-            )
-        if not dependencies.authorization_allows(
-            identity=identity,
-            action="product_environment.read",
-            product=profile.product,
-            context=historical_context,
-            target=AuthorizationTarget(scope="instance", instances=(environment,)),
-        ):
-            raise dependencies.http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Identity cannot read this product's historical lane evidence.",
             )
         return ProductIncidentEnvironmentScope(
             product=profile.product,
