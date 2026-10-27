@@ -380,6 +380,17 @@ class ActivationTests(unittest.TestCase):
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 
         host = self.retained_collection_fixture()
+        record = activation_record(self.store, self.product, self.context)
+        assert record is not None
+        platform_secret = self.store.read_secret_record("global-platform-password")
+        self.store.write_secret_record(
+            platform_secret.model_copy(update={"name": "RENAMED_GLOBAL_PLATFORM_PASSWORD"})
+        )
+        with self.assertRaises(TestingActivationRefusal) as original_refusal:
+            self.adapter.require_unchanged(record)
+        self.assertEqual(
+            original_refusal.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED
+        )
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=LaunchplaneAuthzPolicy(),
@@ -713,15 +724,19 @@ class ActivationTests(unittest.TestCase):
     def test_retained_compose_read_failures_preserve_denials_and_unknown_facts(self) -> None:
         import click
         from datetime import datetime, timezone
+        from control_plane import http_error_evidence
         from control_plane.dokploy import native_copy_stream
         from control_plane.disposable_lane_collection import collect_testing_resource_facts
         from control_plane.testing_compose_resources import collect_compose_resource_facts
 
         self.retained_collection_fixture()
-        with patch.object(
-            native_copy_stream,
-            "_read_remote",
-            side_effect=click.ClickException("private-source-error"),
+        with (
+            patch.object(
+                native_copy_stream,
+                "_read_remote",
+                side_effect=click.ClickException("private-source-error"),
+            ),
+            self.assertLogs(http_error_evidence.__name__, level="WARNING") as logs,
         ):
             self.assertEqual(
                 collect_testing_resource_facts(
@@ -730,6 +745,7 @@ class ActivationTests(unittest.TestCase):
                     product=self.product,
                     context=self.context,
                     now=datetime.now(timezone.utc),
+                    trace_id="collection-refusal-trace",
                 ),
                 {},
             )
@@ -738,6 +754,10 @@ class ActivationTests(unittest.TestCase):
                     self.store, root=self.root, product=self.product, context=self.context
                 )
             self.assertNotIn("private-source-error", str(refusal.exception))
+        evidence = json.loads(logs.records[-1].getMessage())
+        self.assertEqual(evidence["trace_id"], "collection-refusal-trace")
+        self.assertTrue(evidence["sites"])
+        self.assertNotIn("private-source-error", logs.output[0])
         with patch.object(
             native_copy_stream,
             "_read_remote",

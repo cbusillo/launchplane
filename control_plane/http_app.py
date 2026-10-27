@@ -23870,6 +23870,7 @@ def create_launchplane_fastapi_app(
                             context=observation.context,
                             now=store.disposable_lane_observation_time(),
                             root=resolved_control_plane_root,
+                            trace_id=trace_id,
                         )
                     except NativeSourceAuthorizationDenied:
                         raise _launchplane_http_error(

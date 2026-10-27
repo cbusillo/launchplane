@@ -418,7 +418,7 @@ def compose_custody_sha256(
     adapter = TestingActivationAdapter(
         root, store, product, record.request, record.actor, record.scope, "testing-custody-read"
     )
-    adapter.require_unchanged(record)
+    adapter.require_recipient_custody(record)
     resources, preparation_id = preparation_resources(store, product, record.request, record.scope)
     if preparation_id != record.preparation_record_id:
         raise ValueError("Retained preparation changed")
@@ -496,7 +496,7 @@ def _collect_compose_resource_facts(
         record.scope,
         "testing-resource-collection",
     )
-    adapter.require_unchanged(record)
+    adapter.require_recipient_custody(record)
     authority = adapter.bindings()
     resources, preparation_id = preparation_resources(store, product, record.request, record.scope)
     if preparation_id != record.preparation_record_id:
@@ -585,7 +585,7 @@ def _collect_compose_resource_facts(
         or re.fullmatch(r"[a-f0-9]{64}", str(frames[0]["sha256"])) is None
     ):
         raise ValueError("Physical Compose qualification unavailable")
-    adapter.require_unchanged(record)
+    adapter.require_recipient_custody(record)
     adapter.verify_compose_provider(current, values=values)
     if (
         authority != adapter.bindings()
