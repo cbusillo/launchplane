@@ -700,6 +700,7 @@ function DiagnosisCallout({ diagnosis }: { diagnosis: Diagnosis }) {
 
 function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
   const ingress = detail.topology.provider_recorded.ingress;
+  const split = detail.topology.provider_recorded.external_ingress;
   const effectiveChecks = detail.health_monitoring.checks.filter(
     (check) => check.probe_effective,
   );
@@ -741,7 +742,9 @@ function IngressEvidence({ detail }: { detail: ProductEnvironmentDetail }) {
         <EvidenceFact label={detail.health_monitoring.monitoring_intent === "private" ? "Public ingress" : detail.topology.observed.ingress.probe_effective ? "Current public observation" : detail.public_ingress.status ? "Public observation history" : "Public ingress"} value={detail.public_ingress.status ? humanize(detail.public_ingress.status) : "No observation"} />
         <EvidenceFact label="Summary" value={detail.public_ingress.summary || "No public ingress summary was returned."} />
         <EvidenceFact label="Desired endpoint" value={detail.topology.desired.base_url || "Not recorded"} />
-        <EvidenceFact label="Recorded path" value={humanize(ingress.path)} />
+        <EvidenceFact label="Recorded path" value={split ? "Separate business and recovery paths" : humanize(ingress.path)} />
+        {split && <EvidenceFact label="External custodian" value={`${split.custodian}: ${split.domains.join(", ")}`} />}
+        {split && detail.topology.provider_recorded.domains.map(domain => <EvidenceFact key={domain.domain_name} label={domain.domain_name} value={`${domain.ingress?.provider ?? "Unknown ingress"} · TLS: ${domain.tls?.owner ?? "Unknown"}`} />)}
         <EvidenceFact label="Route authority" value={trustLabel(detail.topology.provider_recorded.trust_state)} />
         <EvidenceFact label="Termination" value={humanize(ingress.termination_kind)} />
         <EvidenceFact label="Incident" value={detail.public_ingress.incident_status ? humanize(detail.public_ingress.incident_status) : "No incident recorded"} />
@@ -758,6 +761,7 @@ function TlsEvidence({
   tlsDomains: ProductObservedTlsDomain[];
 }) {
   const recordedTls = detail.topology.provider_recorded.tls;
+  const split = detail.topology.provider_recorded.external_ingress;
   return (
     <section className="environment-evidence-panel" id="tls-evidence">
       <div className="evidence-panel-head">
@@ -778,8 +782,8 @@ function TlsEvidence({
             "Not recorded"
           }
         />
-        <EvidenceFact label="TLS managed by" value={humanize(recordedTls.owner)} />
-        <EvidenceFact label="Terminator" value={humanize(recordedTls.terminator)} />
+        <EvidenceFact label="TLS managed by" value={split ? "Recorded per hostname" : humanize(recordedTls.owner)} />
+        <EvidenceFact label="Terminator" value={split ? "Separate ingress paths" : humanize(recordedTls.terminator)} />
       </dl>
       {tlsDomains.length ? (
         <ul className="tls-domain-list">
@@ -788,6 +792,7 @@ function TlsEvidence({
               <div>
                 <strong>{domain.domain_name}</strong>
                 <span>{domain.role}</span>
+                {split && <span>TLS: {detail.topology.provider_recorded.domains.find(record => record.domain_name === domain.domain_name)?.tls?.owner ?? "Unknown"}</span>}
               </div>
               <div>
                 <strong>{humanize(domain.status)}</strong>

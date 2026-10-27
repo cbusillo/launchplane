@@ -759,6 +759,7 @@ from control_plane.contracts.testing_route_refresh import (
 )
 from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
 from control_plane.contracts.route_binding_record import (
+    RouteBindingExternalIngress,
     route_binding_record_sha256,
     EnvironmentRouteBindingRecord,
     redacted_route_binding_record,
@@ -2638,6 +2639,10 @@ class RouteBindingReconcileEnvelope(BaseModel):
     context: str
     instance: str
     expected_current: control_plane_route_binding_reconcile.RouteBindingExpectedCurrent
+    external_ingress: RouteBindingExternalIngress | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     source_label: str = "operator-reconcile"
     browser_review: browser_route_repair.BrowserRouteRepairRequest | None = Field(
         default=None, exclude_if=lambda value: value is None
@@ -22234,9 +22239,22 @@ def create_launchplane_fastapi_app(
                 expected_current=expected_current,
                 source_label=binding_request.source_label,
                 evaluated_at=utc_now_timestamp(),
+                external_ingress=binding_request.external_ingress,
+                allow_authority_change=binding_request.browser_review is not None
+                and isinstance(identity, GitHubHumanIdentity),
             ),
         )
 
+        if binding_request.mode == "apply" and any(
+            finding.code == "split_ingress_authority_change_requires_review"
+            for finding in reconcile_plan.findings
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Split ingress custody changes require the signed-in administrator's review.",
+            )
         if (
             director_evidence_refresh
             and reconcile_plan.status in {"ready", "unchanged"}
@@ -22340,7 +22358,11 @@ def create_launchplane_fastapi_app(
             response_payload=response.model_dump(mode="json", exclude_none=True),
             lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
         )
-        if binding_request.browser_review is not None or director_evidence_refresh:
+        if (
+            binding_request.browser_review is not None
+            or director_evidence_refresh
+            or reconcile_plan.record.external_ingress is not None
+        ):
             assert isinstance(record_store, PostgresRecordStore)
             try:
                 mutation_result = record_store.reconcile_route_binding_record(
@@ -23052,6 +23074,17 @@ def create_launchplane_fastapi_app(
                     context=route_request.context,
                     instance=instance_name,
                     requested_domains=route_request.ingress.route.domain_names,
+                    tracked_targets=control_plane_ingress_route_scope.tracked_ingress_targets(
+                        record_store, profile
+                    )
+                    if (
+                        route_request.ingress.expected_host_id is not None
+                        and route_request.ingress.require_exact_expected_host_domains
+                        and not route_request.ingress.allow_create
+                        and not route_request.ingress.allow_update
+                        and not route_request.ingress.allow_enable_disable
+                    )
+                    else (),
                     private_endpoints=(
                         record_store.list_private_health_endpoint_records()
                         if isinstance(record_store, PostgresRecordStore)

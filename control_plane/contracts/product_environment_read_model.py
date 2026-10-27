@@ -81,6 +81,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentSeverity,
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -797,6 +798,9 @@ def build_product_environment_detail(
 ) -> ProductEnvironmentDetail:
     profile = record_store.read_product_profile_record(product)
     lane = _find_lane(profile=profile, environment=environment)
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+    )
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
     lane_summary = _read_product_lane_summary(
         record_store=record_store,
@@ -2434,6 +2438,9 @@ def _health_monitoring_summary(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductHealthMonitoringSummary:
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+    )
     incidents = sort_open_incidents(
         tuple(
             incident
