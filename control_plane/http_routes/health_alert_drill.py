@@ -19,7 +19,12 @@ from control_plane.http_routes.support import (
     ReadRouteDependencies,
     run_in_worker_thread,
 )
-from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LaunchplaneIdentity,
+    LocalOperatorIdentity,
+    director_agent_identity,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -45,6 +50,9 @@ def register_health_alert_drill_routes(
             target=AuthorizationTarget(scope="instance", instances=(scope.instance,)),
         ) or (
             send
+            and not (
+                isinstance(identity, LocalOperatorIdentity) and director_agent_identity(identity)
+            )
             and not dependencies.authorization_allows(
                 identity=identity,
                 action="public_ingress_monitor.run_once",
@@ -56,7 +64,7 @@ def register_health_alert_drill_routes(
                 status_code=403,
                 trace_id=trace,
                 code="authorization_denied",
-                message="Caller lacks existing scoped read or monitor execution access.",
+                message="Caller lacks scoped lane read or health alert drill send access.",
             )
 
     async def execute(

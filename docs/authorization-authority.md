@@ -168,6 +168,9 @@ in force. See [testing retry](testing-deploy-retry.md).
 The [same-artifact testing service restart](lane-service-restart.md#supported-lane-and-identity)
 also has a bounded Director-agent path; that contract owns its safety and recovery rules.
 
+The [health alert drill](health-alert-drills.md) also has a bounded Director-agent
+send path; that contract owns its authorization and delivery rules.
+
 Generic-web deploy recovery dry runs authorize the instance-scoped
 `generic_web_deploy_recovery.plan` action, with the existing execute grant as a
 compatibility alternative. The authenticated Director agent inherits this inert
