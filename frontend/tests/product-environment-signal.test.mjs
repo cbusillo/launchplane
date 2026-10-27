@@ -9,9 +9,8 @@ const { productsForFixture } = await import("../src/dev-fixtures.ts");
 if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
 else Reflect.deleteProperty(globalThis, "window");
 
-/** @returns {import("../src/generated/openapi.ts").ProductEnvironmentSummary} */
 function environment() {
-  const lane = /** @type {import("../src/generated/openapi.ts").ProductEnvironmentSummary} */ (structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "testing")));
+  const lane = structuredClone(productsForFixture("products")[0].environments.find(lane => lane.environment === "testing"));
   lane.trust_state = "recorded";
   lane.provenance.freshness_status = "verified";
   lane.provenance.stale_after = new Date(Date.now() + 60_000).toISOString();
