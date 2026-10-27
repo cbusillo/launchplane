@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { LaunchplaneApiError, readProviderHoldAttention } from "./api";
+import { isLaunchplaneHttpError, readProviderHoldAttention } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
 import { formatTime } from "./format";
 import type { ProviderHoldAttentionPage } from "./generated/openapi.ts";
@@ -23,10 +23,10 @@ export function useProviderHoldAttention(admin: boolean, fixtureMode: DevFixture
       if (active) setResource({ status: "ready", data: payload.attention, error: "", traceId: payload.trace_id, statusCode: 200 });
     }).catch((error: unknown) => {
       if (!active || controller.signal.aborted) return;
-      const statusCode = error instanceof LaunchplaneApiError ? error.statusCode : 503;
+      const statusCode = isLaunchplaneHttpError(error) ? error.statusCode : 503;
       setResource(current => ({ status: "error", data: [401, 403].includes(statusCode) ? null : current.data,
         error: "Service operation attention could not be read.", statusCode,
-        traceId: error instanceof LaunchplaneApiError ? error.traceId : "" }));
+        traceId: isLaunchplaneHttpError(error) ? error.traceId : "" }));
     });
     return () => { active = false; controller.abort(); };
   }, [enabled, refreshToken, cursor, request.token]);

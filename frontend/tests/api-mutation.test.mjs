@@ -10,6 +10,8 @@ import {
   readAuthSession,
 } from "../src/api.ts";
 import { productConfigFailureCertainty, productConfigOperationFailure } from "../src/product-config-operation.ts";
+import { promotionFailureCertainty, promotionOperationFailure } from "../src/promotion-operation.ts";
+import { odooReleaseFailure, odooReleaseFailureCertainty } from "../src/odoo-release-operation.ts";
 
 const originalFetch = globalThis.fetch;
 
@@ -273,6 +275,10 @@ test("unreadable responses retain HTTP evidence without claiming an apply settle
       assert.equal(productConfigFailureCertainty(error, true), "uncertain");
       assert.equal(productConfigFailureCertainty(error, false), "definitive");
       assert.equal(productConfigOperationFailure(error).statusCode, status);
+      assert.equal(promotionOperationFailure(error).statusCode, status);
+      assert.equal(odooReleaseFailure(error).statusCode, status);
+      assert.equal(promotionFailureCertainty(error, true), "uncertain");
+      assert.equal(odooReleaseFailureCertainty(error), "uncertain");
       return true;
     });
   }

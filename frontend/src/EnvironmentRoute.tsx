@@ -13,7 +13,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import {
-  LaunchplaneApiError,
+  isLaunchplaneHttpError,
   readProductEnvironment,
   readProductEnvironmentConfigStatus,
   readProductPromotionStatus,
@@ -1132,8 +1132,8 @@ function errorResource<T>(data: T | null, error: unknown): ResourceState<T> {
     data,
     error:
       error instanceof Error ? error.message : "Launchplane environment request failed.",
-    traceId: error instanceof LaunchplaneApiError ? error.traceId : "",
-    statusCode: error instanceof LaunchplaneApiError ? error.statusCode : 503,
+    traceId: isLaunchplaneHttpError(error) ? error.traceId : "",
+    statusCode: isLaunchplaneHttpError(error) ? error.statusCode : 503,
   };
 }
 

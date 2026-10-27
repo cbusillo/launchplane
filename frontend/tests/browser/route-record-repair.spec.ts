@@ -152,13 +152,17 @@ test("binding card refuses an unchanged verdict with no stored binding", async (
   expect(calls.map(call => call.body.mode)).toEqual(["dry-run"]);
 });
 
-test("split ingress review preserves both custodians through save and readback @responsive @webkit", async ({ page }) => {
-  const { panel, calls } = await fixture(page, "binding", "split");
-  await panel.getByLabel("Route binding reason", { exact: true }).fill("Record both existing ingress paths.");
+async function enterExternalCustody(panel: ReturnType<Page["getByRole"]>) {
   await panel.getByRole("button", { name: "Edit external custody", exact: true }).click();
   await panel.getByLabel("External domains", { exact: true }).fill(proposedDomains[0]);
   await panel.getByLabel("Proxy custodian", { exact: true }).fill("Office proxy operator");
   await panel.getByLabel("Configuration evidence URL", { exact: true }).fill("https://example.test/proxy-report");
+}
+
+test("split ingress review preserves both custodians through save and readback @responsive @webkit", async ({ page }) => {
+  const { panel, calls } = await fixture(page, "binding", "split");
+  await panel.getByLabel("Route binding reason", { exact: true }).fill("Record both existing ingress paths.");
+  await enterExternalCustody(panel);
   await panel.getByRole("button", { name: "Review route binding", exact: true }).click();
   await expect(panel.getByLabel("Route binding review", { exact: true })).toContainText("Office proxy operator");
   await panel.getByRole("checkbox").check();
@@ -176,10 +180,7 @@ for (const stage of ["session", "review"] as const) {
     const review = panel.getByRole("button", { name: "Review route binding", exact: true });
     await panel.getByLabel("Route binding reason", { exact: true }).fill("Record the existing split custody.");
     await expect(review).toBeEnabled();
-    await panel.getByRole("button", { name: "Edit external custody", exact: true }).click();
-    await panel.getByLabel("External domains", { exact: true }).fill(proposedDomains[0]);
-    await panel.getByLabel("Proxy custodian", { exact: true }).fill("Office proxy operator");
-    await panel.getByLabel("Configuration evidence URL", { exact: true }).fill("https://example.test/proxy-report");
+    await enterExternalCustody(panel);
     let interrupted = false;
     await page.route(stage === "session" ? "**/v1/auth/session" : "**/v1/route-bindings/reconcile", route => {
       if (interrupted) return route.fallback();
@@ -188,7 +189,7 @@ for (const stage of ["session", "review"] as const) {
     });
     await review.click();
     await expect(panel.getByRole("alert")).toContainText(/HTTP 502/);
-    await expect(panel.getByRole("alert")).toContainText(/temporarily unavailable/i);
+    await expect(panel.getByRole("alert")).not.toContainText(/Bad Gateway|expected pattern|not valid JSON/);
     await expect(panel.getByRole("button", { name: "Apply reviewed route binding", exact: true })).toHaveCount(0);
     expect(calls).toHaveLength(0);
     await review.click();

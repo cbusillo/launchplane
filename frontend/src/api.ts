@@ -136,16 +136,22 @@ export class LaunchplaneApiError extends Error {
 }
 
 export class LaunchplaneResponseError extends Error {
+  code = "unreadable_response";
+  traceId = "";
   statusCode: number;
 
   constructor(statusCode: number) {
     const reason = statusCode >= 500
       ? "Launchplane is temporarily unavailable"
       : "Launchplane returned an unreadable response";
-    super(`${reason} (HTTP ${statusCode}). Try the review again. If you sent an apply, keep its recovery request; the outcome is unverified.`);
+    super(`${reason} (HTTP ${statusCode}).`);
     this.name = "LaunchplaneResponseError";
     this.statusCode = statusCode;
   }
+}
+
+export function isLaunchplaneHttpError(error: unknown): error is LaunchplaneApiError | LaunchplaneResponseError {
+  return error instanceof LaunchplaneApiError || error instanceof LaunchplaneResponseError;
 }
 
 let browserMutationQueue: Promise<void> = Promise.resolve();
