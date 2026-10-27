@@ -480,7 +480,7 @@ private-key input, file, download, application delivery or plaintext readback.
 The key uses cryptography's [OpenSSH serialization](https://cryptography.io/en/stable/hazmat/primitives/asymmetric/serialization/).
 
 Use the catalog's installed bounded `launchplane-write-action.py` helper with
-the existing private admin configuration. It calls the deployed service and
+the helper's existing operator configuration. It calls the deployed service and
 owns configuration, transport, saved review and uncertainty handling:
 
 ```sh
@@ -502,8 +502,8 @@ uv run /installed/catalog/skills/launchplane/scripts/launchplane-write-action.py
 
 The pin file contains only the independently verified public known-hosts entry.
 Generation refuses private-key files and mixed binding-reference inputs. The
-helper supplies an empty `bindings` map and returns the public key, its OpenSSH
-SHA256 fingerprint, boundary and binding identifiers, and plan metadata.
+helper supplies an empty `bindings` map. Apply returns the public key, its
+OpenSSH SHA256 fingerprint, boundary and binding identifiers, and plan metadata.
 Successful apply also independently reads the canonical references back.
 The explicit metadata read supplies `generated_capture_keys` for the currently
 configured key version without decrypting it. A lost response is recovered by
