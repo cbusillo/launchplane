@@ -48,6 +48,7 @@ from control_plane.storage.schema_migration import (
     alembic_config,
     migrate_schema,
     schema_migration_target,
+    schema_migration_action,
     SCHEMA_MIGRATION_TARGET_REVISION,
     _RECOGNIZED_SOURCE_REVISIONS,
 )
@@ -69,8 +70,13 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
         self,
     ) -> None:
         for revision in ("", *_RECOGNIZED_SOURCE_REVISIONS):
-            expected = schema_migration_target(
-                current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+            expected = (
+                revision
+                if revision
+                and schema_migration_action(current_revision=revision) == "compatible_ahead"
+                else schema_migration_target(
+                    current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+                )
             )
             with self.subTest(revision=revision), _isolated_postgres_database() as url:
                 if revision:
