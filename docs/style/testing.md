@@ -63,6 +63,14 @@ configuration. `qualityGate.test.local` is the focused command template;
 or metadata change with no affected code, record why behavior tests or IDE inspection do not apply; do not add tests that
 assert instruction wording or config text.
 
+Native JetBrains inspection uses the frontend WebStorm lane rooted at
+`frontend/` and the root PyCharm lane for Python and YAML. Inspect each lane
+in a separate assessment. WebStorm installs the manifest-pinned pnpm dependencies
+with a frozen lockfile and scripts disabled in its private snapshot; the source
+checkout stays untouched. The shared profile is
+`.idea/inspectionProfiles/Project_Default.xml`. TypeScript compiler validation
+still runs through the frontend gate.
+
 For frontend changes, use `qualityGate.build.frontend` for frontend unit, type,
 and build validation, with browser smoke for UI changes as described below.
 
