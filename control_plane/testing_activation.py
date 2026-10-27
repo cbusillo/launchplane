@@ -914,6 +914,9 @@ class TestingActivationAdapter:
                 "Testing configuration or key policy changed.",
                 code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
             )
+        self.require_recipient_custody(record)
+
+    def require_recipient_custody(self, record: TestingActivationRecord) -> None:
         _, target, target_id, provider = self.bindings()
         if record.published:
             if (

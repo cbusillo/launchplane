@@ -10,6 +10,7 @@ from control_plane.contracts.product_retirement import canonical_sha256
 from control_plane.disposable_lanes import DisposableLaneStore
 from control_plane.odoo_testing_usage import OdooTestingUsage
 from control_plane.contracts.disposable_lane import DisposableLaneSafety
+from control_plane.http_error_evidence import log_handled_error_cause
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,13 @@ def disposable_collection_coverage() -> dict[str, str]:
 
 
 def collect_testing_resource_facts(
-    store: object, *, product: str, context: str, now: datetime, root: Path | None = None
+    store: object,
+    *,
+    product: str,
+    context: str,
+    now: datetime,
+    root: Path | None = None,
+    trace_id: str = "",
 ) -> dict[str, str] | None:
     """Reinspect a service-created resettable copy without requiring login history."""
     from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
@@ -151,8 +158,9 @@ def collect_testing_resource_facts(
         }
     except NativeSourceAuthorizationDenied:
         raise
-    except Exception:
-        # A failed physical/copy inspection never becomes an isolation fact.
+    except Exception as error:
+        if trace_id:
+            log_handled_error_cause(error, trace_id)
         return {}
 
 
