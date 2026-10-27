@@ -62,6 +62,10 @@ from control_plane.service_auth import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.provider_operations import provider_operation_response_payload
+from control_plane.generic_web_pre_dispatch_refusal import (
+    PreDispatchRefusal,
+    inspect_pre_dispatch_refusal,
+)
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployResult,
     build_generic_web_runtime_close_out_result,
@@ -157,6 +161,7 @@ class _GenericWebDeployRecoveryInspection:
     standing_testing_permission: bool = False
     event_abandonment_only: bool = False
     abandonment_evidence: dict[str, Any] | None = None
+    pre_dispatch_refusal: PreDispatchRefusal | None = None
 
     @property
     def recovery_digest(self) -> str:
@@ -184,6 +189,8 @@ class _GenericWebDeployRecoveryInspection:
             payload["runtime_close_out"] = self.runtime_close_out_evidence.model_dump(mode="json")
         if self.abandonment_evidence is not None:
             payload["testing_abandonment"] = self.abandonment_evidence
+        if self.pre_dispatch_refusal is not None:
+            payload["pre_dispatch_refusal"] = self.pre_dispatch_refusal.digest_evidence()
         return payload
 
     def dry_run_response(self) -> GenericWebDeployRecoveryDryRunResponse:
@@ -447,6 +454,91 @@ def _apply_runtime_close_out(
             message="Generic web deploy recovery reservation changed before close-out.",
         )
     return _apply_response(trace_id=trace_id, inspection=inspection, reservation=close_out.record)
+
+
+def _apply_pre_dispatch_refusal(
+    *,
+    trace_id: str,
+    inspection: _GenericWebDeployRecoveryInspection,
+    store: PostgresRecordStore,
+    dependencies: GenericWebDeployRecoveryDependencies,
+) -> GenericWebDeployRecoveryApplyResponse:
+    from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+    from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
+    from control_plane.workflows.generic_web_deploy import generic_web_record_result
+    from control_plane.workflows.generic_web_deploy_provider import (
+        GenericWebProviderDeploymentObservation,
+    )
+
+    adapter = inspection.adapter
+    assert adapter is not None
+    with (
+        serialize_generic_web_product_operation(
+            record_store=store, product=inspection.product, exclusive=True
+        ),
+        store.testing_replacement_execution_lock(
+            testing_event_execution_lock_name(inspection.reservation.provider_target_key)
+        ) as check,
+    ):
+        if check is None:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="execution_lock_busy",
+                message="Testing execution is busy.",
+            )
+        check()
+        current = inspect_pre_dispatch_refusal(
+            store,
+            adapter,
+            inspection.reservation,
+            inspection.provider_operation_key,
+            inspection.observed_at,
+        )
+        if current is None or current != inspection.pre_dispatch_refusal:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="reservation_changed",
+                message="Original refusal evidence changed.",
+            )
+        record = current.deployment
+        assert record.failure is not None
+        records, result = generic_web_record_result(
+            record=record,
+            product=inspection.product,
+            target=adapter._resolve_deploy_target(),
+            observation=GenericWebProviderDeploymentObservation(
+                outcome="absent", error_message=record.failure.code
+            ),
+        )
+        payload = provider_operation_response_payload(
+            trace_id=trace_id, records=records, result=result
+        )
+        payload["recovery"] = _recovery_metadata(inspection)
+        payload["pre_dispatch_refusal"] = current.digest_evidence()
+        check()
+        adopted = store.adopt_reconciled_mutation(
+            reservation=inspection.reservation,
+            response_status_code=409,
+            response_trace_id=trace_id,
+            response_payload=payload,
+            expected_original_intent=current.original_intent,
+            expected_binding_evidence=(*current.bindings, record),
+        )
+        if (
+            adopted.status not in {"adopted", "replayed"}
+            or adopted.record is None
+            or _stored_recovery_metadata(adopted.record)
+            != (inspection.recovery_digest, "close_out_observed")
+        ):
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="reservation_changed",
+                message="Original refusal evidence changed.",
+            )
+        return _apply_response(trace_id=trace_id, inspection=inspection, reservation=adopted.record)
 
 
 def _apply_testing_abandonment(
@@ -770,6 +862,7 @@ async def _inspect_generic_web_deploy_recovery(
     retain_event_request = False
     runtime_close_out_evidence: GenericWebRuntimeCloseOutEvidence | None = None
     abandonment_evidence: dict[str, Any] | None = None
+    pre_dispatch_refusal: PreDispatchRefusal | None = None
 
     if reservation.state == "completed":
         stored_result = reservation.response_payload.get("result")
@@ -1087,6 +1180,14 @@ async def _inspect_generic_web_deploy_recovery(
                 if runtime_close_out_evidence is not None:
                     proposed_action = "close_out_observed"
             if proposed_action == "hold_unknown":
+                pre_dispatch_refusal = inspect_pre_dispatch_refusal(
+                    record_store, adapter, reservation, provider_operation_key, lookup.observed_at
+                )
+                if pre_dispatch_refusal is not None and provider_outcome == "absent":
+                    proposed_action = "close_out_observed"
+                else:
+                    pre_dispatch_refusal = None
+            if proposed_action == "hold_unknown":
                 from control_plane.generic_web_testing_abandonment import (
                     inspect_testing_abandonment,
                 )
@@ -1124,6 +1225,7 @@ async def _inspect_generic_web_deploy_recovery(
         and not (requested_authorized and stored_authorized),
         event_abandonment_only=event_abandonment_only,
         abandonment_evidence=abandonment_evidence,
+        pre_dispatch_refusal=pre_dispatch_refusal,
     )
 
 
@@ -1347,6 +1449,13 @@ def build_generic_web_deploy_recovery_apply_handler(
         )
 
         if inspection.proposed_action == "close_out_observed":
+            if inspection.pre_dispatch_refusal is not None:
+                return _apply_pre_dispatch_refusal(
+                    trace_id=trace_id,
+                    inspection=action_inspection,
+                    store=record_store,
+                    dependencies=dependencies,
+                )
             return _apply_runtime_close_out(
                 trace_id=trace_id,
                 inspection=action_inspection,
