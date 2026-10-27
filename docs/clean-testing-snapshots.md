@@ -185,9 +185,10 @@ pass, after any failure backoff, before admitting a requested wake. This lets
 the next wake measure headroom after the stop completes. An admitted partial
 wake resumes from the gateway's persisted receipt, even after a router or
 scheduler restart. A lost completion response needs only another observation.
-A failed pass backs off that preview for five minutes in memory, allowing other
-previews and ordinary refresh/destroy operations to proceed; no retry intent or
-budget is stored. Manual stops, staff testing holds, changed generations, other
+A failed stop/start backs off that preview for five minutes in memory, allowing
+other previews and ordinary refresh/destroy operations to proceed; no retry
+intent or budget is stored. Busy host locks and failed observations retry on the
+next pass. Manual stops, staff testing holds, changed generations, other
 provider reservations and unavailable custody still block idle effects.
 Existing previews gain the router on their next normal data-preserving refresh.
 
@@ -200,7 +201,9 @@ The gateway opens only after all services pass health and the exact runtime
 identity agrees. Insufficient capacity leaves the preview asleep; a later pass
 checks capacity again. The gateway's wake receipt identifies recovery; any
 attempt that still needs to start stopped services checks current memory and
-disk again. It does not reserve capacity across an interruption. A preview that
+disk again. If admission refuses a partial wake, its running services stop so
+it releases their memory before the next pass. It does not reserve capacity
+across an interruption. A preview that
 never becomes healthy can be refreshed or destroyed through the ordinary
 preview path. Data-preserving refreshes also credit their own running services
 after matching the current target's identity; cold starts still meet the memory

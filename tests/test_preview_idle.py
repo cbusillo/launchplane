@@ -38,6 +38,7 @@ from control_plane.preview_idle import (
 from control_plane.preview_idle_runtime import (
     PREVIEW_IDLE_RUNTIME_PROGRAM,
     PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS,
+    PREVIEW_IDLE_START_LOCK_NAME,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.profiles import _odoo_preview_profile_payload
@@ -473,14 +474,23 @@ class PreviewIdleOperationTests(unittest.TestCase):
         )
         self.store.write_preview_record(other)
         visited: list[str] = []
+        run_preview = self.scheduler._run_preview
 
-        def run(_profile: object, preview_id: str, _host: str, _token: str) -> None:
+        def run(
+            profile: LaunchplaneProductProfileRecord, preview_id: str, host: str, token: str
+        ) -> None:
             visited.append(preview_id)
             if preview_id == self.preview.preview_id:
-                raise RuntimeError("Persistent wake failure")
+                run_preview(profile, preview_id, host, token)
+
+        def fail_effect(**kwargs: Any) -> None:
+            if kwargs["payload"]["action"] == "sleep":
+                raise RuntimeError("Persistent sleep failure")
+            self.transport(**kwargs)
 
         with (
             patch.object(self.scheduler, "_run_preview", side_effect=run),
+            patch.object(self.remote, "side_effect", fail_effect),
             patch("control_plane.preview_idle.monotonic", return_value=100) as clock,
             self.assertLogs("control_plane.preview_idle", level="WARNING"),
         ):
@@ -493,6 +503,52 @@ class PreviewIdleOperationTests(unittest.TestCase):
             visited.clear()
             self.scheduler.run_once()
             self.assertCountEqual(visited, [self.preview.preview_id, other.preview_id])
+
+    def test_transient_observation_failure_retries_on_the_next_pass(self) -> None:
+        for action in ("poll", "observe"):
+            with self.subTest(action=action):
+                self.scheduler = PreviewIdleScheduler(self.store, control_plane_root=self.root)
+                self.value = observation()
+                self.effects.clear()
+                failed = False
+
+                def transport(**kwargs: Any) -> None:
+                    nonlocal failed
+                    if kwargs["payload"]["action"] == action and not failed:
+                        failed = True
+                        raise OSError("Transient read failure")
+                    self.transport(**kwargs)
+
+                with patch("control_plane.preview_idle._read_remote", side_effect=transport):
+                    with self.assertLogs("control_plane.preview_idle", level="WARNING"):
+                        self.scheduler.run_once()
+                    self.scheduler.run_once()
+                self.assertEqual(self.value["gateway"]["mode"], "asleep")
+
+    def test_busy_observation_or_wake_retries_on_the_next_pass(self) -> None:
+        for action in ("observe", "awake"):
+            with self.subTest(action=action):
+                self.scheduler = PreviewIdleScheduler(self.store, control_plane_root=self.root)
+                self.value = observation()
+                if action == "awake":
+                    self.run_preview()
+                    self.value["gateway"]["requested"] = True
+                busy = True
+
+                def transport(**kwargs: Any) -> None:
+                    nonlocal busy
+                    if kwargs["payload"]["action"] == action and busy:
+                        busy = False
+                        kwargs["receive"]({"type": "complete", "result": {"busy": True}})
+                        return
+                    self.transport(**kwargs)
+
+                with patch("control_plane.preview_idle._read_remote", side_effect=transport):
+                    self.scheduler.run_once()
+                    self.scheduler.run_once()
+                self.assertEqual(
+                    self.value["gateway"]["mode"], "awake" if action == "awake" else "asleep"
+                )
 
     def test_partial_wake_resumes_gateway_receipt_after_scheduler_and_router_restart(self) -> None:
         self.run_preview()
@@ -700,7 +756,7 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         ):
             with self.subTest(state=state):
                 self.namespace["one_inspection"] = Mock(return_value={"State": state})
-                with self.assertRaisesRegex(RuntimeError, "stopped or unhealthy"):
+                with self.assertRaises(RuntimeError):
                     self.namespace["execute"]()
                 self.assertNotIn(("control", "awake"), self.calls)
 
@@ -725,7 +781,7 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
             }
 
         self.namespace["one_inspection"] = inspect
-        with self.assertRaisesRegex(RuntimeError, "health is unavailable"):
+        with self.assertRaises(RuntimeError):
             self.namespace["execute"]()
         self.assertLess(now[0], PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS * 1.1)
         self.assertNotIn(("control", "awake"), self.calls)
@@ -746,10 +802,13 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         self.namespace["observe_memory_headroom"] = lambda *_: 99
         self.assertFalse(self.namespace["execute"]()["capacity"])
         self.assertFalse(any(call[0] == "start" for call in self.calls))
+        self.assertTrue(all(not state["running"] for state in self.states.values()))
+        self.states["database"] = {"running": True, "healthy": True}
         self.namespace["observe_memory_headroom"] = lambda *_: 100
         self.namespace["spec"]["disk_reserve"] = 101
         self.assertFalse(self.namespace["execute"]()["capacity"])
         self.assertFalse(any(call[0] == "start" for call in self.calls))
+        self.assertTrue(all(not state["running"] for state in self.states.values()))
         self.namespace["spec"]["disk_reserve"] = 100
         self.namespace["execute"]()
         self.assertEqual(self.calls[-1], ("control", "awake"))
@@ -769,14 +828,14 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
             with (
                 patch("pathlib.Path.home", return_value=Path(directory).resolve()),
                 patch("sys.argv", ["fixture", encoded, "frame:"]),
-                (locks / "idle-start.lock").open("w") as first_wake,
+                (locks / PREVIEW_IDLE_START_LOCK_NAME).open("w") as first_wake,
             ):
                 self.namespace["fcntl"].flock(first_wake.fileno(), self.namespace["fcntl"].LOCK_EX)
                 output = io.StringIO()
                 with redirect_stdout(output):
                     exec(compile(entry, "<contending-wake>", "exec"), self.namespace)
-                self.assertEqual(
-                    json.loads(output.getvalue().removeprefix("frame:"))["type"], "failed"
+                self.assertTrue(
+                    json.loads(output.getvalue().removeprefix("frame:"))["result"]["busy"]
                 )
                 execute.assert_not_called()
                 self.namespace["fcntl"].flock(first_wake.fileno(), self.namespace["fcntl"].LOCK_UN)

@@ -6,6 +6,7 @@ from control_plane.preview_gateway import PREVIEW_GATEWAY_SOCKET
 
 
 PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS = 300
+PREVIEW_IDLE_START_LOCK_NAME = "idle-start.lock"
 
 
 PREVIEW_IDLE_RUNTIME_PROGRAM = (
@@ -13,6 +14,7 @@ PREVIEW_IDLE_RUNTIME_PROGRAM = (
     + inspect.getsource(observe_memory_headroom)
     + f"\nPREVIEW_GATEWAY_SOCKET = {PREVIEW_GATEWAY_SOCKET!r}\n"
     + f"WAKE_HEALTH_SECONDS = {PREVIEW_IDLE_WAKE_TIMEOUT_SECONDS!r}\n"
+    + f"PREVIEW_IDLE_START_LOCK_NAME = {PREVIEW_IDLE_START_LOCK_NAME!r}\n"
     + r"""
 import base64
 import fcntl
@@ -90,6 +92,14 @@ def wait_healthy(identifier, deadline):
     raise RuntimeError('Preview wake health is unavailable')
 
 
+def refuse_capacity(containers, status):
+    if status['wake_record_id']:
+        for service in ('web', 'script-runner', 'database'):
+            docker('stop', '-t', '30', containers[service][0])
+    return {'gateway': status, 'services': application_state(runtime()[0]),
+        'capacity': False, 'accepted': False}
+
+
 def execute():
     containers, router = runtime()
     status = control(router, {'action': 'status'})
@@ -119,11 +129,11 @@ def execute():
         if any(not item['running'] for item in states.values()):
             floor = spec['memory_floor']
             if floor is not None and observe_memory_headroom(Path('/proc'), Path('/sys/fs/cgroup')) < floor:
-                return {'gateway': status, 'services': states, 'capacity': False, 'accepted': False}
+                return refuse_capacity(containers, status)
             volume = json.loads(docker('volume', 'inspect', spec['preview_volumes']['data']))[0]
             space = os.statvfs(volume['Mountpoint'])
             if space.f_bavail * space.f_frsize < spec['disk_reserve']:
-                return {'gateway': status, 'services': states, 'capacity': False, 'accepted': False}
+                return refuse_capacity(containers, status)
         if not status['wake_record_id']:
             status = control(router, {**request, 'action': 'waking'})
             if not status.get('accepted'):
@@ -168,14 +178,19 @@ try:
     target = hashlib.sha256(spec['compose_project'].encode()).hexdigest()
     descriptors = []
     try:
-        names = [target + '.lock'] + (['idle-start.lock'] if spec['action'] == 'awake' else [])
+        names = [target + '.lock'] + ([PREVIEW_IDLE_START_LOCK_NAME] if spec['action'] == 'awake' else [])
         for name in names:
             descriptor = os.open(root / name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             descriptors.append(descriptor)
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        inherited_lock_descriptors = tuple(descriptors)
-        result = execute()
-        frame = {'type': 'complete', 'result': result}
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                frame = {'type': 'complete', 'result': {'busy': True}}
+                break
+        else:
+            inherited_lock_descriptors = tuple(descriptors)
+            result = execute()
+            frame = {'type': 'complete', 'result': result}
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)

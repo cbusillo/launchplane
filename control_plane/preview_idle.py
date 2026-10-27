@@ -42,6 +42,8 @@ PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS = 5 * 60
 
 
 def idle_action(observation: dict[str, Any]) -> str:
+    if observation.get("busy"):
+        return ""
     gateway, services = observation["gateway"], observation["services"]
     if set(services) != {"web", "database", "script-runner"}:
         raise ValueError("Preview idle service evidence is incomplete.")
@@ -277,9 +279,6 @@ class PreviewIdleScheduler:
                     self._run_preview(profile, preview.preview_id, host, token)
                     self._retry_after.pop(preview.preview_id, None)
                 except Exception:
-                    self._retry_after[preview.preview_id] = (
-                        monotonic() + PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS
-                    )
                     _LOGGER.warning(
                         "Preview idle observation unavailable for %s", preview.preview_id
                     )
@@ -377,4 +376,10 @@ class PreviewIdleScheduler:
                         "record_id": gateway["wake_record_id"] or record_id,
                     }
                 )
-                client.read(action, {**control, "action": action})
+                try:
+                    client.read(action, {**control, "action": action})
+                except Exception:
+                    self._retry_after[preview_id] = (
+                        monotonic() + PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS
+                    )
+                    raise
