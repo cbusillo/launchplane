@@ -463,16 +463,18 @@ not successful synchronization. Do not add a sleep, retry or larger timeout
 to hide a flake.
 
 Assertions retain their 10-second watchdog and each test its 30-second
-watchdog, including actions and navigation. Each Playwright run has a 10-minute
-watchdog, leaving setup and teardown room inside CI's 15-minute browser job.
-Server startup retains its separate two-minute watchdog. These limits fail
-incomplete work; they never turn it into a pass.
+watchdog, including actions and navigation. Server startup retains its
+two-minute watchdog. CI's 15-minute browser-job limit also bounds setup,
+isolation probes and execution. These limits fail incomplete work; they never
+turn it into a pass.
 
 The server-isolation harness uses a watchdog derived from the shared server
 startup and test deadlines. Its peer wait includes the peer's cold server
 startup; it cannot assume both independent servers become ready together.
-Full-suite qualification belongs in CI. For local diagnosis, use a short focused
-run with zero retries and at most a few browser workers. For example:
+Use CI for full-suite qualification of this shared-host investigation. The full
+manual local command remains supported; it runs the unsharded suite and checks
+all screenshots. For local diagnosis, use a short focused run with zero retries
+and at most a few browser workers. For example:
 
 ```bash
 (cd frontend && pnpm exec playwright test backup-credentials product-setup --repeat-each=2 --workers=2)

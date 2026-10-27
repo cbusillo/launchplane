@@ -3,7 +3,6 @@ export const browserDeadlines = {
   assertion: 10_000,
   test: 30_000,
   server: 120_000,
-  suite: 10 * 60_000,
 };
 
 // An isolation probe can reach its peer only after that peer starts its server

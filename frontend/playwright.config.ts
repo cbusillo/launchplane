@@ -11,7 +11,6 @@ export default defineConfig({
   retries: 0,
   forbidOnly: Boolean(process.env.CI),
   timeout: browserDeadlines.test,
-  globalTimeout: browserDeadlines.suite,
   reporter: "line",
   expect: {
     timeout: browserDeadlines.assertion,
