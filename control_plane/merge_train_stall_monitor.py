@@ -275,6 +275,7 @@ def run_stall_monitor_pass(
                     client = GitHubMergeTrainClient(
                         transport=UrllibMergeTrainGitHubTransport(token=token),
                         source_screening=True,
+                        product_profile_store=store,
                     )
                     client.begin_snapshot_pass(policy=target, read_only=True)
                     setting_gaps = client.target_setting_gaps(repository_policy=target)
