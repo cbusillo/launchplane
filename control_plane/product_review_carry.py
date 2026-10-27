@@ -8,7 +8,7 @@ from typing import Final, cast
 from urllib.parse import quote
 from uuid import uuid4
 
-from control_plane.client_test_notes import change_client_review
+from control_plane.client_test_notes import change_client_review, owner_test_notes
 from control_plane.contracts.merge_train_branch_refresh_record import (
     MergeTrainBranchRefreshRecord,
 )
@@ -20,6 +20,7 @@ from control_plane.contracts.product_review import (
     ProductReviewCarryCommit,
     ProductReviewDecisionRecord,
     ProductReviewIntegratedChange,
+    PRODUCT_REVIEW_REASON_MAX_LENGTH,
 )
 from control_plane.dependency_update_review import DEPENDENCY_UPDATE_NOTES, pure_dependency_update
 from control_plane.merge_train_branch_refresh import (
@@ -81,74 +82,52 @@ def carry_owner_acceptance(
         if refresh_store is not None
         else ()
     )
-    carry = _base_only_refresh(
-        repository=profile.repository,
-        accepted_head=accepted_head,
-        head=head,
-        base_branch=base_branch.strip(),
-        refreshes=refreshes,
-        read=read,
+    comparison = _object(
+        read(f"/repos/{_path(profile.repository)}/compare/{accepted_head}...{head}")
     )
     reason: ProductReviewCarryReason
     integration: ProductReviewCarry | None = None
     commits: tuple[ProductReviewCarryCommit, ...] = ()
-    if carry is not None:
-        refresh_record_ids, base_commit = carry
-        reason = "merge_train_base_refresh"
-    else:
-        comparison = _object(
-            read(f"/repos/{_path(profile.repository)}/compare/{accepted_head}...{head}")
-        )
-        refresh_record_ids = ()
-        if comparison.get("status") == "ahead":
-            commits = _client_impact_commits(comparison, accepted_head, head)
-            base_commit = ""
-            if not commits:
-                integration = _accepted_base_integration(
-                    comparison=comparison,
-                    accepted_head=accepted_head,
-                    head=head,
-                    base_branch=base_branch.strip(),
-                    store=store,
-                    profile=profile,
-                    read=read,
-                    refreshes=refreshes,
-                    accepted_record_id=accepted.record_id,
-                )
-                if integration is None:
-                    return None
-                commits, base_commit = integration.commits, integration.comparison_base_sha
-            reason = "accepted_base_integration" if integration else "client_impact_none"
-        elif comparison.get("status") == "diverged":
-            branch = quote(base_branch.strip(), safe="")
-            base_commit = _text(
-                _object(
-                    read(f"/repos/{_path(profile.repository)}/branches/{branch}"), "commit"
-                ).get("sha")
-            ).lower()
-            if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
+    if comparison.get("status") == "ahead":
+        commits = _client_impact_commits(comparison, accepted_head, head)
+        base_commit = ""
+        if not commits:
+            integration = _accepted_base_integration(
+                comparison=comparison,
+                accepted_head=accepted_head,
+                head=head,
+                base_branch=base_branch.strip(),
+                store=store,
+                profile=profile,
+                read=read,
+                refreshes=refreshes,
+                accepted_record_id=accepted.record_id,
+            )
+            if integration is None:
                 return None
-            reason = "unchanged_patch_base_update"
-        else:
+            commits, base_commit = integration.commits, integration.comparison_base_sha
+        reason = integration.reason if integration else "client_impact_none"
+    elif comparison.get("status") == "diverged":
+        branch = quote(base_branch.strip(), safe="")
+        base_commit = _text(
+            _object(read(f"/repos/{_path(profile.repository)}/branches/{branch}"), "commit").get(
+                "sha"
+            )
+        ).lower()
+        if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
             return None
-    if reason not in {"client_impact_none", "accepted_base_integration"}:
-        responses: dict[str, object] = {}
-
-        def comparison_read(path: str) -> object:
-            # These comparisons and trees are bound to immutable commits. Reuse the
-            # comparisons; trees are needed only after text and positions match.
-            if path not in responses:
-                responses[path] = read(path)
-            return responses[path]
-
+        reason = "unchanged_patch_base_update"
+    else:
+        return None
+    if reason == "unchanged_patch_base_update":
+        comparison_read = cache(read)
         accepted_change = _change_fingerprint(
             repository=profile.repository,
             base=base_commit,
             head=accepted.head_sha,
             read=comparison_read,
             include_blobs=False,
-            changed_lines_only=reason == "merge_train_base_refresh",
-            ignore_hunk_positions=reason == "unchanged_patch_base_update",
+            ignore_hunk_positions=True,
         )
         if not accepted_change or accepted_change != _change_fingerprint(
             repository=profile.repository,
@@ -156,38 +135,36 @@ def carry_owner_acceptance(
             head=head,
             read=comparison_read,
             include_blobs=False,
-            changed_lines_only=reason == "merge_train_base_refresh",
-            ignore_hunk_positions=reason == "unchanged_patch_base_update",
+            ignore_hunk_positions=True,
         ):
             return None
-        if reason == "unchanged_patch_base_update":
-            if not patch_positions_match_base_update(
-                repository=profile.repository,
-                base=base_commit,
-                accepted_head=accepted.head_sha,
-                head=head,
-                read=comparison_read,
-            ):
-                return None
-            accepted_modes = _change_fingerprint(
-                repository=profile.repository,
-                base=base_commit,
-                head=accepted.head_sha,
-                read=comparison_read,
-                include_blobs=False,
-                ignore_hunk_positions=True,
-                include_file_modes=True,
-            )
-            if accepted_modes is None or accepted_modes != _change_fingerprint(
-                repository=profile.repository,
-                base=base_commit,
-                head=head,
-                read=comparison_read,
-                include_blobs=False,
-                ignore_hunk_positions=True,
-                include_file_modes=True,
-            ):
-                return None
+        if not patch_positions_match_base_update(
+            repository=profile.repository,
+            base=base_commit,
+            accepted_head=accepted.head_sha,
+            head=head,
+            read=comparison_read,
+        ):
+            return None
+        accepted_modes = _change_fingerprint(
+            repository=profile.repository,
+            base=base_commit,
+            head=accepted.head_sha,
+            read=comparison_read,
+            include_blobs=False,
+            ignore_hunk_positions=True,
+            include_file_modes=True,
+        )
+        if accepted_modes is None or accepted_modes != _change_fingerprint(
+            repository=profile.repository,
+            base=base_commit,
+            head=head,
+            read=comparison_read,
+            include_blobs=False,
+            ignore_hunk_positions=True,
+            include_file_modes=True,
+        ):
+            return None
     with store.product_review_lock(
         repository=profile.repository, pull_request_number=pull_request_number
     ):
@@ -217,7 +194,7 @@ def carry_owner_acceptance(
                     record_id=accepted.record_id,
                     head_sha=accepted_head,
                     reason=reason,
-                    refresh_record_ids=refresh_record_ids,
+                    refresh_record_ids=(),
                     comparison_base_sha=base_commit,
                     commits=commits,
                 ),
@@ -366,7 +343,7 @@ def _accepted_base_integration(
     return ProductReviewCarry(
         record_id=accepted_record_id,
         head_sha=accepted_head,
-        reason="accepted_base_integration",
+        reason="accepted_base_integration" if side else "merge_train_base_refresh",
         comparison_base_sha=base,
         commits=tuple(reversed(side)),
         refresh_record_ids=tuple(reversed(refresh_ids)),
@@ -493,7 +470,11 @@ def _merged_change_reviewed(
         pull_request_number=number,
         head_sha=str(head.get("sha") or ""),
         decision_record_id=decisions[0].record_id if intent.review_required else "",
-        engineering_basis=(DEPENDENCY_UPDATE_NOTES if dependency_only else str(change["body"]))
+        engineering_basis=(
+            DEPENDENCY_UPDATE_NOTES
+            if dependency_only
+            else owner_test_notes(str(change["body"]))[:PRODUCT_REVIEW_REASON_MAX_LENGTH]
+        )
         if not intent.review_required
         else "",
     )
@@ -525,49 +506,6 @@ def _carryable(decision: ProductReviewDecisionRecord) -> bool:
         and bool(decision.head_sha.strip())
         and not (decision.feedback_requested and not decision.feedback_url)
     )
-
-
-def _base_only_refresh(
-    *,
-    repository: str,
-    accepted_head: str,
-    head: str,
-    base_branch: str,
-    refreshes: tuple[MergeTrainBranchRefreshRecord, ...],
-    read: SourceControlRead,
-) -> tuple[tuple[str, ...], str] | None:
-    """The train's refresh records from `accepted_head` to `head`, oldest first, and
-    the base commit the newest refresh merged; None unless every step is one.
-
-    Each step is bound to the exact commit the train saw the provider make, so a
-    different merge of the same parents never matches a record.
-    """
-
-    record_ids: list[str] = []
-    newest_base_commit = ""
-    current = head
-    for _ in range(MAX_REFRESHES):
-        refresh = next(
-            (
-                record
-                for record in refreshes
-                if record.result_head_sha == current and record.base_branch == base_branch
-            ),
-            None,
-        )
-        if refresh is None or not _on_base_branch(
-            repository=repository,
-            commit=refresh.merged_base_sha,
-            base_branch=base_branch,
-            read=read,
-        ):
-            return None
-        record_ids.insert(0, refresh.record_id)
-        newest_base_commit = newest_base_commit or refresh.merged_base_sha
-        if refresh.expected_head_sha == accepted_head:
-            return tuple(record_ids), newest_base_commit
-        current = refresh.expected_head_sha
-    return None
 
 
 def _on_base_branch(

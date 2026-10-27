@@ -28,7 +28,7 @@ class ProductReviewIntegratedChange(BaseModel):
     pull_request_number: int = Field(gt=0)
     head_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     decision_record_id: str = ""
-    engineering_basis: str = ""
+    engineering_basis: str = Field(default="", max_length=PRODUCT_REVIEW_REASON_MAX_LENGTH)
 
     @model_validator(mode="after")
     def _validate_basis(self) -> "ProductReviewIntegratedChange":

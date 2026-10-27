@@ -11,7 +11,11 @@ from control_plane.contracts.merge_train_branch_refresh_record import (
 )
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.product_review import ProductReviewCarry, ProductReviewDecisionRecord
+from control_plane.contracts.product_review import (
+    ProductReviewCarry,
+    ProductReviewDecisionRecord,
+    PRODUCT_REVIEW_REASON_MAX_LENGTH,
+)
 from control_plane.merge_train_branch_refresh import merge_train_branch_refresh_recorder
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
@@ -204,6 +208,46 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             requested_at=_REFRESH_REQUESTED_AT,
         )
         self.store.write_merge_train_branch_refresh_record(record)
+        comparison = self.github.commit_comparison
+        if comparison.get("status") != "ahead":
+            self._later_commits("Merge base branch")
+            comparison = self.github.commit_comparison
+            comparison["commits"] = []
+        commits = comparison["commits"]
+        assert isinstance(commits, list)
+        if not any(commit["sha"] == merged_base_sha for commit in commits):
+            commits.append(
+                {
+                    "sha": merged_base_sha,
+                    "parents": [{"sha": "f" * 40}],
+                    "commit": {"message": "Engineering base change"},
+                }
+            )
+        if not any(commit["sha"] == result_head_sha for commit in commits):
+            commits.append(
+                {
+                    "sha": result_head_sha,
+                    "parents": [{"sha": expected_head_sha}, {"sha": merged_base_sha}],
+                    "commit": {"message": "Merge base branch"},
+                }
+            )
+        comparison.update(total_commits=len(commits), ahead_by=len(commits))
+        imported_pr = _PULL_REQUEST + 1000
+        self.github.responses.setdefault(
+            f"/repos/{_REPOSITORY}/commits/{merged_base_sha}/pulls?per_page=100",
+            [{"number": imported_pr}],
+        )
+        self.github.responses.setdefault(
+            f"/repos/{_REPOSITORY}/pulls/{imported_pr}",
+            {
+                "merged": True,
+                "head": {"sha": merged_base_sha},
+                "base": {"ref": base_branch, "repo": {"full_name": _REPOSITORY}},
+                "body": "## Client test notes\nNothing for the Client to test: Engineering base change.",
+                "labels": [],
+            },
+        )
+        self.github.base_sha = merged_base_sha
         return record.record_id
 
     def _publish(self) -> dict[str, object]:
@@ -423,12 +467,42 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         pull = self.github.responses[f"/repos/{_REPOSITORY}/pulls/{_PULL_REQUEST + 1}"]
         assert isinstance(pull, dict)
         pull["body"] = (
+            "Unrelated PR material\n" * 300 + "\n"
             "## Client test notes\nNothing for the Client to test: Test fixture cleanup only."
+            + "x"
+            * PRODUCT_REVIEW_REASON_MAX_LENGTH
         )
         self.assertEqual(self._publish()["state"], "success")
         carry = self._decisions()[0].carried_from
         assert carry is not None
-        self.assertEqual(carry.integrated_changes[0].engineering_basis, pull["body"])
+        self.assertIn(carry.integrated_changes[0].engineering_basis, str(pull["body"]))
+        self.assertNotIn("Unrelated PR material", carry.integrated_changes[0].engineering_basis)
+        self.assertLessEqual(
+            len(carry.integrated_changes[0].engineering_basis), PRODUCT_REVIEW_REASON_MAX_LENGTH
+        )
+
+    def test_recorded_refresh_can_combine_or_absorb_an_accepted_patch(self) -> None:
+        for change in (_change(patch=_PATCH + "\n+Combined accepted behavior"), []):
+            with self.subTest(change=change):
+                self.setUp()
+                self._integrate_accepted_billing_change()
+                self._train_refreshed()
+                self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = change
+                self.assertEqual(self._publish()["state"], "success")
+
+    def test_recorded_refresh_never_bypasses_an_imported_changes_rejection(self) -> None:
+        self._integrate_accepted_billing_change()
+        self._train_refreshed()
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change()
+        (decision,) = self.store.list_product_review_decision_records(
+            repository=_REPOSITORY, pull_request_number=_PULL_REQUEST + 1
+        )
+        self.store.write_product_review_decision_record(
+            decision.model_copy(
+                update={"decision": "changes_requested", "reason": "Invoice is missing"}
+            )
+        )
+        self.assert_waits_for_the_client(self._publish())
 
     def test_dependency_only_base_change_uses_the_same_engineering_classification(self) -> None:
         self._integrate_accepted_billing_change()
@@ -774,6 +848,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
     def test_a_rebase_after_a_train_refresh_uses_the_strict_nontrain_proof(self) -> None:
         self._train_refreshed()
         self.github.head_sha = _OTHER_MERGE_HEAD
+        self.github.commit_comparison = {"status": "diverged"}
         self.assertEqual(self._publish()["state"], "success")
         carry = self._decisions()[0].carried_from
         assert carry is not None
@@ -1010,7 +1085,6 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(self._decisions()[0].head_sha, _REFRESHED_HEAD)
 
     def test_changed_diff_needs_a_new_decision(self) -> None:
-        self._train_refreshed()
         # A conflict resolution or anything else that changes the pull request's change.
         cases: dict[str, list[dict[str, object]]] = {
             "added line": _change(patch=_PATCH + "\n+Extra line"),
