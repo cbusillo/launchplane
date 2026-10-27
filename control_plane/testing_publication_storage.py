@@ -109,17 +109,23 @@ def testing_binding_matches_retained_publication(
         != testing_binding_authority(expected)
     ):
         return False
-    key = expected.source.source_versions.get("testing_publication", "")
+    route = retained_testing_route(store, actual)
+    return route is not None and testing_binding_matches_route(actual, expected, route)
+
+
+def retained_testing_route(
+    store: db.PostgresRecordStore, binding: EnvironmentRouteBindingRecord
+) -> TestingLaneRoute | None:
+    key = binding.source.source_versions.get("testing_publication", "")
     from control_plane.testing_address_storage import effective_testing_route
 
     try:
         publication = read_publication(store, key) if key else None
         if publication is None or publication.state != "applied":
-            return False
-        route = effective_testing_route(store, publication, binding=actual)
-        return testing_binding_matches_route(actual, expected, route)
+            return None
+        return effective_testing_route(store, publication, binding=binding)
     except (ValueError, FileNotFoundError):
-        return False
+        return None
 
 
 def _snapshot(

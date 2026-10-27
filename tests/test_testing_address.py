@@ -552,6 +552,21 @@ class TestingAddressTests(unittest.TestCase):
                     {(item.tls_domain_name, item.tls_domain_role) for item in targets},
                     {(item.domain_name, item.role) for item in refreshed.domains},
                 )
+                from control_plane.contracts.product_topology_read_model import (
+                    build_product_environment_topology,
+                )
+
+                topology = build_product_environment_topology(
+                    record_store=self.store,
+                    profile=profile,
+                    lane=lane,
+                    lane_summary=None,
+                )
+                self.assertEqual(
+                    {(item.domain_name, item.role) for item in topology.desired.domains},
+                    {(item.domain_name, item.role) for item in refreshed.domains},
+                )
+                self.assertNotIn("domain_divergence", {item.code for item in topology.warnings})
                 if key == "repeat-alias":
                     exercise_published_copy_maintenance(self, self.fixture)
                     inventory = self.fixture.current().inventory
