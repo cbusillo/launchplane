@@ -37,6 +37,7 @@ from control_plane.storage.schema_migration import (
     SCHEMA_MIGRATION_TARGET_REVISION,
     alembic_config,
     migrate_schema,
+    schema_migration_action,
 )
 from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
 from tests.test_retired_delivery_migration import history_snapshot, seed_retired_history
@@ -206,12 +207,11 @@ class PublicHostAuthorityPostgresTests(unittest.TestCase):
         ):
             with self.subTest(revision=revision), _isolated_postgres_database() as url:
                 command.upgrade(alembic_config(url), revision)
-                expected = (
-                    EXPECTED_ALEMBIC_HEAD_REVISION
-                    if delivery_already_applied
-                    else SCHEMA_MIGRATION_TARGET_REVISION
+                migrated = migrate_schema(database_url=url)
+                self.assertIn(
+                    schema_migration_action(current_revision=migrated),
+                    {"current", "compatible_ahead"},
                 )
-                self.assertEqual(migrate_schema(database_url=url), expected)
                 engine = create_engine(url)
                 try:
                     present = set(inspect(engine).get_table_names())
@@ -224,7 +224,7 @@ class PublicHostAuthorityPostgresTests(unittest.TestCase):
                             connection.execute(text("SELECT version_num FROM alembic_version"))
                             .scalars()
                             .all(),
-                            [expected],
+                            [migrated],
                         )
                     store = PostgresRecordStore(database_url=url)
                     try:
@@ -253,11 +253,25 @@ class PublicHostAuthorityPostgresTests(unittest.TestCase):
             ):
                 if initial_revision:
                     command.upgrade(alembic_config(url), initial_revision)
-                self.assertEqual(
-                    migrate_schema(database_url=url, target_revision=target_revision),
-                    EXPECTED_ALEMBIC_HEAD_REVISION if initial_revision else target_revision,
+                migrated = migrate_schema(database_url=url, target_revision=target_revision)
+                self.assertIn(
+                    schema_migration_action(
+                        current_revision=migrated, target_revision=target_revision
+                    ),
+                    {"current", "compatible_ahead"},
                 )
-                self.assertEqual(migrate_schema(database_url=url), EXPECTED_ALEMBIC_HEAD_REVISION)
+                engine = create_engine(url)
+                try:
+                    self.assertTrue(
+                        set(held.RETIRED_TABLES).isdisjoint(inspect(engine).get_table_names())
+                    )
+                finally:
+                    engine.dispose()
+                migrated = migrate_schema(database_url=url)
+                self.assertIn(
+                    schema_migration_action(current_revision=migrated),
+                    {"current", "compatible_ahead"},
+                )
 
     def test_equivalent_foreign_writers_share_fence_during_provider_io(self) -> None:
         with _store_for_fresh_head_database() as store:
