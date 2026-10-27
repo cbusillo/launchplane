@@ -5751,7 +5751,7 @@ aliases can now block an operation that previously passed an ownership check.
 Provider I/O retains only scoped name/target fences, so unrelated endpoint and
 product writers continue. A foreign claim acquired between recipient publication
 and its inverse refuses the inverse without overwriting that claim. Resolve the
-foreign ownership through its supported owner path, then retry the scoped inverse.
+foreign ownership through its supported control-plane path, then retry the scoped inverse.
 
 Before checked Ready, qualify the immutable currently deployed image against
 both activated joins as the previous-image rollback target. It must include the
