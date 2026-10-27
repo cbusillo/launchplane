@@ -26,9 +26,12 @@ RECOVERY_REQUIRED_EXIT = 75
 HEALTH_PROBE_SECONDS = 30
 HEALTH_REFREEZE_SECONDS = 45
 API_EGRESS_PRIORITY = 300
-VERIFICATION_ATTEMPTS = 3
+API_NETWORK_HOOKS = ("input", "output", "postrouting")
+WATCHDOG_ATTEMPTS = 3
 DATABASE_UNSAFE_EVENT = "database_unsafe"
 DEPLOYMENT_RECOVERY_REQUIRED_EVENT = "deployment_recovery_required"
+RECOVERY_REQUIRED_EVENT = "recovery_required"
+RELEASE_INCOMPLETE_EVENT = "release_incomplete"
 
 
 class RecoveryRequired(RuntimeError):
@@ -276,42 +279,61 @@ def settle_operator(state: dict[str, Any]) -> None:
         time.sleep(0.2)
 
 
+def database_credential(environment: dict[str, str]) -> tuple[str, str] | None:
+    value = environment.get("LAUNCHPLANE_DATABASE_URL", "")
+    if not value:
+        return None
+    url = urlsplit(value)
+    if (
+        url.scheme.split("+", 1)[0] not in {"postgres", "postgresql"}
+        or not url.username
+        or not url.password
+        or {"user", "password", "passfile", "service"} & parse_qs(url.query).keys()
+        or any(environment.get(key) for key in ("PGUSER", "PGPASSWORD", "PGPASSFILE", "PGSERVICE"))
+    ):
+        raise RuntimeError("Database credential indirection is not qualified for custody.")
+    return unquote(url.username), unquote(url.password)
+
+
 def require_no_outside_writers(
     api: dict[str, Any], allowed: set[str], *, project: str, operators: set[str]
 ) -> None:
-    source = api["Config"]["Labels"].get("org.opencontainers.image.source", "")
-    database = dict(value.split("=", 1) for value in api["Config"]["Env"] if "=" in value).get(
-        "LAUNCHPLANE_DATABASE_URL", ""
+    credential = database_credential(
+        dict(value.split("=", 1) for value in api["Config"]["Env"] if "=" in value)
     )
-    if not source or not database:
-        raise RuntimeError("The API source/database identity is incomplete.")
-    for identifier in run(
-        "docker",
-        "ps",
-        "-aq",
-        "--no-trunc",
-        "--filter",
-        "label=org.opencontainers.image.source=" + source,
-    ).split():
+    if credential is None:
+        raise RuntimeError("The API database credential identity is incomplete.")
+    identifiers = run("docker", "ps", "-aq", "--no-trunc").split()
+    if not identifiers:
+        raise RuntimeError("The container credential inventory is unavailable.")
+    for other in json.loads(run("docker", "inspect", *identifiers)):
+        identifier = other["Id"]
         if identifier in allowed:
             continue
-        other = inspect_container(identifier)
-        labels = other["Config"]["Labels"]
+        labels = other["Config"]["Labels"] or {}
         own_operator = (
             other["Name"].lstrip("/") in operators
             and labels.get("com.docker.compose.project") == project
             and labels.get("com.docker.compose.oneoff", "").lower() == "true"
             and other["Image"] == api["Image"]
         )
+        if own_operator:
+            continue
+        values = [
+            value
+            for key in ("Env", "Cmd", "Entrypoint")
+            for value in (other["Config"].get(key) or [])
+        ]
+        environment = dict(
+            value.split("=", 1) for value in (other["Config"].get("Env") or []) if "=" in value
+        )
         if (
-            not own_operator
-            and dict(value.split("=", 1) for value in other["Config"]["Env"] if "=" in value).get(
-                "LAUNCHPLANE_DATABASE_URL"
-            )
-            == database
+            any(credential[1] in unquote(value) for value in values)
+            or other["Image"] == api["Image"]
+            and database_credential(environment) is None
         ):
             raise RuntimeError(
-                "Another Launchplane container holds this database credential; its custody is unresolved."
+                "Another container has unresolved Launchplane database credential custody."
             )
 
 
@@ -558,7 +580,7 @@ def install_watchdog(state_path: Path, state: dict[str, Any], *, health: bool = 
         [
             sys.executable,
             str(state_path.parent / "driver.py"),
-            "refreeze" if health else "release",
+            "refreeze" if health else "recover",
             "--state",
             str(state_path),
         ]
@@ -566,6 +588,7 @@ def install_watchdog(state_path: Path, state: dict[str, Any], *, health: bool = 
     )
     (root / (unit + ".service")).write_text(
         "[Unit]\nDescription=Launchplane maintenance recovery\nAfter=docker.service\n"
+        f"StartLimitIntervalSec=1d\nStartLimitBurst={WATCHDOG_ATTEMPTS}\n"
         "[Service]\nType=oneshot\nExecStart="
         + command
         + f"\nRestart=on-failure\nRestartPreventExitStatus={RECOVERY_REQUIRED_EXIT}\nRestartSec=15s\nTimeoutStartSec=900s\n"
@@ -810,7 +833,7 @@ def require_api_egress_fence(state: dict[str, Any]) -> None:
     chains = {
         item["chain"]["name"]: item["chain"] for item in document["nftables"] if "chain" in item
     }
-    if set(chains) != {"output", "postrouting"} or any(
+    if set(chains) != set(API_NETWORK_HOOKS) or any(
         chains[name].get("hook") != name
         or chains[name].get("type") != "filter"
         or chains[name].get("prio") != API_EGRESS_PRIORITY
@@ -826,7 +849,11 @@ def require_api_egress_fence(state: dict[str, Any]) -> None:
         if (
             len(expressions) != 3
             or expressions[0].get("match")
-            != {"op": "!=", "left": {"meta": {"key": "oifname"}}, "right": "lo"}
+            != {
+                "op": "!=",
+                "left": {"meta": {"key": "iifname" if name == "input" else "oifname"}},
+                "right": "lo",
+            }
             or "counter" not in expressions[1]
             or expressions[2] != {"drop": None}
         ):
@@ -849,7 +876,7 @@ def cleanup_api_probe(state: dict[str, Any], *, phase_id: str | None = None) -> 
         api_namespace_command(state, "ss", "-Knt", "state", "connected")
         remaining = api_namespace_command(state, "ss", "-Hnt", "state", "connected").splitlines()
         if any(line.split()[0] != "TIME-WAIT" for line in remaining):
-            raise RecoveryRequired("Buffered API TCP connections remain before network unfence.")
+            raise RuntimeError("Buffered API TCP connections remain before network unfence.")
         tables = json.loads(api_namespace_command(state, "nft", "-j", "list", "tables"))["nftables"]
         if any(item.get("table", {}).get("name") == phase["table"] for item in tables):
             require_api_egress_fence(state)
@@ -898,7 +925,7 @@ def verify_api_health(state_path: Path) -> None:
                 raise RecoveryRequired("An API Unix listener could bypass the network fence.")
             table = state["verification_phase"]["table"]
             rules = "add table inet " + table + "\n"
-            for hook in ("output", "postrouting"):
+            for hook in API_NETWORK_HOOKS:
                 rules += (
                     "add chain inet "
                     + table
@@ -910,7 +937,16 @@ def verify_api_health(state_path: Path) -> None:
                     + str(API_EGRESS_PRIORITY)
                     + "; policy accept; }\n"
                 )
-                rules += "add rule inet " + table + " " + hook + ' oifname != "lo" counter drop\n'
+                interface = "iifname" if hook == "input" else "oifname"
+                rules += (
+                    "add rule inet "
+                    + table
+                    + " "
+                    + hook
+                    + " "
+                    + interface
+                    + ' != "lo" counter drop\n'
+                )
             api_namespace_command(state, "nft", "-f", "-", input_text=rules)
             require_api_egress_fence(state)
             install_watchdog(state_path, state, health=True)
@@ -935,7 +971,7 @@ def verify_api_health(state_path: Path) -> None:
                 "-c",
                 "import json,os,urllib.request\n"
                 "port=int(os.environ.get('LAUNCHPLANE_SERVICE_PORT','8080'))\n"
-                "with urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/health',timeout=5) as response:\n"
+                "with urllib.request.urlopen(f'http://127.0.0.1:{port}/v1/health?maintenance_liveness=true',timeout=5) as response:\n"
                 " payload=json.load(response)\n"
                 " if response.status!=200 or payload.get('status')!='ok':raise SystemExit(1)\n",
             ]
@@ -945,7 +981,7 @@ def verify_api_health(state_path: Path) -> None:
             with locked_state(state_path) as state:
                 phase = state["verification_phase"]
                 if phase["phase_id"] != phase_id:
-                    raise RecoveryRequired("Another API phase owns health verification.")
+                    raise RuntimeError("Another API phase owns health verification.")
                 if not phase["active"]:
                     raise RuntimeError("The controlled API thaw ended before health readback.")
                 require_verification_cpu_hold(state, api_thawed=True)
@@ -969,7 +1005,7 @@ def verify_api_health(state_path: Path) -> None:
                 with locked_state(state_path) as state:
                     phase = state["verification_phase"]
                     if phase["phase_id"] != phase_id:
-                        raise RecoveryRequired("Another API phase owns blocked-egress readback.")
+                        raise RuntimeError("Another API phase owns blocked-egress readback.")
                     if not phase["active"]:
                         raise RuntimeError("The API phase ended before blocked-egress readback.")
                     require_api_egress_fence(state)
@@ -982,7 +1018,7 @@ def verify_api_health(state_path: Path) -> None:
                     dropped = sum(
                         expression["counter"]["packets"]
                         for item in document["nftables"]
-                        if "rule" in item
+                        if "rule" in item and item["rule"].get("chain") in {"output", "postrouting"}
                         for expression in item["rule"]["expr"]
                         if "counter" in expression
                     )
@@ -1042,10 +1078,6 @@ def complete_service_verification(state_path: Path) -> None:
             return
         state["releasing"] = True
         (state_path.parent / "releasing").touch(mode=0o600)
-        attempts = state.get("verification_attempts", 0)
-        if attempts >= VERIFICATION_ATTEMPTS:
-            raise RecoveryRequired("Bounded committed-state verification needs recovery review.")
-        state["verification_attempts"] = attempts + 1
         save(state_path, state)
         cleanup_api_probe(state)
         terminate_keeper(state)
@@ -1065,11 +1097,15 @@ def complete_service_verification(state_path: Path) -> None:
 
 def release(state_path: Path) -> None:
     try:
-        complete_service_verification(state_path)
+        finish_release(state_path)
     except Exception as error:
         with locked_state(state_path) as state:
-            record_recovery_required(state, error, writers_held=None)
+            record_release_failure(state, error)
         raise
+
+
+def finish_release(state_path: Path) -> None:
+    complete_service_verification(state_path)
     with locked_state(state_path) as state:
         if state.get("released"):
             remove_watchdog(state)
@@ -1079,7 +1115,6 @@ def release(state_path: Path) -> None:
         (state_path.parent / "releasing").touch(mode=0o600)
         save(state_path, state)
         pending = (state_path.parent / "commit-pending.json").exists()
-        writers_held: bool | None = None
         try:
             cleanup_api_probe(state)
             terminate_keeper(state)
@@ -1095,14 +1130,11 @@ def release(state_path: Path) -> None:
             if pending and not safe:
                 for observed in original_containers(state):
                     if observed["HostConfig"]["RestartPolicy"]["Name"] != "no":
-                        writers_held = False
-                        raise RuntimeError("An unverified service regained automatic restart.")
+                        raise RecoveryRequired("An unverified service regained automatic restart.")
                     if observed["State"]["Running"] and read_freezer(
                         state["originals"][observed["Id"]]
                     ) != ("1", "1"):
-                        writers_held = False
-                        raise RuntimeError("An unverified service is no longer frozen.")
-                writers_held = True
+                        raise RecoveryRequired("An unverified service is no longer frozen.")
                 proof = operator(state, "verify")
                 state["revision"] = proof["revision"]
                 receipt_path = state_path.parent / "verification-complete.json"
@@ -1127,7 +1159,6 @@ def release(state_path: Path) -> None:
                 save(state_path.parent / "database-safe.json", state["safe_to_resume"])
         except Exception as error:
             if pending:
-                record_recovery_required(state, error, writers_held=writers_held)
                 raise
             state["keeper_termination_unverified"] = type(error).__name__
             save(state_path, state)
@@ -1179,17 +1210,19 @@ def release(state_path: Path) -> None:
         emit_release(state)
 
 
-def record_recovery_required(
-    state: dict[str, Any], error: Exception, *, writers_held: bool | None
-) -> None:
-    state["recovery_required"] = type(error).__name__
-    save(Path(state["job_directory"]) / "state.json", state)
+def record_release_failure(state: dict[str, Any], error: Exception) -> None:
+    if isinstance(error, RecoveryRequired):
+        state["recovery_required"] = type(error).__name__
+        save(Path(state["job_directory"]) / "state.json", state)
     print(
         json.dumps(
             {
-                "event": "recovery_required",
+                "event": RECOVERY_REQUIRED_EVENT
+                if isinstance(error, RecoveryRequired)
+                else RELEASE_INCOMPLETE_EVENT,
                 "hold_id": state["hold_id"],
-                "writers_held": writers_held,
+                "writers_held": False if state.get("resumed") else None,
+                "error_type": type(error).__name__,
                 "revision": state.get("revision"),
             }
         ),
@@ -1209,6 +1242,33 @@ def emit_release(state: dict[str, Any]) -> None:
         ),
         flush=True,
     )
+
+
+def request_release(state_path: Path, *, manual: bool = False) -> None:
+    state = json.loads(state_path.read_text())
+    if state.get("released"):
+        emit_release(state)
+        return
+    unit = "lp-maint-" + state["hold_id"] + ".service"
+    try:
+        if manual:
+            run("systemctl", "reset-failed", unit)
+        run("systemctl", "start", unit, timeout=920)
+    except RuntimeError as error:
+        state = json.loads(state_path.read_text())
+        if state.get("released"):
+            emit_release(state)
+            return
+        status = run("systemctl", "show", unit, "--property=ExecMainStatus", "--value").strip()
+        if status == str(RECOVERY_REQUIRED_EXIT):
+            raise RecoveryRequired(
+                "The original recovery service requires reconciliation."
+            ) from error
+        raise
+    state = json.loads(state_path.read_text())
+    if not state.get("released"):
+        raise RuntimeError("The original recovery service has no completed release readback.")
+    emit_release(state)
 
 
 def prepare(arguments: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
@@ -1424,13 +1484,12 @@ def hold(state_path: Path) -> None:
                             update_state(
                                 state_path, database_released=True, revision=event["revision"]
                             )
-                            release(state_path)
                             print(line.decode(), flush=True)
                             return
                         print(line.decode(), flush=True)
     finally:
         try:
-            release(state_path)
+            request_release(state_path)
         finally:
             if commands is not None:
                 os.close(commands)
@@ -1522,7 +1581,8 @@ def interrupted(_signum: int, _frame: object) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Bounded full writer hold of Launchplane only.")
     parser.add_argument(
-        "mode", choices=("plan", "hold", "release", "dump", "submit", "verify", "refreeze")
+        "mode",
+        choices=("plan", "hold", "release", "dump", "submit", "verify", "refreeze", "recover"),
     )
     parser.add_argument("--state", type=Path)
     parser.add_argument("--receipt-file", type=Path)
@@ -1534,7 +1594,7 @@ def main() -> int:
     arguments = parser.parse_args()
     for number in (signal.SIGHUP, signal.SIGTERM):
         signal.signal(number, interrupted)
-    if arguments.mode in {"dump", "submit", "release", "verify", "refreeze"}:
+    if arguments.mode in {"dump", "submit", "release", "verify", "refreeze", "recover"}:
         if not isinstance(arguments.state, Path):
             parser.error("This mode requires --state.")
         state_path = arguments.state
@@ -1551,10 +1611,18 @@ def main() -> int:
                         parser.error("refreeze requires the exact phase id.")
                     with locked_state(state_path) as state:
                         cleanup_api_probe(state, phase_id=arguments.phase_id)
-                elif arguments.mode == "verify":
+                elif arguments.mode == "recover":
+                    state = json.loads(state_path.read_text())
+                    unit = "lp-maint-" + state["hold_id"] + ".service"
+                    if run(
+                        "systemctl", "show", unit, "--property=MainPID", "--value"
+                    ).strip() != str(os.getpid()):
+                        raise RuntimeError(
+                            "Only the original systemd service owns recovery execution."
+                        )
                     release(state_path)
                 else:
-                    release(state_path)
+                    request_release(state_path, manual=True)
             except RecoveryRequired:
                 return RECOVERY_REQUIRED_EXIT
         return 0

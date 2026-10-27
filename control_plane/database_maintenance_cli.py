@@ -353,6 +353,7 @@ def keep_database(
             disconnect_clients=lambda: disconnect_frozen_clients(connection, set(addresses)),
         ):
             before = database_snapshot(connection)
+            revision = str(connection.scalar(text("SELECT version_num FROM alembic_version")))
             snapshot = str(connection.scalar(text("SELECT pg_export_snapshot()")))
             transaction = str(connection.scalar(text("SELECT txid_current()")))
             emit(
@@ -397,19 +398,6 @@ def keep_database(
             elif receipt.get("action") != "release":
                 raise ValueError("Only an exact rehearsal or release command is accepted.")
         connection.close()
-        with connection.engine.connect() as verifier:
-            pending = arguments.job_directory / "commit-pending.json"
-            proof = (
-                json.loads(pending.read_text())
-                if pending.exists()
-                else {"system_identifier": identifier, "before": before, "after": before}
-            )
-            revision = verify_committed_database(verifier, proof)
-            verify_application_reads(verifier)
-        save(
-            arguments.job_directory / "database-safe.json",
-            {"revision": revision, "hold_id": arguments.hold_id},
-        )
         emit("database_released", revision=revision)
 
 

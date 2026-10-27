@@ -26711,7 +26711,18 @@ def create_launchplane_fastapi_app(
             )
         return response
 
-    async def read_health() -> HealthResponse:
+    async def read_health(
+        request: Request, maintenance_liveness: Annotated[bool, Query()] = False
+    ) -> HealthResponse:
+        if not maintenance_liveness:
+            return await run_in_threadpool(
+                lambda: HealthResponse(
+                    trace_id=next_trace_id(),
+                    storage_backend=storage_backend_name(get_record_store()),
+                )
+            )
+        if request.client is None or request.client.host not in {"127.0.0.1", "::1"}:
+            raise HTTPException(status_code=403, detail="Maintenance liveness requires loopback.")
         if health_storage_backend is None:
             raise HTTPException(status_code=503, detail="Launchplane startup is incomplete.")
         return HealthResponse(
@@ -26735,6 +26746,10 @@ def create_launchplane_fastapi_app(
         response_model=HealthResponse,
         operation_id="read_launchplane_health",
         summary="Read Launchplane service health",
+        responses={
+            403: {"model": LaunchplaneErrorResponse},
+            503: {"model": LaunchplaneErrorResponse},
+        },
     )
 
     async def configure_github_delivery(

@@ -1,7 +1,8 @@
 from datetime import datetime, timedelta, timezone
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from collections.abc import Iterator
 import json
+from io import StringIO
 import os
 import subprocess
 import sys
@@ -69,7 +70,9 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 requests.append(self.path)
-                self.send_response(200 if self.path == "/v1/health" else 404)
+                self.send_response(
+                    200 if self.path == "/v1/health?maintenance_liveness=true" else 404
+                )
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "ok"}).encode())
 
@@ -141,7 +144,7 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                     if not fenced:
                         raise AssertionError("The actual API probe requires its network fence")
                     entries = []
-                    for name in ("output", "postrouting"):
+                    for name in ("input", "output", "postrouting"):
                         entries.extend(
                             [
                                 {
@@ -159,7 +162,13 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                                             {
                                                 "match": {
                                                     "op": "!=",
-                                                    "left": {"meta": {"key": "oifname"}},
+                                                    "left": {
+                                                        "meta": {
+                                                            "key": "iifname"
+                                                            if name == "input"
+                                                            else "oifname"
+                                                        }
+                                                    },
                                                     "right": "lo",
                                                 }
                                             },
@@ -346,13 +355,13 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 patch.object(host, "set_freezer"),
                 patch.object(host, "start_process", side_effect=replace),
             ):
-                with self.assertRaises(host.RecoveryRequired):
+                with self.assertRaises(RuntimeError):
                     host.verify_api_health(path)
                 remove.assert_not_called()
             self.assertTrue(json.loads(path.read_text())["verification_phase"]["active"])
             self.assertFalse((path.parent / "verification-complete.json").exists())
 
-    def test_failed_committed_verification_has_a_durable_retry_bound_without_resuming(self) -> None:
+    def test_transient_verification_remains_manually_recoverable_without_a_state_edit(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = state_file(root)
@@ -360,17 +369,28 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
             with (
                 patch.object(host, "terminate_keeper"),
                 patch.object(host, "original_containers", return_value=[]),
-                patch.object(host, "operator", side_effect=RuntimeError("Transient read")) as read,
+                patch.object(host, "operator", side_effect=RuntimeError("Transient read")),
                 patch.object(host, "resume_original") as resume,
             ):
-                for _ in range(host.VERIFICATION_ATTEMPTS):
+                for _ in range(host.WATCHDOG_ATTEMPTS + 1):
                     with self.assertRaisesRegex(RuntimeError, "Transient read"):
                         host.release(path)
-                with self.assertRaises(host.RecoveryRequired):
-                    host.release(path)
-                self.assertEqual(read.call_count, host.VERIFICATION_ATTEMPTS)
                 resume.assert_not_called()
-            self.assertFalse(json.loads(path.read_text()).get("released", False))
+            self.assertNotIn("recovery_required", json.loads(path.read_text()))
+            with (
+                patch.object(host, "terminate_keeper"),
+                patch.object(host, "original_containers", return_value=[]),
+                patch.object(
+                    host, "operator", return_value={"revision": "verified", "outcome": "before"}
+                ),
+                patch.object(
+                    host, "resume_original", side_effect=lambda identifier, _state: identifier
+                ),
+                patch.object(host, "operator_container", return_value=None),
+                patch.object(host, "remove_watchdog"),
+            ):
+                host.release(path)
+            self.assertTrue(json.loads(path.read_text())["released"])
 
     def test_namespace_command_uses_and_closes_the_opened_handle(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -559,7 +579,8 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             path = state_file(Path(temporary))
             with (
-                patch.object(sys, "argv", ["driver", "release", "--state", str(path)]),
+                patch.object(sys, "argv", ["driver", "recover", "--state", str(path)]),
+                patch.object(host, "run", return_value=str(os.getpid())),
                 patch.object(
                     host, "release", side_effect=host.RecoveryRequired("verified state mismatch")
                 ),
@@ -606,7 +627,7 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 patch.object(
                     host, "resume_original", side_effect=lambda identifier, _state: identifier
                 ) as resume,
-                patch.object(host, "operator", side_effect=RuntimeError("unsafe")),
+                patch.object(host, "operator", side_effect=host.RecoveryRequired("unsafe")),
             ):
                 with self.assertRaises(RuntimeError):
                     host.release(path)
@@ -681,6 +702,33 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 host.release(path)
             self.assertCountEqual(resumed, ["own-api", "own-train"])
             self.assertTrue(json.loads(path.read_text())["released"])
+
+    def test_terminal_deployment_reconciliation_after_resume_reports_actual_writer_state(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = state_file(root, fenced=True, revision="verified")
+            output = StringIO()
+            with (
+                patch.object(host, "terminate_keeper"),
+                patch.object(host, "operator_container", return_value=None),
+                patch.object(host, "remove_watchdog"),
+                patch.object(
+                    host, "resume_original", side_effect=lambda identifier, _state: identifier
+                ),
+                patch.object(
+                    host, "operator", side_effect=host.RecoveryRequired("Original marker unknown")
+                ),
+                redirect_stdout(output),
+            ):
+                with self.assertRaises(host.RecoveryRequired):
+                    host.release(path)
+            event = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(event["event"], host.RECOVERY_REQUIRED_EVENT)
+            self.assertIs(event["writers_held"], False)
+            self.assertTrue(json.loads(path.read_text())["recovery_required"])
+            self.assertFalse(json.loads(path.read_text()).get("released", False))
 
     def test_changed_live_cluster_cannot_reuse_a_sticky_resume_proof(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -817,7 +865,7 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
             with (
                 patch.object(host, "install_watchdog"),
                 patch.object(host, "start_process", side_effect=RuntimeError("controller refused")),
-                patch.object(host, "release") as release,
+                patch.object(host, "request_release") as release,
             ):
                 with self.assertRaises(RuntimeError):
                     host.hold(path)
@@ -889,15 +937,38 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
                 "Env": ["LAUNCHPLANE_DATABASE_URL=" + database],
             },
         }
-        with (
-            patch.object(host, "run", return_value="original\noutside\n"),
-            patch.object(host, "inspect_container", return_value=outside),
+        outside["Id"] = "outside"
+        outside["Image"] = "foreign-image"
+        outside["Config"]["Labels"]["org.opencontainers.image.source"] = "foreign-source"
+
+        def inventory(*arguments: str, **_values: Any) -> str:
+            if arguments[:2] == ("docker", "ps"):
+                return "" if "--filter" in arguments else "outside\n"
+            if arguments[:2] == ("docker", "inspect"):
+                return json.dumps([outside])
+            raise AssertionError("Unexpected fixture operation")
+
+        for url in (
+            database,
+            "postgresql+psycopg://synthetic:cred%65ntial@alias/another?application_name=fixture",
         ):
+            outside["Config"]["Env"] = ["LAUNCHPLANE_DATABASE_URL=" + url]
+            for key in ("LAUNCHPLANE_DATABASE_URL", "DATABASE_URL", "PGPASSWORD"):
+                outside["Config"]["Env"] = [
+                    key + "=" + ("credential" if key == "PGPASSWORD" else url)
+                ]
+                with patch.object(host, "run", side_effect=inventory):
+                    with self.assertRaises(RuntimeError):
+                        host.require_no_outside_writers(
+                            api, {"original"}, project="own", operators=set()
+                        )
+        outside["Config"]["Env"] = [
+            "LAUNCHPLANE_DATABASE_URL=postgresql://isolated:other@restore/db"
+        ]
+        outside["Image"] = api["Image"]
+        with patch.object(host, "run", side_effect=inventory):
+            host.require_no_outside_writers(api, {"original"}, project="own", operators=set())
+        outside["Config"]["Env"] = []
+        with patch.object(host, "run", side_effect=inventory):
             with self.assertRaises(RuntimeError):
                 host.require_no_outside_writers(api, {"original"}, project="own", operators=set())
-        outside["Config"]["Env"] = ["LAUNCHPLANE_DATABASE_URL=postgresql://isolated/restore"]
-        with (
-            patch.object(host, "run", return_value="outside\n"),
-            patch.object(host, "inspect_container", return_value=outside),
-        ):
-            host.require_no_outside_writers(api, {"original"}, project="own", operators=set())

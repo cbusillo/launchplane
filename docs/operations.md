@@ -5677,8 +5677,14 @@ existing `.env` in place and the actual API image ID, with no ports, logs,
 restart policy, runtime volumes, Odoo copy or prepared-public mounts. Its root
 is read-only, temporary storage is RAM-backed, and its only host mount is private
 maintenance state. The credential-free browser may remain running. Every own
-writer must match the image; an outside same-source container with the same DB
-credential, even dormant, refuses qualification. Unknown identities refuse.
+writer must match the image. The complete Docker inventory, including dormant
+and foreign-source containers, must have exclusive credential custody: a raw or
+percent-decoded copy of the API database password in any other environment or
+configured command refuses qualification. A same-image container without explicit
+independent database credentials also refuses qualification.
+The API needs explicit PostgreSQL username/password wiring; credential indirection
+is unqualified. Values stay in process memory and are never emitted. Unknown
+identities refuse.
 The plan also reads the API's network namespace, connection transport, mounts,
 capability bounds and namespace peers. Host/shared namespaces, local database
 transport overrides, local proxies, Unix listeners, bind/socket mounts and an
@@ -5689,11 +5695,14 @@ Before any freeze, `hold` installs and reads back a persistent systemd calendar
 timer/service, records every original restart policy, and suppresses automatic
 restart on those exact IDs. Private fsync'd state and watchdog files survive
 reboot. The watchdog runs release at the recorded deadline, including after a
-missed deadline during reboot, and retries transient unavailable reads with readback.
-A genuine unsafe committed-state result is terminal for the watchdog; its distinct
-exit status prevents restart loops. The same manual release re-reads after an
-authorized in-place full restore or other external repair. Its service timeout
-bounds one recovery attempt. Observe actual release;
+missed deadline during reboot. That oneshot service is the single recovery owner:
+EOF cleanup, the deadline and explicit release requests join the same systemd job.
+The keeper ends at COMMIT; only that recovery owner verifies committed state.
+Systemd bounds automatic starts and each recovery attempt's duration. A genuine
+unsafe committed-state result is terminal; its distinct exit status prevents
+restart loops. Explicit manual release resets the systemd failure/start limit
+and re-runs every gate after a repair, without editing private state. It never
+restores data or replays an uncertain provider request. Observe actual release;
 installation alone is not a release receipt.
 
 The keeper takes the existing own-deploy dispatch lock and installs an expiring
@@ -5803,7 +5812,9 @@ before/after verifier: first terminate and confirm the exact keeper backend
 is gone, then independently compare committed state with either verified full
 state, check revision/cluster and full invariants. Any unsafe or UNKNOWN result
 keeps originals frozen or stopped with restart disabled and the recovery marker
-held. It emits `recovery_required`; there is no automatic restore or drop retry.
+held. A verified unsafe result emits `recovery_required`; a transient unavailable
+read emits `release_incomplete` and remains retryable. Neither permits an
+automatic restore or drop retry.
 Preserve the failed state and bring the Director a separate exact full-restore
 decision, since later writes could otherwise be lost.
 
@@ -5818,18 +5829,23 @@ write and verification fails. An earlier empty count is not expiry proof.
 The original API then gets a bounded health-only thaw with all other writer
 CPUs still frozen and deployments held. Before thaw, the driver proves zero
 other DB clients and atomically installs its own UUID-named nftables table in
-that exact API namespace. `inet` OUTPUT and POSTROUTING hooks drop every
-non-loopback IPv4/IPv6 packet; exact hook/rule readback and continuous checks
+that exact API namespace. `inet` INPUT, OUTPUT and POSTROUTING hooks drop
+non-loopback IPv4/IPv6 traffic; the inbound hook prevents new SYN arrivals racing
+socket destruction. Exact hook/rule readback and continuous checks
 hold through the phase. A second persistent, phase-bound timer performs cleanup
 independently at the short health deadline. It consumes the existing root
 capabilities; the API itself cannot alter the fence.
 
 Before thaw, connected TCP sockets and the kernel's queued inbound connections
 are destroyed under the network fence, preserving listeners. Only the API CPU
-thaws. A fresh actual loopback HTTP GET to `/v1/health` must
-return HTTP 200 and the service's success payload.
-The health route reads its backend identity captured during successful startup
-without borrowing a request-worker slot or querying the held database.
+thaws. A fresh actual loopback HTTP GET to
+`/v1/health?maintenance_liveness=true` must return HTTP 200 and the service's
+success payload. This explicit loopback-only probe reads successful-startup
+metadata asynchronously; it proves same-process HTTP liveness, not database
+access or ordinary request-worker readiness. Default `/v1/health` retains its
+original request-worker/store path, including waiting when those workers are
+saturated. The separate matching-image read-only database and runtime probes
+remain mandatory. The route documents its maintenance 403/503 responses.
 An unauthenticated TCP probe
 to its in-place database endpoint must fail, with a kernel packet drop observed.
 No database credential is transmitted by that probe. Before removing its own
@@ -5854,10 +5870,14 @@ before-state abort can reopen unchanged. A running frozen original automatically
 completes missing verification through the same
 `database_maintenance_host.py release --state STATE_JSON` path used by EOF cleanup
 and the persistent deadline watchdog. The `verify` alias uses that same path.
-Committed-state attempts are durably bounded; transient database reads, census
-collisions and health transport failures remain retryable after exact phase
-cleanup. Exhaustion preserves the holds for recovery review. A transport failure
-does not classify the database as unsafe or authorize a production restore.
+Automatic starts are bounded by systemd's retained unit rate limit; transient
+database reads, census collisions and health transport failures remain retryable
+after exact phase cleanup. Exhaustion preserves the holds. Explicit manual
+`release` or `verify` resets that start limit and joins the same recovery service;
+it can always re-read the original operation without a private-state edit.
+A transport failure does not classify the database as unsafe or authorize a
+production restore. Terminal identity/schema or unknown provider-effect results
+still stop automatic retries and require the applicable recovery decision.
 If the API is stopped after reboot and the after-state lacks health proof, the
 driver cannot start it with full network before a namespace fence exists. It
 keeps writers stopped and reports recovery required; bring the Director the
