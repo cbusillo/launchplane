@@ -67,6 +67,17 @@ from control_plane.testing_separation_resources import (
 )
 
 
+def activation_deployment_key(receipt: str | None) -> str:
+    if not receipt:
+        return ""
+    if re.fullmatch(r"[^\s=]+", receipt):
+        return receipt
+    match = re.fullmatch(r"deployment=([^\s=]+) status=([^\s=]+)", receipt)
+    if match is None or match[2] not in api._DEPLOYMENT_SUCCESS_STATUSES:
+        return ""
+    return api.deployment_key_from_wait_result(receipt)
+
+
 class ApplicationRouteAdmissionContradiction(TestingActivationRefusal):
     """A complete route read positively contradicts the admitted predecessor."""
 
@@ -831,9 +842,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             timeout_seconds=300,
             deployment_title=title,
         )
-        if not deployment:
+        deployment_id = activation_deployment_key(deployment)
+        if not deployment_id:
             raise TestingActivationRefusal("Original deployment completion is unavailable.")
-        return self.save_state(record, **{state_key: deployment})
+        return self.save_state(record, **{state_key: deployment_id})
 
     def application_values(self, record: TestingActivationRecord) -> dict[str, str]:
         from control_plane.runtime_environments import (
@@ -2108,7 +2120,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 live.get("domains") != []
                 or len(history) != 1
                 or history[0].get("title") != provider_operation_title(operation_key) + suffix
-                or api.deployment_key(history[0]) != record.state_recipient.get(key)
+                or not activation_deployment_key(record.state_recipient.get(key))
+                or api.deployment_key(history[0])
+                != activation_deployment_key(record.state_recipient.get(key))
                 or api.deployment_status(history[0])
                 not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
             ):
@@ -2547,7 +2561,10 @@ def activation_image_record(record: TestingActivationRecord) -> Any:
     )
 
     readiness = record.application_readiness
-    if readiness is None or not record.state_recipient.get("application_deployment_id"):
+    deployment_id = activation_deployment_key(
+        record.state_recipient.get("application_deployment_id")
+    )
+    if readiness is None or not deployment_id:
         raise TestingActivationRefusal("The original image deployment is unavailable.")
     return DeploymentRecord(
         record_id=readiness.runtime_identity.deployment_record_id,
@@ -2564,7 +2581,7 @@ def activation_image_record(record: TestingActivationRecord) -> Any:
             target_type="application",
             target_name=record.namespace,
             deploy_mode="docker",
-            deployment_id=record.state_recipient["application_deployment_id"],
+            deployment_id=deployment_id,
             status="pass",
             finished_at=record.qualified_at,
         ),
