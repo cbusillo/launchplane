@@ -56,7 +56,7 @@ filters on active status. These describe the recorded snapshot at capture time,
 not the live production database now. They expose aggregate business volume
 and grouping density, without individual or group identities.
 
-The supported repository client reuses the installed operator helper's private
+The supported repository client reuses the installed admin helper's private
 configuration, identity and transport:
 
 ```bash
