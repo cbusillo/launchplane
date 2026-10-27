@@ -94,6 +94,14 @@ Other free text always gets an ordinary pseudonym, which can hide some invalid
 history, such as a blank or too-long value, or two values that differ only in
 case. Arbitrary map values with those names receive no format exemption.
 
+The legacy preview `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64` field is structured
+data: its scoped addon payload is validated, decoded, scrubbed with the same
+salt and encoded again. Literal values and binding identifiers are replaced;
+the preview instance and canonical secret transport relationships survive.
+The same key in an arbitrary map receives no exemption. A malformed or unsafe
+preview payload keeps its ordinary pseudonym so the candidate still refuses it
+when it migrates; releases that do not activate that migration remain deployable.
+
 ## Candidate rehearsal
 
 `scripts/deploy/stored-record-preflight.sh` takes an immutable candidate, the
@@ -142,6 +150,21 @@ unsupported revisions or candidates without the module refuse. There is no
 production-database, empty-fixture or coverage fallback.
 
 ## Activation order and recovery
+
+The managed-preview migration needs this structured exporter deployed first.
+The compatibility release retains the profile-archive startup target and reads
+existing legacy preview values below managed preview settings, with the same
+render validator. It restores no legacy writer. After a fresh exported snapshot
+passes the guarded migration, the activation release advances the startup target
+and removes that transitional reader. The migration's validation, ownership,
+conflict and atomicity guards remain unchanged in both releases.
+While legacy entries remain, the existing profile-write guard stays enforced
+and new preview configuration writes report `preview_settings_migration_pending`.
+The normal activation deployment clears those entries and enables the writes.
+Reapplying onboarding also waits for activation so it cannot replace the legacy
+values with manifest defaults. Idle-reservation retirement waits for the same
+activation; a held retired reservation can keep its disposable preview waiting
+in the meantime. Inspect those holds read-only and never remove them by hand.
 
 The exporter and candidate module must land and deploy first through the
 existing path. The Supervisor then dispatches this same deploy workflow on the

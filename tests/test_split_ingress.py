@@ -944,7 +944,7 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                 )
             return saved_record
 
-        await save(payload, "create-split-custody")
+        created = await save(payload, "create-split-custody")
         changed = {
             **payload,
             "external_ingress": {
@@ -954,18 +954,19 @@ class SplitIngressBrowserTests(_BrowserRouteRepairFixture):
                 "attested_at": "2025-01-01T00:00:00Z",
             },
         }
-        unchanged = (
-            await self.post(
-                route,
-                {
-                    **payload,
-                    "external_ingress": {
-                        **payload["external_ingress"],
-                        "domains": list(reversed(payload["external_ingress"]["domains"])),
+        with patch("control_plane.http_app.utc_now_timestamp", return_value=created["updated_at"]):
+            unchanged = (
+                await self.post(
+                    route,
+                    {
+                        **payload,
+                        "external_ingress": {
+                            **payload["external_ingress"],
+                            "domains": list(reversed(payload["external_ingress"]["domains"])),
+                        },
                     },
-                },
-            )
-        ).json()["review"]
+                )
+            ).json()["review"]
         self.assertEqual(unchanged["status"], "unchanged")
         updated = await save(changed, "update-split-custody")
         self.assertEqual(

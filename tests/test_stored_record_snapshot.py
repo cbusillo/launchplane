@@ -92,6 +92,47 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         LaunchplaneProductProfileRecord.model_validate(profile)
         self.assertEqual(before, self.store.list_authz_policy_records()[0].model_dump_json())
 
+    def test_encoded_preview_export_keeps_unsafe_values_invalid_without_exposing_them(self) -> None:
+        import base64
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+        from control_plane.preview_settings import validate_preview_scope
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+
+        profile = LaunchplaneProductProfileRecord.model_validate(product_profile_payload())
+        encoded = base64.b64encode(
+            json.dumps(
+                {
+                    "context": profile.preview.context,
+                    "instance": "preview",
+                    "addon_settings": [
+                        {
+                            "addon": "connector",
+                            "setting": "api_token",
+                            "value": {"source": "literal", "value": "private-sentinel"},
+                        }
+                    ],
+                }
+            ).encode()
+        ).decode()
+        profile.preview.override_env = {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: encoded}
+        self.store.write_product_profile_record(profile)
+        for version in (1, 2):
+            with self.subTest(version=version):
+                exported = self.store.export_stored_record_snapshot(format_version=version)
+                row = next(
+                    row
+                    for family, row in iter_snapshot_rows(exported)
+                    if family == "launchplane_product_profiles"
+                )
+                scrubbed = row["payload"]["preview"]
+                with self.assertRaises(ValueError):
+                    validate_preview_scope(scrubbed["override_env"], context=scrubbed["context"])
+                self.assertNotIn("private-sentinel", json.dumps(row))
+                self.assertNotIn(encoded, json.dumps(row))
+        self.assertEqual(profile, self.store.read_product_profile_record(profile.product))
+
     def test_lifecycle_schedules_and_preview_suffix_remain_readable_after_scrubbing(self) -> None:
         from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
 

@@ -3092,6 +3092,16 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             self.assertEqual(store.list_authz_policy_records(), ())
 
     def test_scrubbed_snapshot_restores_in_postgres_and_rejects_stricter_policy(self) -> None:
+        import base64
+        from control_plane.contracts.odoo_post_deploy_payload import (
+            ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+        )
+        from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
+        from control_plane.preview_settings import validate_preview_scope
+        from control_plane.storage.migrations.versions import (
+            a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
+            b8f2c4d6e0a7_managed_preview_settings as preview_settings,
+        )
         from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
         from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
         from control_plane.stored_record_preflight import check_restored_records, restore_snapshot
@@ -3100,7 +3110,10 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
         from tests.test_postgres_store import _merge_train_run_record
         from pydantic import ValidationError
 
-        with _store_for_fresh_head_database() as source:
+        with _isolated_postgres_database() as source_url:
+            migrate_schema(database_url=source_url, target_revision=profile_archive.revision)
+            source = PostgresRecordStore(database_url=source_url)
+            self.addCleanup(source.close)
             policy = LaunchplaneAuthzPolicy(
                 schema_version=2,
                 github_actions=(
@@ -3123,7 +3136,35 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             profile = product_profile_payload()
             preview = profile["preview"]
             assert isinstance(preview, dict)
-            preview["override_env"] = {"TOKEN": "plaintext-sentinel"}
+            addon = "private_connector"
+            setting = "api_token"
+            encoded_payload = {
+                "context": f" {str(preview['context']).upper()} ",
+                "instance": "preview",
+                "addon_settings": [
+                    {
+                        "addon": addon,
+                        "setting": "private_option",
+                        "value": {"source": "literal", "value": "plaintext-sentinel"},
+                    },
+                    {
+                        "addon": addon,
+                        "setting": setting,
+                        "value": {
+                            "source": "secret_binding",
+                            "secret_binding_id": "private-binding",
+                            "environment_variable": addon_setting_secret_env_key(
+                                addon_name=addon, setting_name=setting
+                            ),
+                        },
+                    },
+                ],
+            }
+            preview["override_env"] = {
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    json.dumps(encoded_payload).encode()
+                ).decode()
+            }
             source.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile)
             )
@@ -3170,9 +3211,25 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     engine = create_engine(target_url)
                     self.addCleanup(engine.dispose)
                     revision = restore_snapshot(engine, exported)
+                    migrate_schema(
+                        database_url=target_url, target_revision=preview_settings.revision
+                    )
                     target = PostgresRecordStore(database_url=target_url)
                     self.addCleanup(target.close)
-                    self.assertEqual(revision, target.schema_revision())
+                    self.assertEqual(revision, SCHEMA_MIGRATION_TARGET_REVISION)
+                    restored_profile = target.list_product_profile_records()[0]
+                    self.assertFalse(restored_profile.preview.override_env)
+                    restored_settings = target.list_runtime_environment_records()[0]
+                    decoded = validate_preview_scope(
+                        restored_settings.env, context=restored_profile.preview.context
+                    )
+                    self.assertIsNotNone(decoded)
+                    assert decoded is not None
+                    self.assertEqual(
+                        len(decoded.addon_settings), len(encoded_payload["addon_settings"])
+                    )
+                    for sentinel in ("plaintext-sentinel", "private-binding", addon):
+                        self.assertNotIn(sentinel, decoded.model_dump_json())
                     self.assertEqual(
                         len(target.list_authz_policy_records()),
                         len(source.list_authz_policy_records()),

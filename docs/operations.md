@@ -5757,7 +5757,8 @@ fences and preview data are unchanged. The gateway's persisted receipt and
 current lane observation recover sleep and wake under the existing executor lock; see
 [preview idle behavior](clean-testing-snapshots.md).
 
-Normal migration selects `b1b3d5f7a9e2` for an already-applied delivery-drop
+Once activated through [stored-record preflight](stored-record-preflight.md#activation-order-and-recovery),
+migration selects `b1b3d5f7a9e2` for an already-applied delivery-drop
 branch, `b2c4e6a8f0d3` for an already-applied hostname-only branch, and
 `f87c72d690ab` for their already-applied compatibility joins. These empty joins
 retain each branch's existing approval boundary. They never activate the
@@ -5770,8 +5771,9 @@ receipt alone; use this image or a later one.
 
 ### Managed preview settings migration
 
-The managed preview-settings revision is `b8f2c4d6e0a7`, immediately after the
-non-runtime profile archive. It moves profile preview overrides into each
+For the producer-first rollout and compatibility target, see
+[stored-record preflight activation](stored-record-preflight.md#activation-order-and-recovery).
+The managed-preview migration moves profile preview overrides into each
 product's existing runtime-environment records at instance `preview`, and removes
 the old profile values atomically. Existing testing and production records stay
 unchanged. See [shared preview settings](preview-settings.md) for
@@ -5782,7 +5784,7 @@ An explicit `b8f2c4d6e0a7` migration target retains its historical joins:
 `c1c5f7a9b3d0` for their compatibility join. Its route from the archive never
 applies either unrelated branch. An approved delivery-drop request from this
 revision joins at `b9a3d5e7f1b8`; hostname-only histories still refuse it.
-Current release routing continues through idle retirement as described above.
+The activation target also includes idle retirement as described above.
 
 Downgrade retains the migrated values. An older image that does not recognize
 these revisions or still renders profile overrides is not a rollback target for

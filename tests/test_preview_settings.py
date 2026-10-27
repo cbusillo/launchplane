@@ -15,6 +15,14 @@ class PreviewSettingsTests(unittest.TestCase):
             store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{directory}/records.db")
             store.ensure_schema()
             self.addCleanup(store.close)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="context",
+                    context="site",
+                    env={"COLOR": "context", "LEGACY_ONLY": "context"},
+                    updated_at="2026-10-26T00:00:00Z",
+                )
+            )
             for instance, values in (
                 ("testing", {"COLOR": "testing", "TEMPLATE_ONLY": "kept"}),
                 ("prod", {"COLOR": "prod"}),
@@ -34,6 +42,7 @@ class PreviewSettingsTests(unittest.TestCase):
                 record_store=store,
                 context_name="site",
                 template_values={"COLOR": "template", "TEMPLATE_ONLY": "kept"},
+                legacy_values={"COLOR": "legacy", "LEGACY_ONLY": "preserved"},
             )
             self.assertEqual(
                 preview.values,
@@ -41,6 +50,7 @@ class PreviewSettingsTests(unittest.TestCase):
                     "COLOR": "preview",
                     "TEMPLATE_ONLY": "kept",
                     "PREVIEW_ONLY": "isolated",
+                    "LEGACY_ONLY": "preserved",
                 },
             )
             self.assertEqual(store.list_runtime_environment_records(), before)

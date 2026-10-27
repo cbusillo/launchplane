@@ -16394,6 +16394,13 @@ def create_launchplane_fastapi_app(
             return ProductConfigApplyResponse.model_validate(
                 replay_response.model_dump(mode="json")
             )
+        if product_config_request.instance == "preview" and config_profile.preview.override_env:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="preview_settings_migration_pending",
+                message="Preview settings writes become available after the normal Launchplane activation deployment.",
+            )
         if (
             isinstance(identity, LocalOperatorIdentity)
             and (product_config_request.mode == "apply" or not director_agent_identity(identity))
