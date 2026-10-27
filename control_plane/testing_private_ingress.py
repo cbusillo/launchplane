@@ -31,6 +31,7 @@ from control_plane.dokploy.application_domains import (
 )
 from control_plane.ingress_route_scope import validate_ingress_route_instance_scope
 from control_plane.npmplus import NpmplusClient, NpmplusProxyHost, NpmplusProxyHostPayload
+from control_plane.npmplus import PRIVATE_BEARER_FORWARDING
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -260,6 +261,7 @@ class TestingPrivateIngressAdapter:
             certificate_id=self.request.certificate_id,
             access_list_id=self.request.access_list_id,
             ssl_forced=True,
+            npmplus_location_config=PRIVATE_BEARER_FORWARDING,
             advanced_config="# launchplane private testing "
             + canonical_json_sha256(
                 {
@@ -386,14 +388,29 @@ class TestingPrivateIngressAdapter:
             return False
         if existing is None:
             return self.request.operation == "create"
-        # The snapshot already verifies receipt ownership and full config.
-        # Retry only the idempotent toggle, without recreating an application
-        # domain that disappeared after the reviewed enable request.
+        return bool(snapshot["domain_present"]) and (
+            self._legacy_bearer_shape(existing, desired)
+            or (
+                existing.enabled != desired.enabled
+                and _host_payload(existing)
+                == _host_payload(desired.model_copy(update={"enabled": existing.enabled}))
+            )
+        )
+
+    def _legacy_bearer_shape(
+        self, existing: NpmplusProxyHost, desired: NpmplusProxyHostPayload
+    ) -> bool:
         return (
-            bool(snapshot["domain_present"])
-            and existing.enabled != desired.enabled
+            self.request.operation == "create"
+            and not existing.npmplus_location_config
+            and desired.npmplus_location_config == PRIVATE_BEARER_FORWARDING
+            and not desired.locations
             and _host_payload(existing)
-            == _host_payload(desired.model_copy(update={"enabled": existing.enabled}))
+            == _host_payload(
+                desired.model_copy(
+                    update={"npmplus_location_config": "", "enabled": existing.enabled}
+                )
+            )
         )
 
     def _snapshot(
@@ -414,7 +431,11 @@ class TestingPrivateIngressAdapter:
                     break
         if len(hosts) > 1:
             raise ValueError("The testing edge hostname is ambiguous.")
-        existing = self.client.get_proxy_host(hosts[0].id, public_only=True) if hosts else None
+        existing = (
+            self.client.get_proxy_host(hosts[0].id, public_only=True, private_bearer_auth=True)
+            if hosts
+            else None
+        )
         if self.request.operation == "disable":
             if existing is None or existing.domain_names != (hostname,):
                 raise ValueError("There is no owned private testing route to disable.")
@@ -433,8 +454,11 @@ class TestingPrivateIngressAdapter:
                 or (name.startswith("*.") and hostname.endswith(name[1:]))
             ):
                 raise ValueError("Another edge host type owns the testing hostname.")
-        if existing is not None and _host_payload(existing) != _host_payload(
-            desired.model_copy(update={"enabled": existing.enabled})
+        if (
+            existing is not None
+            and _host_payload(existing)
+            != _host_payload(desired.model_copy(update={"enabled": existing.enabled}))
+            and not self._legacy_bearer_shape(existing, desired)
         ):
             raise ValueError("Private route configuration changed; do not overwrite it.")
         if self.request.operation == "disable":
@@ -809,6 +833,10 @@ class TestingPrivateIngressAdapter:
                 started = True
                 if existing is None:
                     actual = self.client.create_proxy_host(desired)
+                elif self._legacy_bearer_shape(existing, desired):
+                    actual = self.client.update_proxy_host(host_id=existing.id, payload=desired)
+                    if desired.enabled and not actual.enabled:
+                        actual = self.client.enable_proxy_host(actual.id)
                 elif desired.enabled != existing.enabled:
                     actual = (
                         self.client.enable_proxy_host(existing.id)
@@ -817,7 +845,9 @@ class TestingPrivateIngressAdapter:
                     )
                 else:
                     actual = existing
-                actual = self.client.get_proxy_host(actual.id, public_only=True)
+                actual = self.client.get_proxy_host(
+                    actual.id, public_only=True, private_bearer_auth=True
+                )
                 if _host_payload(actual) != _host_payload(desired):
                     raise ValueError("The provider did not retain the exact protected route.")
                 actual_hosts.append(actual)

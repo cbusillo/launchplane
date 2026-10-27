@@ -194,7 +194,7 @@ def private_ingress_snapshot(
     hosts = [host for host in client.list_proxy_hosts() if hostname in host.domain_names]
     if len(hosts) != 1:
         raise ValueError("Use the unique original private testing edge.")
-    host = client.get_proxy_host(hosts[0].id, public_only=True)
+    host = client.get_proxy_host(hosts[0].id, public_only=True, private_bearer_auth=True)
     receipt = latest_testing_private_ingress_receipt(
         store, product=product, context=context, host_id=host.id
     )

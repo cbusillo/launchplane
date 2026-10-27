@@ -23279,6 +23279,7 @@ def create_launchplane_fastapi_app(
                     "proxy_host": response_ingress_result.proxy_host.model_copy(
                         update={
                             "advanced_config": "",
+                            "npmplus_location_config": "",
                             "meta": {},
                             "locations": (),
                         }

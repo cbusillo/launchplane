@@ -299,11 +299,12 @@ def _inherit_existing_npmplus_fields(
     desired_payload: NpmplusProxyHostPayload,
     existing_host: NpmplusProxyHost | None,
 ) -> NpmplusProxyHostPayload:
-    # Omitted advanced_config inherits the live provider host value. Explicit
-    # values, including an empty string, replace or clear the provider value.
-    if existing_host is None or "advanced_config" in route.model_fields_set:
+    if existing_host is None:
         return desired_payload
-    return desired_payload.model_copy(update={"advanced_config": existing_host.advanced_config})
+    inherited = {"npmplus_location_config": existing_host.npmplus_location_config}
+    if "advanced_config" not in route.model_fields_set:
+        inherited["advanced_config"] = existing_host.advanced_config
+    return desired_payload.model_copy(update=inherited)
 
 
 def find_npmplus_proxy_host_by_domains(
