@@ -71,7 +71,7 @@ See [Traefik's file-provider documentation](https://doc.traefik.io/traefik/v3.3/
 
 ## Compatible and database-changing paths
 
-Private readiness executes the selected image's `/usr/local/bin/launchplane-readiness`.
+Private readiness executes the selected image's shipped readiness helper.
 Synthetic cutover images inherit that helper from their immutable base without
 installing a separate readiness implementation.
 

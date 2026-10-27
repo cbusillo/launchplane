@@ -760,7 +760,7 @@ class OdooCutoverRehearsalTests(unittest.TestCase):
         payload = json.loads(
             render_odoo_app_slot_compose(plan, data_volume="fixture", private_network=self.network)
         )
-        command = payload["services"]["web"]["command"].replace("$$", "$")
+        command = payload["services"]["web"]["command"][0].replace("$$", "$")
         self.new_web = self.start_web(
             plan.candidate, plan.new.slot_id, plan.new.runtime_identity, command=command
         )

@@ -21,9 +21,10 @@ if cursor.fetchone() != (True,):
 registry = None
 if os.environ['CUTOVER_WORKER_KIND'] == 'cron':
     import sys
-    sys.path.insert(0, '/odoo')
+    sys.path[:0] = ['/odoo', '/volumes/scripts']
     import odoo
     from odoo import api, SUPERUSER_ID
+    from odoo_website_settings import read_string_parameter, write_string_parameter
     odoo.tools.config.parse_config(['--config','/dev/null','--db_host',os.environ['ODOO_DB_HOST'],
         '--db_user',os.environ['ODOO_DB_USER'],'--addons-path',os.environ['ODOO_ADDONS_PATH'],
         '--data-dir','/volumes/data','--max-cron-threads','0','--no-http'])
@@ -34,7 +35,7 @@ while True:
             env = api.Environment(cr, SUPERUSER_ID, {})
             parameters = env['ir.config_parameter'].sudo()
             key = 'cutover.fixture.cron_ticks'
-            parameters.set_param(key, int(parameters.get_param(key, '0')) + 1)
+            write_string_parameter(parameters, key, str(int(read_string_parameter(parameters, key) or '0') + 1))
             cr.commit()
     cursor.execute('INSERT INTO cutover_worker_ticks(writer,slot,process) VALUES (%s,%s,%s)',
                    (writer, slot, os.getpid()))

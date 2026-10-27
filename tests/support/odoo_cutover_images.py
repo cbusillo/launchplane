@@ -210,10 +210,12 @@ def build_fixture_images(
         shutil.copytree(inputs / "docker/scripts", build / "scripts")
         shutil.copytree(libraries, build / "runtime-libraries")
         shutil.copytree(inputs / "launchplane/addons", build / "health")
+        (build / "odoo.conf").write_text("[options]\nhttp_interface = 0.0.0.0\n")
         (build / "Dockerfile").write_text(
             f"FROM {base_alias}\nUSER root\nCOPY scripts /volumes/scripts\n"
             "COPY runtime-libraries /venv/lib/python3.13/site-packages\n"
             "COPY health /opt/launchplane/addons\nCOPY addon /opt/fixture-addons\n"
+            "COPY odoo.conf /opt/fixture-odoo.conf\nENV ODOO_CONFIG=/opt/fixture-odoo.conf\n"
             "COPY declaration.json /opt/launchplane/evidence/release-compatibility.json\n"
         )
         docker(
