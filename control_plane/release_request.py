@@ -127,6 +127,8 @@ def request_release_review(
         decision_reference=decision_reference,
         actor=actor,
     )
+    if saved.release_on_acceptance == "director_standing":
+        return True
     return publish_release_invitation(
         store=store,
         profile=saved,

@@ -95,7 +95,7 @@
           "checklist_digest",
           "decision_reference"
         ],
-        "schema_fingerprint_sha256": "1957487a91dda1171cbe40f6fd5be2e38ab6ab45b0bdf294c5b707eb5d729cd7",
+        "schema_fingerprint_sha256": "3974ab75b8a36c9b5b9632cc5c3e9640951a3259618f008724fa86de6a0e1d26",
         "supported_surfaces": [
           "service_api",
           "browser"
@@ -1218,8 +1218,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "409c44bdcb6529f319cd3602a20f6be5851cd428"
+    "source_commit_sha": "a7885497999d7c84cbf5ca3054d1f6c2184ac149"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "2fa317d3b3edf3efcadfa1b7b495bcaf3cfab6918e22edc4296f2cff4dcf1711"
+  "semantic_digest_sha256": "437776408352b3ee4c0bcbe77040c1b608e63c73969ae06ba8ab2335a1a280a1"
 }

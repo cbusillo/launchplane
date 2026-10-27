@@ -27,14 +27,18 @@ Dokploy application and Compose targets both save and read back the snapshot
 before deployment. Production retains existing provider substitutions; testing's
 stricter input checks remain unchanged. Ordinary production redeploys retain and
 redeliver their recorded release settings, rather than applying staged changes.
+That also returns drift from a direct runtime sync to the reviewed values.
+Keys now owned by effective managed secret bindings stay on the secret delivery
+path during deploy, rollback and recovery. Historical release evidence stays
+unchanged; this settings path neither reads secret versions nor activates them.
 Two-slot lanes keep their separate qualified slot-settings contract and do not
 enter this conventional-target settings path.
 
-Automatically starting the first settings-only release on a legacy
+Automatically starting the first settings release on a legacy
 Director-standing product needs an
 explicit existing release request (`POST /v1/release-review/requests`) bound to
 that exact checklist. Deploying this source capability alone therefore starts no
-legacy settings-only activation. The product's owning session records that
+legacy settings activation, including one bundled with new code. The product's owning session records that
 request, and existing standing acceptance starts the gated release. No extra
 profile switch or grant is needed. Client invitations remain disabled for
 Director-standing products.

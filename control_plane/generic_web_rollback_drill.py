@@ -65,8 +65,20 @@ def run_generic_web_rollback_drill(
         raise click.ClickException("The accepted rollback target is not ready.")
     planned = plan.planned_deploy
     trace_id = f"client-release-{decision.record_id}"
-    previous_inventory, _promotion = rollback_drill_previous_inventory(
+    previous_inventory, promotion = rollback_drill_previous_inventory(
         store=store, decision=decision, deployment=deployment, scope=scope
+    )
+    if promotion is None and (
+        decision.checklist.production.runtime_settings is not None
+        or decision.checklist.candidate.runtime_settings is not None
+    ):
+        raise click.ClickException("The rollback drill lacks its pinned forward promotion.")
+    source_deployment_record_id = (
+        promotion.deployment_record_id
+        if promotion is not None
+        else store.read_environment_inventory(
+            context_name=lane.context, instance_name=lane.instance
+        ).deployment_record_id
     )
 
     class RollbackDrillAdapter(GenericWebProdPromotionProviderMutationAdapter):
@@ -139,9 +151,7 @@ def run_generic_web_rollback_drill(
                             previous_inventory=previous_inventory,
                         ),
                         production_changed=True,
-                        source_deployment_record_id=store.read_environment_inventory(
-                            context_name=lane.context, instance_name=lane.instance
-                        ).deployment_record_id,
+                        source_deployment_record_id=source_deployment_record_id,
                         deploy_provider=self._deploy_provider,
                         provider_operation_title=provider_operation_title(provider_operation_key),
                         deployment_record_id=self._deployment_record_id(provider_operation_key),

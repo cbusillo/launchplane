@@ -130,6 +130,55 @@ class _ReleaseReviewHttpFixture(unittest.IsolatedAsyncioTestCase):
 
 
 class ReleaseReviewHttpTests(_ReleaseReviewHttpFixture):
+    async def test_standing_settings_request_succeeds_without_an_invitation(self) -> None:
+        from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
+        from control_plane.release_review import checklist_digest
+
+        review = build_release_review(store=self.store, profile=profile(), read=github_read)
+        assert review.checklist is not None
+        checklist = review.checklist.model_copy(
+            update={
+                "candidate": review.checklist.candidate.model_copy(
+                    update={
+                        "runtime_settings": GenericWebReleaseSettings(values={"APP_CHANNEL": "new"})
+                    }
+                )
+            }
+        )
+        review = review.model_copy(
+            update={"checklist": checklist, "checklist_digest": checklist_digest(checklist)}
+        )
+        self.store.write_product_profile_record(
+            profile().model_copy(
+                update={"driver_id": "generic-web", "release_on_acceptance": "director_standing"}
+            )
+        )
+        with (
+            patch("control_plane.http_app.current_release_review", return_value=review),
+            patch("control_plane.release_request.publish_release_invitation") as invitation,
+        ):
+            payload: dict[str, object] = {
+                "product": profile().product,
+                "checklist_digest": review.checklist_digest,
+                "source": "director_request",
+                "reason": "Activate the saved settings",
+                "decision_reference": "https://git.example.test/decisions/965",
+            }
+            headers = {"Authorization": "Bearer local-operator-token"}
+            first = await _asgi_request(
+                self.app, "POST", "/v1/release-review/requests", headers=headers, payload=payload
+            )
+            self.assertEqual(first.status_code, 200, first.text)
+            saved = self.store.read_product_profile_record(profile().product).release_request
+            assert saved is not None
+            self.assertEqual(first.json()["release_request"], saved.model_dump(mode="json"))
+            retry = await _asgi_request(
+                self.app, "POST", "/v1/release-review/requests", headers=headers, payload=payload
+            )
+            self.assertEqual(retry.status_code, 200, retry.text)
+            self.assertEqual(retry.json()["release_request"], first.json()["release_request"])
+            invitation.assert_not_called()
+
     async def test_review_access_uses_existing_scope_without_building_a_checklist(self) -> None:
         with patch(
             "control_plane.http_app.current_release_review",

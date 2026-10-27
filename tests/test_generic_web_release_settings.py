@@ -19,6 +19,207 @@ from tests.test_generic_web_promotion import _ProductionProvider, _profile
 
 
 class GenericWebReleaseSettingsTests(unittest.TestCase):
+    def test_invalid_settings_are_bounded_release_evidence_errors(self) -> None:
+        from control_plane.release_review import (
+            ReleaseReviewStore,
+            ReleaseEvidenceUnavailable,
+            release_version,
+        )
+        from tests.test_generic_web_promotion import _store_with_production
+
+        for ambiguous in (False, True):
+            with self.subTest(ambiguous=ambiguous):
+                store = _store_with_production()
+                record = RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context=store.profile.lanes[1].context,
+                    instance="prod",
+                    env={"APP_CHANNEL": "safe"} if ambiguous else {"GITHUB_TOKEN": "synthetic"},
+                    updated_at=store.profile.updated_at,
+                )
+                store.runtime_records = (record, record) if ambiguous else (record,)
+                with self.assertRaises(ReleaseEvidenceUnavailable) as raised:
+                    release_version(
+                        store=cast(ReleaseReviewStore, store),
+                        profile=store.profile,
+                        instance="testing",
+                    )
+                self.assertEqual(raised.exception.code, "production_settings_unavailable")
+
+    def test_secret_ownership_is_preserved_across_release_rollback_and_recovery(self) -> None:
+        from control_plane.generic_web_release_settings import (
+            RELEASE_SETTINGS_KEY,
+            prepare_release_settings,
+            verify_recorded_release_settings,
+        )
+        from tests.test_generic_web_promotion import _store_with_production
+
+        for final_plain_key in (False, True):
+            with self.subTest(final_plain_key=final_plain_key), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(Path(directory))
+                seeded = _store_with_production()
+                product = seeded.profile
+                lane = product.lanes[1]
+                inventory = seeded.read_environment_inventory(
+                    context_name=lane.context, instance_name="prod"
+                )
+                previous = seeded.read_deployment_record(inventory.deployment_record_id)
+                previous_settings = GenericWebReleaseSettings(
+                    values={
+                        "APP_BOUND": "previous plain value",
+                        **({} if final_plain_key else {"APP_CHANNEL": "old"}),
+                    },
+                    absent_keys=("OLD_BOUND",),
+                )
+                previous = previous.model_copy(
+                    update={
+                        "runtime_source": {
+                            **previous.runtime_source,
+                            RELEASE_SETTINGS_KEY: previous_settings.model_dump_json(),
+                        }
+                    }
+                )
+                store.write_environment_inventory(inventory)
+                store.write_deployment_record(previous)
+                for key in ("APP_BOUND", "OLD_BOUND"):
+                    secret = SecretRecord(
+                        secret_id=key.lower(),
+                        scope="context_instance",
+                        integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                        name="Synthetic managed setting",
+                        context=lane.context,
+                        instance="prod",
+                        current_version_id="must-not-read",
+                        created_at=product.updated_at,
+                        updated_at=product.updated_at,
+                    )
+                    store.write_secret_record(secret)
+                    store.write_secret_binding(
+                        SecretBinding(
+                            binding_id=key.lower(),
+                            secret_id=secret.secret_id,
+                            integration=secret.integration,
+                            binding_key=key,
+                            context=lane.context,
+                            instance="prod",
+                            created_at=product.updated_at,
+                            updated_at=product.updated_at,
+                        )
+                    )
+                if not final_plain_key:
+                    store.write_runtime_environment_record(
+                        RuntimeEnvironmentRecord(
+                            scope="instance",
+                            context=lane.context,
+                            instance="prod",
+                            env={} if final_plain_key else {"APP_CHANNEL": "new"},
+                            updated_at=product.updated_at,
+                        )
+                    )
+                desired = desired_release_settings(store, product)
+                self.assertEqual(
+                    desired,
+                    GenericWebReleaseSettings(
+                        values={} if final_plain_key else {"APP_CHANNEL": "new"}
+                    ),
+                )
+                provider = _ProductionProvider()
+                provider.settings = {
+                    "APP_BOUND": "synthetic secret",
+                    "OLD_BOUND": "synthetic secret",
+                    "APP_CHANNEL": "old",
+                }
+                assert previous.runtime_identity is not None
+                target = provider.resolve_deploy_target(
+                    lane=lane,
+                    normalized_artifact_id=previous.runtime_identity.artifact_id,
+                    request_source_git_ref=previous.source_git_ref,
+                    request_timeout_seconds=30,
+                )
+                evidence: dict[str, str] = {}
+                with patch.object(
+                    provider, "read_release_settings", wraps=provider.read_release_settings
+                ) as reader:
+                    prepare_release_settings(
+                        store=store,
+                        provider=provider,
+                        control_plane_root=Path(directory),
+                        target=target,
+                        context=lane.context,
+                        settings=desired,
+                        evidence=evidence,
+                    )
+                    forward = previous.model_copy(
+                        update={"record_id": "forward", "runtime_source": evidence}
+                    )
+                    store.write_deployment_record(forward)
+                    assert previous.runtime_identity is not None
+                    provider.execute_artifact_deploy(
+                        runtime_identity=previous.runtime_identity,
+                        resolved_deploy_target=target,
+                        before_provider_mutation=lambda _phase: None,
+                        effect_started=lambda: None,
+                    )
+                    self.assertTrue(
+                        verify_recorded_release_settings(
+                            store=store,
+                            provider=provider,
+                            control_plane_root=Path(directory),
+                            target=target,
+                            record=forward,
+                        )
+                    )
+                    rollback_evidence: dict[str, str] = {}
+                    restored = prepare_release_settings(
+                        store=store,
+                        provider=provider,
+                        control_plane_root=Path(directory),
+                        target=target,
+                        context=lane.context,
+                        settings=None,
+                        evidence=rollback_evidence,
+                        rollback_target=previous.record_id,
+                        rollback_source=forward.record_id,
+                    )
+                    self.assertEqual(
+                        restored,
+                        GenericWebReleaseSettings(
+                            values={} if final_plain_key else {"APP_CHANNEL": "old"}
+                        ),
+                    )
+                    provider.execute_artifact_deploy(
+                        runtime_identity=previous.runtime_identity,
+                        resolved_deploy_target=target,
+                        before_provider_mutation=lambda _phase: None,
+                        effect_started=lambda: None,
+                    )
+                    from control_plane.contracts.deployment_record import (
+                        DEPLOYMENT_OPERATION_EVIDENCE_KEY,
+                    )
+
+                    rollback = previous.model_copy(
+                        update={
+                            "runtime_source": {
+                                **rollback_evidence,
+                                DEPLOYMENT_OPERATION_EVIDENCE_KEY: "rollback",
+                            }
+                        }
+                    )
+                    self.assertTrue(
+                        verify_recorded_release_settings(
+                            store=store,
+                            provider=provider,
+                            control_plane_root=Path(directory),
+                            target=target,
+                            record=rollback,
+                        )
+                    )
+                    for call in reader.call_args_list:
+                        self.assertFalse({"APP_BOUND", "OLD_BOUND"} & call.kwargs["keys"])
+                self.assertEqual(provider.settings["APP_BOUND"], "synthetic secret")
+                self.assertEqual(provider.settings["OLD_BOUND"], "synthetic secret")
+                self.assertEqual(store.read_deployment_record(previous.record_id), previous)
+
     def test_dokploy_delivers_and_restores_settings_for_application_and_compose(self) -> None:
         for kind in ("application", "compose"):
             with self.subTest(kind=kind):

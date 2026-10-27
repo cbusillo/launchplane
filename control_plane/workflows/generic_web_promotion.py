@@ -318,11 +318,14 @@ def _execute_generic_web_prod_promotion_unserialized(
         )
     from control_plane.generic_web_release_settings import desired_release_settings
 
-    release_settings = (
-        release_decision.checklist.candidate.runtime_settings
-        if not request.dry_run and release_decision is not None
-        else desired_release_settings(record_store, profile)
-    )
+    try:
+        release_settings = (
+            release_decision.checklist.candidate.runtime_settings
+            if not request.dry_run and release_decision is not None
+            else desired_release_settings(record_store, profile)
+        )
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
+        raise click.ClickException("Production release settings could not be verified.") from error
     if request.release_tag:
         _preflight_github_release(
             control_plane_root=control_plane_root,

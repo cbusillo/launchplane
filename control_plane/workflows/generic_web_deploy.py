@@ -48,6 +48,7 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDe
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
 from control_plane.generic_web_release_settings import (
+    ReleaseSettingsStore,
     RELEASE_SETTINGS_KEY,
     ROLLBACK_SETTINGS_KEY,
     prepare_release_settings,
@@ -96,7 +97,7 @@ from control_plane.workflows.ship import (
 GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID = "control-plane-dokploy"
 
 
-class GenericWebDeployStore(Protocol):
+class GenericWebDeployStore(ReleaseSettingsStore, Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...

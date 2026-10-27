@@ -1191,10 +1191,19 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         )
 
     def test_first_settings_only_standing_release_needs_the_existing_explicit_request(self) -> None:
+        self._first_settings_standing_request(same_artifact=True)
+
+    def test_first_code_and_settings_standing_release_needs_the_existing_explicit_request(
+        self,
+    ) -> None:
+        self._first_settings_standing_request(same_artifact=False)
+
+    def _first_settings_standing_request(self, *, same_artifact: bool) -> None:
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
         from control_plane.release_request import record_release_request
 
-        self.keep_current_artifact_in_testing()
+        if same_artifact:
+            self.keep_current_artifact_in_testing()
         self.store.write_runtime_environment_record(
             RuntimeEnvironmentRecord(
                 scope="instance",

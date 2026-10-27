@@ -98,6 +98,36 @@ def _source_of_truth() -> DokploySourceOfTruth:
 
 
 class _GenericWebDeployStore:
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]:
+        return ()
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        return ()
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return ()
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord:
+        raise FileNotFoundError("No target environment")
+
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
         self.deployments: list[DeploymentRecord] = []

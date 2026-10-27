@@ -1,5 +1,6 @@
 from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.generic_web_release_settings import (
     recorded_release_settings,
     recorded_release_baseline,
@@ -81,6 +82,15 @@ class _GenericWebPromotionStore:
         self, **_kwargs: object
     ) -> tuple[RuntimeEnvironmentRecord, ...]:
         return self.runtime_records
+
+    def list_secret_records(self, **_kwargs: object) -> tuple[()]:
+        return ()
+
+    def list_secret_bindings(self, **_kwargs: object) -> tuple[()]:
+        return ()
+
+    def read_dokploy_target_record(self, **_kwargs: object) -> DokployTargetRecord:
+        raise FileNotFoundError("No target environment")
 
     def read_generic_web_source_snapshot(
         self, *, product: str, context_name: str, instance_name: str
