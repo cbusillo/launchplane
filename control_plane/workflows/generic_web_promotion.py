@@ -12,6 +12,7 @@ from control_plane.generic_web_source_qualification import (
     GenericWebSourceQualificationStore,
     GenericWebSourceUnqualified,
     GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
     qualified_generic_web_source_inventory,
 )
 from control_plane.release_review import require_release_approval
@@ -460,7 +461,7 @@ def _execute_generic_web_prod_promotion_unserialized(
         # dispatch. Only an explicitly new record plus this invocation's first
         # checkpoint refusal proves that no forward effect was admitted.
         fresh_deployment = False
-        source_refusal: GenericWebPromotionSourceRefused | None = None
+        admission_refusal: GenericWebPromotionAdmissionRefused | None = None
         if original_deployment_record_id:
             try:
                 record_store.read_deployment_record(original_deployment_record_id)
@@ -468,7 +469,7 @@ def _execute_generic_web_prod_promotion_unserialized(
                 fresh_deployment = True
 
         def admit_source() -> None:
-            nonlocal source_admitted, source_refusal
+            nonlocal source_admitted, admission_refusal
             # Admit this accepted artifact after health/backup waits. Once its
             # production attempt starts, testing may advance to another build.
             if not source_admitted:
@@ -484,14 +485,18 @@ def _execute_generic_web_prod_promotion_unserialized(
                         source_lane=source_lane,
                     )
                 except GenericWebPromotionSourceRefused as refusal:
-                    source_refusal = refusal
+                    admission_refusal = refusal
                     raise
                 source_admitted = True
 
         def promotion_checkpoint(phase: str) -> None:
-            nonlocal forward_effect_admitted
-            admit_source()
-            backup_checkpoint.before_provider_effect(phase, provider_effect_checkpoint)
+            nonlocal forward_effect_admitted, admission_refusal
+            try:
+                admit_source()
+                backup_checkpoint.before_provider_effect(phase, provider_effect_checkpoint)
+            except GenericWebPromotionAdmissionRefused as refusal:
+                admission_refusal = refusal
+                raise
             forward_effect_admitted = True
 
         try:
@@ -547,8 +552,8 @@ def _execute_generic_web_prod_promotion_unserialized(
         # The ordinary deploy records checkpoint refusals as failed results.
         # Restore their typed admission meaning only for this explicitly fresh,
         # never-admitted invocation; prior or uncertain effects stay conservative.
-        if source_refusal is not None and fresh_deployment and not forward_effect_admitted:
-            raise source_refusal
+        if admission_refusal is not None and fresh_deployment and not forward_effect_admitted:
+            raise admission_refusal
     backup_gate.evidence.update(backup_checkpoint.evidence)
     deployment_record = _read_deployment_record(
         record_store=record_store,

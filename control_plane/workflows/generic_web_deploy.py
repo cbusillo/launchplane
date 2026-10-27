@@ -9,7 +9,7 @@ from typing import Callable, Literal, Protocol, cast
 
 import click
 from control_plane.generic_web_source_qualification import (
-    GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
     GenericWebSourceQualificationStore,
 )
 from control_plane.generic_web_testing_inputs import TestingInputSafetyRefused
@@ -1266,7 +1266,7 @@ def _execute_generic_web_deploy_unserialized(
             )
     except (click.ClickException, TestingInputSafetyRefused) as exc:
         if (
-            isinstance(exc, GenericWebPromotionSourceRefused)
+            isinstance(exc, GenericWebPromotionAdmissionRefused)
             and not prior_attempt_exists
             and not provider_effect_attempted
         ):

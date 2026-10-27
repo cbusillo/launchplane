@@ -10,7 +10,10 @@ from typing import Protocol, cast
 
 import click
 from control_plane.lane_movement import LaneMovementRefused
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import (
+    GenericWebPromotionSourceRefused,
+    GenericWebPromotionAdmissionRefused,
+)
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -218,6 +221,7 @@ def require_production_promotion_backup(
             in {
                 "lane_movement.source_order_unavailable",
                 GenericWebPromotionSourceRefused.failure_code,
+                GenericWebPromotionAdmissionRefused.failure_code,
             }
             and promotion.backup_gate.evidence.get("provider_effects_status") == "not_started"
         ):
@@ -342,10 +346,10 @@ def production_promotion_backup_guard(
                 and not effects_started
             ):
                 failed.failure = error.record_failure()
-            elif isinstance(error, GenericWebPromotionSourceRefused) and not effects_started:
+            elif isinstance(error, GenericWebPromotionAdmissionRefused) and not effects_started:
                 failed.failure = RecordFailure(
                     code=error.failure_code,
-                    description="Testing did not qualify the accepted source before production admission.",
+                    description=error.failure_description,
                 )
             failed.backup_gate.evidence.update(protection_evidence)
             record_store.write_promotion_record(failed)

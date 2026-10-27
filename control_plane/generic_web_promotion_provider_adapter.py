@@ -31,7 +31,7 @@ from control_plane.provider_operations import (
     provider_operation_response_payload as _provider_operation_response_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.generic_web_source_qualification import GenericWebPromotionSourceRefused
+from control_plane.generic_web_source_qualification import GenericWebPromotionAdmissionRefused
 
 from control_plane.workflows.generic_web_deploy import normalize_generic_web_artifact_id
 from control_plane.workflows.generic_web_deploy_provider import (
@@ -214,10 +214,8 @@ class GenericWebProdPromotionProviderMutationAdapter:
             isinstance(lease, ProviderEvidenceLease)
             and lease.evidence_reservation().provider_effect_started_at
         )
-        recipient_refusal: PromotionTargetChanged | None = None
 
         def validate_current_authority() -> None:
-            nonlocal recipient_refusal
             if not automatic_rollback:
                 if self._validate_before_checkpoint is not None:
                     self._validate_before_checkpoint()
@@ -228,14 +226,14 @@ class GenericWebProdPromotionProviderMutationAdapter:
                         recipient = custody(
                             self._record_store, self._profile.product, self._lane.context
                         )
-                        if recipient is not None and recipient.phase not in {
-                            "published",
-                            "retired",
-                        }:
-                            recipient_refusal = PromotionTargetChanged(
-                                "Production recipient custody is active and unpublished for this lane."
+                        if (
+                            recipient is not None
+                            and recipient.phase not in {"published", "retired"}
+                            and not recipient.publication
+                        ):
+                            raise GenericWebPromotionAdmissionRefused(
+                                "Unpublished production recipient custody requires its qualified, armed cutover."
                             )
-                            raise recipient_refusal
                         require_generic_web_promotion_target(
                             record_store=self._record_store,
                             lane=self._lane,
@@ -280,8 +278,6 @@ class GenericWebProdPromotionProviderMutationAdapter:
                     deployment_record_id=self._deployment_record_id(provider_operation_key),
                     provider_effect_checkpoint=checkpoint_provider_effect,
                 )
-            if recipient_refusal is not None and not effects_admitted:
-                raise recipient_refusal
         except StarletteHTTPException as error:
             raise ProviderMutationRejectedError(error) from error
         except (FileNotFoundError, ValueError, click.ClickException) as error:
@@ -291,7 +287,7 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 raise ProviderMutationRejectedError(error) from error
             if provider_effect_attempted:
                 raise ProviderMutationUnknownError(str(error)) from error
-            if isinstance(error, GenericWebPromotionSourceRefused) or error is recipient_refusal:
+            if isinstance(error, GenericWebPromotionAdmissionRefused):
                 # The shared runner alone releases a reservation, and only when
                 # its authoritative effect checkpoint proves nothing dispatched.
                 raise ProviderMutationRejectedError(error) from error

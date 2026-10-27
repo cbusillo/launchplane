@@ -64,10 +64,16 @@ class GenericWebSourceOperationUnresolved(GenericWebSourceUnqualified):
     pass
 
 
-class GenericWebPromotionSourceRefused(click.ClickException):
+class GenericWebPromotionAdmissionRefused(click.ClickException):
+    failure_code = "generic_web.admission_refused"
+    failure_description = "Production admission was refused before provider dispatch."
+
+
+class GenericWebPromotionSourceRefused(GenericWebPromotionAdmissionRefused):
     """Fresh forward admission refused; it is not a failed production attempt."""
 
     failure_code = "generic_web.source_unqualified"
+    failure_description = "Testing did not qualify the accepted source before production admission."
 
 
 def qualified_generic_web_source_inventory(

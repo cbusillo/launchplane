@@ -335,16 +335,19 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self.assertTrue(previous.execution)
         replacement = self.continue_recipient()
         actions = list(f.actions)
-        with self.assertRaises(ValueError):
-            f.run_release()
+        with patch.object(f.adapter, "apply", wraps=f.adapter.apply) as apply:
+            with self.assertRaises(ValueError):
+                f.run_release()
+            apply.assert_called_once()
+            original = apply.call_args.args[1].evidence_reservation()
         self.assertEqual(custody(f.store, replacement.product, replacement.context), replacement)
         self.assertEqual(f.actions, actions)
         self.assertEqual(f.store.list_held_provider_target_reservations(), ())
         self.assertIsNone(
             f.store.read_idempotency_record(
-                scope="client-release",
-                route_path="/fixture/recipient-release",
-                idempotency_key="accepted-release",
+                scope=original.scope,
+                route_path=original.route_path,
+                idempotency_key=original.idempotency_key,
             )
         )
 
@@ -431,6 +434,17 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self.enterContext(
             patch("control_plane.workflows.generic_web_promotion._wait_for_healthcheck")
         )
+        grant = releases.client_release_grant(
+            decision=self.decision,
+            action="generic_web_prod_promotion.execute",
+            context=f.record.context,
+            authorized_at=datetime.now(UTC).isoformat(),
+        )
+
+        def validate_acceptance() -> None:
+            if not releases._generic_web_release_authority_allows(f.store, grant):
+                raise ValueError("The accepted release is on hold.")
+
         adapter = GenericWebProdPromotionProviderMutationAdapter(
             control_plane_root=f.fixture.root,
             record_store=f.store,
@@ -443,6 +457,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             profile=profile,
             lane=next(lane for lane in profile.lanes if lane.instance == "prod"),
             trace_id="recipient-race",
+            validate_before_checkpoint=validate_acceptance,
             validate_before_effect=lambda _target: None,
             deploy_provider=provider,
             settle_pre_effect_failure=True,
@@ -486,8 +501,23 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
                 inserted = True
             return admitted
 
-        with patch.object(
-            f.store, "checkpoint_mutation_provider_effect", side_effect=create_after_admission
+        deploy = provider.execute_artifact_deploy
+
+        def hold_after_candidate(**kwargs: Any) -> None:
+            try:
+                deploy(**kwargs)
+            finally:
+                if fail_candidate and candidate in provider.deployed_artifacts:
+                    profile = f.store.read_product_profile_record(f.record.product)
+                    f.store.write_product_profile_record(
+                        profile.model_copy(update={"release_on_acceptance": "held"})
+                    )
+
+        with (
+            patch.object(
+                f.store, "checkpoint_mutation_provider_effect", side_effect=create_after_admission
+            ),
+            patch.object(provider, "execute_artifact_deploy", side_effect=hold_after_candidate),
         ):
             result = self.run_ordinary(adapter)
         self.assertTrue(inserted)
@@ -531,7 +561,9 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
     def test_ordinary_promotion_rechecks_new_custody_at_its_atomic_first_effect(self) -> None:
         from control_plane.production_recipient import authority_snapshot
         from control_plane.storage.postgres import LaunchplaneProductionRecipientRow
-        from control_plane.generic_web_promotion_provider_adapter import PromotionTargetChanged
+        from control_plane.generic_web_source_qualification import (
+            GenericWebPromotionAdmissionRefused,
+        )
 
         f = self.fixture
         adapter, provider = self.ordinary_adapter()
@@ -563,11 +595,28 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         with patch.object(
             f.store, "checkpoint_mutation_provider_effect", side_effect=create_custody
         ):
-            with self.assertRaises(PromotionTargetChanged):
+            with self.assertRaises(GenericWebPromotionAdmissionRefused):
                 self.run_ordinary(adapter)
         self.assertTrue(inserted)
         self.assertEqual(provider.deployed_artifacts, [])
         self.assertEqual(f.actions, [])
+        from control_plane.workflows.production_promotion_backup import (
+            require_production_promotion_backup,
+            GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+        )
+
+        reusable = require_production_promotion_backup(
+            record_store=f.store,
+            product=f.record.product,
+            context=f.record.context,
+            instance="prod",
+            promotion_action=GENERIC_WEB_PROMOTION_BACKUP_ACTION,
+            backup_record_id=f.old_backup,
+        )
+        self.assertEqual(reusable.status, "pass")
+        self.assertTrue(
+            all(record.deploy.status == "pass" for record in f.store.list_deployment_records())
+        )
         self.assertIsNone(
             f.store.read_idempotency_record(
                 scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
