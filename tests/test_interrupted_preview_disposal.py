@@ -7,18 +7,21 @@ import click
 
 from control_plane.clean_testing_snapshot import CleanTestingSnapshot
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
-from control_plane.contracts.preview_execution import odoo_preview_destroy_issued_at
 from control_plane.preview_reservation_recovery import (
     interrupted_preview_restore as read_interrupted_preview_restore,
     original_preview_intent,
 )
-from control_plane.preview_filestore import PreviewRestoreDisposalRequired
+from control_plane.preview_filestore import (
+    PreviewRestoreDisposalRequired,
+    PreviewRestoreCustodyUnknown,
+)
 from control_plane.contracts.preview_execution import preview_execution_lock_name
 from control_plane.odoo_preview_apply_http import (
     issue_odoo_preview_apply_plan,
 )
 from control_plane.provider_operations import ProviderMutationUnknownError
 from control_plane.storage.postgres import LaunchplaneIdempotencyRow, ORIGINAL_MUTATION_INTENT_ROUTE
+from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
 from tests.support.disposable_lanes import record_safety
 from tests.test_product_reconcile import FakePreviewProvider, ProductReconcileTestCase, PR_HEAD
 
@@ -45,6 +48,7 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
             ),
         )
         self.native_interrupted = False
+        self.fail_rebuild = False
         build = self.provider.build_inputs
         execute = self.provider.execute_apply
 
@@ -65,7 +69,9 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         def apply(**kwargs: Any) -> dict[str, object]:
             operation = kwargs["issued_plan"].operation
             kwargs["provider_effect_checkpoint"](operation)
-            if operation == "refresh" and not self.store.list_preview_records():
+            if operation == "refresh" and (
+                self.fail_rebuild or not self.store.list_preview_records()
+            ):
                 self.native_interrupted = True
                 raise ProviderMutationUnknownError("fixture interrupted restore")
             result = execute(**kwargs)
@@ -94,6 +100,23 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         failed = self.run_once()
         self.assertEqual(failed.state, "failed")
         self.original = self.store.list_held_odoo_preview_reservations(product="site")[0]
+        provenance = original_preview_intent(
+            self.original, profile=self.profile, store=self.store
+        ).issued_plan.plan_provenance
+        assert provenance is not None
+        self.issue_time = provenance.issued_at
+
+    def run_once(self) -> ProductReconcileRequestRecord:
+        if not hasattr(self, "issue_time"):
+            return super().run_once()
+        self.issue_time += timedelta(seconds=1)
+        with patch(
+            "control_plane.product_reconcile.issue_odoo_preview_apply_plan",
+            side_effect=lambda **kwargs: issue_odoo_preview_apply_plan(
+                **kwargs, issued_at=self.issue_time
+            ),
+        ):
+            return super().run_once()
 
     def test_reconciler_disposes_then_rebuilds_without_replaying_the_restore(self) -> None:
         self.request("preview", 5)
@@ -105,17 +128,7 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         self.assertEqual(original.state, "completed")
         self.assertNotEqual(original.response_payload["result"]["status"], "pass")
         self.request("preview", 5)
-        preview = self.store.list_preview_records()[0]
-        after_destroy = datetime.fromisoformat(
-            odoo_preview_destroy_issued_at(preview.destroy_reason).replace("Z", "+00:00")
-        ) + timedelta(seconds=1)
-        with patch(
-            "control_plane.product_reconcile.issue_odoo_preview_apply_plan",
-            side_effect=lambda **kwargs: issue_odoo_preview_apply_plan(
-                **kwargs, issued_at=after_destroy
-            ),
-        ):
-            rebuilt = self.reconcile()
+        rebuilt = self.reconcile()
         self.assertEqual(rebuilt["action"], "apply")
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
         self.assertEqual(self.provider.applied, [("destroy", 5), ("refresh", 5)])
@@ -146,7 +159,8 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         self.native_interrupted = False
         self.request("preview", 5)
         result = self.run_once()
-        self.assertTrue(result.last_error or result.last_plan.get("held"))
+        self.assertEqual(result.state, "failed")
+        self.assertEqual(result.last_plan["preview_operation_status"], "reconcile_required")
         self.assertFalse(self.provider.applied)
         held = self.store.list_held_odoo_preview_reservations(product="site")
         self.assertEqual([item.record_id for item in held], [self.original.record_id])
@@ -206,6 +220,7 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         ):
             for failure, disposable in (
                 (PreviewRestoreDisposalRequired(), True),
+                (PreviewRestoreCustodyUnknown(), False),
                 (click.ClickException("fixture unknown custody"), False),
                 (None, False),
             ):
@@ -259,17 +274,7 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         disposal = self.store.list_held_odoo_preview_reservations(product="site")[0]
         intent = original_preview_intent(disposal, profile=self.profile, store=self.store)
         result = FakePreviewProvider().execute_apply(issued_plan=intent.issued_plan)
-        assert intent.issued_plan.plan_provenance is not None
-        after_destroy = intent.issued_plan.plan_provenance.issued_at + timedelta(seconds=1)
-        with (
-            patch.object(self.provider, "observe_apply", return_value=("present", result, False)),
-            patch(
-                "control_plane.product_reconcile.issue_odoo_preview_apply_plan",
-                side_effect=lambda **kwargs: issue_odoo_preview_apply_plan(
-                    **kwargs, issued_at=after_destroy
-                ),
-            ),
-        ):
+        with patch.object(self.provider, "observe_apply", return_value=("present", result, False)):
             self.request("preview", 5)
             self.reconcile()
         self.assertEqual(effects, ["destroy"])
@@ -279,3 +284,107 @@ class InterruptedPreviewDisposalTests(ProductReconcileTestCase):
         self.assertEqual(original_disposal.idempotency_key, disposal.idempotency_key)
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
         self.assertEqual(self.provider.applied, [("refresh", 5)])
+
+    def test_waits_keep_recorded_disposal_until_absence_is_verified(self) -> None:
+        self.write_preview()
+
+        def lost_reply(**kwargs: Any) -> dict[str, object]:
+            kwargs["provider_effect_checkpoint"]("compose_destroy")
+            self.native_interrupted = False
+            raise ProviderMutationUnknownError("fixture lost destroy reply")
+
+        with patch.object(self.provider, "execute_apply", side_effect=lost_reply):
+            self.request("preview", 5)
+            failed = self.run_once()
+        disposal = self.store.list_held_odoo_preview_reservations(product="site")[0]
+        carried = failed.last_plan["disposal_original_reservation_id"]
+        self.advance_preview_recovery_grace = False
+        self.native.reset_mock()
+        for pr_state in ("open", None):
+            with self.subTest(pr_state=pr_state):
+                self.github.pull_request["state"] = pr_state
+                self.request("preview", 5)
+                waiting = self.run_once()
+                self.assertTrue(waiting.last_plan["held"])
+                self.assertEqual(waiting.last_plan["disposal_original_reservation_id"], carried)
+        self.github.pull_request["state"] = "open"
+        self.advance_preview_recovery_grace = True
+        self.request("preview", 5)
+        unknown = self.run_once()
+        self.assertEqual(unknown.last_plan["action"], "destroy")
+        self.assertEqual(unknown.last_plan["disposal_original_reservation_id"], carried)
+        self.assertEqual(unknown.last_plan["preview_plan_id"], disposal.idempotency_key)
+        original_disposal = self.store.read_idempotency_record_by_id(disposal.record_id)
+        assert original_disposal is not None
+        self.assertEqual(original_disposal.state, "reconcile_required")
+        self.assertFalse(self.provider.applied)
+        self.native.assert_not_called()
+
+    def test_repeated_failed_build_stops_after_one_reconstruction(self) -> None:
+        self.request("preview", 5)
+        self.reconcile()
+        self.fail_rebuild = True
+        self.request("preview", 5)
+        failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.native.reset_mock()
+        self.request("preview", 5)
+        stopped = self.run_once()
+        self.assertEqual(stopped.last_plan["action"], "wait")
+        self.assertTrue(stopped.last_plan["held"])
+        self.assertEqual(self.provider.applied, [("destroy", 5)])
+        self.native.assert_not_called()
+        self.github.runs[50]["run_attempt"] = 2
+        self.request("preview", 5)
+        recovered = self.reconcile()
+        self.assertEqual(recovered["action"], "destroy")
+        self.assertEqual(self.provider.applied, [("destroy", 5), ("destroy", 5)])
+        self.request("preview", 5)
+        self.run_once()
+        self.request("preview", 5)
+        first_new_run_recovery = self.reconcile()
+        self.assertEqual(first_new_run_recovery["action"], "destroy")
+        self.request("preview", 5)
+        self.run_once()
+        self.native.reset_mock()
+        self.request("preview", 5)
+        stopped_again = self.run_once()
+        self.assertTrue(stopped_again.last_plan["held"])
+        self.assertEqual(self.provider.applied, [("destroy", 5)] * 3)
+        self.native.assert_not_called()
+
+    def test_completed_second_failure_also_stops_reconstruction(self) -> None:
+        self.request("preview", 5)
+        self.reconcile()
+        self.fail_rebuild = True
+        self.request("preview", 5)
+        self.run_once()
+        failed_result = {"status": "fail", "error_message": "fixture module update failed"}
+        self.native.reset_mock()
+        with patch.object(
+            self.provider, "observe_apply", return_value=("present", failed_result, False)
+        ):
+            self.request("preview", 5)
+            stopped = self.run_once()
+        self.assertTrue(stopped.last_plan["held"])
+        self.assertEqual(stopped.last_plan["action"], "wait")
+        self.assertEqual(self.store.list_held_odoo_preview_reservations(product="site"), ())
+        self.assertEqual(self.provider.applied, [("destroy", 5)])
+        self.native.assert_not_called()
+
+    def test_serving_preview_never_probes_failed_history(self) -> None:
+        self.request("preview", 5)
+        self.reconcile()
+        self.request("preview", 5)
+        self.reconcile()
+        self.native.reset_mock()
+        self.request("preview", 5)
+        serving = self.reconcile()
+        self.assertEqual(serving["reason"], "already_serving")
+        self.native.assert_not_called()
+
+    def test_discovery_checks_one_locator_then_rechecks_before_effects(self) -> None:
+        self.native.reset_mock()
+        self.request("preview", 5)
+        self.reconcile()
+        self.assertEqual(self.native.call_count, 2)

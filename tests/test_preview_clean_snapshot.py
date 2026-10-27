@@ -33,6 +33,7 @@ from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
 from control_plane.preview_filestore import (
     PREPARE_PREVIEW_FILESTORE_PROGRAM,
     PREVIEW_RESTORE_DISPOSAL_REQUIRED,
+    PREVIEW_RESTORE_CUSTODY_UNKNOWN,
 )
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 
@@ -579,14 +580,19 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             self.prepare_filestore(snapshot=self.snapshot, apply=False),
             {"type": "failed", "reason": PREVIEW_RESTORE_DISPOSAL_REQUIRED},
         )
+        newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
+        self.assertEqual(
+            self.prepare_filestore(snapshot=newer, apply=False),
+            {"type": "failed", "reason": PREVIEW_RESTORE_DISPOSAL_REQUIRED},
+        )
         attempt = next((self.source.parent / "preview-attempts").glob("*.json"))
         legacy = json.loads(attempt.read_text())
         legacy.pop("started")
         attempt.write_text(json.dumps(legacy))
         self.assertEqual(
-            self.prepare_filestore(snapshot=self.snapshot, apply=False), {"type": "failed"}
+            self.prepare_filestore(snapshot=self.snapshot, apply=False),
+            {"type": "failed", "reason": PREVIEW_RESTORE_CUSTODY_UNKNOWN},
         )
-        newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
         self.calls.clear()
         self.assertEqual(self.prepare_filestore(snapshot=newer, apply=False)["type"], "failed")
         with self.assertRaises(RuntimeError):
@@ -594,6 +600,27 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertTrue(self.present)
         self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
         self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
+
+    def test_interrupted_receipt_never_qualifies_shared_or_hidden_data(self) -> None:
+        self.killed_during_restore = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.killed_during_restore = False
+        self.containers["foreign"] = {
+            "Id": "foreign",
+            "Config": {"Labels": {"com.docker.compose.project": "another-project"}},
+            "Mounts": [{"Type": "volume", "Name": "preview-data-filestore"}],
+        }
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False), {"type": "failed"}
+        )
+        del self.containers["foreign"]
+        attachment = self.data / "filestore" / "needed-attachment"
+        attachment.write_bytes(b"retain this data")
+        self.assertEqual(
+            self.prepare_filestore(snapshot=self.snapshot, apply=False), {"type": "failed"}
+        )
+        self.assertEqual(attachment.read_bytes(), b"retain this data")
 
     def test_receipt_alone_never_admits_changed_or_missing_native_data(self) -> None:
         self.run_script()

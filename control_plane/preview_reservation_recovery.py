@@ -10,8 +10,11 @@ from typing import Callable
 
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
+    format_launchplane_mutation_timestamp,
     parse_launchplane_mutation_timestamp,
 )
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.preview_execution import odoo_preview_destroy_issued_at
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_ROUTE,
@@ -161,6 +164,69 @@ def held_preview_reservations(
     if not isinstance(store, PostgresRecordStore):
         return ()
     return store.list_held_odoo_preview_reservations(product=product, limit=limit)
+
+
+def preview_restore_originals(
+    store: PostgresRecordStore, *, profile: LaunchplaneProductProfileRecord, number: int
+) -> tuple[tuple[LaunchplaneIdempotencyRecord, OriginalPreviewIntent], ...]:
+    originals = []
+    for reservation in store.list_odoo_preview_cleanup_originals(
+        product=profile.product, number=number
+    ):
+        try:
+            original = original_preview_intent(reservation, profile=profile, store=store)
+        except ValueError:
+            continue
+        if (
+            original.issued_plan.operation == "refresh"
+            and original.issued_plan.plan_request.pr_number == number
+            and original.issued_plan.dry_run_plan.clean_snapshot is not None
+            and original.issued_plan.plan_provenance is not None
+        ):
+            originals.append((reservation, original))
+    return tuple(originals)
+
+
+def preview_rebuild_already_failed(
+    store: PostgresRecordStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
+    manifest: ArtifactIdentityManifest,
+    originals: tuple[tuple[LaunchplaneIdempotencyRecord, OriginalPreviewIntent], ...],
+) -> bool:
+    preview = find_preview_record(
+        record_store=store,
+        context_name=profile.preview.context,
+        anchor_repo=profile.repository.partition("/")[2],
+        anchor_pr_number=number,
+    )
+    if preview is None or preview.state != "destroyed" or manifest.source_build is None:
+        return False
+    try:
+        destroyed_at = parse_launchplane_mutation_timestamp(
+            odoo_preview_destroy_issued_at(preview.destroy_reason), field_name="destroy_issued_at"
+        )
+    except ValueError:
+        return False
+    failed_before = failed_after = False
+    for _, original in originals:
+        previous = original.apply_request.apply.manifest
+        provenance = original.issued_plan.plan_provenance
+        if (
+            previous is None
+            or provenance is None
+            or previous.source_build != manifest.source_build
+            or previous.source_commit != manifest.source_commit
+            or previous.image.digest != manifest.image.digest
+        ):
+            continue
+        issued_at = parse_launchplane_mutation_timestamp(
+            format_launchplane_mutation_timestamp(provenance.issued_at), field_name="issued_at"
+        )
+        failed_before |= issued_at <= destroyed_at
+        failed_after |= issued_at > destroyed_at
+    return failed_before and failed_after
 
 
 def interrupted_preview_restore(

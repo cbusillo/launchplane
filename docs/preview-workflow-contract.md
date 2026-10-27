@@ -505,9 +505,13 @@ requirements.
 An interrupted clean-snapshot restore is replaced through those same service-issued
 destroy and refresh operations. Its host retry does not drop the database or clear
 private overlay writes. The reconciler observes the retained original and inspects
-its exact physical volume bindings and snapshot. Only a native receipt that records
+its exact physical volume bindings and pinned snapshot. Newer issued snapshots do
+not replace that pin. Discovery makes one host check only when work is needed;
+an already-serving preview does not inspect failed history. Only a native receipt that records
 the start of this never-served restore returns the distinct disposal result.
-Historical incomplete receipts without that proof remain held. The native start
+Historical incomplete receipts without that proof remain held with a distinct
+custody diagnostic: resolve use and needed-copy ownership, then use supported
+preservation or qualified preview destroy. The native start
 is recorded only after verifying the empty database and private upper, with web
 held behind its gate; its writes can be reproduced from the bound snapshot/build.
 
@@ -518,6 +522,10 @@ The existing expired lease, original schedule quiescence, target ownership and
 resource inspection remain mandatory. An uncertain destroy is observed on its
 original key until provider absence and the destroyed lifecycle are verified.
 Only then does ordinary reconciliation rebuild an open PR on new storage.
+If the same verified build fails both before and after that reconstruction,
+reconciliation leaves it failed until a new build or CI run attempt. The bound
+issued times and successful service destroy receipt establish this limit; there
+is no separate retry counter. Closed-PR cleanup remains available.
 There is no new grant, caller assertion or provider-direct cleanup path.
 
 Preparation pins the source before first restore and records that restore has

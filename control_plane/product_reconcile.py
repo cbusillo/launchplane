@@ -1857,6 +1857,8 @@ def reconcile_preview_target(
         interrupted_preview_restore,
         original_preview_intent,
         recover_held_preview,
+        preview_restore_originals,
+        preview_rebuild_already_failed,
     )
 
     held = held_preview_reservations(record_store, product=profile.product)
@@ -1899,21 +1901,6 @@ def reconcile_preview_target(
             and recovered.get("settlement") in {"adopted", "completed", "replayed"}
         ):
             disposal_original = ""
-        if recovered.get("settlement") == "reconcile_required" and interrupted_preview_restore(
-            store=record_store, profile=profile, reservation=reservation, root=control_plane_root
-        ):
-            disposal_original = reservation.record_id
-    if isinstance(record_store, PostgresRecordStore) and control_plane_root is not None:
-        for candidate_original in record_store.list_odoo_preview_cleanup_originals(
-            product=profile.product, number=pull_request_number
-        ):
-            if candidate_original.state == "completed" and interrupted_preview_restore(
-                store=record_store,
-                profile=profile,
-                reservation=candidate_original,
-                root=control_plane_root,
-            ):
-                disposal_original = candidate_original.record_id
     unresolved = [
         entry
         for entry in recovery
@@ -1930,13 +1917,6 @@ def reconcile_preview_target(
         transport=transport,
         pull_request_number=pull_request_number,
     )
-    if disposal_original and decision.observed.get("state") in {"open", "closed"}:
-        decision.plan.update(
-            action="destroy",
-            reason="interrupted_preview_restore",
-            held=False,
-            disposal_original_reservation_id=disposal_original,
-        )
     cleanup = (
         decision.plan.get("action") == "destroy"
         and decision.plan.get("reason") == "pull_request_not_open"
@@ -1949,6 +1929,8 @@ def reconcile_preview_target(
                 if key in {"destroy_retry_key", "destroy_failed_attempts"}
             }
         )
+        if disposal_original:
+            decision.plan["disposal_original_reservation_id"] = disposal_original
         return ReconcileOutcome(decision.plan)
     if (
         any(
@@ -1965,6 +1947,11 @@ def reconcile_preview_target(
                 "reason": "held_preview_recovery_required",
                 "held_reservations": recovery,
                 "held_reservations_truncated": len(held) > 100,
+                **(
+                    {"disposal_original_reservation_id": disposal_original}
+                    if disposal_original
+                    else {}
+                ),
                 **{
                     key: value
                     for key, value in (previous_plan or {}).items()
@@ -1990,6 +1977,56 @@ def reconcile_preview_target(
     if settled:
         plan["preview_operation_status"] = settled[-1]["settlement"]
         plan["preview_result_status"] = settled[-1].get("result_status", "")
+    if (
+        not disposal_original
+        and plan["action"] in {"apply", "destroy"}
+        and profile.preview.clean_testing_snapshot
+        and isinstance(record_store, PostgresRecordStore)
+        and control_plane_root is not None
+    ):
+        originals = preview_restore_originals(
+            record_store, profile=profile, number=pull_request_number
+        )
+        if (
+            plan["action"] == "apply"
+            and isinstance(decision.verified, VerifiedBuildArtifact)
+            and preview_rebuild_already_failed(
+                record_store,
+                profile=profile,
+                number=pull_request_number,
+                manifest=decision.verified.manifest,
+                originals=originals,
+            )
+        ):
+            plan.update(
+                action="wait",
+                held=True,
+                detail="This build failed again after reconstruction. Fix the build or rerun its CI build before retrying.",
+            )
+            return _preview_failure(plan, "preview_apply_failed")
+        if originals:
+            locator, _ = max(
+                originals,
+                key=lambda item: (
+                    item[1].issued_plan.plan_provenance.issued_at
+                    if item[1].issued_plan.plan_provenance is not None
+                    else datetime.min.replace(tzinfo=timezone.utc)
+                ),
+            )
+            if interrupted_preview_restore(
+                store=record_store,
+                profile=profile,
+                reservation=locator,
+                root=control_plane_root,
+            ):
+                disposal_original = locator.record_id
+    if disposal_original and decision.observed.get("state") in {"open", "closed"}:
+        plan.update(
+            action="destroy",
+            reason="interrupted_preview_restore",
+            held=False,
+            disposal_original_reservation_id=disposal_original,
+        )
     if plan["action"] not in {"apply", "destroy"}:
         if unresolved:
             plan.update(held=True, reason="held_preview_recovery_required")
