@@ -218,6 +218,26 @@ class PreviewInventoryEvidenceTests(unittest.TestCase):
             restored = PreviewInventoryScanRecord.model_validate_json(payload)
             self.assertEqual(restored, scan)
 
+        from control_plane.contracts.preview_inventory_scan_record import PreviewSleepObservation
+        from control_plane.preview_inventory_evidence import inventory_scan_evidence
+
+        scan = scan.model_copy(
+            update={
+                "status": "pass",
+                "preview_count": 1,
+                "preview_slugs": ("pr-1",),
+                "sleep_observations": (PreviewSleepObservation(slug="pr-1", state="asleep"),),
+            }
+        )
+        payload = scan.model_dump_json()
+        V1Scan.model_validate_json(payload)
+        restored = PreviewInventoryScanRecord.model_validate_json(payload)
+        self.assertEqual(
+            inventory_scan_evidence(restored).sleep_observations, scan.sleep_observations
+        )
+        stale = restored.model_copy(update={"scanned_at": "2000-01-01T00:00:00Z"})
+        self.assertEqual(inventory_scan_evidence(stale).sleep_observations, ())
+
     def test_old_malformed_history_does_not_poison_current_bounded_evidence(self) -> None:
         from control_plane.preview_inventory_evidence import (
             PREVIEW_INVENTORY_SCAN_READ_LIMIT,

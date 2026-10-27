@@ -36,6 +36,7 @@ from tests.test_http_app_ingress import (
     _instance_ingress_exact_host_payload,
     _instance_ingress_product_profile,
 )
+from tests.test_route_binding_record import _dokploy_target_record
 
 
 class _ReadOnlyIngressClient(_FakeNpmplusIngressClient):
@@ -80,6 +81,13 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
         profile = _instance_ingress_product_profile()
         endpoint = _edge_endpoint_record()
         cases: tuple[tuple[str, dict[str, object], dict[str, object], int], ...] = (
+            ("tracked-alias", {}, {"allow_update": False, "allow_enable_disable": False}, 202),
+            (
+                "tracked-alias-mutating",
+                {},
+                {"allow_update": True, "allow_enable_disable": False},
+                400,
+            ),
             ("matching", {}, {}, 202),
             ("missing", {}, {}, 400),
             ("upstream-drift", {"forward_port": 8443}, {}, 409),
@@ -124,6 +132,30 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                         return super().list_proxy_hosts()
 
                 ingress = Client(() if name == "missing" else (host,))
+                profile = _instance_ingress_product_profile()
+                if name.startswith("tracked-alias"):
+                    lane = profile.lanes[0]
+                    profile = profile.model_copy(
+                        update={
+                            "lanes": (
+                                lane.model_copy(
+                                    update={
+                                        "base_url": "https://business.example.test",
+                                        "health_url": "https://business.example.test/health",
+                                        "health_monitoring": lane.health_monitoring.model_copy(
+                                            update={"checks": ()}
+                                        ),
+                                    }
+                                ),
+                                *profile.lanes[1:],
+                            )
+                        }
+                    )
+                    store.write_dokploy_target_record(
+                        _dokploy_target_record(
+                            context=lane.context, instance=lane.instance, domains=host.domain_names
+                        )
+                    )
                 store.write_product_profile_record(profile)
                 if name == "shared-context":
                     store.write_product_profile_record(

@@ -11,7 +11,6 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as held,
     e8d2f6a0b4c7_drop_preview_enablement as migration,
     da72490fce13_join_topics_retirement as topics_join,
-    c9e3f5a7b0c2_join_attestations_retirement as attestations_retirement_join,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.schema_migration import (
@@ -86,13 +85,11 @@ class RetiredPreviewEnablementMigrationTests(unittest.TestCase):
             config = alembic_config(database_url)
             command.upgrade(config, held.revision)
             self.assertEqual(schema_migration_action(current_revision=held.revision), "upgrade")
-            command.upgrade(
-                config,
-                schema_migration_target(
-                    current_revision=held.revision,
-                    target_revision=SCHEMA_MIGRATION_TARGET_REVISION,
-                ),
+            target = schema_migration_target(
+                current_revision=held.revision,
+                target_revision=SCHEMA_MIGRATION_TARGET_REVISION,
             )
+            command.upgrade(config, target)
             engine = create_engine(database_url)
             try:
                 self.assertNotIn(migration.RETIRED_TABLE, inspect(engine).get_table_names())
@@ -101,11 +98,11 @@ class RetiredPreviewEnablementMigrationTests(unittest.TestCase):
                         connection.execute(text("SELECT version_num FROM alembic_version"))
                         .scalars()
                         .all(),
-                        [attestations_retirement_join.revision],
+                        [target],
                     )
-                self.assertEqual(
-                    schema_migration_action(current_revision=attestations_retirement_join.revision),
-                    "compatible_ahead",
+                self.assertIn(
+                    schema_migration_action(current_revision=target),
+                    {"current", "compatible_ahead"},
                 )
             finally:
                 engine.dispose()

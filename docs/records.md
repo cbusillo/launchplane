@@ -940,6 +940,48 @@ an ORM column/table or remains only in the evidence payload.
   Product repositories must not own route bindings, TLS ownership, provider
   host ids, certificate ids, or edge topology.
 
+  A public generic-web lane may retain both an externally maintained business
+  ingress and a managed recovery route. Its optional `external_ingress` names
+  a proper subset of the tracked domains, the proxy custodian and an HTTPS
+  configuration-evidence URL. The top-level ingress and TLS fields describe
+  the remaining managed domains; per-domain readers resolve external edge
+  termination and external TLS for the named subset. The complete tracked
+  domain set stays in `domains`, with its primary/alias roles unchanged.
+  Legacy single-path records retain their existing serialized form and digest.
+
+  The existing signed-in Route binding review establishes, changes or removes
+  external custody with CSRF, review digest, current-record CAS and atomic source
+  comparisons. The managed audit must cover exactly the remaining hosts and join
+  the recorded target and active edge. The commit compares route-relevant profile
+  fields, including monitoring URLs, the fallback health path and public-site intent;
+  unrelated display edits do not invalidate it. Custody decisions cannot absorb
+  changes to destination, domain roles, managed ingress/TLS or status. Removing
+  external custody requires complete managed evidence. This operation changes
+  records only, never provider routes. Agents can refresh unchanged evidence.
+
+  Each recorded host gets a strict runtime-identity HTTP check and a TLS check
+  using its resolved custody. Derived HTTP checks retain the configured homepage,
+  health path/query, DNS expectations and recovery thresholds. Unsupported checks
+  or conflicting DNS policy block admission and remain no-network configuration
+  failures if introduced later. Disabled checks supply no policy.
+
+  Topology and runtime readers share observation applicability: current monitoring
+  intent, URLs, deployment identity, profile and relevant authority dates must agree.
+  The server preserves unchanged custody timestamps and stamps changed custody
+  itself; HTTP and TLS probes must strictly follow the decision. HTTP evidence also
+  carries a per-host custody digest so an external observation cannot qualify a
+  host reassigned to managed custody. Each HTTPS redirect is checked before
+  connection against the requested host's custody set, and its visited chain is
+  retained and rechecked. Legacy redirects without adequate proof stay unverified.
+  The route-record SHA separately fences incident transitions.
+
+  After managed evidence expires, readers may rerun the existing reconcile plan
+  without writing. Only identical current authority, custody and source evidence
+  refresh projected provenance. TLS uses existing per-host divergence checks and
+  exact source identities/versions, while certificate freshness remains independent.
+  Missing or changed sources retain their warnings. There is no periodic authority
+  write, scheduler or calendar re-attestation step.
+
 Promote a payload field into ORM structure when Launchplane needs to filter,
 order, join, authorize, constrain, display it regularly, or drive an action from
 it. Keep unstable provider envelopes, replay/debug context, and raw evidence in

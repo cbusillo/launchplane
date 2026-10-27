@@ -899,12 +899,13 @@ A product-config secret entry can use `copy_from` instead of `value`:
 ```
 
 The top-level product-config target is the destination lane. The source must be
-a stable lane of that same product, and the destination must be lane-exact
+a configuration scope of that same product, and the destination must be exact
 in `runtime_environment`. The source binding key is the destination binding key;
 renaming a token to bypass integration key safety is not supported. Neither a
 source product nor another secret store can be supplied. Site-shared sources
 may be selected when that source lane has no configured exact binding. Ambiguous,
-disabled, missing or superseded sources are refused. Copies to previews are refused.
+disabled, missing or superseded sources are refused. Copies to the managed
+`preview` scope use the same checks and must pass preview key-safety policy.
 An explicit class on the source must allow the destination lane; a `prod_only`
 source cannot be copied to testing by relabelling its destination `shared_safe`.
 
@@ -1005,3 +1006,8 @@ deployed: the provider copy stays in place and already holds the same value, and
 a later live-target runtime sync delivers it from the managed secret. A
 production secret adopted as `shared_safe` with a sharing reason can then be
 copied to testing by reference, as described above.
+
+## Shared preview settings
+
+See [preview runtime settings](preview-settings.md) for the managed `preview`
+scope, precedence, UI and helper usage, and migration from profile overrides.

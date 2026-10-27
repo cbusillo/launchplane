@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import provider_key_adoption, runtime_platform_credentials
 from control_plane import product_secret_copy
+from control_plane.preview_settings import validate_preview_scope
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.public_hosts import normalize_public_hosts
@@ -421,6 +422,38 @@ def plan_product_config_authority_bundle(
         retired_provider_keys=retired_provider_keys,
         source_label=source_label,
     )
+    if instance_name == "preview":
+        secret_keys = set(
+            control_plane_secrets.resolve_effective_secret_bindings_from_store(
+                record_store=record_store,
+                integration="runtime_environment",
+                context_name=context_name,
+                instance_name="preview",
+                scopes=site_secret_scopes("preview"),
+                excluded_binding_ids=frozenset(
+                    binding.binding_id for binding in disabled_bundle.secret_bindings
+                ),
+            )
+        ) | {
+            str(secret["binding_key"])
+            for secret in secrets
+            if secret["integration"] == "runtime_environment" and secret["instance"] == "preview"
+        }
+        current_preview_record = _find_runtime_environment_record(
+            existing_records=existing_runtime_records,
+            scope="instance",
+            context_name=context_name,
+            instance_name="preview",
+        )
+        plain = (
+            runtime_record.env
+            if runtime_record is not None
+            else (current_preview_record.env if current_preview_record else {})
+        )
+        try:
+            validate_preview_scope(plain, context=context_name, secret_keys=frozenset(secret_keys))
+        except ValueError as error:
+            raise ProductConfigError(str(error), code="runtime_setting_refused") from error
     secret_summaries: list[dict[str, object]] = list(disabled_summaries)
     runtime_key_safety_summary = _evaluate_product_config_runtime_key_safety(
         record_store=record_store,
@@ -1053,6 +1086,8 @@ def _product_config_secret_inputs(
             instance_name=secret_instance,
             index=index,
         )
+        if instance_name == "preview" and validated_scope != "context_instance":
+            raise ProductConfigError("Preview secrets require the exact preview instance scope.")
         context_scope_uses_instance_safety_target = (
             validated_scope == "context" and expected_scope == "context_instance"
         )

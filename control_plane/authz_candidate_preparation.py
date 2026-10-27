@@ -936,16 +936,21 @@ def _agent_product_setup_rule_state(
     return "present", grants
 
 
-def product_context_owners(record_store: object) -> dict[str, frozenset[str]]:
+def product_context_owners(
+    record_store: object, *, config_scopes: bool = False
+) -> dict[str, frozenset[str]]:
     """Map each lane or historical context, case-folded, to the products using it."""
     lister = getattr(record_store, "list_product_profile_records", None)
     if not callable(lister):
         raise TypeError("Agent product setup requires product profile storage.")
     return product_context_owner_map(
-        record
-        if isinstance(record, LaunchplaneProductProfileRecord)
-        else LaunchplaneProductProfileRecord.model_validate(record)
-        for record in lister()
+        (
+            record
+            if isinstance(record, LaunchplaneProductProfileRecord)
+            else LaunchplaneProductProfileRecord.model_validate(record)
+            for record in lister()
+        ),
+        config_scopes=config_scopes,
     )
 
 

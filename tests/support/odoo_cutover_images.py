@@ -11,6 +11,7 @@ from control_plane.contracts.prepared_public_site import WRITER_KINDS
 from typing import Any
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.deploy_reference import is_digest_pinned_image_reference
 from control_plane.contracts.artifact_release_compatibility import (
     ReleaseInputFile,
     ReleaseModuleDeclaration,
@@ -30,17 +31,59 @@ def docker(*arguments: str, program: str | None = None, timeout: int = 180) -> s
     return result.stdout.strip()
 
 
+UV_PLATFORMS = {"arm64": "aarch64-unknown-linux-gnu", "amd64": "x86_64-unknown-linux-gnu"}
+
+
+def fixture_base(
+    base_image: str, target_platform: str | None
+) -> tuple[dict[str, Any], dict[str, Any], tuple[str, ...]]:
+    selection: tuple[str, ...] = ()
+    if target_platform is not None:
+        if target_platform not in {"linux/" + architecture for architecture in UV_PLATFORMS}:
+            raise ValueError("select a supported linux/amd64 or linux/arm64 target_platform")
+        if not is_digest_pinned_image_reference(base_image):
+            raise ValueError("explicit target_platform requires an immutable base image reference")
+        selection = ("--platform", target_platform)
+    parent = json.loads(docker("image", "inspect", base_image))[0]
+    base = (
+        json.loads(docker("image", "inspect", *selection, base_image))[0] if selection else parent
+    )
+    architecture = base.get("Architecture")
+    if (
+        base.get("Os") != "linux"
+        or architecture not in UV_PLATFORMS
+        or not base.get("RootFS", {}).get("Layers")
+    ):
+        raise ValueError(
+            "concrete base metadata unavailable; select an available explicit target_platform"
+        )
+    if selection and (
+        target_platform != "linux/" + architecture
+        or base_image not in parent.get("RepoDigests", [])
+        or base_image not in base.get("RepoDigests", [])
+    ):
+        raise ValueError("selected platform metadata does not match the immutable parent")
+    return parent, base, selection
+
+
 def build_fixture_images(
-    root: Path, *, base_image: str, inputs: Path, prefix: str, include_settings: bool = True
+    root: Path,
+    *,
+    base_image: str,
+    inputs: Path,
+    prefix: str,
+    include_settings: bool = True,
+    target_platform: str | None = None,
 ) -> tuple[ArtifactIdentityManifest, ...]:
     template = Path(__file__).parent / "cutover_probe"
-    base = json.loads(docker("image", "inspect", base_image))[0]
-    base_alias = "launchplane-cutover-base:" + base["Id"].removeprefix("sha256:")
-    docker("tag", base["Id"], base_alias)
+    parent, base, selection = fixture_base(base_image, target_platform)
+    base_alias = "launchplane-cutover-base:" + parent["Id"].removeprefix("sha256:")
+    docker("tag", parent["Id"], base_alias)
     graph_text = docker(
         "run",
         "--rm",
         "--pull=never",
+        *selection,
         "--network",
         "none",
         "-v",
@@ -68,10 +111,8 @@ def build_fixture_images(
         ReleaseModuleDeclaration(name=name, depends=tuple(depends))
         for name, depends in sorted(graph.items())
     )
-    architecture = docker("image", "inspect", "--format", "{{.Architecture}}", base_image)
-    platform = {"arm64": "aarch64-unknown-linux-gnu", "amd64": "x86_64-unknown-linux-gnu"}[
-        architecture
-    ]
+    architecture = base["Architecture"]
+    uv_platform = UV_PLATFORMS[architecture]
     requirements = root / "runtime-requirements.txt"
     subprocess.run(
         [
@@ -98,7 +139,7 @@ def build_fixture_images(
             "--python-version",
             "3.13",
             "--python-platform",
-            platform,
+            uv_platform,
             "--target",
             str(libraries),
             "-r",
@@ -113,6 +154,7 @@ def build_fixture_images(
             "run",
             "--rm",
             "--pull=never",
+            *selection,
             "--network",
             "none",
             "--entrypoint",
@@ -210,12 +252,12 @@ def build_fixture_images(
         shutil.copytree(inputs / "docker/scripts", build / "scripts")
         shutil.copytree(libraries, build / "runtime-libraries")
         shutil.copytree(inputs / "launchplane/addons", build / "health")
-        shutil.copy(inputs / "scripts/launchplane-readiness.py", build / "readiness.py")
+        (build / "odoo.conf").write_text("[options]\nhttp_interface = 0.0.0.0\n")
         (build / "Dockerfile").write_text(
             f"FROM {base_alias}\nUSER root\nCOPY scripts /volumes/scripts\n"
             "COPY runtime-libraries /venv/lib/python3.13/site-packages\n"
             "COPY health /opt/launchplane/addons\nCOPY addon /opt/fixture-addons\n"
-            "COPY readiness.py /opt/launchplane-readiness.py\n"
+            "COPY odoo.conf /opt/fixture-odoo.conf\nENV ODOO_CONFIG=/opt/fixture-odoo.conf\n"
             "COPY declaration.json /opt/launchplane/evidence/release-compatibility.json\n"
         )
         docker(
@@ -229,11 +271,18 @@ def build_fixture_images(
             image_name + ":" + name,
             str(build),
         )
-        derived = json.loads(docker("image", "inspect", image_name + ":" + name))[0]
+        derived = json.loads(docker("image", "inspect", *selection, image_name + ":" + name))[0]
         if derived["RootFS"]["Layers"][: len(base["RootFS"]["Layers"])] != base["RootFS"]["Layers"]:
             raise ValueError("fixture build did not retain the selected immutable base layers")
         digests = json.loads(
-            docker("image", "inspect", "--format", "{{json .RepoDigests}}", image_name + ":" + name)
+            docker(
+                "image",
+                "inspect",
+                *selection,
+                "--format",
+                "{{json .RepoDigests}}",
+                image_name + ":" + name,
+            )
         )
         manifest.image.digest = next(
             value.split("@", 1)[1] for value in digests if value.startswith(image_name + "@")

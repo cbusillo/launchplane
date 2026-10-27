@@ -45,6 +45,7 @@ from control_plane.lane_runtime_verification import (
     read_lane_runtime_verification,
 )
 from control_plane.source_control_change import read_branch_revision
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
@@ -120,6 +121,9 @@ def _resolve_guard_refusal(
     health_after: datetime,
     summary: str,
 ) -> str:
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(store, profile, lane)
+    )
     checks = tuple(
         check
         for check in lane.health_monitoring.checks

@@ -108,6 +108,15 @@ class OperationSpec:
 
 OPERATION_SPECS = (
     OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/aggregate-counts",
+        "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
         "POST",
         INTEGRATION_ATTESTATION_ROUTE,
         "Record an exact-merge engineering attestation with a confirming independent model review; records no new Client decision and never promotes.",

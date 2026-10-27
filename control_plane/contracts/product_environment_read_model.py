@@ -63,6 +63,7 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_incident_eligible,
     product_lane_monitoring_probe_effective,
     product_config_requirement_applies_to_lane,
+    product_config_target,
 )
 from control_plane.contracts.production_backup_authority import (
     ProductionBackupAuthorityStatus,
@@ -81,6 +82,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentSeverity,
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressObservationRecord
+from control_plane.split_ingress import read_split_ingress_binding, split_ingress_monitoring_lane
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -109,6 +111,16 @@ from control_plane.preview_inventory_evidence import (
     PreviewInventoryEvidence,
     read_preview_inventory_evidence,
 )
+
+
+class PreviewSettingsReadStore(Protocol):
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
+    def list_secret_bindings(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[SecretBinding, ...]: ...
 
 
 ActionAllowed = Callable[[str, str, str, tuple[str, ...]], bool]
@@ -797,6 +809,9 @@ def build_product_environment_detail(
 ) -> ProductEnvironmentDetail:
     profile = record_store.read_product_profile_record(product)
     lane = _find_lane(profile=profile, environment=environment)
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+    )
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
     lane_summary = _read_product_lane_summary(
         record_store=record_store,
@@ -895,23 +910,57 @@ def build_product_environment_config_status(
     write_prerequisites: ProductConfigWritePrerequisites = ProductConfigWritePrerequisites(),
 ) -> ProductEnvironmentConfigStatus:
     profile = record_store.read_product_profile_record(product)
-    lane = _find_lane(profile=profile, environment=environment)
+    lane = product_config_target(profile, environment)
     descriptor, descriptor_warning = _read_profile_descriptor(profile)
-    lane_summary = _read_product_lane_summary(
-        record_store=record_store,
-        profile=profile,
-        lane=lane,
-    )
+    lane_summary: LaunchplaneLaneSummary | None
+    if lane.instance == "preview":
+        lane_summary = LaunchplaneLaneSummary(
+            context=lane.context,
+            instance=lane.instance,
+            runtime_environment_records=tuple(
+                record
+                for record in cast(
+                    PreviewSettingsReadStore, record_store
+                ).list_runtime_environment_records(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+                if record.scope == "instance" and record.instance == "preview"
+            ),
+            secret_bindings=tuple(
+                binding
+                for binding in cast(PreviewSettingsReadStore, record_store).list_secret_bindings(
+                    context_name=lane.context, instance_name=lane.instance
+                )
+                if binding.context == lane.context and binding.instance == "preview"
+            ),
+            provenance=DataProvenance(source_kind="record", freshness_status="recorded"),
+        )
+    else:
+        lane_summary = _read_product_lane_summary(
+            record_store=record_store,
+            profile=profile,
+            lane=lane,
+        )
     provenance = (
         lane_summary.provenance if lane_summary is not None else _missing_lane_provenance(lane)
     )
     runtime_settings = _runtime_config_status_items(
-        requirements=profile.expected_config.runtime_environment_keys,
+        requirements=tuple(
+            item
+            for item in profile.expected_config.runtime_environment_keys
+            if lane.instance != "preview"
+            or (item.context == lane.context and item.instance == "preview")
+        ),
         lane=lane,
         lane_summary=lane_summary,
     )
     managed_secrets = _managed_secret_config_status_items(
-        requirements=profile.expected_config.managed_secret_bindings,
+        requirements=tuple(
+            item
+            for item in profile.expected_config.managed_secret_bindings
+            if lane.instance != "preview"
+            or (item.context == lane.context and item.instance == "preview")
+        ),
         lane=lane,
         lane_summary=lane_summary,
     )
@@ -2319,7 +2368,7 @@ def _build_preview_summary(
     action_allowed: ActionAllowed,
 ) -> ProductPreviewSummary:
     if not profile.preview.enabled:
-        return ProductPreviewSummary(enabled=False)
+        return ProductPreviewSummary(enabled=False, context=profile.preview.context)
     summaries: tuple[LaunchplanePreviewSummary | PreviewRecord, ...] = ()
     list_preview_summaries = getattr(record_store, "list_preview_summaries", None)
     list_preview_records = getattr(record_store, "list_preview_records", None)
@@ -2412,7 +2461,7 @@ def _build_preview_summary(
         active_count=len(summaries),
         inventory=inventory
         if records_allowed
-        else inventory.model_copy(update={"observed_slugs": ()}),
+        else inventory.model_copy(update={"observed_slugs": (), "sleep_observations": ()}),
         unobserved_record_slugs=tuple(sorted(tracked_slugs - observed_slugs))
         if comparable and records_allowed
         else (),
@@ -2434,6 +2483,9 @@ def _health_monitoring_summary(
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
 ) -> ProductHealthMonitoringSummary:
+    lane = split_ingress_monitoring_lane(
+        profile, lane, read_split_ingress_binding(record_store, profile, lane)
+    )
     incidents = sort_open_incidents(
         tuple(
             incident

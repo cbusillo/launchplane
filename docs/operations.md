@@ -5567,20 +5567,12 @@ health-alert policies and historical delivery evidence intact.
 ### Prepared retired-delivery table migration
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup targets the additive
-integration-attestation revision described below. It follows the
-non-runtime profile archive `a4c8e0f2b6d3`, which follows
-discussion-topic revision `b81ca763d924` and the separately approved Q533
-preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
-`e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
-and a green PR do not authorize applying the drop to the shared database.
-The candidate runtime accepts the common predecessor, either branch revision,
-their original empty merge revision, `e9e3a7b1c5d8`, the additive topics revision,
-its existing held-path join `da72490fce13`, and the prepared hostname revisions
-and compatibility joins described below. It retains expiry/key-retirement,
+`RETIRED_TABLES` in that revision. Normal service startup targets the
+[canonical hostname activation](#canonical-hostname-activation), including the
+non-runtime profile archive, managed preview settings and idle retirement. The
+release default preserves all held delivery history. The candidate runtime
+requires that activation before it serves traffic. It retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
-These are recognized revision paths; the HTTP service also requires the topics
-table and starts only after the release migration has added it.
 While this hold is active, schema initialization refuses a migration graph whose
 head has advanced beyond the reviewed compatibility join. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
@@ -5589,11 +5581,11 @@ step; advancing an unrelated additive migration does not authorize it. Lifting
 the hold requires the shared-data/release approval below.
 
 The release default never traverses the held branch. If a database has already
-applied the held drop or the original join, startup applies the missing preview
-and topic migrations and joins the paths at `da72490fce13`.
-After explicit approval, requesting the held revision on a database already at
-the preview or topics revision applies the held drop, adds topics if missing,
-and joins at `da72490fce13`. These routes leave
+applied the held drop or one of its joins, startup joins the missing approved
+branches at `f87c72d690ab`. After explicit approval, requesting the held revision
+from an activated hostname-only schema reaches that same join. Earlier schemas
+keep their explicit historical application routes, followed by normal startup.
+These routes leave
 one recorded Alembic revision; startup never mistakes incomparable branches for
 ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
@@ -5724,6 +5716,51 @@ during automatic deployment. Complete the deployed-image qualification before
 that release reaches main. Image rollback then returns to this qualified
 compatibility image without downgrading the hostname schema.
 
+### Canonical hostname activation
+
+Startup activates the already-prepared hostname revision through
+`b2c4e6a8f0d3`, which also includes the profile archive, preview settings and
+idle retirement. A database that already applied the held delivery drop joins
+at `f87c72d690ab`; an explicit approved held-drop request from a hostname-only
+schema also reaches that join. Startup never applies that drop on its own.
+The runtime refuses earlier schemas until the supported migration completes.
+The four compatibility-prelude migration files remain unchanged.
+
+Ownership comparisons and PostgreSQL hostname fences share ASCII case folding,
+surrounding whitespace removal, trailing-dot removal and retained URL-host
+extraction. Existing payloads stay unchanged, and new public-host validation
+keeps its existing rules. Provider IDs, receipt ownership and exact original
+recipient checks remain exact.
+
+Every supported active private-endpoint write, including recipient publication
+and its scoped inverse, takes the existing hostname transaction fence before
+rechecking foreign target domains, public hosts and pending effects. Target writes,
+including compare-and-write domain repair, also refuse a foreign active endpoint
+claim under the same short authority transaction. A competing
+provider operation returns `public_hosts_authority_busy` (HTTP 409). A settled
+foreign target claim returns `private_health_endpoint_host_owned` (HTTP 409);
+review ownership before retrying. Failed endpoint applies save no success
+receipt. Disabled endpoint cleanup remains available. Endpoints may still share
+an internal monitoring host with each other. These are service/store writer
+fences, not a grant for direct database writes.
+
+Activation can hold a self-deploy or train worker startup when the transition
+mutex or target-table lock is busy. The migration remains transactional; retry
+through the supported self-deploy after writers or maintenance settle. Canonical
+aliases can now block an operation that previously passed an ownership check.
+Provider I/O retains only scoped name/target fences, so unrelated endpoint and
+product writers continue. A foreign claim acquired between recipient publication
+and its inverse refuses the inverse without overwriting that claim. Resolve the
+foreign ownership through its supported control-plane path, then retry the scoped inverse.
+
+Before checked Ready, qualify the immutable currently deployed image against
+both activated joins as the previous-image rollback target. It must include the
+non-runtime archive and every later applied migration; the old #4229 image is
+not compatible. Verify the supported self-deploy will capture that qualified
+image and that older HTTP replicas and workers have been replaced. Rollback
+starts that image on the compatible-ahead schema without downgrading it. The
+independent held-drop approval still applies to real data.
+
 ### Non-runtime profile archive
 
 Release revision `a4c8e0f2b6d3` follows the topics revision. It copies every
@@ -5746,22 +5783,73 @@ Downgrade refuses. Images from before this revision reject it, so an image
 rollback across it needs this image or a later one; the hostname compatibility
 image above is no longer a rollback target once the archive has run.
 
+
+### Preview idle reservation retirement
+
+Release revision `b0a2c4e6f8d1` follows the managed preview-settings migration. It
+removes only the retired preview-idle scope's stop/start reservations and
+original-intent records. A matching database constraint refuses an overlapping
+old scheduler's late reservation writes before effects. Other operations, target
+fences and preview data are unchanged. The gateway's persisted receipt and
+current lane observation recover sleep and wake under the existing executor lock; see
+[preview idle behavior](clean-testing-snapshots.md).
+
+Through [stored-record preflight](stored-record-preflight.md#activation-order-and-recovery),
+startup migration selects `b1b3d5f7a9e2` for an already-applied delivery-drop
+branch, `b2c4e6a8f0d3` for an already-applied hostname-only branch, and
+`f87c72d690ab` for their already-applied compatibility joins. These empty joins
+retain each branch's existing approval boundary. They never activate the
+prepared delivery drop or hostname transition on an unapproved database.
+An explicit approved delivery-drop request from `b0a2c4e6f8d1` joins at
+`b1b3d5f7a9e2`; hostname-only histories continue to refuse that request.
+Downgrade cannot reconstruct deleted idle intents. An image rollback to code
+that still requires them cannot recover a sleeping preview from its gateway
+receipt alone; use this image or a later one.
+
+### Managed preview settings migration
+
+For the producer-first rollout and activation order, see
+[stored-record preflight activation](stored-record-preflight.md#activation-order-and-recovery).
+The managed-preview migration moves profile preview overrides into each
+product's existing runtime-environment records at instance `preview`, and removes
+the old profile values atomically. Existing testing and production records stay
+unchanged. See [shared preview settings](preview-settings.md) for
+configuration and conflict handling.
+
+An explicit `b8f2c4d6e0a7` migration target retains its historical joins:
+`b9a3d5e7f1b8` for retirement, `c0b4e6f8a2c9` for hostnames, and
+`c1c5f7a9b3d0` for their compatibility join. Its route from the archive never
+applies either unrelated branch. An approved delivery-drop request from this
+revision joins at `b9a3d5e7f1b8`; hostname-only histories still refuse it.
+The startup target includes idle retirement as described above.
+
+Downgrade retains the migrated values. An older image that does not recognize
+these revisions or still renders profile overrides is not a rollback target for
+this change; retain a compatible image or the pre-migration backup and matching
+image. Schema initialization's head fence continues rejecting unreviewed
+successors after the idle-retirement transition above.
+
+This data migration uses the shared preview validator. A restored database from
+before this revision must pass the validator in the selected image; later
+validation changes may therefore refuse older values transactionally at startup.
+Preflight that backup's preview settings against the selected image before
+release rather than weakening validation to admit them.
+
 ### Additive integration-attestation storage
 
-Normal startup targets `c8d2e4f6a9b1`, following the non-runtime profile archive.
-It adds only `launchplane_integration_attestations` and its PR lookup index.
-The default path still never applies the held delivery drop or hostname change.
-Already-applied retirement branches join at `c9e3f5a7b0c2`, hostname-only
-branches at `d0f4a6b8c1d3`, and combined compatibility branches at `d1a5b7c9d2e4`.
-Those joins are empty. Runtime recognizes both earlier supported revisions and
-these additions; the HTTP service still checks its required tables.
-An explicit approved delivery-drop request from the additive revision joins at
-`c9e3f5a7b0c2`; hostname-only databases still refuse that request. The held
-destructive application procedure and its separate approval are unchanged.
-Image rollback retains this additive table and its immutable evidence.
+The attestation release targets `c8d2e4f6a9b1`, following the current
+hostname/idle-retirement release target. It adds only
+`launchplane_integration_attestations` and its PR lookup index. The default path
+still never applies the held delivery drop. An already-applied delivery branch
+joins at `d1a5b7c9d2e4`; that join is empty. Runtime recognizes the preceding
+release and compatibility revisions and these additions; the HTTP service still
+checks its required tables. Explicit approved delivery-drop requests from the
+additive revision use the same join, preserving the existing separate approval.
+
 Before activating this target, deploy the compatibility slice containing these
-same migration files and recognized revision paths while startup still targets
-the profile archive. It creates no attestation table and does not require it.
-Retain that deployed compatibility image as activation's previous-image rollback
-target. Source delivery alone does not qualify it. Older images cannot recognize
-the additive revision and are below the new rollback floor.
+same two migration files and recognized revision paths while startup still uses
+the preceding target. That slice creates no attestation table and does not
+require it. Retain its qualified deployed image as activation's previous-image
+rollback target. Source delivery alone does not qualify it. Older images cannot
+recognize the additive revision and are below the new rollback floor. Image
+rollback retains the additive table and its immutable evidence.

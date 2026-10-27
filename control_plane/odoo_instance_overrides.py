@@ -29,7 +29,10 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 from control_plane.contracts.public_hosts import resolve_origin_base_url, resolve_public_base_url
 from control_plane.odoo_import_overrides import import_runtime_value, runtime_values_for_override
 
-ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
+from control_plane.contracts.odoo_post_deploy_payload import (
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY as ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+)
+
 LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY = "LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED"
 LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY = "LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED"
 ODOO_OVERRIDE_SECRET_ENV_PREFIX = "ODOO_OVERRIDE_SECRET__"

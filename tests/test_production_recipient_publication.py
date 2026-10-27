@@ -304,6 +304,36 @@ class RecipientPublicationTests(unittest.TestCase):
         self.assertEqual(current.policy_revision, self.next_policy.policy_revision + 1)
         self.assertEqual(len(history), 3)
 
+    def test_publication_and_inverse_refuse_a_foreign_targets_endpoint_hostname(self) -> None:
+        from urllib.parse import urlsplit
+        from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
+
+        foreign = self.publication.target.model_copy(
+            update={
+                "context": "foreign",
+                "domains": (urlsplit(self.publication.health_endpoints[0].url).hostname,),
+            }
+        )
+        self.store.write_dokploy_target_record(foreign)
+        before = authority_snapshot(self.store, self.record.product, self.record.context)
+        with self.assertRaises(DokployTargetRecordChanged):
+            self.publish()
+        self.assertEqual(
+            authority_snapshot(self.store, self.record.product, self.record.context), before
+        )
+        self.assertEqual(custody(self.store, self.record.product, self.record.context), self.record)
+        self.store.delete_dokploy_target_record(expected_record=foreign)
+        published = self.publish()
+        foreign = foreign.model_copy(update={"domains": (urlsplit(self.monitor.url).hostname,)})
+        self.store.write_dokploy_target_record(foreign)
+        before = authority_snapshot(self.store, self.record.product, self.record.context)
+        with self.assertRaises(DokployTargetRecordChanged):
+            rollback_publication(self.store, published, stop_replacement=lambda: None)
+        self.assertEqual(
+            authority_snapshot(self.store, self.record.product, self.record.context), before
+        )
+        self.assertEqual(custody(self.store, self.record.product, self.record.context), published)
+
     def test_failure_before_commit_rolls_back_target_monitor_backup_and_custody(self) -> None:
         before = authority_snapshot(self.store, self.record.product, self.record.context)
         with patch.object(

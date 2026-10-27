@@ -29,6 +29,7 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.dokploy import api, source
+from control_plane.dokploy.application_endpoint import application_endpoint_spec
 from control_plane.dokploy.fresh_application import (
     match_application_volume_mount,
     require_fresh_application_runtime,
@@ -65,6 +66,17 @@ from control_plane.testing_separation_resources import (
     preparation_binding,
     APPLICATION_CAPABILITY_PHASE,
 )
+
+
+def activation_deployment_key(receipt: str | None) -> str:
+    if not receipt:
+        return ""
+    if re.fullmatch(r"[^\s=]+", receipt):
+        return receipt
+    match = re.fullmatch(r"deployment=([^\s=]+) status=([^\s=]+)", receipt)
+    if match is None or match[2] not in api._DEPLOYMENT_SUCCESS_STATUSES:
+        return ""
+    return api.deployment_key_from_wait_result(receipt)
 
 
 class ApplicationRouteAdmissionContradiction(TestingActivationRefusal):
@@ -812,6 +824,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             raise TestingActivationRefusal(
                 "The fresh recipient has an unrequested deployment history."
             )
+        self.verify_application_endpoint(record)
         checkpoint(phase)
         record = self.save(record, phase=phase)
         api.trigger_deployment(
@@ -831,9 +844,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             timeout_seconds=300,
             deployment_title=title,
         )
-        if not deployment:
+        deployment_id = activation_deployment_key(deployment)
+        if not deployment_id:
             raise TestingActivationRefusal("Original deployment completion is unavailable.")
-        return self.save_state(record, **{state_key: deployment})
+        return self.save_state(record, **{state_key: deployment_id})
 
     def application_values(self, record: TestingActivationRecord) -> dict[str, str]:
         from control_plane.runtime_environments import (
@@ -997,6 +1011,11 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         # Its initial-only fields are replaced only after separately proving their
         # exact original activation values above and the actual runtime below.
         vanilla = deepcopy(live)
+        endpoint = live.get("endpointSpecSwarm")
+        if endpoint is not None:
+            if endpoint != application_endpoint_spec({}):
+                raise TestingActivationRefusal("The application endpoint setting changed.")
+            vanilla["endpointSpecSwarm"] = None
         for key in ("dockerImage", "username", "password", "registryUrl", "registryId"):
             vanilla[key] = None
         vanilla.update(
@@ -1011,6 +1030,47 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         require_fresh_application_runtime(
             vanilla, environment_id=record.environment_id, project_id=record.project_id
         )
+
+    def verify_application_endpoint(self, record: TestingActivationRecord) -> None:
+        if self.live(record).get("endpointSpecSwarm") != application_endpoint_spec({}):
+            raise TestingActivationRefusal("The application endpoint setting did not verify.")
+
+    def configure_original_undeployed_endpoint(
+        self, record: TestingActivationRecord, checkpoint: Callable[[str], None]
+    ) -> TestingActivationRecord:
+        if (
+            "application_deployment_id" in record.state_recipient
+            or record.phase == "deploy_application_deployment_id"
+            or self.live(record).get("endpointSpecSwarm") is not None
+        ):
+            return record
+        self.verify_provider(record)
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        history = api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=record.target_id,
+            require_complete=True,
+        )
+        if history:
+            raise TestingActivationRefusal(
+                "An original deployment prevents endpoint configuration."
+            )
+        checkpoint("configure_application")
+        record = self.save(record, phase="configure_application")
+        api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/application.update",
+            method="POST",
+            payload={
+                "applicationId": record.target_id,
+                "endpointSpecSwarm": application_endpoint_spec({}),
+            },
+        )
+        self.verify_application_endpoint(record)
+        return record
 
     @staticmethod
     def mount_matches(
@@ -1104,8 +1164,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     "applicationId": record.target_id,
                     "sourceType": "docker",
                     "autoDeploy": False,
+                    "endpointSpecSwarm": application_endpoint_spec({}),
                 },
             )
+            self.verify_application_endpoint(record)
             checkpoint(record.phase)
             api.dokploy_request(
                 host=host,
@@ -1129,6 +1191,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             )
             self.verify_provider(record)
             record = self.save_state(record, application_configured="true")
+        record = self.configure_original_undeployed_endpoint(record, checkpoint)
         self.verify_provider(record)
         return record
 
@@ -2108,7 +2171,9 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                 live.get("domains") != []
                 or len(history) != 1
                 or history[0].get("title") != provider_operation_title(operation_key) + suffix
-                or api.deployment_key(history[0]) != record.state_recipient.get(key)
+                or not activation_deployment_key(record.state_recipient.get(key))
+                or api.deployment_key(history[0])
+                != activation_deployment_key(record.state_recipient.get(key))
                 or api.deployment_status(history[0])
                 not in api._DEPLOYMENT_SUCCESS_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES
             ):
@@ -2547,7 +2612,10 @@ def activation_image_record(record: TestingActivationRecord) -> Any:
     )
 
     readiness = record.application_readiness
-    if readiness is None or not record.state_recipient.get("application_deployment_id"):
+    deployment_id = activation_deployment_key(
+        record.state_recipient.get("application_deployment_id")
+    )
+    if readiness is None or not deployment_id:
         raise TestingActivationRefusal("The original image deployment is unavailable.")
     return DeploymentRecord(
         record_id=readiness.runtime_identity.deployment_record_id,
@@ -2564,7 +2632,7 @@ def activation_image_record(record: TestingActivationRecord) -> Any:
             target_type="application",
             target_name=record.namespace,
             deploy_mode="docker",
-            deployment_id=record.state_recipient["application_deployment_id"],
+            deployment_id=deployment_id,
             status="pass",
             finished_at=record.qualified_at,
         ),

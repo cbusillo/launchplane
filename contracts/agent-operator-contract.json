@@ -46,6 +46,33 @@
     },
     "operations": [
       {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_identity"
+        ],
+        "method": "GET",
+        "modes": [
+          "read"
+        ],
+        "operation_id": "read_odoo_copy_aggregates",
+        "path": "/v1/products/{product}/environments/{environment}/aggregate-counts",
+        "purpose": "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [],
+        "schema_fingerprint_sha256": "e64b3445dbb164f7f3ea85f4c6f98dac50de39d247bd3b679a4add451e4416bf",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "body",
         "identity_dependencies": [
           "read_browser_mutation_identity"
@@ -1222,8 +1249,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "f406759c2086b9053ece85bb2e3ab3cf34a7ff91"
+    "source_commit_sha": "3855b16e2e536d082a788be8f43156509d147b5e"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "b051c58e01473e3b439da1595e4d5a0f8bccc1d963c1ffd4c3406d249d989409"
+  "semantic_digest_sha256": "aaf6b7735e915b88a0324387222951b600186ccac90e8a5437677d88561113b7"
 }

@@ -38,6 +38,7 @@ from control_plane.testing_route_effects import (
     ROUTE_WRITING,
     ROUTE_WRITER_RECEIPT,
 )
+from control_plane.testing_application_inspection import ApplicationCandidateInspection
 
 _logger = logging.getLogger(__name__)
 
@@ -227,6 +228,7 @@ class TestingActivationInspection(SeparationResourcesStatus):
     public_health_status: ReleaseStatus | None = None
     public_health_verified: bool | None = None
     public_identity_status: RuntimeIdentityStatus | None = None
+    candidate: ApplicationCandidateInspection | None = None
 
 
 def inspect_application_activation(
@@ -240,6 +242,8 @@ def inspect_application_activation(
     idempotency_key: str,
     trace_id: str,
     observe_original: Callable[[str, str, str], ProviderObservation],
+    inspect_candidate: Callable[[TestingActivationRecord, str], ApplicationCandidateInspection]
+    | None = None,
 ) -> TestingActivationInspection:
     if not idempotency_key or request.application is None:
         raise TestingActivationRefusal(
@@ -305,6 +309,33 @@ def inspect_application_activation(
     readiness = record.application_readiness
     private_health = readiness.private_health if readiness else None
     public_health = readiness.public_health if readiness else None
+    candidate = None
+    if inspect_candidate is not None and record.phase in {
+        "restoring_application_route",
+        "refusing_private_candidate",
+        "refused",
+    }:
+        candidate = inspect_candidate(
+            record,
+            build_provider_operation_key(
+                scope=row.scope,
+                route_path=row.route_path,
+                idempotency_key=row.idempotency_key,
+                request_fingerprint=row.request_fingerprint,
+                reconciliation_key=row.reconciliation_key,
+            ),
+        )
+        if (
+            activation_record(
+                store,
+                product,
+                request.context,
+                scope=scope,
+                preparation_key=request.preparation_key,
+            )
+            != record
+        ):
+            candidate = ApplicationCandidateInspection(placement="unavailable")
     return TestingActivationInspection(
         product=product,
         context=request.context,
@@ -327,4 +358,5 @@ def inspect_application_activation(
         public_health_status=public_health.status if public_health else None,
         public_health_verified=public_health.verified if public_health else None,
         public_identity_status=public_health.runtime_identity_status if public_health else None,
+        candidate=candidate,
     )

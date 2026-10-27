@@ -386,6 +386,26 @@ text is withheld. A missing child or writer is not physical absence. These reads
 make no provider call, settle no writer and grant no continuation authority;
 they expose no route URL, script, credential or private intent. The original
 apply remains the supported route for an evidenced original-child reconciliation.
+For an original in route restoration, private refusal or completed refusal,
+inspection also reads that original candidate's placement, domains shape and
+complete deployment history. Closed fields distinguish missing/malformed domains,
+non-singular history, an absent stored deployment, mismatched original ID/title
+and nonterminal status. Unknown history exposes no count or sole-row verdict.
+Application history uses the same complete-response and unique-ID requirements
+as Compose history; permissive historical readers retain their existing behavior.
+When original runtime admission exists, the existing fixed private runtime reader
+also reports current HTTP status, identity classification and task failure, without
+updating saved admission or the failed edge result. Managed values remain inside
+the service; the fixed reader receives only their comparison digests. No values,
+URLs, names, IDs, titles or raw health payload leave this projection. These provider
+reads settle nothing and give no qualification or retry credit. Changed original
+records discard the candidate observation. Use the qualified current checkout.
+
+After an applied physical route write, activation waits for the file provider's
+readback under the current lease and recovery guards. Only a pending reload is
+polled; foreign authority or other failures still refuse immediately. Expiry keeps
+the original operation unresolved. This wait sends no second writer and applies
+equally to the original forward and inverse directions.
 New retained-capability failures also emit bounded numeric locations in the
 generated Python program. Inspection exposes those locations and that recognized
 Python body's SHA-256 only for a matching, disabled, terminal capability run with
@@ -397,13 +417,38 @@ do not change any capability predicate, custody, retry or qualification rule.
 Public readiness observation and
 publication freshness use the same database clock.
 
-Private HTTP checks send one bounded request through the existing proxy's numeric
-TCP client and parse the complete response without following redirects. The
+New undeployed recipients use the existing testing application's DNSRR endpoint
+setting, with exact persistence checked before the first deployment. Configured
+runtime verification permits only that controlled setting; initial allocation
+and other Swarm options remain strict. Historical null/default records remain
+readable for recovery. An original configured-but-undeployed null endpoint may
+receive only this endpoint update at the existing configuration checkpoint after
+complete empty deployment history is verified. A saved deployment receipt or
+started deploy phase prevents that update. Existing deployed recipients are never
+retuned by this step. Recovery inspection still probes the owned task IP for
+current health diagnostics; it does not qualify the service backend or authorize
+publication. A deployed historical recipient that cannot qualify retains the
+existing explicit-refusal exit.
+
+Private HTTP checks resolve the published service name from the existing proxy
+with an absolute IPv4 DNS query and require its complete unique address set to
+identify the single owned task,
+before and after the request. They connect through that same name, preserve the numeric task-IP HTTP Host
+header, and verify
+full runtime identity, then recheck service, task and container continuity.
+A healthy task-IP probe cannot substitute for a failed service backend.
+Unavailable samples return the existing terminal failed frame with bounded
+source-line evidence, allowing the unchanged observation window to retry without
+waiting out a transport timeout. Private error text is never returned.
+The complete HTTP response is parsed without following redirects. The
 selected-image rehearsal in `qualityGate.test.testingRouteReaderRehearsal` runs
-the emitted program against that actual binary for healthy, redirect, HTTP
+the emitted program against real DNS and name-based HTTP in an isolated internal
+Docker network. With a DNS search suffix configured, assigning the canonical alias to two
+containers must be rejected before HTTP; removing the address-ownership check makes this case
+incorrectly reach a healthy response. It checks healthy, redirect, HTTP
 failure, malformed, truncated and wrong-identity responses. Set the existing
 `LAUNCHPLANE_TEST_TRAEFIK_IMAGE` to an already-local immutable image to run it
-locally. Its Swarm topology remains a finite fixture; it is no live-lane proof.
+locally. Its Swarm ownership remains a finite fixture; it is no live-lane proof.
 
 The exact completed activation permits an ordinary forward deployment to start
 with a fresh lifecycle baseline on the new application. It skips only the
@@ -447,6 +492,13 @@ unresolved activations remain unchanged; an unpublished activation retaining
 this exact recipient keeps its own interlock, even with no retained target
 reservations. This continuation never settles that operation. Independent
 original recipients and their custody remain preserved.
+Original deployment receipts use the provider deployment ID. Reads also recognize
+an exact historical successful wait receipt from that same operation; malformed
+receipts remain unproved. Recognition changes no stored bytes and supplies no
+custody by itself: complete singular history, original title, terminal status,
+placement, unchanged hold and original-operation guards still apply. Image
+evidence and candidate inspection use the same deployment-ID interpretation.
+
 A refusal or failure flag alone does not prove original effects settled. That
 proof belongs to the original operation's supported custody continuation.
 After a qualified lift, resume the original blocked operation through its own

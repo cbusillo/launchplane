@@ -58,7 +58,7 @@ value=json.loads(sys.stdin.read())
 with tempfile.TemporaryDirectory() as temporary:
     root=Path(temporary); contract=root/'contract.json'; evidence=root/'evidence.json'
     contract.write_text(json.dumps(value['contract'])); evidence.write_text(json.dumps(value['browser']))
-    argv=[sys.executable,'/opt/launchplane-readiness.py','--contract',str(contract),'--evidence',str(evidence)]
+    argv=[sys.executable,'/usr/local/bin/launchplane-readiness','--contract',str(contract),'--evidence',str(evidence)]
     prepared=subprocess.run(argv+['prepare'],capture_output=True,text=True,check=True)
     evidence.write_text(prepared.stdout)
     checked=subprocess.run(argv+['check'],capture_output=True,text=True,check=True)
