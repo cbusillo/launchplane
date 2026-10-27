@@ -2032,7 +2032,9 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                 patch.object(subprocess, "run", side_effect=command),
                 redirect_stdout(output),
             ):
-                exec(compile(rehearsal.python_heredoc(script), "<delivered-wrapper>", "exec"), {})
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(script)
             return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
 
         with (

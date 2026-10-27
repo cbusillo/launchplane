@@ -5,7 +5,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hmac
-import gzip
 import json
 from pathlib import Path
 import re
@@ -1292,23 +1291,10 @@ class OdooRehearsalAdapter:
             spec["business_validation_identity"] = business_validation_identity(
                 record, operation_key
             )
-        program = str(spec.pop("program"))
-        encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
-        # Keep both Dokploy's remote shell materializer and Python's argv small.
-        # The full reviewed record binding stays above; only the host's projection
-        # and reviewed program cross this transport, through Python's stdin.
-        program = "import sys\nsys.argv = ['rehearsal', " + repr(encoded) + "]\n" + program
-        packed = base64.b64encode(gzip.compress(program.encode(), mtime=0)).decode()
-        script = (
-            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_REHEARSAL'\n"
-            + "import base64, gzip\nexec(compile(gzip.decompress(base64.b64decode("
-            + repr(packed)
-            + ")), "
-            + repr(REHEARSAL_HOST_FILENAME)
-            + ", 'exec'), {})"
-            + "\nLP_REHEARSAL\n"
-        )
-        return script
+        from control_plane.host_package import host_schedule
+
+        spec.pop("program")
+        return host_schedule("rehearsal", spec)
 
     @staticmethod
     def validate_apply_script(record: OdooUpgradeRehearsalRecord, script: str) -> None:
