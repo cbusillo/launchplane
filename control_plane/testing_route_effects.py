@@ -3,12 +3,14 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
+import time
 from typing import Any
 from uuid import uuid4
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.testing_rebuild import REBUILD_ROUTE, REBUILD_SCOPE
 from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+from control_plane.dokploy.testing_route import TestingRoutePending
 from control_plane.dokploy.testing_route_execution import (
     TestingRouteExecutionCustody,
     TestingRouteExecutionIntent,
@@ -36,6 +38,7 @@ ROUTE_INITIALIZER_RECEIPT = REBUILD_ROUTE + ":route-initializer"
 ROUTE_WRITER_RECEIPT = REBUILD_ROUTE + ":route-writer"
 ROUTE_PREPARING = "testing-route-preparing"
 ROUTE_WRITING = "testing-route-writing"
+ROUTE_RELOAD_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -509,6 +512,23 @@ class TestingRouteEffects:
             if self.inverse:
                 raise NativeSourceUnavailable("The excluded inverse may retry on its current root.")
             return ProviderMutationOutcome(200, {"route_write_not_started": True})
-        if outcome != "applied" or not self.present():
+        if outcome != "applied":
             raise NativeSourceUnavailable("The original route writer requires observation.")
+        self.wait_for_applied_route(lease)
         return ProviderMutationOutcome(200)
+
+    def wait_for_applied_route(self, lease: ProviderOperationLease) -> None:
+        deadline = time.monotonic() + ROUTE_RELOAD_TIMEOUT_SECONDS
+        while True:
+            self.recovery_guard()
+            lease.assert_current()
+            try:
+                present = self.present()
+            except TestingRoutePending:
+                present = False
+            if present:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise NativeSourceUnavailable("The original route writer requires observation.")
+            time.sleep(min(1.0, remaining))

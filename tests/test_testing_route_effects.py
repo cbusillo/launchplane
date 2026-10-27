@@ -1,7 +1,8 @@
 """Persist actual emitted fence calls and recover without replaying a nonce."""
 
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+import time
 
 from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
 from control_plane.dokploy.native_copy_stream import (
@@ -166,6 +167,46 @@ class TestingRouteFenceControllerTests(unittest.TestCase):
         self.assertEqual(result.status, "adopted")
         self.assertEqual(self.fixture.remote_modes.count("publish_v2"), sends)
         self.assertEqual(self.fixture.route_file.read_bytes(), content)
+
+    def test_applied_forward_and_inverse_wait_for_the_file_provider_without_new_writers(
+        self,
+    ) -> None:
+        self.fixture.apply_immediately = False
+        with patch.object(time, "sleep", side_effect=lambda _: self.fixture.apply_document()):
+            self.assertEqual(self.run_switch().status, "completed")
+            self.assertEqual(self.run_switch(inverse=True).status, "completed")
+        self.assertEqual(self.fixture.remote_modes.count("publish_v2"), 2)
+        self.assertEqual(
+            json.loads(self.fixture.route_file.read_text()),
+            route_document(self.fixture.plan, self.fixture.plan.old_backend),
+        )
+
+    def test_unconverged_file_provider_keeps_the_original_writer_fenced(self) -> None:
+        self.fixture.apply_immediately = False
+        with (
+            patch("control_plane.testing_route_effects.ROUTE_RELOAD_TIMEOUT_SECONDS", 0),
+            self.assertRaises(NativeSourceUnavailable),
+        ):
+            self.run_switch()
+        self.assertEqual(self.fixture.remote_modes.count("publish_v2"), 1)
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+
+    def test_foreign_route_during_reload_is_not_retried(self) -> None:
+        from control_plane.dokploy.testing_route import TestingRouteAuthorityChanged
+
+        self.fixture.apply_immediately = False
+
+        def replace_route(_: float) -> None:
+            self.fixture.apply_document()
+            router = next(iter(self.fixture.raw["routers"].values()))
+            self.fixture.raw["routers"]["foreign@file"] = dict(router)
+
+        with (
+            patch.object(time, "sleep", side_effect=replace_route),
+            self.assertRaises(TestingRouteAuthorityChanged),
+        ):
+            self.run_switch()
+        self.assertEqual(self.fixture.remote_modes.count("publish_v2"), 1)
 
     def test_inverse_retries_on_a_new_root_and_keeps_original_physical_custody(self) -> None:
         from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT

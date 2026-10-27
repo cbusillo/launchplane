@@ -2,7 +2,7 @@
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import click
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
@@ -87,6 +87,9 @@ def register_testing_activation_routes(
                 from control_plane.testing_activation_inspection import (
                     inspect_application_activation,
                 )
+                from control_plane.testing_application_inspection import (
+                    inspect_application_candidate,
+                )
 
                 observed = await run_in_worker_thread(
                     lambda: inspect_application_activation(
@@ -99,6 +102,9 @@ def register_testing_activation_routes(
                         idempotency_key=idempotency_key.strip(),
                         trace_id=trace,
                         observe_original=adapter.observe,
+                        inspect_candidate=lambda record, key: inspect_application_candidate(
+                            cast("ApplicationActivationAdapter", adapter), record, key
+                        ),
                     )
                 )
                 return accepted_evidence_response(
