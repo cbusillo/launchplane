@@ -2123,8 +2123,10 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     record=Mock(ordinary_job_binding=None, updated_at=self.candidate.updated_at)
                 )
 
-                def close_then_interrupt(*, candidate: MergeTrainBatchCandidate) -> None:
-                    self.client.close_batch_pull_request(candidate=candidate)
+                def close_then_interrupt(
+                    *, candidate: MergeTrainBatchCandidate, reason: str
+                ) -> None:
+                    self.client.close_batch_pull_request(candidate=candidate, reason=reason)
                     raise RuntimeError("interrupted after close")
 
                 if interrupted:

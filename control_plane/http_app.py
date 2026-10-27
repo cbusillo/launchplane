@@ -1,4 +1,5 @@
 from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
+from control_plane import odoo_business_hours_config
 from control_plane import browser_route_repair
 from control_plane.access_policy_review import github_account_login, github_account_for_login
 from control_plane.dokploy_target_comparison import (
@@ -30,6 +31,7 @@ import secrets
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import cache
+from importlib.metadata import version as distribution_version
 from urllib.parse import unquote
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, MutableMapping
 from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
@@ -54,6 +56,7 @@ from control_plane.contracts.updater_proposal import (
 from control_plane.http_routes.updater_proposal import register_updater_proposal_route
 from control_plane.http_route_preparation import PreparedAPIRoute
 from control_plane.http_routes.support import run_in_worker_thread
+from control_plane.http_error_evidence import log_handled_error_cause
 from control_plane.http_routes.health_alert_drill import register_health_alert_drill_routes
 from fastapi.exceptions import RequestValidationError
 from control_plane.github_request_timing import github_request_tally
@@ -75,6 +78,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from requests.exceptions import RequestException
 from sqlalchemy.exc import SQLAlchemyError
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane import authz_grant_service as control_plane_authz_grant_service
@@ -203,6 +207,9 @@ from control_plane.authz_rule_retirement import (
 )
 from control_plane.http_routes.runtime_setting_removal import (
     register_runtime_setting_removal_routes,
+)
+from control_plane.http_routes.service_runtime_settings import (
+    register_service_runtime_settings_routes,
 )
 from control_plane.authz_retirement_evidence import build_retirement_evidence
 from control_plane.contracts.authz_retirement_evidence import (
@@ -357,22 +364,6 @@ from control_plane.contracts.agent_write_intent import (
     secret_evidence_for_agent_write_intent,
 )
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
-from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
-from control_plane.contracts.every_code_pr_feedback_record import (
-    EveryCodePrFeedbackRecord,
-    EveryCodePrFeedbackStatus,
-    apply_every_code_pr_feedback_status,
-)
-from control_plane.contracts.every_code_notifications import (
-    EveryCodeNotificationAttemptRecord,
-    EveryCodeNotificationPolicyRecord,
-)
-from control_plane.contracts.every_code_work_request import (
-    EveryCodeWorkRequestRecord,
-    EveryCodeWorkRequestStatusUpdate,
-    add_seconds_to_timestamp as add_lease_seconds,
-    requeue_every_code_work_request,
-)
 from control_plane.contracts.idempotency_record import (
     LaunchplaneIdempotencyRecord,
     build_launchplane_idempotency_record_id,
@@ -385,10 +376,14 @@ from control_plane.http_routes.release_review import (
 )
 from control_plane.release_review import (
     ProductionChangeRequiresPromotion,
+    PullRequestNotes,
     current_release_review,
+    read_pull_request_notes,
 )
 from control_plane.release_review_record import publish_release_decision
-from control_plane.release_invitation import publish_release_invitation, adopt_release_invitation
+from control_plane.release_invitation import adopt_release_invitation
+from control_plane.release_request import request_release_review
+from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
 from control_plane.github_app_webhook import GITHUB_APP_WEBHOOK_ROUTE
 from control_plane.provider_operations import (
@@ -720,6 +715,7 @@ from control_plane.workflows.odoo_preview_runtime import (
 )
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import (
+    product_config_target,
     LaunchplaneProductProfileRecord,
     ProductProfileChangedError,
     ProductExpectedConfigProfile,
@@ -765,6 +761,7 @@ from control_plane.contracts.testing_route_refresh import (
 )
 from control_plane.native_testing_route_refresh import plan_native_testing_route_refresh
 from control_plane.contracts.route_binding_record import (
+    RouteBindingExternalIngress,
     route_binding_record_sha256,
     EnvironmentRouteBindingRecord,
     redacted_route_binding_record,
@@ -772,6 +769,12 @@ from control_plane.contracts.route_binding_record import (
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.preview_override_authorization import (
+    director_preview_snapshot_allowed,
+)
+from control_plane.product_testing_restore_policy import director_testing_storage_allowed
+from control_plane.testing_address_storage import testing_health_url_correction_allowed
+from control_plane import artifact_scan as control_plane_artifact_scan
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
     NotificationPolicyScopeConflict,
@@ -780,11 +783,6 @@ from control_plane.drivers import native_routes
 from control_plane.drivers.route_paths import (
     INGRESS_ROUTE_APPLY_ROUTE as _INGRESS_ROUTE_APPLY_ROUTE,
 )
-from control_plane.every_code_work_request_write import (
-    EveryCodeWorkRequestCreateEnvelope,
-    build_every_code_work_request_record,
-)
-from control_plane.every_code_notifications_delivery import deliver_every_code_blocked_notifications
 from control_plane.notifications import post_discord_webhook
 from control_plane.preview_pr_feedback_notifications import (
     deliver_preview_pr_feedback_notifications,
@@ -923,11 +921,6 @@ from control_plane.health_monitor_status import (
     HealthMonitorStatusResponse,
     read_health_monitor_status,
 )
-from control_plane.production_delivery_monitor import (
-    RefusedProductionRequestReconciliation,
-    reconcile_refused_production_requests,
-)
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import (
     DbOnlyMutationPreflightResult,
     DbOnlyMutationRequest,
@@ -938,7 +931,9 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
     RouteBindingReconcileWriteResult,
 )
-from control_plane.workflows.product_onboarding import plan_product_onboarding_authority_bundle
+from control_plane.workflows.product_onboarding import (
+    plan_product_onboarding_authority_bundle,
+)
 from control_plane.workflows.public_ingress_monitor import (
     RUNTIME_IDENTITY_CONFIRMATION_DELAY_SECONDS,
     PublicIngressMonitorStore,
@@ -1015,6 +1010,7 @@ from control_plane.http_routes.testing_verification import register_testing_veri
 from control_plane.http_routes.testing_generation_retirement import (
     register_testing_generation_retirement_routes,
 )
+from control_plane.http_routes.testing_address import register_testing_address_routes
 from control_plane.http_routes.product_website_cleanup import (
     register_product_website_cleanup_routes,
 )
@@ -1085,9 +1081,6 @@ _ODOO_ADDON_SETTINGS_MAX_BODY_BYTES = 16 * 1024
 _INTEGRATION_ALLOWANCES_MAX_BODY_BYTES = 16 * 1024
 _INTEGRATION_ALLOWANCES_DENIED_MESSAGE = (
     "Workflow cannot read or change integration allowances for the requested product/context."
-)
-_INTEGRATION_ALLOWANCES_NOT_FOUND_MESSAGE = (
-    "Odoo product lane was not found for the requested allowances."
 )
 _TESTING_HOLD_MAX_BODY_BYTES = 8 * 1024
 _TESTING_HOLD_DENIED_MESSAGE = (
@@ -1271,7 +1264,6 @@ _BOUNDED_REQUEST_BODY_CONTRACTS: dict[str, tuple[str, int, bool, bool]] = {
 _DOKPLOY_TARGET_SETUP_ROUTE = "/v1/dokploy-targets/setup"
 _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE = "/v1/products/public-ingress-monitor/run-once"
 _PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/public-ingress/notification-policies/apply"
-_EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE = "/v1/every-code/notification-policies/apply"
 _PREVIEW_PR_FEEDBACK_NOTIFICATION_POLICY_APPLY_ROUTE = (
     "/v1/previews/pr-feedback/notification-policies/apply"
 )
@@ -1366,7 +1358,7 @@ def _local_operator_product_config_scope_refusal(
     context = product_config_request.context
     if context:
         try:
-            owners = product_context_owners(record_store)
+            owners = product_context_owners(record_store, config_scopes=True)
         except TypeError:
             return "Product profile records are unavailable to confirm the context's product."
         if not is_exclusive_product_lane_context(
@@ -1400,10 +1392,6 @@ def _lane_setup_context_owner(*, record_store: object, context: str) -> str:
 
 
 _AGENT_WRITE_INTENT_EVALUATE_ROUTE = "/v1/agent/write-intents/evaluate"
-_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE = "/v1/every-code/work-requests/rerun"
-_EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE = "/v1/every-code/work-requests/heartbeat"
-_EVERY_CODE_WORK_REQUEST_RECOVER_STALE_ROUTE = "/v1/every-code/work-requests/recover-stale"
-_AGENT_WRITE_INTENT_MAX_AGE = timedelta(hours=24)
 _DB_ONLY_MUTATION_LEASE = timedelta(minutes=5)
 
 
@@ -1425,6 +1413,8 @@ class ProductProfileWriteStore(Protocol):
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> object: ...
 
+    def write_product_authority_bundle(self, bundle: ProductAuthorityBundle) -> None: ...
+
 
 class PreviewDesiredStateWriteStore(Protocol):
     def write_preview_desired_state_record(
@@ -1439,11 +1429,22 @@ class OAuthLoginStateRepository(Protocol):
     def pop(self, state: str) -> OAuthLoginState | None: ...
 
 
+class LaunchplaneErrorDetails(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    blocking_deployment_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+
 class LaunchplaneErrorDetail(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: str
     message: str
+    reason: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,79}$",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class LaunchplaneErrorResponse(BaseModel):
@@ -1452,6 +1453,9 @@ class LaunchplaneErrorResponse(BaseModel):
     status: str = "rejected"
     trace_id: str
     error: LaunchplaneErrorDetail
+    details: LaunchplaneErrorDetails | None = Field(
+        default=None, json_schema_extra={"x-launchplane-optional-response": True}
+    )
     records: dict[str, str] | None = Field(
         default=None,
         json_schema_extra={"x-launchplane-optional-response": True},
@@ -1801,21 +1805,6 @@ def _asgi_header_values(*, scope: Scope, name: str) -> list[str]:
     return header_values
 
 
-def _http_status_text(status_code: int) -> str:
-    return {
-        200: "OK",
-        202: "Accepted",
-        400: "Bad Request",
-        401: "Unauthorized",
-        403: "Forbidden",
-        404: "Not Found",
-        405: "Method Not Allowed",
-        409: "Conflict",
-        503: "Service Unavailable",
-        500: "Internal Server Error",
-    }.get(status_code, "OK")
-
-
 async def _send_launchplane_error_response(
     *,
     scope: Scope,
@@ -1977,95 +1966,6 @@ class VeriReelProdBackupGateOperationWorkerReconcileResponse(BaseModel):
     status: Literal["ok"] = "ok"
     trace_id: str
     reconcile_result: VeriReelProdBackupGateOperationWorkerReconcileResultResponse
-
-
-class EveryCodeWorkRequestClaimEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    host: str
-    lease_seconds: int = Field(default=1800, ge=60, le=86400)
-
-    @model_validator(mode="after")
-    def _validate_claim(self) -> "EveryCodeWorkRequestClaimEnvelope":
-        if not self.request_id.strip():
-            raise ValueError("Every Code work request claim requires request_id")
-        if not self.host.strip():
-            raise ValueError("Every Code work request claim requires host")
-        return self
-
-
-class EveryCodeWorkRequestHeartbeatEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    host: str
-    fencing_token: int = Field(ge=1)
-    lease_seconds: int = Field(default=1800, ge=60, le=86400)
-
-    @model_validator(mode="after")
-    def _validate_heartbeat(self) -> "EveryCodeWorkRequestHeartbeatEnvelope":
-        if not self.request_id.strip():
-            raise ValueError("Every Code heartbeat requires request_id")
-        if not self.host.strip():
-            raise ValueError("Every Code heartbeat requires host")
-        return self
-
-
-class EveryCodeWorkRequestStatusEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    host: str
-    state: Literal["running", "done", "blocked"]
-    fencing_token: int = Field(ge=1)
-    result_pr_url: str = ""
-    result_summary: str = ""
-    error_message: str = ""
-    updated_at: str = ""
-
-    @model_validator(mode="after")
-    def _validate_status(self) -> "EveryCodeWorkRequestStatusEnvelope":
-        if not self.request_id.strip():
-            raise ValueError("Every Code work request status requires request_id")
-        if not self.host.strip():
-            raise ValueError("Every Code work request status requires host")
-        return self
-
-
-class EveryCodeWorkRequestRerunEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    request_id: str
-    trigger_actor: str = ""
-    source_url: str = ""
-    agent_write_intent_record_id: str = ""
-
-    @model_validator(mode="after")
-    def _validate_rerun(self) -> "EveryCodeWorkRequestRerunEnvelope":
-        if not self.request_id.strip():
-            raise ValueError("Every Code work request rerun requires request_id")
-        self.request_id = self.request_id.strip()
-        self.trigger_actor = self.trigger_actor.strip()
-        self.source_url = self.source_url.strip()
-        self.agent_write_intent_record_id = self.agent_write_intent_record_id.strip()
-        return self
-
-
-class EveryCodePrFeedbackStatusEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    feedback_id: str
-    request_id: str
-    status: EveryCodePrFeedbackStatus
-
-    @model_validator(mode="after")
-    def _validate_status(self) -> "EveryCodePrFeedbackStatusEnvelope":
-        if not self.feedback_id.strip():
-            raise ValueError("Every Code PR feedback status requires feedback_id")
-        if not self.request_id.strip():
-            raise ValueError("Every Code PR feedback status requires request_id")
-        return self
 
 
 class ProductOnboardingApplyEnvelope(BaseModel):
@@ -2492,20 +2392,6 @@ class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
         return self
 
 
-class EveryCodeNotificationPolicyApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
-    policy: EveryCodeNotificationPolicyRecord
-    reason: str = ""
-
-    @model_validator(mode="after")
-    def _validate_request(self) -> "EveryCodeNotificationPolicyApplyEnvelope":
-        self.reason = self.reason.strip()
-        return self
-
-
 class PreviewPrFeedbackNotificationPolicyApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2753,6 +2639,10 @@ class RouteBindingReconcileEnvelope(BaseModel):
     context: str
     instance: str
     expected_current: control_plane_route_binding_reconcile.RouteBindingExpectedCurrent
+    external_ingress: RouteBindingExternalIngress | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     source_label: str = "operator-reconcile"
     browser_review: browser_route_repair.BrowserRouteRepairRequest | None = Field(
         default=None, exclude_if=lambda value: value is None
@@ -2902,13 +2792,6 @@ class _PublicIngressNotificationPolicyApplyStore(Protocol):
         record: PublicIngressNotificationPolicyRecord,
         *,
         protect_scope: bool = False,
-    ) -> object: ...
-
-
-class _EveryCodeNotificationPolicyApplyStore(Protocol):
-    def write_every_code_notification_policy_record(
-        self,
-        record: EveryCodeNotificationPolicyRecord,
     ) -> object: ...
 
 
@@ -3098,9 +2981,6 @@ class PublicIngressMonitorRunOnceRequest(BaseModel):
     product: str = "launchplane"
     timeout_seconds: int = Field(default=10, ge=1, le=120)
     notify: bool = True
-    refused_production_requests: tuple[RefusedProductionRequestReconciliation, ...] = Field(
-        default=(), max_length=100
-    )
 
     @model_validator(mode="after")
     def _validate_request(self) -> "PublicIngressMonitorRunOnceRequest":
@@ -3110,122 +2990,8 @@ class PublicIngressMonitorRunOnceRequest(BaseModel):
         return self
 
 
-class _EveryCodeWorkRequestWriteStore(Protocol):
-    def write_every_code_work_request_record(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> object: ...
-
-
-class _EveryCodeWorkRequestClaimStore(Protocol):
-    def claim_every_code_work_request_record(
-        self,
-        *,
-        request_id: str,
-        host: str,
-        claimed_at: str,
-        lease_seconds: int = 1800,
-        idempotency_record_factory: (
-            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
-        ) = None,
-    ) -> EveryCodeWorkRequestRecord | None: ...
-
-
-class _EveryCodeWorkRequestHeartbeatStore(Protocol):
-    def heartbeat_every_code_work_request_record(
-        self,
-        *,
-        request_id: str,
-        host: str,
-        fencing_token: int,
-        heartbeat_at: str,
-        lease_expires_at: str,
-    ) -> bool: ...
-
-
-class _EveryCodeWorkRequestStaleStore(Protocol):
-    def list_stale_every_code_work_request_records(
-        self,
-        *,
-        as_of: str,
-        limit: int = 50,
-    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
-
-    def recover_stale_every_code_work_request_record(
-        self,
-        *,
-        expected_record: EveryCodeWorkRequestRecord,
-        recovered_at: str,
-    ) -> EveryCodeWorkRequestRecord | None: ...
-
-
-class _EveryCodeWorkRequestStatusStore(Protocol):
-    def update_every_code_work_request_status_record(
-        self,
-        *,
-        request_id: str,
-        update: EveryCodeWorkRequestStatusUpdate,
-    ) -> EveryCodeWorkRequestRecord: ...
-
-
-class _EveryCodeWorkRequestRerunStore(Protocol):
-    def read_every_code_work_request_record(
-        self, request_id: str
-    ) -> EveryCodeWorkRequestRecord: ...
-
-    def compare_and_write_every_code_work_request_record(
-        self,
-        *,
-        expected_record: EveryCodeWorkRequestRecord,
-        record: EveryCodeWorkRequestRecord,
-        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
-    ) -> Literal["updated", "changed", "missing"]: ...
-
-
-class _AgentWriteIntentRecordReadStore(Protocol):
-    def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord: ...
-
-    def list_agent_write_intent_records(
-        self,
-        *,
-        product: str = "",
-        context_name: str = "",
-        status: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[AgentWriteIntentRecord, ...]: ...
-
-
 class _AgentWriteIntentRecordWriteStore(Protocol):
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> object: ...
-
-
-class _EveryCodePrFeedbackReadStore(Protocol):
-    def list_every_code_pr_feedback_records(
-        self,
-        *,
-        request_id: str = "",
-        repository: str = "",
-        pr_number: int | None = None,
-        status: str = "",
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
-
-
-class _EveryCodePrFeedbackWriteStore(Protocol):
-    def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object: ...
-
-
-class _EveryCodePrFeedbackStatusStore(
-    _EveryCodePrFeedbackReadStore, _EveryCodePrFeedbackWriteStore, Protocol
-):
-    pass
-
-
-class _EveryCodePreviewGateWriteStore(Protocol):
-    def write_every_code_preview_gate_record(
-        self, record: EveryCodePreviewGateRecord
-    ) -> object: ...
 
 
 def require_product_profile_write_store(record_store: object) -> ProductProfileWriteStore:
@@ -3234,6 +3000,7 @@ def require_product_profile_write_store(record_store: object) -> ProductProfileW
         for method_name in (
             "read_product_profile_record",
             "write_product_profile_record",
+            "write_product_authority_bundle",
         )
         if not callable(getattr(record_store, method_name, None))
     ]
@@ -3667,8 +3434,15 @@ def canonical_product_config_request_payload(payload: dict[str, object]) -> dict
     normalized_payload = control_plane_product_config.normalize_product_config_payload(
         request.product_config_payload()
     )
+    if request.odoo_business_hours is not None:
+        normalized_payload.pop("runtime_env", None)
     return {
         **normalized_payload,
+        **(
+            {"reviewed_plan_sha256": request.reviewed_plan_sha256}
+            if request.reviewed_plan_sha256
+            else {}
+        ),
         "mode": request.mode,
         "source_label": request.source_label,
         "reason": request.reason,
@@ -3682,6 +3456,7 @@ def product_config_continuity_payload(payload: dict[str, object]) -> dict[str, o
     continuity_payload.pop("reason", None)
     continuity_payload.pop("confirmation", None)
     continuity_payload.pop("source_label", None)
+    continuity_payload.pop("reviewed_plan_sha256", None)
     return continuity_payload
 
 
@@ -3764,7 +3539,7 @@ def product_config_dry_run_exists(
     identity: LaunchplaneIdentity,
     request_payload: dict[str, object],
     route_path: str = _PRODUCT_CONFIG_APPLY_ROUTE,
-    public_hosts_plan_digest: str = "",
+    authority_plan_digest: str = "",
 ) -> bool:
     idempotency_store = idempotency_capable_store(record_store)
     if idempotency_store is None:
@@ -3776,7 +3551,7 @@ def product_config_dry_run_exists(
         scope=idempotency_scope(identity),
         route_path=route_path,
         idempotency_key=product_config_dry_run_key(request_payload)
-        + (":" + public_hosts_plan_digest if public_hosts_plan_digest else ""),
+        + (":" + authority_plan_digest if authority_plan_digest else ""),
     )
     return stored_record is not None and stored_record.request_fingerprint == continuity_fingerprint
 
@@ -3795,13 +3570,13 @@ def store_product_config_dry_run_record(
     trace_id: str,
     response: BaseModel,
     route_path: str = _PRODUCT_CONFIG_APPLY_ROUTE,
-    public_hosts_plan_digest: str = "",
+    authority_plan_digest: str = "",
 ) -> None:
     idempotency_store = idempotency_capable_store(record_store)
     if idempotency_store is None:
         return
     dry_run_idempotency_key = product_config_dry_run_key(request_payload) + (
-        ":" + public_hosts_plan_digest if public_hosts_plan_digest else ""
+        ":" + authority_plan_digest if authority_plan_digest else ""
     )
     dry_run_request_fingerprint = product_config_request_fingerprint(
         product_config_continuity_payload(request_payload)
@@ -3950,21 +3725,6 @@ def _public_ingress_notification_policy_summary(
         "status": policy.status,
         "reminder_interval_seconds": policy.reminder_interval_seconds,
         "purpose": policy.purpose,
-        "destination_count": len(policy.destinations),
-        "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
-        "created_at": policy.created_at,
-        "updated_at": policy.updated_at,
-        "source": policy.source,
-    }
-
-
-def _every_code_notification_policy_summary(
-    policy: EveryCodeNotificationPolicyRecord,
-) -> dict[str, object]:
-    return {
-        "policy_id": policy.policy_id,
-        "repository": policy.repository,
-        "status": policy.status,
         "destination_count": len(policy.destinations),
         "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
         "created_at": policy.created_at,
@@ -4413,7 +4173,6 @@ def create_launchplane_fastapi_app(
     control_plane_root_path: FilePath | None = None,
     state_dir: FilePath | None = None,
     repository_evidence_provider: (RepositoryEvidenceProvider | None) = None,
-    every_code_discord_sender: Callable[[str, dict[str, object]], object] = post_discord_webhook,
     preview_pr_feedback_discord_sender: Callable[
         [str, dict[str, object]], object
     ] = post_discord_webhook,
@@ -4423,6 +4182,9 @@ def create_launchplane_fastapi_app(
     github_app_webhook_handler: GitHubAppWebhookHandler | None = None,
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
+    product_review_notes_reader: (
+        Callable[[LaunchplaneProductProfileRecord, int, str], PullRequestNotes] | None
+    ) = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
     preview_lifecycle_scheduler: PreviewLifecycleScheduler | None = None,
@@ -4536,7 +4298,9 @@ def create_launchplane_fastapi_app(
             if isinstance(shared_record_store, PostgresRecordStore):
                 shared_record_store.close()
 
-    app = _LaunchplaneFastAPI(title="Launchplane API", version="0.1.0", lifespan=lifespan)
+    app = _LaunchplaneFastAPI(
+        title="Launchplane API", version=distribution_version("launchplane"), lifespan=lifespan
+    )
     app.state.authz_policy_runtime = resolved_authz_policy_runtime
     app.add_middleware(BoundedRequestBodyMiddleware)
     enforce_human_policy_revalidation = False
@@ -5335,6 +5099,20 @@ def create_launchplane_fastapi_app(
             )
         )
 
+    def read_release_request_mutation_identity(
+        request: Request,
+        response: Response,
+        authorization: Annotated[str, Header(alias="Authorization")] = "",
+        cookie: Annotated[str, Header(alias="Cookie")] = "",
+    ) -> LaunchplaneIdentity:
+        return resolve_browser_mutation_identity(
+            request=request,
+            response=response,
+            authorization=authorization,
+            cookie=cookie,
+            allow_owner=True,
+        )
+
     def require_github_human_identity(identity: LaunchplaneIdentity) -> GitHubHumanIdentity:
         if not isinstance(identity, GitHubHumanIdentity):
             raise _launchplane_http_error(
@@ -5505,13 +5283,6 @@ def create_launchplane_fastapi_app(
             trace_id,
         )
         return JSONResponse(status_code=status_code, content=payload)
-
-    def read_every_code_work_request_worker_write_identity(
-        authorization: Annotated[str, Header(alias="Authorization")] = "",
-    ) -> LaunchplaneIdentity | None:
-        if every_code_worker_token_authorized(authorization):
-            return None
-        return read_write_identity(authorization=authorization)
 
     def read_write_identity(
         authorization: Annotated[str, Header(alias="Authorization")] = "",
@@ -6175,7 +5946,7 @@ def create_launchplane_fastapi_app(
             ),
         )
 
-    def require_every_code_read_methods(
+    def require_agent_write_intent_methods(
         record_store: object,
         *,
         required_methods: tuple[str, ...],
@@ -6190,89 +5961,10 @@ def create_launchplane_fastapi_app(
             missing_summary = ", ".join(missing_methods)
             raise TypeError(f"record store does not support {capability}: {missing_summary}")
 
-    def require_every_code_work_request_write_store(
-        record_store: object,
-    ) -> _EveryCodeWorkRequestWriteStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("write_every_code_work_request_record",),
-            capability="Every Code work request writes",
-        )
-        return cast(_EveryCodeWorkRequestWriteStore, record_store)
-
-    def require_every_code_work_request_claim_store(
-        record_store: object,
-    ) -> _EveryCodeWorkRequestClaimStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("claim_every_code_work_request_record",),
-            capability="Every Code work request claim writes",
-        )
-        return cast(_EveryCodeWorkRequestClaimStore, record_store)
-
-    def require_every_code_work_request_heartbeat_store(
-        record_store: object,
-    ) -> _EveryCodeWorkRequestHeartbeatStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("heartbeat_every_code_work_request_record",),
-            capability="Every Code work request heartbeat writes",
-        )
-        return cast(_EveryCodeWorkRequestHeartbeatStore, record_store)
-
-    def require_every_code_work_request_stale_store(
-        record_store: object,
-    ) -> _EveryCodeWorkRequestStaleStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=(
-                "list_stale_every_code_work_request_records",
-                "recover_stale_every_code_work_request_record",
-            ),
-            capability="Every Code stale work request recovery",
-        )
-        return cast(_EveryCodeWorkRequestStaleStore, record_store)
-
-    def require_every_code_work_request_status_store(
-        record_store: object,
-    ) -> _EveryCodeWorkRequestStatusStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("update_every_code_work_request_status_record",),
-            capability="Every Code work request status writes",
-        )
-        return cast(_EveryCodeWorkRequestStatusStore, record_store)
-
-    def require_every_code_work_request_rerun_store(
-        record_store: object,
-    ) -> _EveryCodeWorkRequestRerunStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=(
-                "read_every_code_work_request_record",
-                "compare_and_write_every_code_work_request_record",
-            ),
-            capability="Every Code work request rerun writes",
-        )
-        return cast(_EveryCodeWorkRequestRerunStore, record_store)
-
-    def require_agent_write_intent_read_store(
-        record_store: object,
-    ) -> _AgentWriteIntentRecordReadStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=(
-                "read_agent_write_intent_record",
-                "list_agent_write_intent_records",
-            ),
-            capability="agent write-intent evidence reads",
-        )
-        return cast(_AgentWriteIntentRecordReadStore, record_store)
-
     def require_agent_write_intent_write_store(
         record_store: object,
     ) -> _AgentWriteIntentRecordWriteStore:
-        require_every_code_read_methods(
+        require_agent_write_intent_methods(
             record_store,
             required_methods=("write_agent_write_intent_record",),
             capability="agent write-intent records",
@@ -6312,168 +6004,6 @@ def create_launchplane_fastapi_app(
             policy_record_id=policy_record.record_id,
             policy_sha256=policy_record.policy_sha256,
         )
-
-    def reject_agent_write_intent(
-        *, trace_id: str, code: str, message: str, record_id: str = ""
-    ) -> HTTPException:
-        detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
-        if record_id:
-            detail["records"] = {"agent_write_intent_record_id": record_id}
-        return LaunchplaneHTTPException(
-            status_code=404 if code == "agent_write_intent_not_found" else 409,
-            detail=detail,
-        )
-
-    def validate_every_code_rerun_write_intent(
-        *,
-        record_store: object,
-        rerun_request: EveryCodeWorkRequestRerunEnvelope,
-        idempotency_key: str,
-        now: datetime,
-        trace_id: str,
-    ) -> AgentWriteIntentRecord | None:
-        record_id = rerun_request.agent_write_intent_record_id.strip()
-        if not record_id:
-            return None
-        try:
-            record = require_agent_write_intent_read_store(
-                record_store
-            ).read_agent_write_intent_record(record_id)
-        except FileNotFoundError as error:
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_not_found",
-                message="Agent write-intent evidence record was not found.",
-                record_id=record_id,
-            ) from error
-        if (
-            record.evaluation.status != "allowed"
-            or record.evaluation.intent != "every_code_rerun"
-            or record.evaluation.mode != "apply"
-            or not record.evaluation.safe_to_execute
-        ):
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_not_executable",
-                message=(
-                    "Every Code rerun requires an allowed apply-mode "
-                    "every_code_rerun intent record."
-                ),
-                record_id=record.record_id,
-            )
-        if (
-            record.evaluation.product != "launchplane"
-            or record.evaluation.context != _LAUNCHPLANE_SERVICE_CONTEXT
-        ):
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_scope_mismatch",
-                message=(
-                    "Agent write-intent evidence does not match the Every Code "
-                    "rerun product/context."
-                ),
-                record_id=record.record_id,
-            )
-        if record.evaluation.authz_action != "every_code_work_request.rerun":
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_action_mismatch",
-                message="Agent write-intent evidence was evaluated for a different route action.",
-                record_id=record.record_id,
-            )
-        if rerun_request.source_url and rerun_request.source_url != record.request.source_url:
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_source_mismatch",
-                message="Every Code rerun source_url does not match the write-intent source_url.",
-                record_id=record.record_id,
-            )
-        if idempotency_key and record.idempotency_key and idempotency_key != record.idempotency_key:
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_idempotency_mismatch",
-                message=(
-                    "Every Code rerun idempotency key does not match the write-intent evidence."
-                ),
-                record_id=record.record_id,
-            )
-        try:
-            recorded_at = parse_utc_timestamp(record.recorded_at)
-        except ValueError as error:
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_stale",
-                message="Agent write-intent evidence timestamp is invalid or stale.",
-                record_id=record.record_id,
-            ) from error
-        if recorded_at > now or now - recorded_at > _AGENT_WRITE_INTENT_MAX_AGE:
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_stale",
-                message="Agent write-intent evidence is too old for Every Code rerun execution.",
-                record_id=record.record_id,
-            )
-        return record
-
-    def matching_every_code_rerun_intent_record(
-        *, record_store: object, source_url: str, now: datetime
-    ) -> AgentWriteIntentRecord | None:
-        for record in require_agent_write_intent_read_store(
-            record_store
-        ).list_agent_write_intent_records(
-            product="launchplane",
-            context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-            status="allowed",
-            limit=50,
-        ):
-            if record.evaluation.intent != "every_code_rerun":
-                continue
-            if record.evaluation.mode != "apply" or not record.evaluation.safe_to_execute:
-                continue
-            if record.evaluation.authz_action != "every_code_work_request.rerun":
-                continue
-            if record.request.source_url != source_url:
-                continue
-            try:
-                recorded_at = parse_utc_timestamp(record.recorded_at)
-            except ValueError:
-                continue
-            if recorded_at <= now and now - recorded_at <= _AGENT_WRITE_INTENT_MAX_AGE:
-                return record
-        return None
-
-    def require_every_code_pr_feedback_write_store(
-        record_store: object,
-    ) -> _EveryCodePrFeedbackWriteStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("write_every_code_pr_feedback_record",),
-            capability="Every Code PR feedback writes",
-        )
-        return cast(_EveryCodePrFeedbackWriteStore, record_store)
-
-    def require_every_code_pr_feedback_status_store(
-        record_store: object,
-    ) -> _EveryCodePrFeedbackStatusStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=(
-                "list_every_code_pr_feedback_records",
-                "write_every_code_pr_feedback_record",
-            ),
-            capability="Every Code PR feedback status writes",
-        )
-        return cast(_EveryCodePrFeedbackStatusStore, record_store)
-
-    def require_every_code_preview_gate_write_store(
-        record_store: object,
-    ) -> _EveryCodePreviewGateWriteStore:
-        require_every_code_read_methods(
-            record_store,
-            required_methods=("write_every_code_preview_gate_record",),
-            capability="Every Code preview gate writes",
-        )
-        return cast(_EveryCodePreviewGateWriteStore, record_store)
 
     def merge_train_policy_not_configured_error(
         *, trace_id: str, error: MergeTrainPolicyStoreMissingError
@@ -7384,11 +6914,41 @@ def create_launchplane_fastapi_app(
                 current_profile = lane_store.read_product_profile_record(product_profile.product)
                 if current_profile != product_profile:
                     raise DisposableLaneSafetyUnknown("The preview profile changed; plan again.")
+                if service_apply_request.preserve_original_reservation_id:
+                    from control_plane.preview_preservation import (
+                        require_preview_preservation_admission,
+                    )
+
+                    authority = require_preview_preservation_admission(
+                        store=cast(PostgresRecordStore, record_store),
+                        profile=current_profile,
+                        issued_plan=issued_plan,
+                        original_reservation_id=service_apply_request.preserve_original_reservation_id,
+                        operation_record_id=preview_apply_operation.adapter._deployment_record_id,
+                        captured_schedule_binding=preview_apply_operation.adapter.schedule_binding,
+                    )
+                    if preview_binding and authority.preservation_id != preview_binding:
+                        raise DisposableLaneSafetyUnknown(
+                            "Original preservation authority changed."
+                        )
+                    preview_binding = authority.preservation_id
+                    return
                 preview = resolve_disposable_preview(
-                    lane_store, current_profile, issued_plan.context, issued_plan.preview_slug
+                    lane_store,
+                    current_profile,
+                    issued_plan.context,
+                    issued_plan.preview_slug,
+                    allow_destroyed=issued_plan.operation == "refresh",
                 )
                 compose_id = issued_plan.dry_run_plan.compose_ref
-                if not compose_id or compose_id.startswith("${created."):
+                creating_recipient = (
+                    issued_plan.operation == "refresh"
+                    and preview.state == "destroyed"
+                    and compose_id.startswith("${created.composeId:")
+                )
+                if not creating_recipient and (
+                    not compose_id or compose_id.startswith("${created.")
+                ):
                     raise DisposableLaneSafetyUnknown(
                         "The existing preview target is not resolved."
                     )
@@ -7398,11 +6958,15 @@ def create_launchplane_fastapi_app(
                     )
                 except FileNotFoundError:
                     target_id = None
-                if (target_id is not None and compose_id != target_id.target_id) or any(
-                    item.target_id == compose_id
-                    and (item.context, item.instance)
-                    != (issued_plan.context, issued_plan.preview_slug)
-                    for item in lane_store.list_dokploy_target_id_records()
+                if (
+                    (creating_recipient and target_id is not None)
+                    or (target_id is not None and compose_id != target_id.target_id)
+                    or any(
+                        item.target_id == compose_id
+                        and (item.context, item.instance)
+                        != (issued_plan.context, issued_plan.preview_slug)
+                        for item in lane_store.list_dokploy_target_id_records()
+                    )
                 ):
                     raise DisposableLaneSafetyUnknown(
                         "The discovered preview target changed or aliases another lane."
@@ -7413,12 +6977,12 @@ def create_launchplane_fastapi_app(
                     context=issued_plan.context,
                     instance=issued_plan.preview_slug,
                     preview=preview,
-                    preview_refresh=issued_plan.operation == "refresh",
+                    preview_operation=issued_plan.operation,
                 )
                 if preview_binding and binding != preview_binding:
                     raise DisposableLaneSafetyUnknown("Preview bindings changed; plan again.")
                 preview_binding = binding
-            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+            except (DisposableLaneSafetyUnknown, FileNotFoundError, ValueError) as error:
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
@@ -7444,7 +7008,7 @@ def create_launchplane_fastapi_app(
             observe_apply=observe_odoo_preview_apply_result,
             supersession_is_quiescent=odoo_preview_supersession_is_quiescent,
             pre_mutation_guard=preview_checkpoint if director_preview_apply else None,
-            qualify_existing_refresh=director_preview_apply and issued_plan.operation == "refresh",
+            qualify_existing_preview=director_preview_apply,
         )
         try:
             response = await run_provider_operation_http(
@@ -8678,27 +8242,21 @@ def create_launchplane_fastapi_app(
         context: str,
         instance: str,
         trace_id: str,
-        not_found_message: str,
     ) -> None:
-        # Authorization names a product; storage selects by context and instance, so
-        # prove the product owns the lane before reading or writing it.
         try:
-            resolve_odoo_post_deploy_product_route(
-                record_store=record_store, product=product, context=context, instance=instance
+            control_plane_product_config_service.resolve_product_config_profile(
+                cast(control_plane_product_config_service.ProductConfigProfileReader, record_store),
+                product=product,
+                context=context,
+                instance=instance,
             )
-        except OdooPostDeployRouteDependencyError as error:
+        except control_plane_product_config.ProductConfigError as error:
+            profile_error = control_plane_product_config_service.product_config_service_error(error)
             raise _launchplane_http_error(
-                status_code=404,
+                status_code=profile_error.status_code,
                 trace_id=trace_id,
-                code="not_found",
-                message=not_found_message,
-            ) from error
-        except OdooPostDeployProductMismatchError as error:
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="product_driver_mismatch",
-                message="Product is not configured for the requested driver route.",
+                code=profile_error.code,
+                message=profile_error.message,
             ) from error
         except ValueError as error:
             raise _launchplane_http_error(
@@ -8742,7 +8300,6 @@ def create_launchplane_fastapi_app(
             context=context,
             instance=instance,
             trace_id=trace_id,
-            not_found_message=_INTEGRATION_ALLOWANCES_NOT_FOUND_MESSAGE,
         )
         try:
             result = control_plane_integration_allowances.read_integration_allowances(
@@ -8822,7 +8379,6 @@ def create_launchplane_fastapi_app(
             context=allowances_request.context,
             instance=allowances_request.instance,
             trace_id=trace_id,
-            not_found_message=_INTEGRATION_ALLOWANCES_NOT_FOUND_MESSAGE,
         )
         typed_store = cast(
             control_plane_integration_allowances.IntegrationAllowancesStore, record_store
@@ -8943,26 +8499,6 @@ def create_launchplane_fastapi_app(
         )
         return response
 
-    def _require_testing_hold_lane(
-        *, record_store: object, product: str, context: str, instance: str, trace_id: str
-    ) -> None:
-        # The hold is target policy, independent of the product's deploy driver.
-        try:
-            control_plane_product_config_service.resolve_product_config_profile(
-                cast(control_plane_product_config_service.ProductConfigProfileReader, record_store),
-                product=product,
-                context=context,
-                instance=instance,
-            )
-        except control_plane_product_config.ProductConfigError as error:
-            profile_error = control_plane_product_config_service.product_config_service_error(error)
-            raise _launchplane_http_error(
-                status_code=profile_error.status_code,
-                trace_id=trace_id,
-                code=profile_error.code,
-                message=profile_error.message,
-            ) from error
-
     async def read_testing_hold(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
@@ -8991,7 +8527,7 @@ def create_launchplane_fastapi_app(
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
             read_action="product_environment.read",
         )
-        _require_testing_hold_lane(
+        _require_lane_product_config_lane(
             record_store=record_store,
             product=product,
             context=context,
@@ -9159,7 +8695,7 @@ def create_launchplane_fastapi_app(
                 code="local_operator_lane_scope_required",
                 message="The Director's agent can set a testing hold but not lift one.",
             )
-        _require_testing_hold_lane(
+        _require_lane_product_config_lane(
             record_store=record_store,
             product=hold_request.product,
             context=hold_request.context,
@@ -9228,6 +8764,8 @@ def create_launchplane_fastapi_app(
                     lane_check()
                     event_check()
 
+                    runtime_binding: dict[str, object] = {}
+
                     def qualify(
                         *,
                         inspect_provider: bool,
@@ -9244,6 +8782,7 @@ def create_launchplane_fastapi_app(
                             inspect_provider=inspect_provider,
                             inspect_storage=inspect_storage,
                             before_inspection=before_inspection,
+                            runtime_binding=runtime_binding,
                         )
 
                     binding = qualify(inspect_provider=False)
@@ -10978,6 +10517,7 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code=error.code,
                 message=str(error),
+                reason=error.code,
             ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
@@ -11142,6 +10682,14 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="odoo_target_replacement_current_artifact_changed",
                 message=str(error),
+            ) from error
+        except TestingRebuildRefused as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
+                reason=error.code,
             ) from error
         except OdooTargetReplacementApplyIdempotencyKeyReusedError as error:
             raise _launchplane_http_error(
@@ -12868,798 +12416,6 @@ def create_launchplane_fastapi_app(
         )
         return response
 
-    async def create_every_code_work_request(
-        request: Request,
-        every_code_request: EveryCodeWorkRequestCreateEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        if not resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action="every_code_work_request.write",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot create Every Code work requests.",
-            )
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replayed_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path="/v1/every-code/work-requests/create",
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=True,
-        )
-        if replayed_response is not None:
-            return replayed_response
-        try:
-            every_code_store = require_every_code_work_request_write_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        try:
-            record = build_every_code_work_request_record(
-                every_code_request,
-                queued_at=every_code_request.queued_at.strip() or utc_now_timestamp(),
-            )
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message=str(error) or "Request could not be completed.",
-            ) from error
-        every_code_store.write_every_code_work_request_record(record)
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={"request_id": record.request_id, "state": record.state},
-            result={"request": record.model_dump(mode="json")},
-        )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path="/v1/every-code/work-requests/create",
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
-        return response
-
-    async def claim_every_code_work_request(
-        request: Request,
-        payload: dict[str, object],
-        identity: Annotated[
-            LaunchplaneIdentity | None,
-            Depends(read_every_code_work_request_worker_write_identity),
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        worker_token_authorized = every_code_worker_token_authorized(
-            request.headers.get("Authorization", "")
-        )
-        idempotency_identity = identity or (
-            TerminalAgentIdentity(
-                subject="every-code-worker",
-                token_label="every-code-worker-token",
-            )
-            if worker_token_authorized
-            else None
-        )
-        if identity is not None:
-            if not resolved_authz_policy_runtime.allows(
-                identity=identity,
-                action="every_code_work_request.claim",
-                product="launchplane",
-                context=_LAUNCHPLANE_SERVICE_CONTEXT,
-            ):
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="Workflow cannot claim Every Code work requests.",
-                )
-        normalized_idempotency_key = ""
-        payload_fingerprint = ""
-        if idempotency_identity is not None:
-            (
-                normalized_idempotency_key,
-                payload_fingerprint,
-                replayed_response,
-            ) = await replay_apply_idempotency(
-                request=request,
-                record_store=record_store,
-                identity=idempotency_identity,
-                route_path="/v1/every-code/work-requests/claim",
-                idempotency_key=idempotency_key,
-                trace_id=trace_id,
-                check_replay=True,
-            )
-            if replayed_response is not None:
-                return replayed_response
-        try:
-            every_code_store = require_every_code_work_request_claim_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        try:
-            claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=str(error),
-            ) from error
-
-        def claim_response(record: EveryCodeWorkRequestRecord) -> AcceptedEvidenceResponse:
-            return accepted_evidence_response(
-                trace_id=trace_id,
-                records={"request_id": record.request_id, "state": record.state},
-                result={"request": record.model_dump(mode="json")},
-            )
-
-        def claim_idempotency_record(
-            record: EveryCodeWorkRequestRecord,
-        ) -> LaunchplaneIdempotencyRecord:
-            if idempotency_identity is None:
-                raise RuntimeError("Every Code claim idempotency requires an identity.")
-            return build_apply_idempotency_record(
-                identity=idempotency_identity,
-                route_path="/v1/every-code/work-requests/claim",
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=claim_response(record),
-            )
-
-        try:
-            claimed_record = every_code_store.claim_every_code_work_request_record(
-                request_id=claim_request.request_id.strip(),
-                host=claim_request.host.strip(),
-                claimed_at=utc_now_timestamp(),
-                lease_seconds=claim_request.lease_seconds,
-                idempotency_record_factory=(
-                    claim_idempotency_record
-                    if idempotency_identity is not None and normalized_idempotency_key
-                    else None
-                ),
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if claimed_record is None:
-            if idempotency_identity is not None and normalized_idempotency_key:
-                _, _, replayed_response = await replay_apply_idempotency(
-                    request=request,
-                    record_store=record_store,
-                    identity=idempotency_identity,
-                    route_path="/v1/every-code/work-requests/claim",
-                    idempotency_key=normalized_idempotency_key,
-                    trace_id=trace_id,
-                    check_replay=True,
-                )
-                if replayed_response is not None:
-                    return replayed_response
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="work_request_already_claimed",
-                message="Every Code work request is not queued for claim.",
-            )
-        return claim_response(claimed_record)
-
-    async def write_every_code_work_request_heartbeat(
-        request: Request,
-        payload: dict[str, object],
-        identity: Annotated[
-            LaunchplaneIdentity | None,
-            Depends(read_every_code_work_request_worker_write_identity),
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        del idempotency_key
-        trace_id = next_trace_id()
-        worker_token_authorized = every_code_worker_token_authorized(
-            request.headers.get("Authorization", "")
-        )
-        if identity is None and not worker_token_authorized:
-            raise _launchplane_http_error(
-                status_code=401,
-                trace_id=trace_id,
-                code="unauthorized",
-                message="Every Code heartbeat requires authorization.",
-            )
-        try:
-            heartbeat_store = require_every_code_work_request_heartbeat_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        try:
-            heartbeat_request = EveryCodeWorkRequestHeartbeatEnvelope.model_validate(payload)
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=str(error),
-            ) from error
-        now = utc_now_timestamp()
-        new_lease_expires_at = add_lease_seconds(now, heartbeat_request.lease_seconds)
-        accepted = heartbeat_store.heartbeat_every_code_work_request_record(
-            request_id=heartbeat_request.request_id.strip(),
-            host=heartbeat_request.host.strip(),
-            fencing_token=heartbeat_request.fencing_token,
-            heartbeat_at=now,
-            lease_expires_at=new_lease_expires_at,
-        )
-        if not accepted:
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="heartbeat_rejected",
-                message="Every Code heartbeat rejected: wrong owner, fencing token, or terminal state.",
-            )
-        return accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "request_id": heartbeat_request.request_id.strip(),
-                "fencing_token": heartbeat_request.fencing_token,
-            },
-            result={
-                "request_id": heartbeat_request.request_id.strip(),
-                "lease_expires_at": new_lease_expires_at,
-            },
-        )
-
-    async def recover_stale_every_code_work_requests(
-        request: Request,
-        payload: dict[str, object],
-        identity: Annotated[
-            LaunchplaneIdentity | None,
-            Depends(read_every_code_work_request_worker_write_identity),
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> AcceptedEvidenceResponse:
-        del payload
-        trace_id = next_trace_id()
-        worker_token_authorized = every_code_worker_token_authorized(
-            request.headers.get("Authorization", "")
-        )
-        if identity is None and not worker_token_authorized:
-            raise _launchplane_http_error(
-                status_code=401,
-                trace_id=trace_id,
-                code="unauthorized",
-                message="Every Code stale recovery requires authorization.",
-            )
-        if identity is not None and not resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action="every_code_work_request.update",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot recover stale Every Code work requests.",
-            )
-        try:
-            stale_store = require_every_code_work_request_stale_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        now = utc_now_timestamp()
-        stale_records = stale_store.list_stale_every_code_work_request_records(
-            as_of=now,
-            limit=20,
-        )
-        requeued: list[str] = []
-        flagged: list[str] = []
-        for stale in stale_records:
-            recovered = stale_store.recover_stale_every_code_work_request_record(
-                expected_record=stale,
-                recovered_at=now,
-            )
-            if recovered is None:
-                continue
-            if recovered.state == "queued":
-                requeued.append(recovered.request_id)
-            elif recovered.state == "blocked":
-                flagged.append(recovered.request_id)
-        return accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "checked": len(stale_records),
-                "requeued": len(requeued),
-                "flagged": len(flagged),
-            },
-            result={"requeued": requeued, "flagged": flagged},
-        )
-
-    async def write_every_code_work_request_status(
-        request: Request,
-        payload: dict[str, object],
-        identity: Annotated[
-            LaunchplaneIdentity | None,
-            Depends(read_every_code_work_request_worker_write_identity),
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        normalized_idempotency_key = ""
-        payload_fingerprint = ""
-        worker_token_authorized = every_code_worker_token_authorized(
-            request.headers.get("Authorization", "")
-        )
-        idempotency_identity = identity or (
-            TerminalAgentIdentity(
-                subject="every-code-worker",
-                token_label="every-code-worker-token",
-            )
-            if worker_token_authorized
-            else None
-        )
-        if identity is not None:
-            if not resolved_authz_policy_runtime.allows(
-                identity=identity,
-                action="every_code_work_request.update",
-                product="launchplane",
-                context=_LAUNCHPLANE_SERVICE_CONTEXT,
-            ):
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="Workflow cannot update Every Code work requests.",
-                )
-        if idempotency_identity is not None:
-            (
-                normalized_idempotency_key,
-                payload_fingerprint,
-                replayed_response,
-            ) = await replay_apply_idempotency(
-                request=request,
-                record_store=record_store,
-                identity=idempotency_identity,
-                route_path="/v1/every-code/work-requests/status",
-                idempotency_key=idempotency_key,
-                trace_id=trace_id,
-                check_replay=True,
-            )
-            if replayed_response is not None:
-                return replayed_response
-        try:
-            every_code_store = require_every_code_work_request_status_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        try:
-            status_request = EveryCodeWorkRequestStatusEnvelope.model_validate(payload)
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=str(error),
-            ) from error
-        try:
-            updated_record = every_code_store.update_every_code_work_request_status_record(
-                request_id=status_request.request_id.strip(),
-                update=EveryCodeWorkRequestStatusUpdate(
-                    state=status_request.state,
-                    host=status_request.host,
-                    updated_at=status_request.updated_at.strip() or utc_now_timestamp(),
-                    fencing_token=status_request.fencing_token,
-                    result_pr_url=status_request.result_pr_url,
-                    result_summary=status_request.result_summary,
-                    error_message=status_request.error_message,
-                ),
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=str(error),
-            ) from error
-        notification_attempts: tuple[EveryCodeNotificationAttemptRecord, ...] = ()
-        if updated_record.state == "blocked":
-            notification_attempts = deliver_every_code_blocked_notifications(
-                record_store=record_store,
-                request=updated_record,
-                attempted_at=utc_now_timestamp(),
-                discord_sender=every_code_discord_sender,
-            )
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={"request_id": updated_record.request_id, "state": updated_record.state},
-            result={
-                "request": updated_record.model_dump(mode="json"),
-                "notifications": [
-                    notification_attempt.model_dump(mode="json")
-                    for notification_attempt in notification_attempts
-                ],
-            },
-        )
-        if idempotency_identity is not None:
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=idempotency_identity,
-                route_path="/v1/every-code/work-requests/status",
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        return response
-
-    async def rerun_every_code_work_request(
-        request: Request,
-        payload: dict[str, object],
-        identity: Annotated[
-            LaunchplaneIdentity | None,
-            Depends(read_every_code_work_request_worker_write_identity),
-        ],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        normalized_idempotency_key = ""
-        intent_idempotency_key = idempotency_key.strip()
-        payload_fingerprint = ""
-        worker_token_authorized = every_code_worker_token_authorized(
-            request.headers.get("Authorization", "")
-        )
-        idempotency_identity = identity or (
-            TerminalAgentIdentity(
-                subject="every-code-worker",
-                token_label="every-code-worker-token",
-            )
-            if worker_token_authorized
-            else None
-        )
-        if identity is not None:
-            if not resolved_authz_policy_runtime.allows(
-                identity=identity,
-                action="every_code_work_request.rerun",
-                product="launchplane",
-                context=_LAUNCHPLANE_SERVICE_CONTEXT,
-            ):
-                raise _launchplane_http_error(
-                    status_code=403,
-                    trace_id=trace_id,
-                    code="authorization_denied",
-                    message="Workflow cannot rerun Every Code work requests.",
-                )
-        if idempotency_identity is not None:
-            (
-                normalized_idempotency_key,
-                payload_fingerprint,
-                replayed_response,
-            ) = await replay_apply_idempotency(
-                request=request,
-                record_store=record_store,
-                identity=idempotency_identity,
-                route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
-                idempotency_key=idempotency_key,
-                trace_id=trace_id,
-                check_replay=True,
-            )
-            if replayed_response is not None:
-                return replayed_response
-            intent_idempotency_key = normalized_idempotency_key
-        try:
-            rerun_request = EveryCodeWorkRequestRerunEnvelope.model_validate(payload)
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=str(error),
-            ) from error
-        try:
-            every_code_store = require_every_code_work_request_rerun_store(record_store)
-            require_agent_write_intent_read_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        rerun_checked_at = datetime.now(timezone.utc)
-        intent_record = validate_every_code_rerun_write_intent(
-            record_store=record_store,
-            rerun_request=rerun_request,
-            idempotency_key=intent_idempotency_key,
-            now=rerun_checked_at,
-            trace_id=trace_id,
-        )
-        try:
-            existing_record = every_code_store.read_every_code_work_request_record(
-                rerun_request.request_id
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=str(error),
-            ) from error
-        if intent_record is None:
-            intent_record = matching_every_code_rerun_intent_record(
-                record_store=record_store,
-                source_url=existing_record.issue_url,
-                now=rerun_checked_at,
-            )
-            if intent_record is None:
-                raise reject_agent_write_intent(
-                    trace_id=trace_id,
-                    code="agent_write_intent_required",
-                    message="Every Code rerun requires matching approved write-intent evidence.",
-                )
-        if intent_record.request.source_url != existing_record.issue_url:
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_source_mismatch",
-                message="Every Code rerun write-intent source_url does not match the work-request issue URL.",
-                record_id=intent_record.record_id,
-            )
-        if rerun_request.source_url and rerun_request.source_url != existing_record.issue_url:
-            raise reject_agent_write_intent(
-                trace_id=trace_id,
-                code="agent_write_intent_source_mismatch",
-                message="Every Code rerun source_url does not match the work-request issue URL.",
-                record_id=intent_record.record_id,
-            )
-        try:
-            requeued_record = requeue_every_code_work_request(
-                existing_record,
-                queued_at=utc_now_timestamp(),
-                trigger_actor=rerun_request.trigger_actor,
-            )
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=str(error),
-            ) from error
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "request_id": requeued_record.request_id,
-                "state": requeued_record.state,
-                "agent_write_intent_record_id": intent_record.record_id,
-            },
-            result={"request": requeued_record.model_dump(mode="json")},
-        )
-        idempotency_record = None
-        if idempotency_identity is not None and normalized_idempotency_key:
-            idempotency_record = build_apply_idempotency_record(
-                identity=idempotency_identity,
-                route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        write_status = every_code_store.compare_and_write_every_code_work_request_record(
-            expected_record=existing_record,
-            record=requeued_record,
-            idempotency_record=idempotency_record,
-        )
-        if write_status == "missing":
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=f"Every Code work request {rerun_request.request_id!r} was not found.",
-            )
-        if write_status == "changed":
-            if idempotency_identity is not None and normalized_idempotency_key:
-                _, _, replayed_response = await replay_apply_idempotency(
-                    request=request,
-                    record_store=record_store,
-                    identity=idempotency_identity,
-                    route_path=_EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
-                    idempotency_key=normalized_idempotency_key,
-                    trace_id=trace_id,
-                    check_replay=True,
-                )
-                if replayed_response is not None:
-                    return replayed_response
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="work_request_changed",
-                message="Every Code work request changed while the rerun was being prepared.",
-            )
-        return response
-
-    def write_every_code_pr_feedback(
-        payload: dict[str, object],
-        _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        try:
-            every_code_store = require_every_code_pr_feedback_write_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        try:
-            feedback_record = EveryCodePrFeedbackRecord.model_validate(payload)
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=str(error),
-            ) from error
-        every_code_store.write_every_code_pr_feedback_record(feedback_record)
-        return accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "request_id": feedback_record.request_id,
-                "feedback_id": feedback_record.feedback_id,
-                "status": feedback_record.status,
-            },
-            result={"feedback": feedback_record.model_dump(mode="json")},
-        )
-
-    def write_every_code_pr_feedback_status(
-        payload: dict[str, object],
-        _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        try:
-            every_code_store = require_every_code_pr_feedback_status_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        try:
-            feedback_status_request = EveryCodePrFeedbackStatusEnvelope.model_validate(payload)
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=str(error),
-            ) from error
-        feedback_matches = every_code_store.list_every_code_pr_feedback_records(
-            request_id=feedback_status_request.request_id.strip(),
-            limit=100,
-        )
-        existing_feedback_record = next(
-            (
-                record
-                for record in feedback_matches
-                if record.feedback_id == feedback_status_request.feedback_id.strip()
-            ),
-            None,
-        )
-        if existing_feedback_record is None:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message="Every Code PR feedback record was not found.",
-            )
-        updated_feedback_record = apply_every_code_pr_feedback_status(
-            existing_feedback_record,
-            status=feedback_status_request.status,
-        )
-        if updated_feedback_record is None:
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="feedback_already_final",
-                message="Every Code PR feedback is already applied or ignored.",
-            )
-        every_code_store.write_every_code_pr_feedback_record(updated_feedback_record)
-        return accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "request_id": updated_feedback_record.request_id,
-                "feedback_id": updated_feedback_record.feedback_id,
-                "status": updated_feedback_record.status,
-            },
-            result={"feedback": updated_feedback_record.model_dump(mode="json")},
-        )
-
-    def write_every_code_preview_gate(
-        payload: dict[str, object],
-        _worker_token: Annotated[None, Depends(require_every_code_worker_write_token)],
-        record_store: Annotated[object, Depends(get_record_store)],
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        try:
-            every_code_store = require_every_code_preview_gate_write_store(record_store)
-        except TypeError as error:
-            raise _launchplane_http_error(
-                status_code=503,
-                trace_id=trace_id,
-                code="database_storage_required",
-                message=str(error),
-            ) from error
-        try:
-            gate_record = EveryCodePreviewGateRecord.model_validate(payload)
-        except (ValueError, ValidationError) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_payload",
-                message=str(error),
-            ) from error
-        every_code_store.write_every_code_preview_gate_record(gate_record)
-        return accepted_evidence_response(
-            trace_id=trace_id,
-            records={
-                "gate_id": gate_record.gate_id,
-                "request_id": gate_record.request_id,
-                "status": gate_record.status,
-            },
-            result={"gate": gate_record.model_dump(mode="json")},
-        )
-
     def ensure_route_binding_allowed(
         *,
         identity: LaunchplaneIdentity,
@@ -13689,6 +12445,7 @@ def create_launchplane_fastapi_app(
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+        dry_run: bool = False,
     ) -> AcceptedEvidenceResponse:
         trace_id = next_trace_id()
         try:
@@ -13716,17 +12473,28 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Request payload failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.allows(
+        policy_profile_write = resolved_authz_policy_runtime.allows(
             identity=identity,
             action="product_profile.write",
             product=profile.product,
             context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ):
+        )
+        director_conditional_write = not policy_profile_write and director_agent_identity(identity)
+        if not policy_profile_write and not director_conditional_write:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Workflow cannot write the requested product profile.",
+            )
+        if director_conditional_write and (
+            not request.headers.get("If-Match", "") or not idempotency_key.strip()
+        ):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="conditional_preview_review_required",
+                message="Conditional profile settings require If-Match and an Idempotency-Key.",
             )
         if profile.preview.historical_transport:
             raise _launchplane_http_error(
@@ -13776,9 +12544,83 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
-        if existing_profile is not None and "production_use_authority" not in raw_payload:
-            profile = profile.model_copy(
-                update={"production_use_authority": existing_profile.production_use_authority}
+        expected_revision = request.headers.get("If-Match", "")
+        if expected_revision and (
+            existing_profile is None
+            or expected_revision != f'"{product_profile_record_sha256(existing_profile)}"'
+        ):
+            raise _launchplane_http_error(
+                status_code=412,
+                trace_id=trace_id,
+                code="product_profile_changed",
+                message="Product profile changed since review; read and review it again.",
+            )
+        if existing_profile is not None:
+            preserved_fields = {
+                field: getattr(existing_profile, field)
+                for field in ("odoo_business_hours", "production_use_authority", "release_request")
+                if field not in raw_payload
+            }
+            try:
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    {**profile.model_dump(mode="json"), **preserved_fields}
+                )
+            except ValidationError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_profile_conflict",
+                    message=(
+                        "Stored profile settings conflict with the requested change; "
+                        "review or clear them through their supported configuration operation."
+                    ),
+                ) from error
+        scan_activation = (
+            director_conditional_write
+            and control_plane_artifact_scan.is_artifact_scan_activation(existing_profile, profile)
+        )
+        snapshot_activation = director_conditional_write and director_preview_snapshot_allowed(
+            existing_profile, profile
+        )
+        storage_update = director_conditional_write and director_testing_storage_allowed(
+            existing_profile, profile
+        )
+        health_url_correction = (director_conditional_write or dry_run) and (
+            testing_health_url_correction_allowed(existing_profile, profile)
+        )
+        if director_conditional_write and not (
+            scan_activation or snapshot_activation or storage_update or health_url_correction
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Director agents may conditionally change only scan activation, preview "
+                    "snapshot policy, testing storage requirements or health fallback corrections. "
+                    "Use product-config for preview settings."
+                ),
+            )
+        if profile.release_request != (
+            existing_profile.release_request if existing_profile is not None else None
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="release_request_bounded_apply_required",
+                message=(
+                    "Release request data is managed separately. Refresh the profile before saving settings; "
+                    f"use POST {RELEASE_REQUEST_ROUTE} to request a release."
+                ),
+            )
+        if profile.odoo_business_hours != (
+            existing_profile.odoo_business_hours if existing_profile else None
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="business_hours_bounded_apply_required",
+                message="Change calendar policy through the reviewed product-config operation.",
             )
         if existing_profile is not None and (
             profile.production_use != existing_profile.production_use
@@ -13795,7 +12637,12 @@ def create_launchplane_fastapi_app(
         ) or (
             existing_profile is not None
             and existing_profile.release_on_acceptance == "director_standing"
-            and profile.owner.github_id != existing_profile.owner.github_id
+            and (
+                profile.owner.github_id != existing_profile.owner.github_id
+                or profile.repository != existing_profile.repository
+                or profile.repository_id != existing_profile.repository_id
+                or profile.repository_owner_id != existing_profile.repository_owner_id
+            )
         ):
             raise _launchplane_http_error(
                 status_code=409,
@@ -13850,13 +12697,57 @@ def create_launchplane_fastapi_app(
                         "the reviewed prelaunch-rebuild apply endpoint."
                     ),
                 )
-        profile_store.write_product_profile_record(profile)
+        if dry_run:
+            if not health_url_correction:
+                raise _launchplane_http_error(
+                    status_code=400,
+                    trace_id=trace_id,
+                    code="testing_health_url_correction_required",
+                    message="Profile dry run supports only a testing health fallback correction.",
+                )
+            assert existing_profile is not None
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records={"product_profile": profile.product},
+                result={
+                    "dry_run": True,
+                    "testing_health_url_correction": True,
+                    "profile_sha256": product_profile_record_sha256(existing_profile),
+                    "replacement_sha256": product_profile_record_sha256(profile),
+                },
+            )
+        if scan_activation:
+            try:
+                scan = await run_in_threadpool(
+                    control_plane_artifact_scan.qualify_product_artifact,
+                    record_store,
+                    product=profile.product,
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_profile_conflict",
+                    message="The product changed during scan qualification; read it again.",
+                ) from error
+            if scan.status != "pass":
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="artifact_scan_refused",
+                    message="Artifact scan activation requires a passing verified-image scan.",
+                )
         response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={"product_profile": profile.product},
+            trace_id=trace_id, records={"product_profile": profile.product}
         )
-        store_apply_idempotency(
-            record_store=record_store,
+        bundle = authority_bundle_with_apply_idempotency(
+            bundle=ProductAuthorityBundle(
+                product_profiles=(profile,),
+                expected_product_profiles=(existing_profile,)
+                if existing_profile is not None
+                else (),
+                absent_product_ids=() if existing_profile is not None else (profile.product,),
+            ),
             identity=identity,
             route_path=_PRODUCT_PROFILES_ROUTE,
             idempotency_key=normalized_idempotency_key,
@@ -13864,6 +12755,26 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             response=response,
         )
+        try:
+            profile_store.write_product_authority_bundle(bundle)
+        except ProductProfileConflictError as error:
+            if normalized_idempotency_key:
+                replay_response = replay_stored_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_PRODUCT_PROFILES_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                )
+                if replay_response is not None:
+                    return replay_response
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product profile changed before save; read and review again.",
+            ) from error
         return response
 
     async def apply_product_expected_config(
@@ -14515,6 +13426,63 @@ def create_launchplane_fastapi_app(
             )
         )
 
+    def resolve_profile_owner(
+        profile: LaunchplaneProductProfileRecord, login: str, trace_id: str
+    ) -> control_plane_product_owner_setting.ProductOwnerIdentity:
+        try:
+            with launchplane_github_token(
+                token_resolver=resolve_launchplane_github_token,
+                api_request=github_api_request,
+                control_plane_root=resolved_control_plane_root,
+                context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
+                repository=profile.repository,
+                report_failure=True,
+            ) as github_token:
+                if not github_token:
+                    raise _launchplane_http_error(
+                        status_code=503,
+                        trace_id=trace_id,
+                        code="github_credentials_unavailable",
+                        message="Launchplane has no GitHub read credential to look up the Owner login.",
+                    )
+                return control_plane_product_owner_setting.resolve_github_user_owner(
+                    login=login,
+                    token=github_token,
+                    api_request=github_api_request,
+                )
+
+        except DeliveryGitHubCredentialsUnavailable as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_credentials_unavailable",
+                message=(
+                    f"Launchplane could not resolve the GitHub read credential at "
+                    f"{error.stage} to look up the Client login."
+                ),
+            ) from error
+        except control_plane_product_owner_setting.ProductOwnerLoginNotFoundError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="owner_login_not_found",
+                message=str(error),
+            ) from error
+        except control_plane_product_owner_setting.ProductOwnerLoginNotUserError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="owner_login_not_user",
+                message=str(error),
+            ) from error
+        except control_plane_product_owner_setting.ProductOwnerLookupUnavailableError as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="github_lookup_unavailable",
+                message=str(error),
+            ) from error
+
     async def apply_product_owner(
         product: str,
         request: Request,
@@ -14651,67 +13619,22 @@ def create_launchplane_fastapi_app(
             ) from error
         resolved_owner = control_plane_product_owner_setting.ProductOwnerIdentity()
         if not owner_request.clear:
-
-            def lookup_owner() -> control_plane_product_owner_setting.ProductOwnerIdentity:
-                with launchplane_github_token(
-                    token_resolver=resolve_launchplane_github_token,
-                    api_request=github_api_request,
-                    control_plane_root=resolved_control_plane_root,
-                    context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    repository=profile.repository,
-                    report_failure=True,
-                ) as github_token:
-                    if not github_token:
-                        raise _launchplane_http_error(
-                            status_code=503,
-                            trace_id=trace_id,
-                            code="github_credentials_unavailable",
-                            message="Launchplane has no GitHub read credential to look up the Owner login.",
-                        )
-                    return control_plane_product_owner_setting.resolve_github_user_owner(
-                        login=owner_request.github_login,
-                        token=github_token,
-                        api_request=github_api_request,
-                    )
-
-            try:
-                resolved_owner = await run_in_threadpool(lookup_owner)
-            except DeliveryGitHubCredentialsUnavailable as error:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="github_credentials_unavailable",
-                    message=(
-                        f"Launchplane could not resolve the GitHub read credential at "
-                        f"{error.stage} to look up the Client login."
-                    ),
-                ) from error
-            except control_plane_product_owner_setting.ProductOwnerLoginNotFoundError as error:
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="owner_login_not_found",
-                    message=str(error),
-                ) from error
-            except control_plane_product_owner_setting.ProductOwnerLoginNotUserError as error:
-                raise _launchplane_http_error(
-                    status_code=400,
-                    trace_id=trace_id,
-                    code="owner_login_not_user",
-                    message=str(error),
-                ) from error
-            except control_plane_product_owner_setting.ProductOwnerLookupUnavailableError as error:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="github_lookup_unavailable",
-                    message=str(error),
-                ) from error
-        plan = control_plane_product_owner_setting.build_product_owner_setting_plan(
-            profile=profile,
-            request=owner_request,
-            resolved_owner=resolved_owner,
-        )
+            resolved_owner = await run_in_threadpool(
+                resolve_profile_owner, profile, owner_request.github_login, trace_id
+            )
+        try:
+            plan = control_plane_product_owner_setting.build_product_owner_setting_plan(
+                profile=profile,
+                request=owner_request,
+                resolved_owner=resolved_owner,
+            )
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_product_profile",
+                message=str(error),
+            ) from error
         records = {"product_profile": profile.product}
         if owner_request.mode != "apply":
             return accepted_evidence_response(
@@ -17275,6 +16198,49 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
+        if product_config_request.odoo_business_hours is not None:
+            required_actions = [
+                (
+                    "product_profile.read",
+                    product_config_request.product,
+                    _LAUNCHPLANE_SERVICE_CONTEXT,
+                    None,
+                ),
+                (
+                    "operations.read",
+                    "launchplane",
+                    product_config_request.context,
+                    AuthorizationTarget(scope="instance", instances=("prod",)),
+                ),
+            ]
+            if product_config_request.mode == "apply":
+                required_actions.append(
+                    (
+                        "product_profile.write",
+                        product_config_request.product,
+                        _LAUNCHPLANE_SERVICE_CONTEXT,
+                        None,
+                    )
+                )
+            for (
+                required_action,
+                required_product,
+                required_context,
+                required_target,
+            ) in required_actions:
+                if not resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action=required_action,
+                    product=required_product,
+                    context=required_context,
+                    target=required_target,
+                ):
+                    raise _launchplane_http_error(
+                        status_code=403,
+                        trace_id=trace_id,
+                        code="authorization_denied",
+                        message=f"Caller cannot perform {required_action} for calendar configuration.",
+                    )
         if isinstance(identity, LocalOperatorIdentity) and (
             product_config_request.mode == "apply" or not director_agent_identity(identity)
         ):
@@ -17298,7 +16264,11 @@ def create_launchplane_fastapi_app(
             )
         normalized_idempotency_key = idempotency_key.strip()
         if (
-            (operator_identity or product_config_request.public_hosts is not None)
+            (
+                operator_identity
+                or product_config_request.public_hosts is not None
+                or product_config_request.odoo_business_hours is not None
+            )
             and product_config_request.mode == "apply"
             and not normalized_idempotency_key
         ):
@@ -17431,7 +16401,8 @@ def create_launchplane_fastapi_app(
             and config_profile.production_use == "live"
             # The profile's live status describes production, not its owned
             # testing lane. Target ownership and instance scope are checked above.
-            and product_config_request.instance != TESTING_INSTANCE
+            and product_config_request.instance not in {TESTING_INSTANCE, "preview"}
+            and product_config_request.odoo_business_hours is None
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
             )
@@ -17443,32 +16414,22 @@ def create_launchplane_fastapi_app(
                 message="A live production lane's or context's undeclared settings are recorded by an admin, "
                 "not with the local_operator credential the Director's agent uses.",
             )
-        if (
-            operator_identity
-            and product_config_request.mode == "apply"
-            and product_config_request.public_hosts is None
-            and not product_config_dry_run_exists(
-                record_store=database_store,
-                identity=identity,
-                request_payload=request_payload,
-                route_path=route_path,
-            )
-        ):
-            raise _launchplane_http_error(
-                status_code=409,
-                trace_id=trace_id,
-                code="matching_dry_run_required",
-                message="Admin product-config apply requires a prior matching dry-run.",
-            )
         copy_references = [
             secret.copy_from
             for secret in product_config_request.secrets
             if secret.copy_from is not None
         ]
+        requires_matching_review = (
+            operator_identity
+            or bool(copy_references)
+            or product_config_request.adopts_provider_secrets()
+            or bool(product_config_request.disable_secret_bindings)
+        )
         if (
-            (copy_references or product_config_request.adopts_provider_secrets())
+            requires_matching_review
             and product_config_request.mode == "apply"
             and product_config_request.public_hosts is None
+            and product_config_request.odoo_business_hours is None
             and not product_config_dry_run_exists(
                 record_store=database_store,
                 identity=identity,
@@ -17480,7 +16441,7 @@ def create_launchplane_fastapi_app(
                 status_code=409,
                 trace_id=trace_id,
                 code="matching_dry_run_required",
-                message="Secret copy and provider adoption require a prior matching dry-run.",
+                message="Product-config apply requires a prior matching dry-run.",
             )
 
         def secret_copy_source_readable(*, context: str, instance: str) -> bool:
@@ -17518,7 +16479,61 @@ def create_launchplane_fastapi_app(
                 )
         lane_provider_env_reader: control_plane_product_config.LaneProviderEnvReader | None = None
         public_hosts_plan: product_public_hosts.PublicHostsPlan | None = None
+        calendar_plan = None
+        calendar_replacement = None
         try:
+            if product_config_request.odoo_business_hours is not None:
+                try:
+                    calendar_plan, calendar_replacement = await asyncio.to_thread(
+                        odoo_business_hours_config.plan_business_hours_config,
+                        store=database_store,
+                        profile=config_profile,
+                        request=product_config_request.odoo_business_hours,
+                        root=resolved_control_plane_root,
+                        reason=product_config_request.reason,
+                        source_label=product_config_request.source_label,
+                    )
+                    if product_config_request.mode == "apply" and (
+                        product_config_request.reviewed_plan_sha256 != calendar_plan.plan_digest
+                        or not product_config_dry_run_exists(
+                            record_store=database_store,
+                            identity=identity,
+                            request_payload=request_payload,
+                            route_path=route_path,
+                            authority_plan_digest=calendar_plan.plan_digest,
+                        )
+                    ):
+                        raise ValueError("Calendar review no longer matches.")
+                except (
+                    OSError,
+                    ValueError,
+                    KeyError,
+                    TypeError,
+                    click.ClickException,
+                    SQLAlchemyError,
+                ):
+                    if product_config_request.mode == "apply":
+                        _, _, calendar_replay = await replay_apply_idempotency(
+                            request=request,
+                            record_store=database_store,
+                            identity=identity,
+                            route_path=route_path,
+                            idempotency_key=idempotency_key,
+                            trace_id=trace_id,
+                            request_payload=request_payload,
+                            check_replay=True,
+                        )
+                        if calendar_replay is not None:
+                            return ProductConfigApplyResponse.model_validate(
+                                calendar_replay.model_dump(mode="json")
+                            )
+                    raise _launchplane_http_error(
+                        status_code=409 if product_config_request.mode == "apply" else 503,
+                        trace_id=trace_id,
+                        code="calendar_qualification_unavailable",
+                        message="Calendar references or reviewed authority could not be verified. Inspect and review again.",
+                    ) from None
+
             if product_config_request.public_hosts is not None:
                 public_hosts_plan = await asyncio.to_thread(
                     product_public_hosts.plan_public_hosts,
@@ -17534,7 +16549,7 @@ def create_launchplane_fastapi_app(
                     identity=identity,
                     request_payload=request_payload,
                     route_path=route_path,
-                    public_hosts_plan_digest=public_hosts_plan.result.plan_digest,
+                    authority_plan_digest=public_hosts_plan.result.plan_digest,
                 ):
                     raise _launchplane_http_error(
                         status_code=409,
@@ -17567,7 +16582,7 @@ def create_launchplane_fastapi_app(
                     payload={
                         key: value
                         for key, value in product_config_request.product_config_payload().items()
-                        if key != "public_hosts"
+                        if key not in {"public_hosts", "odoo_business_hours"}
                     },
                     mode=product_config_request.mode,
                     actor=launchplane_identity_actor(identity),
@@ -17648,6 +16663,22 @@ def create_launchplane_fastapi_app(
             **planned_driver_result,
             "reason": product_config_request.reason,
         }
+        if calendar_plan is not None and calendar_replacement is not None:
+            if product_config_request.mode == "apply":
+                if calendar_plan.changed:
+                    calendar_replacement = LaunchplaneProductProfileRecord.model_validate(
+                        calendar_replacement.model_copy(
+                            update={
+                                "updated_at": utc_now_timestamp(),
+                                "source": product_config_request.source_label,
+                            }
+                        ).model_dump(mode="json")
+                    )
+                authority_bundle = authority_bundle.model_copy(
+                    update={"product_profiles": (calendar_replacement,)}
+                )
+                calendar_plan = calendar_plan.model_copy(update={"applied": True})
+            driver_result["odoo_business_hours"] = calendar_plan.model_dump(mode="json")
         if public_hosts_plan is not None:
             authority_bundle = authority_bundle.model_copy(
                 update={"dokploy_targets": (public_hosts_plan.replacement,)}
@@ -17671,10 +16702,7 @@ def create_launchplane_fastapi_app(
             result=ProductConfigApplyResult.model_validate(driver_result),
         )
         if (
-            operator_identity
-            or copy_references
-            or product_config_request.adopts_provider_secrets()
-            or public_hosts_plan is not None
+            requires_matching_review or public_hosts_plan is not None or calendar_plan is not None
         ) and product_config_request.mode == "dry-run":
             store_product_config_dry_run_record(
                 record_store=database_store,
@@ -17683,7 +16711,9 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 response=product_config_response,
                 route_path=route_path,
-                public_hosts_plan_digest=public_hosts_plan.result.plan_digest
+                authority_plan_digest=calendar_plan.plan_digest
+                if calendar_plan
+                else public_hosts_plan.result.plan_digest
                 if public_hosts_plan
                 else "",
             )
@@ -17885,12 +16915,8 @@ def create_launchplane_fastapi_app(
         )
         try:
             profile = database_store.read_product_profile_record(product.strip())
-            lane = next(
-                candidate
-                for candidate in profile.lanes
-                if candidate.instance == environment.strip()
-            )
-        except (FileNotFoundError, StopIteration) as error:
+            lane = product_config_target(profile, environment)
+        except FileNotFoundError as error:
             raise _launchplane_http_error(
                 status_code=404,
                 trace_id=trace_id,
@@ -18656,8 +17682,23 @@ def create_launchplane_fastapi_app(
         )
         if replay_response is not None:
             return replay_response
+
+        def replay_committed_onboarding() -> AcceptedEvidenceResponse | None:
+            if onboarding_request.mode != "apply" or not normalized_idempotency_key:
+                return None
+            return replay_stored_apply_idempotency(
+                record_store=database_store,
+                identity=identity,
+                route_path=_PRODUCT_ONBOARDING_APPLY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+            )
+
         onboarding_manifest = onboarding_request.manifest
         generic_web_plan_sha256 = ""
+        adopted_onboarding_target = None
+        adopted_onboarding_target_id = None
         if onboarding_request.generic_web is not None:
             try:
                 existing_profile = database_store.read_product_profile_record(
@@ -18671,6 +17712,9 @@ def create_launchplane_fastapi_app(
                     existing_profile=existing_profile,
                 )
             except ValueError as error:
+                replay_response = replay_committed_onboarding()
+                if replay_response is not None:
+                    return replay_response
                 raise _launchplane_http_error(
                     status_code=400,
                     trace_id=trace_id,
@@ -18729,7 +17773,36 @@ def create_launchplane_fastapi_app(
                     intent=onboarding_request.generic_web,
                     target_id=onboarding_request.resolved_target_id,
                 )
-            except ValueError as error:
+                try:
+                    adopted_onboarding_target = database_store.read_dokploy_target_record(
+                        context_name=onboarding_request.generic_web.testing_context,
+                        instance_name="testing",
+                    )
+                except FileNotFoundError:
+                    pass
+                else:
+                    adopted_onboarding_target_id = database_store.read_dokploy_target_id_record(
+                        context_name=adopted_onboarding_target.context,
+                        instance_name="testing",
+                    )
+                    if (
+                        adopted_onboarding_target.target_type != "application"
+                        or adopted_onboarding_target_id.target_id
+                        != onboarding_request.resolved_target_id
+                    ):
+                        raise ValueError(
+                            "Generic-web onboarding must preserve the adopted application identity."
+                        )
+                    target = onboarding_manifest.provider_targets[0].model_copy(
+                        update={
+                            "target_name": adopted_onboarding_target.target_name,
+                            "project_name": adopted_onboarding_target.project_name,
+                        }
+                    )
+                    onboarding_manifest = onboarding_manifest.model_copy(
+                        update={"provider_targets": (target,)}
+                    )
+            except (ValueError, FileNotFoundError) as error:
                 raise _launchplane_http_error(
                     status_code=400,
                     trace_id=trace_id,
@@ -18742,13 +17815,33 @@ def create_launchplane_fastapi_app(
                 record_store=database_store,
                 manifest=onboarding_manifest,
             )
+        except ProductProfileConflictError as error:
+            replay_response = replay_committed_onboarding()
+            if replay_response is not None:
+                return replay_response
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_changed",
+                message=str(error),
+            ) from error
         except ValueError as error:
+            replay_response = replay_committed_onboarding()
+            if replay_response is not None:
+                return replay_response
             raise _launchplane_http_error(
                 status_code=400,
                 trace_id=trace_id,
                 code="invalid_product_onboarding_manifest",
                 message=str(error),
             ) from error
+        if adopted_onboarding_target is not None:
+            authority_bundle = authority_bundle.model_copy(
+                update={
+                    "expected_dokploy_targets": (adopted_onboarding_target,),
+                    "expected_dokploy_target_ids": (adopted_onboarding_target_id,),
+                }
+            )
         result, driver_result = (
             control_plane_product_onboarding_service.build_product_onboarding_service_result(
                 onboarding_result
@@ -18785,7 +17878,11 @@ def create_launchplane_fastapi_app(
                     response=onboarding_response,
                 )
             )
-        except RuntimeEnvironmentConflictError as error:
+        except (
+            RuntimeEnvironmentConflictError,
+            ProductProfileConflictError,
+            DokployTargetRecordChanged,
+        ) as error:
             replay_response = replay_stored_apply_idempotency(
                 record_store=database_store,
                 identity=identity,
@@ -18796,6 +17893,20 @@ def create_launchplane_fastapi_app(
             )
             if replay_response is not None:
                 return replay_response
+            if isinstance(error, DokployTargetRecordChanged):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_onboarding_target_changed",
+                    message=str(error),
+                ) from error
+            if isinstance(error, ProductProfileConflictError):
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="product_profile_changed",
+                    message=str(error),
+                ) from error
             raise runtime_environment_conflict_http_error(trace_id=trace_id, error=error) from error
         return onboarding_response
 
@@ -19051,6 +18162,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="invalid_request",
                 message="Request payload failed validation.",
+            )
+        if raw_payload.get("workflow_rule_retirement") is not None:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="reviewed_policy_proposal_required",
+                message="Selected workflow retirement requires a Director-approved policy proposal.",
             )
         try:
             return control_plane_authz_grant_service.AuthzManagedPolicyReconcileEnvelope.model_validate(
@@ -21976,6 +21094,7 @@ def create_launchplane_fastapi_app(
                     product=live_target_runtime_request.product,
                     context=live_target_runtime_request.context,
                     instance=live_target_runtime_request.instance,
+                    recovery=True,
                     separation_only=not live_target_runtime_request.deploy,
                 )
             except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
@@ -21997,6 +21116,7 @@ def create_launchplane_fastapi_app(
                     product=live_target_runtime_request.product,
                     context=live_target_runtime_request.context,
                     instance=live_target_runtime_request.instance,
+                    recovery=True,
                     separation_only=not live_target_runtime_request.deploy,
                 )
                 if current_binding != disposable_runtime_binding:
@@ -22604,7 +21724,15 @@ def create_launchplane_fastapi_app(
             )
         endpoint_status = "applied" if endpoint_request.mode == "apply" else "planned"
         if endpoint_request.mode == "apply":
-            endpoint_store.write_private_health_endpoint_record(endpoint_request.endpoint)
+            try:
+                endpoint_store.write_private_health_endpoint_record(endpoint_request.endpoint)
+            except DokployTargetRecordChanged as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="private_health_endpoint_host_owned",
+                    message=str(error),
+                ) from error
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={},
@@ -22960,15 +22088,26 @@ def create_launchplane_fastapi_app(
         authorization_action = (
             "route_binding.apply" if binding_request.mode == "apply" else "route_binding.read"
         )
-        ensure_route_binding_allowed(
+        policy_authorized = resolved_authz_policy_runtime.allows(
             identity=identity,
-            trace_id=trace_id,
             action=authorization_action,
             product=binding_request.product,
-            context_name=binding_request.context,
-            instance_name=binding_request.instance,
-            message="Workflow cannot reconcile route bindings for the requested product/context.",
+            context=binding_request.context,
+            target=AuthorizationTarget(scope="instance", instances=(binding_request.instance,)),
         )
+        director_evidence_refresh = (
+            not policy_authorized
+            and director_agent_identity(identity)
+            and binding_request.mode == "apply"
+            and binding_request.expected_current.state == "present"
+        )
+        if not policy_authorized and not director_evidence_refresh:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Workflow cannot reconcile route bindings for the requested product/context.",
+            )
         if binding_request.mode == "apply" and not idempotency_key.strip():
             raise _launchplane_http_error(
                 status_code=400,
@@ -23051,6 +22190,14 @@ def create_launchplane_fastapi_app(
                     f"Unsupported route binding mutation preflight status: {preflight.status}"
                 )
 
+        if director_evidence_refresh:
+            require_browser_repair_lane(
+                record_store=record_store,
+                product=binding_request.product,
+                context=binding_request.context,
+                instance=binding_request.instance,
+                trace_id=trace_id,
+            )
         expected_current = binding_request.expected_current
         if binding_request.browser_review is not None:
             require_browser_repair_lane(
@@ -23084,8 +22231,35 @@ def create_launchplane_fastapi_app(
                 expected_current=expected_current,
                 source_label=binding_request.source_label,
                 evaluated_at=utc_now_timestamp(),
+                external_ingress=binding_request.external_ingress,
+                allow_authority_change=binding_request.browser_review is not None
+                and isinstance(identity, GitHubHumanIdentity),
             ),
         )
+
+        if binding_request.mode == "apply" and any(
+            finding.code == "split_ingress_authority_change_requires_review"
+            for finding in reconcile_plan.findings
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Split ingress custody changes require the signed-in administrator's review.",
+            )
+        if (
+            director_evidence_refresh
+            and reconcile_plan.status in {"ready", "unchanged"}
+            and not control_plane_route_binding_reconcile.is_evidence_only_route_binding_refresh(
+                reconcile_plan
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Director agents may refresh only unchanged existing route authority.",
+            )
 
         review = None
         if binding_request.browser_review is not None:
@@ -23176,7 +22350,11 @@ def create_launchplane_fastapi_app(
             response_payload=response.model_dump(mode="json", exclude_none=True),
             lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
         )
-        if binding_request.browser_review is not None:
+        if (
+            binding_request.browser_review is not None
+            or director_evidence_refresh
+            or reconcile_plan.record.external_ingress is not None
+        ):
             assert isinstance(record_store, PostgresRecordStore)
             try:
                 mutation_result = record_store.reconcile_route_binding_record(
@@ -23189,7 +22367,14 @@ def create_launchplane_fastapi_app(
             except (
                 control_plane_route_binding_reconcile.RouteBindingSourceChanged,
                 ProductContextOwnershipError,
-            ):
+            ) as error:
+                if director_evidence_refresh:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="route_binding_changed",
+                        message="Route evidence or product ownership changed before commit.",
+                    ) from error
                 return settle_browser_route_repair_stale(
                     database_store=record_store,
                     identity=identity,
@@ -23881,6 +23066,17 @@ def create_launchplane_fastapi_app(
                     context=route_request.context,
                     instance=instance_name,
                     requested_domains=route_request.ingress.route.domain_names,
+                    tracked_targets=control_plane_ingress_route_scope.tracked_ingress_targets(
+                        record_store, profile
+                    )
+                    if (
+                        route_request.ingress.expected_host_id is not None
+                        and route_request.ingress.require_exact_expected_host_domains
+                        and not route_request.ingress.allow_create
+                        and not route_request.ingress.allow_update
+                        and not route_request.ingress.allow_enable_disable
+                    )
+                    else (),
                     private_endpoints=(
                         record_store.list_private_health_endpoint_records()
                         if isinstance(record_store, PostgresRecordStore)
@@ -24130,6 +23326,7 @@ def create_launchplane_fastapi_app(
             action="preview_lifecycle.plan",
             product=plan_request.product,
             context=plan_request.context,
+            inherit_agent_read_role=director_agent_identity(identity),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -24246,6 +23443,16 @@ def create_launchplane_fastapi_app(
             action="preview_lifecycle.cleanup",
             product=cleanup_request.product,
             context=cleanup_request.context,
+            inherit_agent_read_role=False,
+        ) and (
+            cleanup_request.apply
+            or not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="preview_lifecycle.plan",
+                product=cleanup_request.product,
+                context=cleanup_request.context,
+                inherit_agent_read_role=director_agent_identity(identity),
+            )
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -24385,13 +23592,18 @@ def create_launchplane_fastapi_app(
         denied_actions_by_product: dict[str, str] = {}
         denied_profile: LaunchplaneProductProfileRecord | None = None
         denied_action = ""
+        required_actions = ("preview_lifecycle.plan",) + (
+            ("preview_lifecycle.cleanup",) if sweep_request.apply else ()
+        )
         for profile in requested_sweep_profiles:
-            for action in ("preview_lifecycle.plan", "preview_lifecycle.cleanup"):
+            for action in required_actions:
                 if not resolved_authz_policy_runtime.allows(
                     identity=identity,
                     action=action,
                     product=profile.product,
                     context=profile.preview.context,
+                    inherit_agent_read_role=director_agent_identity(identity)
+                    and not sweep_request.apply,
                 ):
                     denied_actions_by_product[profile.product] = action
                     if denied_profile is None:
@@ -24646,7 +23858,7 @@ def create_launchplane_fastapi_app(
                 )
                 resource_facts: dict[str, str] | None = None
                 if (
-                    profile.driver_id == "odoo"
+                    profile.driver_id in {"odoo", "generic-web"}
                     and observation.instance == "testing"
                     and facts.production_resources != "shared"
                 ):
@@ -24657,6 +23869,7 @@ def create_launchplane_fastapi_app(
                             product=profile.product,
                             context=observation.context,
                             now=store.disposable_lane_observation_time(),
+                            root=resolved_control_plane_root,
                         )
                     except NativeSourceAuthorizationDenied:
                         raise _launchplane_http_error(
@@ -26066,6 +25279,7 @@ def create_launchplane_fastapi_app(
             action="preview_desired_state.discover",
             product=desired_state_request.product,
             context=desired_state_request.context,
+            inherit_agent_read_role=director_agent_identity(identity),
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -26328,84 +25542,6 @@ def create_launchplane_fastapi_app(
             record_store=database_store,
             identity=identity,
             route_path=_PUBLIC_INGRESS_NOTIFICATION_POLICY_APPLY_ROUTE,
-            idempotency_key=normalized_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
-        return response
-
-    async def apply_every_code_notification_policy(
-        request: Request,
-        policy_request: EveryCodeNotificationPolicyApplyEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse:
-        trace_id = next_trace_id()
-        require_local_operator_notification_policy_reason(
-            identity=identity,
-            reason=policy_request.reason,
-            trace_id=trace_id,
-            message="Local operator Every Code notification policy apply requires a reason.",
-        )
-        if not resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action="every_code_notification_policy.apply",
-            product="launchplane",
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) and not (
-            policy_request.mode != "apply"
-            and resolved_authz_policy_runtime.allows(
-                identity=identity,
-                action="every_code_notification_policy.plan",
-                product="launchplane",
-                context=_LAUNCHPLANE_SERVICE_CONTEXT,
-            )
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message="Workflow cannot apply Every Code notification policy.",
-            )
-        database_store = require_notification_policy_database_store(
-            record_store=record_store,
-            trace_id=trace_id,
-            label="Every Code",
-        )
-        (
-            normalized_key,
-            payload_fingerprint,
-            replayed_response,
-        ) = await replay_notification_policy_idempotency(
-            request=request,
-            record_store=database_store,
-            identity=identity,
-            route_path=_EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-        )
-        if replayed_response is not None:
-            return replayed_response
-        if policy_request.mode == "apply":
-            cast(
-                _EveryCodeNotificationPolicyApplyStore,
-                database_store,
-            ).write_every_code_notification_policy_record(policy_request.policy)
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={"every_code_notification_policy_id": policy_request.policy.policy_id},
-            result={
-                "mode": policy_request.mode,
-                "changed": policy_request.mode == "apply",
-                "policy": _every_code_notification_policy_summary(policy_request.policy),
-            },
-        )
-        store_notification_policy_idempotency(
-            record_store=database_store,
-            identity=identity,
-            route_path=_EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE,
             idempotency_key=normalized_key,
             request_fingerprint_value=payload_fingerprint,
             trace_id=trace_id,
@@ -26729,8 +25865,11 @@ def create_launchplane_fastapi_app(
                     code="domain_repair_evidence_unqualified",
                     message=str(error),
                 ) from error
-            if set(plan.repair.result.requested_domains).intersection(
-                database_store.retained_disposable_hostnames()
+            if {
+                retained_hostname_identity(host) for host in plan.repair.result.requested_domains
+            }.intersection(
+                retained_hostname_identity(host)
+                for host in database_store.retained_disposable_hostnames()
             ):
                 raise _launchplane_http_error(
                     status_code=409,
@@ -27070,7 +26209,31 @@ def create_launchplane_fastapi_app(
                     code="idempotency_key_required",
                     message="Dokploy target setup apply requires an Idempotency-Key header.",
                 )
-        if setup_request.state_volume_path:
+        ordinary_allocation = (
+            setup_request.operation == "create-application"
+            and setup_request.instance == "testing"
+            and setup_request.mode != "dry-run"
+            and not setup_request.state_volume_path
+        )
+        if ordinary_allocation and setup_request.mode == "apply":
+            prior = database_store.read_idempotency_record(
+                scope=idempotency_scope(identity),
+                route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                idempotency_key=idempotency_key.strip(),
+            )
+            if prior is not None and not prior.reconciliation_key:
+                _, _, legacy_replay = await replay_apply_idempotency(
+                    request=request,
+                    record_store=database_store,
+                    identity=identity,
+                    route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
+                    idempotency_key=idempotency_key,
+                    trace_id=trace_id,
+                    check_replay=True,
+                )
+                if legacy_replay is not None:
+                    return legacy_replay
+        if setup_request.state_volume_path or ordinary_allocation:
             from control_plane.application_state_volume import ApplicationStateVolumeAdapter
             from control_plane.application_state_volume_errors import StateVolumeRefusal
 
@@ -27083,6 +26246,7 @@ def create_launchplane_fastapi_app(
                     trace_id,
                     lane_owner,
                     idempotency_key.strip(),
+                    first_testing_setup=first_testing_setup,
                 )
                 if setup_request.mode == "dry-run":
                     return accepted_evidence_response(
@@ -27095,7 +26259,7 @@ def create_launchplane_fastapi_app(
                         result=adapter.readback(idempotency_key.strip()),
                     )
 
-                if setup_request.retain_state_volume_allocation:
+                if setup_request.retain_state_volume_allocation or setup_request.retain_allocation:
                     return accepted_evidence_response(
                         trace_id=trace_id,
                         records={},
@@ -27120,8 +26284,12 @@ def create_launchplane_fastapi_app(
                     route_path=_DOKPLOY_TARGET_SETUP_ROUTE,
                     trace_id=trace_id,
                     operation=volume_operation,
-                    in_progress_message="Application storage setup is running under its original key.",
-                    reconcile_message="Preserve the original key and storage plan; inspect readback before recovery.",
+                    in_progress_message="Application setup is running under its original key.",
+                    reconcile_message=(
+                        "Preserve the original setup request and key; inspect readback before recovery."
+                        if ordinary_allocation
+                        else "Preserve the original key and storage plan; inspect readback before recovery."
+                    ),
                 )
             except TestingTargetSourceEvidenceUnavailable as error:
                 raise _launchplane_http_error(
@@ -27130,13 +26298,17 @@ def create_launchplane_fastapi_app(
                     code="testing_target_source_evidence_unavailable",
                     message=str(error),
                 ) from error
-            except (ValueError, FileNotFoundError) as error:
+            except (ValueError, FileNotFoundError, click.ClickException) as error:
                 raise _launchplane_http_error(
-                    status_code=409,
+                    status_code=400
+                    if ordinary_allocation and not isinstance(error, StateVolumeRefusal)
+                    else 409,
                     trace_id=trace_id,
                     code=(
                         error.code
                         if isinstance(error, StateVolumeRefusal)
+                        else "invalid_dokploy_target_setup"
+                        if ordinary_allocation
                         else "application_state_volume_unqualified"
                     ),
                     message=str(error),
@@ -27197,6 +26369,23 @@ def create_launchplane_fastapi_app(
                 separation_only=True,
             )
 
+        execution_request = setup_request
+        ordinary_preview: dict[str, str] = {}
+        if (
+            setup_request.operation == "create-application"
+            and setup_request.instance == "testing"
+            and setup_request.mode == "dry-run"
+            and not setup_request.state_volume_path
+        ):
+            from control_plane.application_state_volume import (
+                ordinary_allocation_names,
+                named_application_request,
+            )
+
+            ordinary_preview = ordinary_allocation_names(
+                setup_request, idempotency_scope(identity), idempotency_key.strip()
+            )
+            execution_request = named_application_request(setup_request, ordinary_preview)
         try:
             rebuild_checkpoint()
             # Replacing a testing target holds the lock its event deploys run under.
@@ -27225,7 +26414,7 @@ def create_launchplane_fastapi_app(
                 result = execute_dokploy_target_setup(
                     control_plane_root_path=resolved_control_plane_root,
                     record_store=database_store,
-                    request=setup_request,
+                    request=execution_request,
                     director_source_completion=director_source_completion,
                     # A lane-scoped caller's owner is re-checked when records commit.
                     required_context_owner=(
@@ -27303,6 +26492,18 @@ def create_launchplane_fastapi_app(
                 code="invalid_dokploy_target_setup",
                 message=str(error),
             ) from error
+        if ordinary_preview:
+            setup_result = result["setup"]
+            assert isinstance(setup_result, dict)
+            setup_result["allocation"] = {
+                "project_name": ordinary_preview["project_marker"],
+                "environment_name": ordinary_preview["environment_marker"],
+                "target_name": ordinary_preview["target_marker"],
+                "app_name": ordinary_preview["app_name"],
+            }
+            setup_result["allocation_preview"] = (
+                "exact-for-key" if idempotency_key.strip() else "requires-original-key"
+            )
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={},
@@ -27486,29 +26687,6 @@ def create_launchplane_fastapi_app(
             ),
         )
         result = monitor_result.model_dump(mode="json")
-        if monitor_request.refused_production_requests:
-            if not isinstance(record_store, (PostgresRecordStore, FilesystemRecordStore)):
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="database_storage_required",
-                    message="Refusal reconciliation requires a supported record store.",
-                )
-            try:
-                resolved_refusals = await run_in_threadpool(
-                    reconcile_refused_production_requests,
-                    record_store,
-                    requests=monitor_request.refused_production_requests,
-                    observed_at=utc_now_timestamp(),
-                )
-            except (ValueError, FileNotFoundError) as error:
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="refused_request_reconciliation_blocked",
-                    message=str(error),
-                ) from error
-            result["refused_production_requests_resolved"] = list(resolved_refusals)
         response = accepted_evidence_response(trace_id=trace_id, records={}, result=result)
         if idempotency_store is not None and normalized_idempotency_key:
             idempotency_store.write_idempotency_record(
@@ -27931,24 +27109,6 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="apply_public_ingress_notification_policy",
         summary="Apply public ingress notification policy",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _EVERY_CODE_NOTIFICATION_POLICY_APPLY_ROUTE,
-        apply_every_code_notification_policy,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="apply_every_code_notification_policy",
-        summary="Apply Every Code notification policy",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
@@ -29264,27 +28424,6 @@ def create_launchplane_fastapi_app(
     register_runner_host_hygiene_read_routes(app, dependencies=read_route_dependencies)
     register_deployment_promotion_read_routes(app, dependencies=read_route_dependencies)
 
-    every_code_work_request_write_error_responses: dict[int | str, dict[str, object]] = {
-        400: {"model": LaunchplaneErrorResponse},
-        401: {"model": LaunchplaneErrorResponse},
-        403: {"model": LaunchplaneErrorResponse},
-        409: {"model": LaunchplaneErrorResponse},
-        503: {"model": LaunchplaneErrorResponse},
-    }
-    every_code_worker_write_error_responses: dict[int | str, dict[str, object]] = {
-        400: {"model": LaunchplaneErrorResponse},
-        401: {"model": LaunchplaneErrorResponse},
-        403: {"model": LaunchplaneErrorResponse},
-        503: {"model": LaunchplaneErrorResponse},
-    }
-    every_code_worker_status_error_responses: dict[int | str, dict[str, object]] = {
-        400: {"model": LaunchplaneErrorResponse},
-        401: {"model": LaunchplaneErrorResponse},
-        403: {"model": LaunchplaneErrorResponse},
-        404: {"model": LaunchplaneErrorResponse},
-        409: {"model": LaunchplaneErrorResponse},
-        503: {"model": LaunchplaneErrorResponse},
-    }
     app.add_api_route(
         TRUSTED_MAINTENANCE_WEBHOOK_ROUTE,
         handle_trusted_maintenance_github_webhook,
@@ -29327,6 +28466,7 @@ def create_launchplane_fastapi_app(
             read_github_human_browser_mutation_identity=(
                 read_owner_review_browser_mutation_identity
             ),
+            read_request_mutation_identity=read_release_request_mutation_identity,
             current_review=lambda store, profile, trace_id: current_release_review(
                 control_plane_root=resolved_control_plane_root,
                 record_store=store,
@@ -29340,12 +28480,17 @@ def create_launchplane_fastapi_app(
                 profile=profile,
                 decision=decision,
             ),
-            open_urgent_review=lambda store, profile, reason, digest: publish_release_invitation(
-                store=store,
-                control_plane_root=resolved_control_plane_root,
-                profile=profile,
-                urgent_reason=reason,
-                urgent_checklist_digest=digest,
+            request_release_review=lambda store, profile, review, source, reason, reference, actor: (
+                request_release_review(
+                    store=store,
+                    control_plane_root=resolved_control_plane_root,
+                    profile=profile,
+                    review=review,
+                    source=source,
+                    reason=reason,
+                    decision_reference=reference,
+                    actor=actor,
+                )
             ),
             adopt_invitation=lambda store, profile, digest, issue, comment, dry_run, reason: (
                 adopt_release_invitation(
@@ -29365,7 +28510,8 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=LocalConsumerDependencies(
             common=owner_review_route_dependencies,
-            read_human_mutation_identity=read_github_human_browser_mutation_identity,
+            read_mutation_identity=read_browser_mutation_identity,
+            public_origin=human_session_manager.public_origin if human_session_manager else None,
         ),
     )
     register_owner_secret_input_routes(
@@ -29394,6 +28540,15 @@ def create_launchplane_fastapi_app(
             publish_owner_review_status=lambda store, profile, pull_request_number: (
                 resolved_owner_review_status_publisher.publish(
                     store=store, profile=profile, pull_request_number=pull_request_number
+                )
+            ),
+            read_pull_request_notes=product_review_notes_reader
+            or (
+                lambda profile, pull_request_number, trace_id: read_pull_request_notes(
+                    control_plane_root=resolved_control_plane_root,
+                    profile=profile,
+                    pull_request_number=pull_request_number,
+                    trace_id=trace_id,
                 )
             ),
         ),
@@ -29460,7 +28615,9 @@ def create_launchplane_fastapi_app(
         dependencies=ProductionBackupGateRouteDependencies(
             common=read_route_dependencies,
             read_mutation_identity=read_operator_mutation_identity,
+            read_continuation_identity=read_browser_mutation_identity,
             cancel_pending_operation=cancel_pending_durable_operation,
+            control_plane_root=resolved_control_plane_root,
         ),
     )
     register_odoo_prod_release_operation_routes(
@@ -29480,6 +28637,7 @@ def create_launchplane_fastapi_app(
         dependencies=TestingRebuildRouteDependencies(
             common=read_route_dependencies,
             mutation_identity=read_operator_mutation_identity,
+            lookup_identity=read_browser_mutation_identity,
             root=resolved_control_plane_root,
         ),
     )
@@ -29684,162 +28842,16 @@ def create_launchplane_fastapi_app(
         },
     )
 
-    app.add_api_route(
-        "/v1/every-code/work-requests/create",
-        create_every_code_work_request,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="create_every_code_work_request",
-        summary="Create Every Code work request",
-        responses=every_code_work_request_write_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/every-code/work-requests/claim",
-        claim_every_code_work_request,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="claim_every_code_work_request",
-        summary="Claim Every Code work request",
-        responses=every_code_worker_status_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/every-code/work-requests/status",
-        write_every_code_work_request_status,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_every_code_work_request_status",
-        summary="Write Every Code work request status",
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(EveryCodeWorkRequestStatusEnvelope)
-                    }
-                },
-            }
-        },
-        responses=every_code_worker_status_error_responses,
-    )
-
-    app.add_api_route(
-        _EVERY_CODE_WORK_REQUEST_HEARTBEAT_ROUTE,
-        write_every_code_work_request_heartbeat,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_every_code_work_request_heartbeat",
-        summary="Heartbeat Every Code work request lease",
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(EveryCodeWorkRequestHeartbeatEnvelope)
-                    }
-                },
-            }
-        },
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _EVERY_CODE_WORK_REQUEST_RECOVER_STALE_ROUTE,
-        recover_stale_every_code_work_requests,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="recover_stale_every_code_work_requests",
-        summary="Recover stale Every Code work requests",
-        responses={
-            401: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _EVERY_CODE_WORK_REQUEST_RERUN_ROUTE,
-        rerun_every_code_work_request,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="rerun_every_code_work_request",
-        summary="Rerun Every Code work request",
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(EveryCodeWorkRequestRerunEnvelope)
-                    }
-                },
-            }
-        },
-        responses=every_code_worker_status_error_responses,
-    )
-
     register_every_code_feedback_read_routes(
         app,
         dependencies=read_route_dependencies,
         read_identity=read_every_code_worker_read_identity,
     )
 
-    app.add_api_route(
-        "/v1/every-code/pr-feedback",
-        write_every_code_pr_feedback,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_every_code_pr_feedback",
-        summary="Write Every Code PR feedback",
-        responses=every_code_worker_write_error_responses,
-    )
-
-    app.add_api_route(
-        "/v1/every-code/pr-feedback/status",
-        write_every_code_pr_feedback_status,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_every_code_pr_feedback_status",
-        summary="Write Every Code PR feedback status",
-        responses=every_code_worker_status_error_responses,
-    )
-
     register_every_code_preview_gate_read_routes(
         app,
         dependencies=read_route_dependencies,
         read_identity=read_every_code_worker_read_identity,
-    )
-
-    app.add_api_route(
-        "/v1/every-code/preview-gates",
-        write_every_code_preview_gate,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        operation_id="write_every_code_preview_gate",
-        summary="Write Every Code preview gate",
-        responses=every_code_worker_write_error_responses,
     )
 
     register_every_code_notification_attempt_read_routes(
@@ -30901,6 +29913,11 @@ def create_launchplane_fastapi_app(
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,
     )
+    register_service_runtime_settings_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_operator_mutation_identity,
+    )
     register_product_display_name_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
@@ -31014,6 +30031,13 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,
+    )
+    register_testing_address_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
     )
     register_testing_verification_routes(
         app,
@@ -31151,16 +30175,22 @@ def create_launchplane_fastapi_app(
             trace_id = string_value(detail.get("trace_id", trace_id))
             code = string_value(detail.get("code", code))
             message = string_value(detail.get("message", "Launchplane request failed."))
+            reason = detail.get("reason")
+            details = detail.get("details")
             records = detail.get("records")
             authz = detail.get("authz")
             authz_evaluation = http_error.authz_evaluation
             authz_policy_provenance = http_error.authz_policy_provenance
+            if http_error.__cause__ is not None:
+                log_handled_error_cause(http_error.__cause__, trace_id)
         else:
             message = (
                 http_error.detail
                 if isinstance(http_error.detail, str)
                 else "Launchplane request failed."
             )
+            reason = None
+            details = None
             records = None
             authz = None
             authz_evaluation = None
@@ -31184,9 +30214,24 @@ def create_launchplane_fastapi_app(
                 evaluation=authz_evaluation,
                 policy_provenance=authz_policy_provenance,
             )
+        error_detail = LaunchplaneErrorDetail(code=code, message=message)
+        if reason is not None:
+            try:
+                error_detail = LaunchplaneErrorDetail.model_validate(
+                    {"code": code, "message": message, "reason": reason}
+                )
+            except ValidationError:
+                logging.warning("Invalid optional refusal reason; trace_id=%s", trace_id)
+        error_details = None
+        if details is not None:
+            try:
+                error_details = LaunchplaneErrorDetails.model_validate(details)
+            except ValidationError:
+                logging.warning("Invalid optional refusal details; trace_id=%s", trace_id)
         payload = LaunchplaneErrorResponse(
             trace_id=trace_id,
-            error=LaunchplaneErrorDetail(code=code, message=message),
+            error=error_detail,
+            details=error_details,
             records=records if isinstance(records, dict) else None,
             authz=authz if isinstance(authz, dict) else None,
         )
@@ -31322,6 +30367,7 @@ def create_launchplane_fastapi_app(
         )
 
     app.add_exception_handler(PublicHostAuthorityBusy, public_host_authority_busy_handler)
+
     app.add_exception_handler(HTTPException, launchplane_http_exception_handler)
     app.add_exception_handler(
         STARLETTE_HTTP_EXCEPTION,
@@ -31395,8 +30441,14 @@ def _launchplane_http_error(
     authz_evaluation: AuthzEvaluation | None = None,
     authz_policy_provenance: AuthzPolicyProvenance | None = None,
     headers: dict[str, str] | None = None,
+    reason: str | None = None,
+    details: dict[str, str] | None = None,
 ) -> LaunchplaneHTTPException:
     detail: dict[str, object] = {"trace_id": trace_id, "code": code, "message": message}
+    if reason is not None:
+        detail["reason"] = reason
+    if details is not None:
+        detail["details"] = details
     if records is not None:
         detail["records"] = records
     if authz is not None:

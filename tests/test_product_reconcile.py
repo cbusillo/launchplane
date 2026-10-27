@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import seed_dependency_policy
 from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
@@ -1408,6 +1409,46 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 ),
                 operation,
             )
+
+    def test_completed_native_generation_queues_existing_data_without_bootstrap_queue_receipt(
+        self,
+    ) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        generation = FreshOdooTestingGeneration(
+            product="site",
+            context="cm",
+            operation_id="native-testing-fixture",
+            target_id="independent-testing-target",
+            namespace="lp-testing-" + "a" * 32,
+            domain_host="fresh.example.invalid",
+            resources_binding_sha256="b" * 64,
+            bootstrap_plan_sha256="c" * 64,
+            request_sha256="d" * 64,
+            prepared_at="2026-09-30T12:00:00Z",
+        )
+        for completed in (False, True):
+            current = generation.model_copy(
+                update={"completed_at": "2026-09-30T12:01:00Z" if completed else ""}
+            )
+            with (
+                self.subTest(completed=completed),
+                patch(
+                    "control_plane.odoo_testing_restore.read_current_testing_generation",
+                    return_value=current,
+                ),
+            ):
+                self.request()
+                plan = self.reconcile()
+                if not completed:
+                    self.assertTrue(plan["held"])
+                    self.assertEqual(plan["reason"], "fresh_testing_bootstrap_incomplete")
+                    self.assertNotIn("queued_operation_id", plan)
+                    continue
+                operation = self.store.read_odoo_stable_target_replacement_operation_record(
+                    cast(str, plan["queued_operation_id"])
+                )
+                self.assertEqual(operation.request.data_source_mode, "existing")
+                self.assertFalse(plan["held"])
 
     def fail_with_provider_text(self, operation_id: str) -> None:
         operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)
@@ -5976,6 +6017,15 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def test_recorded_train_candidate_does_not_allocate_a_preview(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch("control_plane.product_reconcile.recorded_train_candidate", return_value=True):
+            plan = self.reconcile()
+        self.assertEqual(plan["action"], "none")
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.store.list_preview_records())
+
     def test_memory_refusal_reports_headroom_and_retries_without_a_new_build(self) -> None:
         from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 
@@ -6046,6 +6096,15 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self, refused_path: str = "/api/domain.delete", *, real_inputs: bool = False
     ) -> list[str]:
         self.advance_preview_recovery_grace = True
+        self.enterContext(
+            patch(
+                "control_plane.odoo_preview_resources.require_existing_preview_resources",
+                return_value="fixture-inspected-binding",
+            )
+        )
+        self.enterContext(
+            patch("control_plane.odoo_preview_resources.require_preview_resource_binding")
+        )
         calls: list[str] = []
         domain_exists = True
 
@@ -6235,6 +6294,17 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             first = self.run_once()
+        self.assertEqual(first.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(calls.count("/api/compose.delete"), 1)
+        reservation = self.store.read_idempotency_record(
+            scope=reconcile_reservation_scope("site"),
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=str(first.last_plan["preview_plan_id"]),
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "reconcile_required")
+        self.assertEqual(reservation.provider_effect_phase, "compose_destroy")
+
         # A later phase with a present compose returns unknown without retrying.
         for _attempt in range(PREVIEW_DESTROY_MAX_FAILED_ATTEMPTS + 1):
             self.request("preview", 5)
@@ -6282,6 +6352,17 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.request("preview", 5)
         with self.assertLogs("control_plane.product_reconcile", "WARNING"):
             first = self.run_once()
+        self.assertEqual(first.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(calls.count("/api/domain.delete"), 1)
+        reservation = self.store.read_idempotency_record(
+            scope=reconcile_reservation_scope("site"),
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key=str(first.last_plan["preview_plan_id"]),
+        )
+        assert reservation is not None
+        self.assertEqual(reservation.state, "reconcile_required")
+        self.assertEqual(reservation.provider_effect_phase, "domain_delete")
+
         with patch.object(
             self.store, "checkpoint_mutation_provider_effect", side_effect=OSError("DB unavailable")
         ):
@@ -6925,7 +7006,7 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.run_once()
         self.assertFalse(self.driver.changes)
 
-    def test_director_standing_preview_needs_valid_notes_without_a_client_invitation(self) -> None:
+    def test_director_standing_preview_invites_review_only_for_an_explicit_label(self) -> None:
         payload = _generic_web_preview_profile().model_dump(mode="json")
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         payload["release_on_acceptance"] = "director_standing"
@@ -6933,21 +7014,21 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
         self.github.add_run(50, PR_HEAD, event="pull_request")
-        for body, labels in (
-            ("## Client test notes\nTry the approval buttons.", []),
-            (
-                "## Client test notes\nTry the changed page.",
-                [{"name": "owner-review"}],
-            ),
-        ):
-            with self.subTest(body=body, labels=labels):
-                self.github.pull_request.update(body=body, labels=labels)
-                self.request("preview", 5)
-                result = self.reconcile()
-                self.assertIn(result["action"], ("apply", "none"))
-                self.assertIs(result["owner_review_requested"], False)
-                for comment in self.comments.on(5):
-                    self.assertNotIn("@site-owner", cast(str, comment["body"]))
+        self.github.pull_request.update(
+            body="## Client test notes\nTry the approval buttons.", labels=[]
+        )
+        self.request("preview", 5)
+        result = self.reconcile()
+        self.assertIn(result["action"], ("apply", "none"))
+        self.assertIs(result["owner_review_requested"], False)
+        for comment in self.comments.on(5):
+            self.assertNotIn("@site-owner", cast(str, comment["body"]))
+        self.github.pull_request.update(labels=[{"name": "owner-review"}])
+        self.request("preview", 5)
+        result = self.reconcile()
+        self.assertIn(result["action"], ("apply", "none"))
+        self.assertIs(result["owner_review_requested"], True)
+        self.github.pull_request.update(labels=[])
         self.github.pull_request["body"] = ""
         self.request("preview", 5)
         self.assertEqual(self.reconcile()["action"], "wait")
@@ -7490,6 +7571,157 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
                 )
                 self.assertFalse(self.sweep_preview())
 
+    def seed_preview_failure(self, *, state: PreviewState = "destroyed") -> None:
+        self.request("preview", 5)
+        request = self.store.claim_next_product_reconcile_request("seed", 600)
+        assert request is not None
+        self.store.complete_product_reconcile_request(
+            request.target_key,
+            "seed",
+            "failed",
+            {
+                "action": "wait",
+                "last_failed_error_summary": record_failure_summary("preview_reconcile_failed"),
+                "pr_feedback": {"status": "failed", "delivery_status": "delivered"},
+            },
+            "preview_reconcile_failed",
+        )
+        self.write_preview(state=state)
+        self.github.pull_request["state"] = "closed"
+
+    def test_retirement_recovers_stale_failure_without_another_pr_event(self) -> None:
+        from control_plane.contracts.product_environment_read_model import (
+            build_product_site_overview,
+        )
+
+        self.seed_preview_failure()
+        preview = self.store.list_preview_records()[0]
+        warning_prefix = f"PR #{preview.anchor_pr_number}:"
+        before = build_product_site_overview(
+            record_store=self.store, product="site", action_allowed=lambda *_: False
+        )
+        self.assertTrue(any(warning.startswith(warning_prefix) for warning in before.warnings))
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+
+        after = build_product_site_overview(
+            record_store=self.store, product="site", action_allowed=lambda *_: False
+        )
+        self.assertEqual(recovered.last_plan["reason"], "pull_request_not_open")
+        self.assertFalse(any(warning.startswith(warning_prefix) for warning in after.warnings))
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_retired_failure_recovery_keeps_unknown_reads_bounded(self) -> None:
+        self.seed_preview_failure()
+        attempts = 0
+        with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+            while self.sweep_preview():
+                failed = self.run_swept_preview()
+                attempts += 1
+                self.assertLessEqual(attempts, PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS)
+        self.assertGreater(attempts, 0)
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("feedback_recovery_stop_reason", failed.last_plan)
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.sweep_preview())
+
+    def test_failed_feedback_requires_a_completed_retirement(self) -> None:
+        self.seed_preview_failure()
+        self.write_preview(state="teardown_pending")
+
+        self.assertFalse(self.sweep_preview())
+        self.assertEqual(self.provider.applied, [])
+
+    def test_failed_feedback_does_not_borrow_another_contexts_retirement(self) -> None:
+        self.seed_preview_failure()
+        preview = self.store.list_preview_records()[0]
+        self.store.write_preview_record(preview.model_copy(update={"context": "other"}))
+
+        self.assertFalse(self.sweep_preview())
+        self.assertEqual(self.provider.applied, [])
+
+    def test_pre_retirement_failures_do_not_spend_the_later_recovery_budget(self) -> None:
+        self.seed_preview_failure(state="active")
+        self.github.pull_request["state"] = "open"
+        for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+            self.request("preview", 5)
+            with patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")):
+                failed = self.run_once()
+            self.assertEqual(failed.state, "failed")
+            self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
+            self.assertNotIn("feedback_recovery_stop_reason", failed.last_plan)
+
+        self.write_preview(state="destroyed")
+        self.github.pull_request["state"] = "closed"
+
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+        self.assertEqual(recovered.last_plan["reason"], "pull_request_not_open")
+        self.assertFalse(self.sweep_preview())
+
+    def test_retired_failure_with_unknown_pr_state_stays_bounded(self) -> None:
+        self.seed_preview_failure()
+        self.github.pull_request["state"] = "unknown"
+        attempts = 0
+        while self.sweep_preview():
+            unresolved = self.run_swept_preview()
+            attempts += 1
+            self.assertLessEqual(attempts, PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS)
+        self.assertGreater(attempts, 0)
+        self.assertEqual(unresolved.last_plan["reason"], "preview_cleanup_pr_state_unknown")
+        self.assertIn("last_failed_error_summary", unresolved.last_plan)
+        self.assertIn("feedback_recovery_stop_reason", unresolved.last_plan)
+        self.assertEqual(self.provider.applied, [])
+
+    def test_retirement_metadata_failure_does_not_block_the_failed_result(self) -> None:
+        self.seed_preview_failure()
+        self.request("preview", 5)
+        with (
+            patch.object(self.github, "get_json", side_effect=OSError("GitHub unavailable")),
+            patch.object(
+                self.store, "list_preview_records", side_effect=OSError("metadata unavailable")
+            ),
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertIn("last_failed_error_summary", failed.last_plan)
+        self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
+
+    def test_new_runtime_failure_does_not_spend_retirement_recovery_budget(self) -> None:
+        self.seed_preview_failure()
+        self.github.pull_request["state"] = "open"
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch.object(
+            self.provider,
+            "execute_apply",
+            return_value={"status": "fail", "provider_effect_attempted": True},
+        ):
+            failed = self.run_once()
+        self.assertEqual(failed.state, "failed")
+        self.assertEqual(failed.last_plan["action"], "apply")
+        self.assertNotIn("feedback_recovery_failed_attempts", failed.last_plan)
+
+    def test_unknown_live_pr_state_does_not_spend_pending_feedback_budget(self) -> None:
+        self.reconcile_preview()
+        self.write_preview(state="active")
+        self.github.pull_request["state"] = "unknown"
+        for _ in range(PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS):
+            self.request("preview", 5)
+            unresolved = self.run_once()
+            self.assertEqual(unresolved.last_plan["reason"], "preview_cleanup_pr_state_unknown")
+            self.assertNotIn("feedback_recovery_failed_attempts", unresolved.last_plan)
+            self.assertNotIn("feedback_recovery_stop_reason", unresolved.last_plan)
+
+        self.write_preview(state="destroyed")
+        self.github.pull_request["state"] = "closed"
+        self.assertTrue(self.sweep_preview())
+        recovered = self.run_swept_preview()
+        self.assertEqual(recovered.last_plan["reason"], "pull_request_not_open")
+        self.assertFalse(self.sweep_preview())
+
     def test_recovery_discovers_feedback_beyond_the_default_history_limit(self) -> None:
         for number in range(10, 120):
             self.store.request_product_reconcile(
@@ -7809,13 +8041,17 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.assertIn("An admin needs to set one", self.comment_body())
 
     def test_notes_without_label_invite_client_and_missing_notes_are_visible(self) -> None:
+        from github_plan_status.client_test_notes import OPEN_CLIENT_QUESTIONS
+
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         self.store.write_product_profile_record(
             LaunchplaneProductProfileRecord.model_validate(payload)
         )
         self.github.add_run(50, PR_HEAD, event="pull_request")
-        self.github.pull_request["body"] = "## Client test notes\nTry the changed price list."
+        self.github.pull_request["body"] = (
+            f"## Client test notes\nTry the changed price list.\n### {OPEN_CLIENT_QUESTIONS}\n- What is the business address?"
+        )
         self.request("preview", 5)
         result = self.reconcile()
         self.assertEqual(result["action"], "apply")
@@ -7831,6 +8067,7 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         )
 
     def test_pure_dependabot_without_build_requests_no_client_review(self) -> None:
+        seed_dependency_policy(self.store, repository=REPOSITORY)
         payload = _profile()
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}
         self.store.write_product_profile_record(
@@ -7839,9 +8076,9 @@ class ProductReconcilePreviewFeedbackTests(ProductReconcileTestCase):
         self.github.pull_request.update(
             {
                 "body": "Bumps a dependency.",
-                "user": {"login": "dependabot[bot]", "type": "Bot"},
+                "user": {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"},
                 "head": {"sha": PR_HEAD, "repo": {"full_name": REPOSITORY}},
-                "base": {"sha": DEPLOYABLE, "repo": {"full_name": REPOSITORY}},
+                "base": {"ref": "main", "sha": DEPLOYABLE, "repo": {"full_name": REPOSITORY}},
             }
         )
         read = self.github.get_json

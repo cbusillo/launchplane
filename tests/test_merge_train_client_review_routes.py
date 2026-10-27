@@ -11,7 +11,7 @@ from control_plane.merge_train_batch_candidate import (
 from control_plane.merge_train_branch_refresh import (
     require_merge_train_client_review_read_store,
 )
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.merge_train_run_once import (
     MergeTrainRunOnceEnvelope,
     execute_merge_train_run_once,
@@ -39,6 +39,7 @@ CLIENT_STATUS = "launchplane/owner-review"
 
 def _review_store(*, review_label: str = "owner-review") -> Any:
     profile = SimpleNamespace(
+        driver_id="generic-web",
         release_on_acceptance="held",
         is_active=True,
         repository=REPOSITORY,
@@ -121,6 +122,33 @@ class LegacyRunOnceClientReviewTests(unittest.TestCase):
                     )
                 dry_run = cast(dict[str, Any], result.accepted_result["dry_run_result"])
                 self.assertEqual(dry_run["intended_next_action"], expected_action)
+
+    def test_odoo_level1_routes_to_candidate_controller_without_a_merge(self) -> None:
+        store = _review_store()
+        store.list_product_profile_records()[0].driver_id = "odoo"
+        transport = _labelled_pull_request_transport((_owner_review_check("success"),))
+        with patch(
+            "control_plane.merge_train_run_once.UrllibMergeTrainGitHubTransport",
+            return_value=transport,
+        ):
+            result = execute_merge_train_run_once(
+                request=MergeTrainRunOnceEnvelope(repository=REPOSITORY, mutate=True),
+                policy=build_test_merge_train_policy(),
+                policy_sha256="policy-sha",
+                token="token",
+                trace_id="trace-odoo-controller",
+                recorded_at="2026-10-03T18:00:00Z",
+                review_store=store,
+            )
+        self.assertFalse(
+            [
+                item
+                for item in transport.requests
+                if item.method != "GET" and item.path != "/graphql"
+            ]
+        )
+        dry_run = cast(dict[str, Any], result.accepted_result["dry_run_result"])
+        self.assertEqual(dry_run["intended_next_action"], "wait_for_checks")
 
     def test_mutating_run_once_does_not_merge_without_current_head_review(self) -> None:
         transport = _labelled_pull_request_transport(())

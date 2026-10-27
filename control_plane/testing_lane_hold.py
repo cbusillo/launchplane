@@ -26,6 +26,7 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetRecordChanged,
     DokployTargetStaffTestingHold,
+    TestingHoldPurpose,
     TestingHoldRehearsal,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
@@ -68,6 +69,7 @@ class TestingHoldStale(ValueError):
     pass
 
 
+@runtime_checkable
 class TestingHoldReader(Protocol):
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
@@ -140,7 +142,7 @@ class TestingHoldApplyRequest(BaseModel):
     mode: TestingHoldMode = "dry-run"
     hold: bool
     rehearsal: bool = Field(default=False, exclude_if=lambda value: not value)
-    purpose: Literal["staff_testing", "isolation_staging"] = "staff_testing"
+    purpose: TestingHoldPurpose = "staff_testing"
     # The hold's reason when setting it; the audit reason when lifting it.
     reason: str
     reviewed_plan_sha256: str = ""

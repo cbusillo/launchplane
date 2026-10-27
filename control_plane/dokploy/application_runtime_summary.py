@@ -84,6 +84,11 @@ def summarize_application_runtime(
                 "state": task.state,
                 "image": task.image,
                 "deployment_record_id": task.deployment_record_id,
+                "container_id_present": task.container_id_present,
+                "error": task.error,
+                "message": task.message,
+                "status_timestamp": task.status_timestamp,
+                "exit_code": task.exit_code,
             }
             for task in observed.tasks[:limit]
         ],

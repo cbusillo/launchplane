@@ -16,6 +16,8 @@ from control_plane.contracts.odoo_upgrade_rehearsal import (
     RehearsalPrerequisite,
 )
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane._odoo_incomplete_rehearsal_retirement import rehearsal_effect_marker
+from control_plane.odoo_incomplete_rehearsal_retirement import original_validation_attempt
 from tests import test_odoo_upgrade_rehearsal as rehearsal
 
 
@@ -36,6 +38,154 @@ def native_fixture(record: Any, key: str, digest: str, disposed: bool = False) -
         public_route=False,
         business_host_frozen=False,
     ).model_dump(mode="json")
+
+
+class NeverStartedRehearsalRetirementTests(unittest.TestCase):
+    def test_never_started_and_refused_execute_dispose_without_rewriting_the_original(self) -> None:
+        from control_plane.odoo_incomplete_rehearsal_retirement import IncompleteRehearsalRetirement
+        from control_plane.provider_operations import (
+            ProviderMutationOutcome,
+            provider_operation_response_payload,
+            run_durable_provider_operation,
+        )
+
+        for refusal, pending in (
+            ("", False),
+            ("rehearsal_storage_capacity_insufficient", False),
+            ("rehearsal_precheck_refused", False),
+            ("", True),
+        ):
+            with self.subTest(refusal=refusal, pending=pending):
+                fixture = rehearsal.RehearsalScenario()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                store = fixture.store
+                prepared = fixture.record.model_copy(
+                    update={
+                        "state": "prepared",
+                        "compose_id": "own-compose",
+                        "project_id": "own-project",
+                        "environment_id": "own-environment",
+                    }
+                )
+                store.compare_and_write_odoo_upgrade_rehearsal(fixture.record, prepared)
+                prepare_rehearsal_local_credentials(
+                    store, fixture.identifier, actor=fixture.principal
+                )
+                adapter = fixture.adapter("prepare")
+
+                def prepare(key: str, lease: Any) -> ProviderMutationOutcome:
+                    lease.checkpoint_effect("prepare")
+                    return ProviderMutationOutcome(
+                        202,
+                        provider_operation_response_payload(
+                            trace_id=adapter.trace,
+                            records={"rehearsal": fixture.identifier},
+                            result=adapter.public(prepared),
+                        ),
+                    )
+
+                with patch.object(adapter, "apply", side_effect=prepare):
+                    completed = fixture.run_operation(adapter, "original-prepare")
+                key = "original-prepare"
+                if refusal:
+                    key = "refused-execute"
+                    with patch.object(
+                        OdooRehearsalAdapter,
+                        "host",
+                        return_value={
+                            "refusal_code": refusal,
+                            "completed": False,
+                        },
+                    ):
+                        completed = fixture.run_operation(fixture.adapter("execute"), key)
+                    self.assertEqual(completed.response_status_code, 409)
+                original = completed.record
+                operation = IncompleteRehearsalRetirement(fixture.adapter("retire-incomplete"), key)
+                if pending:
+                    with patch.object(
+                        OdooRehearsalAdapter, "host", side_effect=TimeoutError("held")
+                    ):
+                        with self.assertRaises(TimeoutError):
+                            fixture.run_operation(fixture.adapter("execute"), "uncertain-execute")
+                    with patch.object(type(operation), "host") as inspection:
+                        with self.assertRaises(RehearsalRefused):
+                            operation.plan()
+                        held = store.list_held_provider_target_reservations()[0]
+                        retried = store.retry_reconciled_mutation(
+                            reservation=held,
+                            lease_owner="lost-executor",
+                            preserve_effect_checkpoint=True,
+                        )
+                        assert retried.record is not None
+                        expired_at = datetime.fromisoformat(
+                            retried.record.lease_expires_at.replace("Z", "+00:00")
+                        ) + timedelta(seconds=1)
+                        with (
+                            patch.object(
+                                store,
+                                "_database_mutation_timestamp",
+                                return_value=expired_at.isoformat(),
+                            ),
+                            self.assertRaises(RehearsalRefused),
+                        ):
+                            operation.plan()
+                        inspection.assert_not_called()
+                    self.assertEqual(
+                        store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared
+                    )
+                    continue
+                native = native_fixture(prepared, key, "a" * 64)
+
+                def host(mode: str, check: Any) -> dict[str, Any]:
+                    check()
+                    return {
+                        **native,
+                        **{
+                            field: mode == "apply"
+                            for field in (
+                                "disposed",
+                                "containers_absent",
+                                "volumes_absent",
+                                "network_absent",
+                                "raw_source_absent",
+                            )
+                        },
+                    }
+
+                with (
+                    patch.object(type(operation), "host", side_effect=host),
+                    patch.object(type(operation), "placement", return_value=True),
+                ):
+                    plan = operation.plan()
+                    operation.adapter.request = operation.adapter.request.model_copy(
+                        update={"reviewed_plan_sha256": plan["plan_sha256"]}
+                    )
+                    outcome = run_durable_provider_operation(
+                        store=store,
+                        scope=operation.reservation_scope(),
+                        route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                        idempotency_key=key,
+                        request_fingerprint=operation.request_fingerprint(),
+                        lease_owner="retirement-worker",
+                        response_trace_id="retirement-trace",
+                        adapter=operation,
+                    )
+                    self.assertEqual(outcome.status, "completed")
+                    result = cast(dict[str, Any], outcome.response_payload["result"])
+                    self.assertTrue(result["disposed"])
+                    self.assertEqual(operation.readback(), result)
+                    with self.assertRaises(RehearsalRefused):
+                        IncompleteRehearsalRetirement(operation.adapter, "unrelated-key").readback()
+                self.assertEqual(
+                    store.read_idempotency_record(
+                        scope=fixture.principal,
+                        route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=fixture.product),
+                        idempotency_key=key,
+                    ),
+                    original,
+                )
+                self.assertFalse(store.list_held_provider_target_reservations())
 
 
 class IncompleteRehearsalRetirementTests(unittest.TestCase):
@@ -187,6 +337,29 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
         assert original is not None
         self.assertEqual(original.state, "completed")
         self.assertFalse(self.store.list_held_provider_target_reservations())
+
+    def test_unreviewed_plan_preserves_rehearsal_without_host_apply(self) -> None:
+        operation = self.retirement()
+        native = native_fixture(self.prepared, self.key, "a" * 64)
+        held = self.store.list_held_provider_target_reservations()
+        original = operation.original(self.prepared)
+        with (
+            patch.object(type(operation), "host", return_value=native) as host,
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            reviewed = operation.plan()["plan_sha256"]
+            stale = ("0" if reviewed[0] != "0" else "1") + reviewed[1:]
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": stale}
+            )
+            with self.assertRaises(RehearsalRefused):
+                self.run_retirement(operation)
+        self.assertNotIn("apply", [call.args[0] for call in host.call_args_list])
+        self.assertEqual(
+            self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier), self.prepared
+        )
+        self.assertEqual(operation.original(self.prepared), original)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), held)
 
     def test_failed_publication_keeps_original_hold_record_and_target_registration(self) -> None:
         operation = self.retirement()
@@ -611,8 +784,11 @@ class IncompleteRehearsalRetirementTests(unittest.TestCase):
 class LaterPhaseRetirementTests(unittest.TestCase):
     """A completed later phase is disposed under the key that published it."""
 
+    database_url = ""
+
     def setUp(self) -> None:
         self.fixture = rehearsal.RehearsalScenario()
+        self.fixture.database_url = self.database_url
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.store = self.fixture.store
@@ -734,7 +910,9 @@ class LaterPhaseRetirementTests(unittest.TestCase):
                 context_name=self.fixture.identifier, instance_name="rehearsal"
             )
 
-    def hold_uncertain_writer(self) -> None:
+    def hold_uncertain_writer(
+        self, action: str = "validate-business", key: str = "uncertain-validation"
+    ) -> None:
         """Leave a started, unsettled operation on the rehearsal's own target."""
         from control_plane.contracts.canonical_json import canonical_json_sha256
         from control_plane.provider_operations import (
@@ -749,12 +927,10 @@ class LaterPhaseRetirementTests(unittest.TestCase):
                 return identifier
 
             def reconciliation_key(self) -> str:
-                return canonical_json_sha256(
-                    {"rehearsal": identifier, "action": "validate-business"}
-                )
+                return canonical_json_sha256({"rehearsal": identifier, "action": action})
 
             def apply(self, key: str, lease: Any) -> Any:
-                lease.checkpoint_effect("validate-business")
+                lease.checkpoint_effect(action)
                 raise TimeoutError("observation lost after the writer started")
 
             def observe(self, *args: Any) -> Any:
@@ -765,8 +941,8 @@ class LaterPhaseRetirementTests(unittest.TestCase):
                 store=self.store,
                 scope=self.fixture.principal,
                 route_path=ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                idempotency_key="uncertain-validation",
-                request_fingerprint="uncertain-validation",
+                idempotency_key=key,
+                request_fingerprint=key,
                 lease_owner="validation-worker",
                 response_trace_id="validation-trace",
                 adapter=cast(Any, UncertainWriter()),
@@ -932,6 +1108,79 @@ class LaterPhaseRetirementTests(unittest.TestCase):
             self.assertEqual(operation.readback(), result.response_payload["result"])
         with self.assertRaises(RehearsalRefused):
             self.retirement("uncertain-validation").record()
+
+    def test_failed_rebuild_abandonment_replaces_history_checkpoint_and_resumes(self) -> None:
+        owned = self.store.read_provider_target_record(
+            context_name=self.fixture.identifier, instance_name="rehearsal"
+        )
+        self.test_unknown_validation_retires_working_copy_and_archives_original()
+        retired = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert retired is not None
+        rebuilding = retired.model_copy(update={"state": "rebuilding"})
+        self.store.compare_and_write_odoo_upgrade_rehearsal(retired, rebuilding)
+        self.store.write_provider_target_record(owned)
+        self.hold_uncertain_writer("rebuild-final", "failed-rebuild")
+        original = self.journal("failed-rebuild")
+        assert retired.incomplete_retirement is not None
+        historical_disposal = retired.incomplete_retirement.host_disposal
+        assert historical_disposal is not None
+        archive = type(retired.abandoned_validations[-1])(
+            original=original,
+            validation_count=len(rebuilding.business_validations),
+            attempt_sha256=original_validation_attempt(original),
+            host_disposal=historical_disposal,
+        )
+        with self.assertRaises(ValueError):
+            self.store.complete_incomplete_rehearsal_retirement(
+                expected=rebuilding,
+                replacement=rebuilding.model_copy(
+                    update={
+                        "state": "retired",
+                        "abandoned_validations": retired.abandoned_validations + (archive,),
+                    }
+                ),
+                original=original,
+                trace_id="wrong-checkpoint",
+                result={"disposed": True, "action": "abandon-validation"},
+            )
+        operation = self.retirement("failed-rebuild")
+        operation.adapter.request = operation.adapter.request.model_copy(
+            update={"action": "abandon-validation"}
+        )
+        native = self.native(key="failed-rebuild")
+        native["recovery_snapshots_preserved"] = True
+        with (
+            patch.object(type(operation), "host", side_effect=self.host(native)) as host,
+            patch.object(type(operation), "placement", return_value=True),
+        ):
+            plan = operation.plan()
+            host.assert_called_once()
+            self.assertFalse(plan["disposes_recovery_snapshots"])
+            operation.adapter.request = operation.adapter.request.model_copy(
+                update={"reviewed_plan_sha256": plan["plan_sha256"]}
+            )
+
+            def interrupted_placement(apply: bool = False, check: Any = None) -> bool:
+                if apply:
+                    raise TimeoutError("disposal reply lost")
+                return True
+
+            with patch.object(type(operation), "placement", side_effect=interrupted_placement):
+                with self.assertRaises(TimeoutError):
+                    self.run_retirement(operation)
+            interrupted = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+            assert interrupted is not None and interrupted.incomplete_retirement is not None
+            self.assertIsNotNone(interrupted.incomplete_retirement.host_disposal)
+            self.assertEqual(self.journal("failed-rebuild"), original)
+            outcome = self.run_retirement(operation)
+            self.assertEqual(outcome.response_payload["result"], operation.readback())
+        completed = self.store.read_odoo_upgrade_rehearsal(self.fixture.identifier)
+        assert completed is not None
+        self.assertEqual(completed.state, "retired")
+        self.assertEqual(completed.copies, rebuilding.copies)
+        self.assertEqual(completed.abandoned_validations[-1].original, original)
+        self.assertEqual(completed.abandoned_validations[:-1], retired.abandoned_validations)
+        self.assertFalse(self.store.list_held_provider_target_reservations())
 
     def test_abandonment_refuses_other_phases_and_production_aliases(self) -> None:
         self.hold_uncertain_writer()
@@ -1252,6 +1501,43 @@ class LaterPhaseRetirementTests(unittest.TestCase):
 
 
 class IncompleteRetirementHostTests(unittest.TestCase):
+    def test_unused_prepared_runtime_requires_no_execute_or_capture_before_disposal(self) -> None:
+        import shutil
+
+        (self.root / "execute.started").unlink()
+        shutil.rmtree(self.root / "raw-source")
+        self.spec["execute_never_started"] = True
+        source = self.fixture.host["database_names"](self.spec)["source"]
+        for container in self.fixture.fixture.containers.values():
+            container["Config"]["Env"] = [
+                "ODOO_DB_NAME=" + source if value.startswith("ODOO_DB_NAME=") else value
+                for value in container["Config"]["Env"]
+            ]
+        for forbidden in (
+            "execute.started",
+            "execute.json",
+            "capture.json",
+            "capture.pending",
+            "raw-source",
+            "simulate-final.started",
+            *self.fixture.host["database_names"](self.spec).values(),
+        ):
+            with self.subTest(forbidden=forbidden):
+                path = self.root / forbidden
+                path.touch()
+                with self.assertRaises(RuntimeError):
+                    self.fixture.run_host(self.spec)
+                path.unlink()
+                self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
+        plan = self.fixture.run_host(self.spec)
+        self.admit(plan)
+        self.spec["mode"] = "apply"
+        result = self.fixture.run_host(self.spec)
+        self.assertTrue(result["disposed"])
+        self.assertFalse(self.fixture.fixture.containers)
+        self.assertFalse(self.fixture.fixture.volumes)
+        self.assertEqual((self.outside / "keep").read_bytes(), b"production fixture")
+
     def recovery_snapshot(self, role: str) -> dict[str, Any]:
         import hashlib
         import json
@@ -1562,7 +1848,11 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                 elif changed == "lineage":
                     (native.root / "capture.json").write_text("{}")
                 elif changed == "pending":
-                    (native.root / "capture.pending").touch()
+                    with patch("os.replace", side_effect=OSError("fixture interrupted save")):
+                        with self.assertRaises(OSError):
+                            native.fixture.host["save"](
+                                native.root / "capture.json", {"state": "unsettled"}
+                            )
                 elif changed == "final":
                     for role in ("web", "script-runner"):
                         config = native.fixture.fixture.containers[role]["Config"]
@@ -1742,7 +2032,9 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                 patch.object(subprocess, "run", side_effect=command),
                 redirect_stdout(output),
             ):
-                exec(compile(rehearsal.python_heredoc(script), "<delivered-wrapper>", "exec"), {})
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(script)
             return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
 
         with (
@@ -1754,6 +2046,31 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         self.assertFalse(result["disposed"])
         self.assertTrue((self.root / "raw-source/database.dump").exists())
         self.assertEqual(operation.original(scenario.prepared).state, "reconcile_required")
+
+        import shutil
+
+        original = operation.original(scenario.prepared)
+        (self.root / "execute.started").unlink()
+        shutil.rmtree(self.root / "raw-source")
+        source = self.fixture.host["database_names"](self.spec)["source"]
+        for container in self.fixture.fixture.containers.values():
+            container["Config"]["Env"] = [
+                "ODOO_DB_NAME=" + source if value.startswith("ODOO_DB_NAME=") else value
+                for value in container["Config"]["Env"]
+            ]
+        spec = {**copy.deepcopy(self.spec), "program": rehearsal_host_program()}
+        with (
+            patch("control_plane.odoo_upgrade_rehearsal.rehearsal_host_spec", return_value=spec),
+            patch.object(operation.adapter, "run_script", side_effect=scheduler),
+            patch.object(
+                operation,
+                "original",
+                return_value=original.model_copy(update={"state": "completed"}),
+            ),
+        ):
+            unused = operation.host("dry-run", lambda: None)
+        self.assertTrue(unused["qualified"])
+        self.assertFalse(unused["disposed"])
 
     def test_host_refuses_unreviewed_inventory_without_deleting_custody(self) -> None:
         plan = self.fixture.run_host(self.spec)
@@ -1844,6 +2161,61 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             self.assertTrue((self.root / copy["database"] / "database.dump").is_file())
         self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
 
+    def test_rebuild_abandonment_preserves_failed_marker_and_both_snapshots(self) -> None:
+        copies = self.later_phase()
+        self.spec.update(action="abandon-validation", abandoned_action="rebuild-final")
+        self.spec["record"]["state"] = "rebuilding"
+        generation = canonical_json_sha256({"generation": "previous-abandonment"})
+        self.spec["record"]["abandoned_validations"] = [{"attempt_sha256": generation}]
+        attempt = canonical_json_sha256({"attempt": "failed-rebuild"})
+        self.spec["abandoned_attempt_sha256"] = attempt
+        marker = self.root / rehearsal_effect_marker("rebuild-final", attempt)
+        marker.touch()
+        before = {
+            copy["database"]: (self.root / copy["database"] / "database.dump").read_bytes()
+            for copy in copies
+        }
+        plan = self.fixture.run_host(self.spec)
+        self.assertTrue(plan["recovery_snapshots_preserved"])
+        self.admit(plan)
+        self.spec["mode"] = "apply"
+        self.assertTrue(self.fixture.run_host(self.spec)["disposed"])
+        self.assertTrue(marker.is_file())
+        for database, content in before.items():
+            self.assertEqual((self.root / database / "database.dump").read_bytes(), content)
+        self.assertFalse(self.fixture.fixture.containers)
+
+        self.spec["record"]["abandoned_validations"].append(
+            {"attempt_sha256": attempt, "original": {"provider_effect_phase": "rebuild-final"}}
+        )
+        self.assertIn(
+            marker.name, self.fixture.host["archived_rehearsal_markers"](self.spec["record"])
+        )
+
+    def test_preparation_cannot_substitute_for_the_original_rebuild_marker(self) -> None:
+        copies = self.later_phase()
+        self.spec.update(action="abandon-validation", abandoned_action="rebuild-final")
+        self.spec["record"]["state"] = "rebuilding"
+        generation = canonical_json_sha256({"generation": "previous-abandonment"})
+        self.spec["record"]["abandoned_validations"] = [{"attempt_sha256": generation}]
+        self.spec["abandoned_attempt_sha256"] = canonical_json_sha256({"attempt": "not-started"})
+        marker = self.root / rehearsal_effect_marker("rebuild-prepared", generation)
+        marker.touch()
+        before = {
+            copy["database"]: (self.root / copy["database"] / "database.dump").read_bytes()
+            for copy in copies
+        }
+        for settled in (False, True):
+            with self.subTest(settled=settled):
+                if settled:
+                    marker.with_suffix(".json").write_text("{}")
+                with self.assertRaises(RuntimeError):
+                    self.fixture.run_host(self.spec)
+                self.assertFalse(any(call[0] in {"stop", "rm"} for call in self.calls))
+                self.assertEqual(marker.read_bytes(), b"")
+                for database, content in before.items():
+                    self.assertEqual((self.root / database / "database.dump").read_bytes(), content)
+
     def test_abandonment_refuses_changed_custody_or_any_validation_outcome(self) -> None:
         copies = self.later_phase()
         self.spec["action"] = "abandon-validation"
@@ -1861,7 +2233,13 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                     "outcome": marker.name.removesuffix(".started") + ".outcome.json",
                     "pending": marker.name.removesuffix(".started") + ".outcome.pending",
                 }.get(changed, "unused")
-                if changed in {"other-effect", "outcome", "pending"}:
+                if changed == "pending":
+                    with patch("os.replace", side_effect=OSError("fixture interrupted save")):
+                        with self.assertRaises(OSError):
+                            self.fixture.host["save"](
+                                extra.with_suffix(".json"), {"state": "unsettled"}
+                            )
+                elif changed in {"other-effect", "outcome"}:
                     extra.touch()
                 elif changed == "corrupt":
                     snapshot.write_bytes(b"changed")
@@ -1906,6 +2284,9 @@ class IncompleteRetirementHostTests(unittest.TestCase):
             copy_runner=upgrade,
             before_web=Mock(),
             private_health=Mock(),
+            verify_before_switch=Mock(
+                side_effect=lambda spec, root, containers, database: containers
+            ),
             rehearsal_storage_capacity=Mock(return_value=True),
             capture=Mock(side_effect=AssertionError("No source recapture")),
         )
@@ -1940,14 +2321,16 @@ class IncompleteRetirementHostTests(unittest.TestCase):
         upgrade.assert_not_called()
         prepared_calls = host["compose"].call_count
         self.spec["attempt_sha256"] = canonical_json_sha256({"refused": "unsafe-stage"})
-        prepared = self.root / (
-            "rebuild-prepared-"
-            + self.spec["record"]["abandoned_validations"][-1]["attempt_sha256"]
-            + ".json"
-        )
+        prepared = (
+            self.root
+            / rehearsal_effect_marker(
+                "rebuild-prepared",
+                self.spec["record"]["abandoned_validations"][-1]["attempt_sha256"],
+            )
+        ).with_suffix(".json")
         saved = prepared.read_bytes()
-        unknown = self.root / (
-            "rebuild-final-" + canonical_json_sha256({"unknown": "attempt"}) + ".started"
+        unknown = self.root / rehearsal_effect_marker(
+            "rebuild-final", canonical_json_sha256({"unknown": "attempt"})
         )
         snapshot = self.root / copies[0]["database"] / "database.dump"
         snapshot_bytes = snapshot.read_bytes()
@@ -1980,7 +2363,15 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                         side_effect=RuntimeError("unavailable")
                     )
                 self.spec["attempt_sha256"] = canonical_json_sha256({"refused": unsafe})
-                if unsafe in {"active", "binding", "snapshot", "inspection", "capacity"}:
+                if unsafe in {
+                    "active",
+                    "binding",
+                    "snapshot",
+                    "inspection",
+                    "capacity",
+                    "unknown-final",
+                    "unknown-bootstrap",
+                }:
                     refused = self.fixture.run_host(self.spec)
                     self.assertEqual(refused["refusal_code"], "rehearsal_rebuild_precheck_refused")
                     self.spec["mode"] = "observe"
@@ -2001,6 +2392,16 @@ class IncompleteRetirementHostTests(unittest.TestCase):
                 host["inspection"] = native_inspection
                 host["rehearsal_storage_capacity"] = capacity
         self.spec["attempt_sha256"] = canonical_json_sha256({"new": "reviewed-key"})
+        archived_attempt = canonical_json_sha256({"archived": "failed-rebuild"})
+        (self.root / rehearsal_effect_marker("rebuild-final", archived_attempt)).touch()
+        self.spec["record"]["abandoned_validations"].insert(
+            0,
+            {
+                "attempt_sha256": archived_attempt,
+                "original": {"provider_effect_phase": "rebuild-final"},
+                "host_disposal": disposal,
+            },
+        )
         result = self.fixture.run_host(self.spec)
         self.assertEqual(host["compose"].call_count, prepared_calls + 1)
         self.assertEqual(result["state"], "switched")
@@ -2202,7 +2603,7 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                         **payload,
                         "action": "execute",
                         "mode": "readback",
-                        "reviewed_plan_sha256": "",
+                        "reviewed_plan_sha256": prepared.binding_sha256,
                     },
                     headers=headers,
                 )
@@ -2248,7 +2649,7 @@ class IncompleteRetirementHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(routed["idempotency_key"], headers["Idempotency-Key"])
                 self.assertNotEqual(routed["adapter"].target_key(), fixture.identifier)
             calls = host.call_count
-            payload.update(mode="readback", reviewed_plan_sha256="")
+            payload.update(mode="readback")
             readback = await request(fixture.app, "POST", route, payload=payload, headers=headers)
             self.assertEqual(readback.status_code, 202, readback.text)
             self.assertEqual(readback.json()["result"]["state"], "retired")

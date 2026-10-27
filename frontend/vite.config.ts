@@ -1,16 +1,15 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
-import { fileURLToPath } from "node:url";
 
 export default defineConfig(({ command, mode }) => {
   let cacheDir: string | undefined;
   if (command === "serve" && mode === "browser-smoke") {
-    const cacheRoot = fileURLToPath(new URL("../tmp/browser-vite-cache/", import.meta.url));
-    mkdirSync(cacheRoot, { recursive: true });
-    cacheDir = mkdtempSync(join(cacheRoot, "server-"));
+    // Outside the checkout, so a killed server leaves nothing in the worktree.
+    cacheDir = mkdtempSync(join(tmpdir(), "launchplane-vite-cache-"));
   }
   function removeCache() {
     if (cacheDir) rmSync(cacheDir, { recursive: true, force: true });

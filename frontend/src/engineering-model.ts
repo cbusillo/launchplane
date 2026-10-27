@@ -1,5 +1,4 @@
 import type {
-  EveryCodeWorkRequestSummary,
   MergeTrainControllerRecordSummary,
   MergeTrainControllerStatusReadModel,
   MergeTrainPolicyTarget,
@@ -53,21 +52,6 @@ export function mergeTrainStatusScopeKey(
     policySha256,
     fixtureMode ?? "",
   ]);
-}
-
-export function everyCodeSummaryTone(
-  summary: EveryCodeWorkRequestSummary,
-): Status {
-  if (summary.summary_status === "complete") {
-    return "pass";
-  }
-  if (summary.summary_status === "stuck") {
-    return "blocked";
-  }
-  if (summary.summary_status === "rerunnable") {
-    return "unknown";
-  }
-  return "pending";
 }
 
 export function mergeTrainTargetOptions(

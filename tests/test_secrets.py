@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.runtime_environments import build_runtime_environment_records_from_definition
 
 import base64
 import json
@@ -41,7 +42,7 @@ def _seed_runtime_environment_records(
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
     try:
-        records = runtime_environments.build_runtime_environment_records_from_definition(
+        records = build_runtime_environment_records_from_definition(
             definition,
             updated_at="2026-04-22T00:00:00Z",
             source_label="test",
@@ -331,6 +332,23 @@ class LaunchplaneSecretsTests(unittest.TestCase):
         audit_events = cast("list[dict[str, object]]", status["recent_audit_events"])
         self.assertEqual(audit_events[0]["event_type"], "rotated")
 
+    def test_status_origin_comes_from_current_immutable_version_without_decryption(self) -> None:
+        store = _FakeSecretReadStore()
+        current = store.versions[-1].model_copy(update={"value_origin": "provider"})
+        store.records = (
+            store.records[0].model_copy(update={"current_version_id": current.version_id}),
+        )
+        store.versions = (store.versions[0], current)
+        with patch.object(control_plane_secrets, "_decrypt_secret_value") as decrypt:
+            status = control_plane_secrets.build_secret_status(store, secret_id=current.secret_id)
+            self.assertEqual(status["current_version_value_origin"], current.value_origin)
+            self.assertEqual(status["current_version_created_at"], current.created_at)
+            store.versions = store.versions[:1]
+            missing = control_plane_secrets.build_secret_status(store, secret_id=current.secret_id)
+            self.assertIsNone(missing["current_version_value_origin"])
+            self.assertFalse(missing["current_version_created_at"])
+            decrypt.assert_not_called()
+
     def test_read_dokploy_config_prefers_managed_secret_overlay(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -451,7 +469,7 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                 )
             store.close()
 
-    def test_worker_secrets_reach_only_their_lane_and_never_the_app(self) -> None:
+    def test_worker_secrets_never_reach_the_app(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -504,18 +522,6 @@ class LaunchplaneSecretsTests(unittest.TestCase):
                     actor="test",
                 )
 
-                self.assertEqual(
-                    control_plane_secrets.resolve_lane_worker_secret_values(
-                        context_name="site", instance_name="prod"
-                    ),
-                    {"PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "lane-backup-key"},
-                )
-                self.assertEqual(
-                    control_plane_secrets.resolve_lane_worker_secret_values(
-                        context_name="site", instance_name="testing"
-                    ),
-                    {},
-                )
                 app_values = runtime_environments.resolve_runtime_environment_values(
                     control_plane_root=control_plane_root,
                     context_name="site",

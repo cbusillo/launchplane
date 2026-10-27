@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { test } from "node:test";
@@ -37,9 +38,7 @@ function runPlaywright(config, children) {
 }
 
 test("overlapping smoke runs own distinct servers", { timeout: 2 * isolationDeadline }, async () => {
-  const scratchRoot = resolve(frontendRoot, "../tmp/browser-isolation");
-  await mkdir(scratchRoot, { recursive: true });
-  const scratch = await mkdtemp(join(scratchRoot, "run-"));
+  const scratch = await mkdtemp(join(tmpdir(), "launchplane-browser-isolation-run-"));
   const children = [];
   try {
     await writeFile(join(scratch, "package.json"), JSON.stringify({ type: "module" }));
@@ -104,7 +103,7 @@ test("serves this run while its peer is alive", async ({ page, baseURL }) => {
 `);
       return runPlaywright(config, children);
     }));
-    for (const run of runs) assert.equal(run.code, 0, run.output);
+    for (const run of runs) assert.equal(run.code, 0, JSON.stringify(runs, null, 2));
     const facts = await Promise.all(receipts.map(async receipt =>
       JSON.parse(await readFile(receipt, "utf8"))));
     assert.notEqual(facts[0].baseURL, facts[1].baseURL);
@@ -120,9 +119,7 @@ test("serves this run while its peer is alive", async ({ page, baseURL }) => {
 });
 
 test("failed smoke startup removes its allocated cache", { timeout: isolationDeadline }, async () => {
-  const scratchRoot = resolve(frontendRoot, "../tmp/browser-isolation");
-  await mkdir(scratchRoot, { recursive: true });
-  const scratch = await mkdtemp(join(scratchRoot, "startup-"));
+  const scratch = await mkdtemp(join(tmpdir(), "launchplane-browser-isolation-startup-"));
   const children = [];
   try {
     await writeFile(join(scratch, "package.json"), JSON.stringify({ type: "module" }));

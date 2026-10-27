@@ -19,6 +19,7 @@ from threading import Event, Timer
 from typing import Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 import uuid
+import zlib
 import click
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.copy_readback_diagnostics import ReadbackPredicate, readback_failure_evidence
@@ -28,6 +29,40 @@ from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTI
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 from websockets.sync.client import connect
+
+NATIVE_PROGRAM_SOURCE_SITE_LIMIT = 8
+CAPABILITY_FAILURE_SITES_MARKER = "testing_resources_failure_sites"
+NATIVE_PROGRAM_SITE_MARKER_MAX_DIGITS = 20
+NATIVE_CONTAINER_SPEC_FIELDS = (
+    "Image",
+    "Labels",
+    "Command",
+    "Args",
+    "Hostname",
+    "Env",
+    "Dir",
+    "User",
+    "Groups",
+    "Privileges",
+    "Init",
+    "StopSignal",
+    "TTY",
+    "OpenStdin",
+    "ReadOnly",
+    "Mounts",
+    "StopGracePeriod",
+    "Healthcheck",
+    "Hosts",
+    "DNSConfig",
+    "Secrets",
+    "Configs",
+    "Isolation",
+    "Sysctls",
+    "CapabilityAdd",
+    "CapabilityDrop",
+    "Ulimits",
+    "OomScoreAdj",
+)
 
 
 class NativeSourceAuthorizationDenied(DurableOperationAuthorizationDeniedError):
@@ -45,8 +80,45 @@ class NativeSourceUnavailable(click.ClickException, ValueError):
 class NativeProgramFailed(NativeSourceUnavailable):
     """A fixed program returned a failed frame; this proves no writer exclusion."""
 
-    def __init__(self, message: str, *, predicate: str = "", kind: str = "unavailable") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        predicate: str = "",
+        kind: str = "unavailable",
+        program: str = "",
+        program_sites: object = None,
+        container_fields: object = None,
+    ) -> None:
         super().__init__(message)
+        line_count = len(program.splitlines())
+        self.program_sites: tuple[int, ...] = (
+            tuple(program_sites)
+            if isinstance(program_sites, list)
+            and 0 < len(program_sites) <= NATIVE_PROGRAM_SOURCE_SITE_LIMIT
+            and all(type(line) is int and 1 <= line <= line_count for line in program_sites)
+            else ()
+        )
+        self.program_sha256 = (
+            hashlib.sha256(program.encode()).hexdigest() if self.program_sites else ""
+        )
+        self.container_fields: tuple[tuple[str, str], ...] = (
+            tuple((item["field"], item["difference"]) for item in container_fields)
+            if self.program_sites
+            and isinstance(container_fields, list)
+            and 0 < len(container_fields) <= len(NATIVE_CONTAINER_SPEC_FIELDS) + 1
+            and all(
+                isinstance(item, dict)
+                and set(item) == {"field", "difference"}
+                and isinstance(item["field"], str)
+                and item["field"] in (*NATIVE_CONTAINER_SPEC_FIELDS, "other")
+                and isinstance(item["difference"], str)
+                and item["difference"] in ("service_only", "task_only", "unequal")
+                for item in container_fields
+            )
+            and len({item["field"] for item in container_fields}) == len(container_fields)
+            else ()
+        )
         self.has_diagnostic = predicate in ReadbackPredicate and kind in {"refused", "unavailable"}
         self.evidence = readback_failure_evidence(
             {
@@ -187,9 +259,21 @@ def _read_program(
         "termios.tcsetattr(0,termios.TCSANOW,a);print('\\n'+sys.argv[1]+'\\n',flush=True);"
         "line=sys.stdin.readline(262145);"
         "assert line.endswith('\\n') and len(line)<=262144;v=json.loads(line);"
-        "sys.argv=[sys.argv[0],v['payload'],sys.argv[2]];"
-        "exec(base64.b64decode(v['program'],validate=True))"
+        "exec(base64.b64decode(v['loader'],validate=True))"
     )
+    dispatcher = (
+        "import hashlib,io,zipfile,zlib;"
+        "chunks=v.get('archive_chunks',0);assert type(chunks) is int and 0<=chunks<=128;"
+        "archive=b''.join(base64.b64decode(sys.stdin.readline(65538).rstrip('\\n'),validate=True) for _ in range(chunks));"
+        "assert 'action' not in v or hashlib.sha256(archive).hexdigest()==v['archive_sha256'];"
+        "sys.argv=(['launchplane-host',v['action'],'--input','-','--prefix',sys.argv[2]]"
+        " if 'action' in v else [sys.argv[0],v['payload'],sys.argv[2]]);"
+        "sys.stdin=io.StringIO(base64.b64decode(v['payload']).decode()) if 'action' in v else sys.stdin;"
+        "exec(compile(zipfile.ZipFile(io.BytesIO(archive)).read('__main__.py'),'<launchplane-host>','exec'),"
+        "{'__name__':'__main__','HOST_PACKAGE_CONTENT':archive}) if 'action' in v"
+        " else exec(zlib.decompress(base64.b64decode(v['program'],validate=True)))"
+    )
+    encoded_dispatcher = base64.b64encode(dispatcher.encode()).decode()
     # Replace the interactive shell before sending any private payload. The
     # loader itself disables canonical input/echo and then proves readiness;
     # shell readline can otherwise reset tty settings and truncate long input.
@@ -201,13 +285,56 @@ def _read_program(
     for line in lines:
         if line == ready:
             break
-    encoded = base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode()
-    encoded_program = base64.b64encode(program.encode()).decode()
+    from control_plane.host_package import (
+        compact_host_input,
+        host_package,
+        HOST_PACKAGE_CHUNK_BYTES,
+        native_package,
+    )
+
+    from control_plane.host_package_runtime import program_names
+
+    package = host_package()
+    action = next(
+        (name for name, member in package.actions.items() if package.programs[member] == program),
+        None,
+    )
+    wire_payload = compact_host_input(payload) if action is not None else payload
+    if action is not None:
+        package = native_package(action, tuple(sorted(program_names(wire_payload) | {action})))
+    encoded = base64.b64encode(json.dumps(wire_payload, sort_keys=True).encode()).decode()
+    encoded_program = (
+        "" if action is not None else base64.b64encode(zlib.compress(program.encode())).decode()
+    )
     if len(encoded) > 120 * 1024 or len(encoded_program) > 120 * 1024:
         raise NativeSourceUnavailable("The fixed remote read exceeds the transport argument bound.")
 
     def dispatch() -> None:
-        message = json.dumps({"program": encoded_program, "payload": encoded}) + "\n"
+        if action is None:
+            message = (
+                json.dumps(
+                    {"loader": encoded_dispatcher, "program": encoded_program, "payload": encoded}
+                )
+                + "\n"
+            )
+        else:
+            chunks = [
+                package.content[offset : offset + HOST_PACKAGE_CHUNK_BYTES]
+                for offset in range(0, len(package.content), HOST_PACKAGE_CHUNK_BYTES)
+            ]
+            message = (
+                json.dumps(
+                    {
+                        "loader": encoded_dispatcher,
+                        "action": action,
+                        "archive_sha256": package.version,
+                        "archive_chunks": len(chunks),
+                        "payload": encoded,
+                    }
+                )
+                + "\n"
+            )
+            message += "".join(base64.b64encode(chunk).decode() + "\n" for chunk in chunks)
         if abort_send is None:
             connection.send(message)
             return
@@ -251,6 +378,9 @@ def _read_program(
                 "The registered source read did not pass.",
                 predicate=predicate if isinstance(predicate, str) else "",
                 kind=kind if isinstance(kind, str) else "unavailable",
+                program=program,
+                program_sites=value.get("sites"),
+                container_fields=value.get("container_fields"),
             )
         if value.get("type") == "source_exceeds_bound":
             raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")
@@ -412,7 +542,7 @@ except BaseException:
 """.replace("__CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES))
 
 
-def _read_remote(
+def run_managed_server_program(
     *,
     host: str,
     token: str,
@@ -464,6 +594,9 @@ def _read_remote(
         json.JSONDecodeError,
     ):
         raise NativeSourceUnavailable("The provider source stream is incomplete.") from None
+
+
+_read_remote = run_managed_server_program
 
 
 NATIVE_ODOO_SOURCE_READ_PROGRAM = (

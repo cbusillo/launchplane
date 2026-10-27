@@ -20,7 +20,8 @@ from control_plane.contracts.secret_record import (
 )
 from control_plane.odoo_instance_overrides import addon_setting_secret_env_key
 from control_plane.odoo_secret_transport import OdooSecretTransportPlan, plan_odoo_secret_transport
-from control_plane.secrets import SecretWriteStore, relabel_secret_binding
+from control_plane.secrets import SecretWriteStore
+from tests.support.secret_relabel import relabel_secret_binding
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import SecretRecordConflictError
@@ -346,7 +347,7 @@ class OdooSecretMetadataTests(unittest.TestCase):
         self.assertEqual(repaired.sharing_reason, source.sharing_reason)
 
     def test_cli_selector_refuses_missing_lane_and_blank_binding_id(self) -> None:
-        store, _, destination, _, _ = self.fixture()
+        store, _, destination, _, record = self.fixture()
         assert isinstance(store, PostgresRecordStore)
         command = [
             "odoo-overrides",
@@ -358,11 +359,27 @@ class OdooSecretMetadataTests(unittest.TestCase):
             "--instance",
             "testing",
             "--repair-metadata-from-relabel-history",
+            "--apply",
+            "--allow-direct-db-mutation",
             "--repair-binding-id",
         ]
-        missing = CliRunner().invoke(main, [*command, destination.binding_id])
-        self.assertNotEqual(missing.exit_code, 0)
-        self.assertIn("no override record", missing.output)
-        blank = CliRunner().invoke(main, [*command, " "])
-        self.assertNotEqual(blank.exit_code, 0)
-        self.assertIn("must not be blank", blank.output)
+        before = (
+            store.list_secret_bindings(limit=None),
+            store.list_secret_records(limit=None),
+            store.list_odoo_instance_override_records(),
+        )
+        for context, binding_id in (("missing", destination.binding_id), (record.context, " ")):
+            with self.subTest(context=context, binding_id=binding_id):
+                scoped = list(command)
+                scoped[scoped.index("--context") + 1] = context
+                refused = CliRunner().invoke(main, [*scoped, binding_id])
+                self.assertNotEqual(refused.exit_code, 0)
+                self.assertNotEqual(refused.exit_code, 2)
+                self.assertEqual(
+                    (
+                        store.list_secret_bindings(limit=None),
+                        store.list_secret_records(limit=None),
+                        store.list_odoo_instance_override_records(),
+                    ),
+                    before,
+                )

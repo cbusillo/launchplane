@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord, PublicHostEffect
 from control_plane.contracts.product_profile_record import ProductOdooLaneDataPolicy
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.odoo_testing_resources import OdooTestingResources
@@ -941,6 +941,54 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
         self.assertEqual(self.routes, [])
 
 
+class FreshTestingBootstrapOwnershipTests(FreshTestingBootstrapScenario):
+    def setUp(self) -> None:
+        self.seed("")
+        self.patches()
+
+    def test_foreign_pending_effect_alias_refuses_before_bootstrap_route(self) -> None:
+        self.review()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        for alias in (
+            self.request.domain_host.upper() + ".",
+            "https://" + self.request.domain_host.upper() + ".:8443/path",
+        ):
+            with self.subTest(alias=alias):
+                foreign = target.model_copy(
+                    update={
+                        "context": "foreign-bootstrap-owner",
+                        "domains": (),
+                        "public_hosts": (),
+                        "pending_public_host_effects": (
+                            PublicHostEffect(
+                                host=alias,
+                                provider_host="provider.invalid",
+                                target_id="foreign-compose",
+                                runtime_port=8069,
+                            ),
+                        ),
+                    }
+                )
+                self.store.write_dokploy_target_record(foreign)
+                with (
+                    patch(
+                        "control_plane.testing_replacement_bootstrap.compose.ensure_compose_web_domain_route"
+                    ) as route,
+                    patch(
+                        "control_plane.testing_replacement_bootstrap.run_resource_schedule"
+                    ) as schedule,
+                ):
+                    with self.assertRaises(ValueError):
+                        bootstrap_plan(self.store, self.profile.product, self.request)
+                    with self.assertRaises(ValueError):
+                        self.apply()
+                    route.assert_not_called()
+                    schedule.assert_not_called()
+                self.assertEqual(self.route_writes, 0)
+
+
 class FreshTestingBootstrapObservationTests(unittest.TestCase):
     def test_unknown_dispatched_route_is_never_blindly_repeated(self) -> None:
         store = Mock(spec=PostgresRecordStore)
@@ -1017,13 +1065,7 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_sqlite_cannot_publish_bootstrap_or_private_failure_details(self) -> None:
-        for mode in (
-            "apply",
-            "readback",
-            "route-repair-dry-run",
-            "route-repair-apply",
-            "route-repair-readback",
-        ):
+        for mode in ("apply", "readback"):
             result = await self.post(mode=mode, reviewed_plan_sha256="a" * 64)
             self.assertEqual(result.status_code, 503, result.text)
         with patch(
@@ -1034,6 +1076,16 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 409, result.text)
         self.assertNotIn("private-value", result.text)
         self.assertNotIn(result.json()["error"]["code"], tuple(BootstrapPrerequisiteCode))
+
+    async def test_retired_certificate_repair_modes_are_rejected(self) -> None:
+        with patch(
+            "control_plane.http_routes.testing_replacement_bootstrap.TestingReplacementBootstrapAdapter"
+        ) as adapter:
+            for mode in ("route-repair-dry-run", "route-repair-apply", "route-repair-readback"):
+                with self.subTest(mode=mode):
+                    result = await self.post(mode=mode, reviewed_plan_sha256="a" * 64)
+                    self.assertEqual(result.status_code, 400, result.text)
+            adapter.assert_not_called()
 
     async def test_dry_run_returns_the_prerequisite_classification(self) -> None:
         prerequisite = TestingBootstrapPrerequisiteError(

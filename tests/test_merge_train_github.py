@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_repository_policy
 import unittest
 import json
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -52,7 +53,7 @@ from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import MergeTrainGitHubMergeRejectedError
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.merge_train_github import merge_train_conflict_probe_ref
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
@@ -3713,12 +3714,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 branch_refresh_store=cast(Any, store),
             )
             self.assertTrue(
-                reader.client_veto(
-                    repository=repository.casefold(), pull_request_number=42, head_sha="head-42"
-                )
+                reader.client_veto(repository=repository.casefold(), pull_request_number=42)
             )
 
-    def test_engineering_only_notes_do_not_clear_current_client_veto(self) -> None:
+    def test_engineering_only_notes_and_new_heads_do_not_clear_client_veto(self) -> None:
         rejection = ProductReviewDecisionRecord(
             record_id="client-veto",
             product="site",
@@ -3733,7 +3732,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         )
         cases = (
             ((rejection,), "fail", True),
-            ((rejection.model_copy(update={"head_sha": "old-head"}),), "pass", False),
+            ((rejection.model_copy(update={"head_sha": "old-head"}),), "fail", True),
             ((rejection.model_copy(update={"owner_github_id": "902"}),), "pass", False),
             ((rejection.model_copy(update={"product": "another-site"}),), "pass", False),
             (
@@ -3759,6 +3758,14 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 False,
             ),
             ((rejection.model_copy(update={"decision": "accepted"}), rejection), "pass", False),
+            (
+                (
+                    rejection.model_copy(update={"decision": "accepted"}),
+                    rejection.model_copy(update={"head_sha": "old-head"}),
+                ),
+                "pass",
+                False,
+            ),
             ((), "pass", False),
         )
         for notes in (
@@ -3804,7 +3811,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         pull = _github_pull_request(42)
         pull["body"] = "## Client test notes\nNothing for the Client to test: CI only."
         pull["labels"] = []
-        rejection = _client_veto_record(repository="cbusillo/sellyouroutboard", head_sha="head-42")
+        rejection = _client_veto_record(repository="cbusillo/sellyouroutboard", head_sha="old-head")
         transport = RecordingMergeTrainGitHubTransport(responses=(pull,))
         client = GitHubMergeTrainClient(
             transport=transport, branch_refresh_store=cast(Any, _client_veto_store((rejection,)))
@@ -3895,15 +3902,21 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         fixture.start()
         self.addCleanup(fixture.stop)
 
-    def test_director_standing_product_needs_engineering_checks_without_a_client_check(
+    def test_director_standing_product_waits_for_a_client_check_only_with_the_label(
         self,
     ) -> None:
-        for labels in (("ready-to-merge",), ("ready-to-merge", "owner-review")):
+        for labels, review_required in (
+            (("ready-to-merge",), False),
+            (("ready-to-merge", "owner-review"), True),
+        ):
             with self.subTest(labels=labels):
                 pull = _github_pull_request(42)
                 pull["body"] = "## Client test notes\nTry the approval buttons on a phone."
                 pull["labels"] = [{"name": label} for label in labels]
-                for conclusion, expected in (("success", "pass"), ("failure", "fail")):
+                for conclusion, expected in (
+                    ("success", "pending" if review_required else "pass"),
+                    ("failure", "fail"),
+                ):
                     with self.subTest(conclusion=conclusion):
                         transport = RecordingMergeTrainGitHubTransport(
                             responses=(
@@ -3936,7 +3949,9 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                         ).read_merge_train_snapshot(
                             repository=profile.repository, base_branch="main"
                         )
-                        self.assertFalse(snapshot.pull_requests[0].owner_review_required)
+                        self.assertIs(
+                            snapshot.pull_requests[0].owner_review_required, review_required
+                        )
                         self.assertEqual(snapshot.pull_requests[0].required_checks_status, expected)
 
     def test_another_clients_product_keeps_its_review_gate_with_a_standing_profile(self) -> None:
@@ -4282,6 +4297,10 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 ]
                 if expected == "patch_or_minor" or label == "force-pushed by someone else":
                     responses.append(timeline)
+                if expected == "patch_or_minor":
+                    responses.append(
+                        {"files": [{"filename": "package.json", "status": "modified"}]}
+                    )
                 responses.extend(
                     [
                         _protected_branch_with_checks("ci-status", app_id=None),
@@ -4295,12 +4314,58 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
 
                 snapshot = GitHubMergeTrainSnapshotReader(
-                    transport=transport
+                    transport=transport, repository_policy=dependency_repository_policy()
                 ).read_merge_train_snapshot(
                     repository="cbusillo/sellyouroutboard", base_branch="main"
                 )
 
                 self.assertEqual(snapshot.pull_requests[0].dependency_update_class, expected)
+
+    def test_dependency_bots_share_immutable_diff_and_signature_admission(self) -> None:
+        from tests.test_merge_train_dependency_updates import renovate_message
+
+        for login, message in (
+            ("dependabot[bot]", INDIRECT_PATCH),
+            ("renovate[bot]", renovate_message()),
+            ("renovate[bot]", renovate_message(updateType="digest")),
+        ):
+            for filename, fork, verified, expected in (
+                ("package.json", False, True, "patch_or_minor"),
+                ("app.py", False, True, "needs_review"),
+                ("package.json", True, True, "needs_review"),
+                ("package.json", False, False, "needs_review"),
+            ):
+                with self.subTest(
+                    login=login, filename=filename, fork=fork, verified=verified, message=message
+                ):
+                    pull = _github_pull_request(16, head_repository="someone/fork" if fork else "")
+                    pull["user"] = {"id": 123, "login": login, "type": "Bot"}
+                    transport = RecordingMergeTrainGitHubTransport(
+                        responses=(
+                            [_github_commit(123, message, sha="head-16", verified=verified)],
+                            [],
+                            {"files": [{"filename": filename, "status": "modified"}]},
+                        )
+                    )
+                    reader = GitHubMergeTrainSnapshotReader(
+                        transport=transport,
+                        repository_policy=dependency_repository_policy(
+                            123,
+                            metadata_format="dependabot_trailer"
+                            if login == "dependabot[bot]"
+                            else "renovate_metadata",
+                        ),
+                    )
+                    result = reader._safe_dependency_update_class(
+                        repository_path="cbusillo/sellyouroutboard",
+                        pull_request_number=16,
+                        author_id=123,
+                        pull_request=pull,
+                        head_sha="head-16",
+                        base_branch="main",
+                        base_sha="base",
+                    )
+                    self.assertEqual(result, expected)
 
     def test_snapshot_reader_paginates_check_runs_before_computing_status(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(

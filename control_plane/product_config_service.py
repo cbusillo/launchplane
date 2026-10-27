@@ -23,9 +23,9 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
     product_target_owner_products,
+    product_config_targets,
     product_config_requirement_applies_to_lane,
 )
-from control_plane.product_config import ProductConfigMode, ProductConfigStore
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     latest_active_runtime_key_safety_policy,
@@ -81,7 +81,7 @@ def resolve_product_config_profile(
         return profile
     if not context or not any(
         lane.context.strip() == context and (not instance or lane.instance.strip() == instance)
-        for lane in profile.lanes
+        for lane in product_config_targets(profile)
     ):
         raise ProductConfigOwnershipMismatchError(
             "Product config target is not owned by the named product.",
@@ -91,6 +91,7 @@ def resolve_product_config_profile(
         record_store.list_product_profile_records(),
         context=context,
         instance="" if context_wide else instance,
+        config_scopes=True,
     ) != frozenset((product,)):
         raise ProductConfigOwnershipMismatchError(
             "Product config requires the named product to own the target alone.",
@@ -239,32 +240,6 @@ def read_lane_provider_env(
             key for key in env if live_target_runtime.provider_key_retirement_blocked(key, declared)
         ),
     )
-
-
-def apply_product_config_service_request(
-    *,
-    record_store: ProductConfigStore,
-    payload: dict[str, object],
-    mode: ProductConfigMode,
-    actor: str,
-    source_label: str,
-) -> tuple[dict[str, object] | None, ProductConfigServiceError | None]:
-    try:
-        return (
-            control_plane_product_config.apply_product_config_bundle(
-                record_store=record_store,
-                payload=payload,
-                mode=mode,
-                actor=actor,
-                source_label=source_label,
-            ),
-            None,
-        )
-    except (
-        control_plane_product_config.ProductConfigError,
-        RuntimeEnvironmentConflictError,
-    ) as error:
-        return None, product_config_service_error(error)
 
 
 def product_config_service_error(

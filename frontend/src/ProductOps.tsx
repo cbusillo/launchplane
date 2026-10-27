@@ -26,10 +26,11 @@ import { ProductRetirementPanel } from "./ProductRetirementPanel";
 import { ProductWebsiteCleanupPanel } from "./ProductWebsiteCleanupPanel";
 import { ProductSetupPanel } from "./ProductSetupPanel";
 import { ProductWorkspaceNav } from "./ProductWorkspaceNav";
+import { ProductReleaseReviewLink } from "./ProductReleaseReviewLink";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
 import { previewInventoryPresentation } from "./preview-inventory";
 import { PreviewInventory } from "./PreviewInventory";
-import { environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
+import { deployHoldNotice, environmentEvidenceDeadlines, environmentOperationalTone, operationalAttentionReasons, operationalWarningReasons, publicObservationGap, expireEnvironmentEvidence, expireProductEvidence, type SignalTone } from "./product-environment-signal";
 import {
   emptyResource,
   type ResourceState,
@@ -375,6 +376,7 @@ function DirectoryLane({
   const tone = environmentOperationalTone(environment);
   const headline = environment ? ingressHeadline(environment) : "Not recorded";
   const reasons = operationalAttentionReasons(environment);
+  const hold = deployHoldNotice(environment);
   return (
     <span className="directory-lane" data-lane={lane} data-operational={tone}>
       <span className="lane-name">{lane === "prod" ? "Production" : "Testing"}</span>
@@ -383,6 +385,7 @@ function DirectoryLane({
         {headline}
       </strong>
       {reasons.length ? <small className="directory-attention">{reasons.join(" · ")}</small> : null}
+      {hold ? <small className="directory-hold">{hold}</small> : null}
       <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Topology evidence" />
       <small className="directory-evidence-detail">
         {environment ? topologyEvidenceDetail(environment) : "This product has no recorded lane for this environment."}
@@ -451,7 +454,8 @@ function ProductWorkspace({
     environments.length === 0 ||
     environments.some(
       (environment) =>
-        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)),
+        ["missing", "stale", "unsupported", "warning"].includes(environmentOperationalTone(environment)) &&
+        !operationalWarningReasons(environment).length,
     );
 
   useEffect(() => {
@@ -500,6 +504,7 @@ function ProductWorkspace({
       </header>
 
       <ProductWorkspaceNav product={product} route={route} />
+      <ProductReleaseReviewLink key={`release-review:${product.product}`} product={product.product} admin={admin} fixtureMode={fixtureMode} />
       {admin && !fixtureMode ? <a className="button" href="#product-setup-title">Environment setup</a> : null}
 
       <a className="mobile-next-inspection" href={`#${inspection.targetId}`}>
@@ -537,6 +542,7 @@ function ProductWorkspace({
           label="Production"
           state={production?.trust_state ?? "missing"}
           value={signalHeadline(production)}
+          detail={operationalWarningReasons(production).length ? "Current release is healthy" : undefined}
         />
         <SignalTile
           label="Previews"
@@ -777,6 +783,7 @@ function EnvironmentRow({
               {recordedPublicObservation(environment) ? <small>{recordedPublicObservation(environment)}</small> : null}
             </>
           ) : <small>{ingressHeadline(environment)}</small>}
+          {deployHoldNotice(environment) ? <small>{deployHoldNotice(environment)}</small> : null}
         </div>
         <div>
           <dt>TLS evidence</dt>
@@ -953,7 +960,7 @@ function ProductDiagnostics({ product }: { product: ProductSiteOverview }) {
               </div>
               <div>
                 <dt>Ingress path</dt>
-                <dd>{environment.topology.provider_recorded.ingress.path}</dd>
+                <dd>{environment.topology.provider_recorded.external_ingress ? "Separate business and recovery paths" : environment.topology.provider_recorded.ingress.path}</dd>
               </div>
             </dl>
           </section>
@@ -1072,9 +1079,7 @@ function NoProducts({ onRetry }: { onRetry: () => void }) {
         No products are owned by Launchplane yet
       </h1>
       <p>
-        Use the supported Product Onboarding workflow to record a product profile,
-        stable lanes, runtime target authority, and required grants. This browser
-        does not invent a sample product or infer provider state.
+        Use Product Onboarding to record the product, its lanes and runtime targets.
       </p>
       <ol className="onboarding-checklist">
         <li>Record the product profile and display name.</li>
@@ -1279,6 +1284,8 @@ function ingressHeadline(environment: ProductEnvironmentSummary): string {
   if (environmentOperationalTone(environment) === "danger") {
     return "Needs attention";
   }
+  const warnings = operationalWarningReasons(environment);
+  if (warnings.length) return warnings.join(" · ");
   const retained = recordedPublicObservation(environment);
   if (retained) {
     return retained;
@@ -1305,6 +1312,7 @@ export function signalHeadline(environment: ProductEnvironmentSummary | null, to
     return "Needs attention";
   }
   if (tone === "warning") {
+    if (operationalWarningReasons(environment).length) return "Delivery warning";
     return environment ? publicObservationGap(expireEnvironmentEvidence(environment).topology) ?? "Review warning" : "Review warning";
   }
   if (!environment || tone === "missing") {

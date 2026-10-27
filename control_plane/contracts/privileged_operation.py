@@ -31,6 +31,7 @@ from control_plane.authz_grant_service import (
     AuthzManagedPolicyReconcileEnvelope,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.contracts.workflow_rule_retirement import WorkflowRuleRetirementRequest
 from control_plane.contracts.backup_policy_proposal import (
     BackupPolicyProposalInput,
     BackupPolicyHumanEvidence,
@@ -256,7 +257,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: int = Field(default=1, ge=1)
-    managed_set_id: str = Field(min_length=1, max_length=96)
+    managed_set_id: str = Field(max_length=96)
     desired_policy: LaunchplaneAuthzPolicy
     schema_migration: Literal["reject", "migrate_v2_to_v3"] = Field(
         default="reject",
@@ -272,6 +273,11 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             exclude_if=lambda value: value is None,
             json_schema_extra={"x-launchplane-optional-response": True},
         )
+    )
+    workflow_rule_retirement: WorkflowRuleRetirementRequest | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
 
     @model_validator(mode="after")
@@ -293,6 +299,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             reason=reason,
             related_issue=related_issue,
             desired_policy=self.desired_policy,
+            workflow_rule_retirement=self.workflow_rule_retirement,
         )
         object.__setattr__(self, "managed_set_id", reconcile_request.managed_set_id)
         object.__setattr__(self, "desired_policy", reconcile_request.desired_policy)
@@ -318,6 +325,7 @@ class ManagedAuthzPolicySetProposalInput(BaseModel):
             related_issue=self.related_issue,
             reviewed_plan_sha256=reviewed_plan_sha256,
             desired_policy=self.desired_policy,
+            workflow_rule_retirement=self.workflow_rule_retirement,
         )
 
 
@@ -633,8 +641,13 @@ class PrivilegedOperationApproval(BaseModel):
     policy_revision: int = Field(ge=1)
     policy_sha256: str
     policy_source: str
-    managed_set_id: str
-    managed_rule_id: str
+    managed_set_id: str = ""
+    managed_rule_id: str = ""
+    grant: Literal["policy_rule", "policy_administrator"] = Field(
+        default="policy_rule",
+        exclude_if=lambda value: value == "policy_rule",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     expires_at: str
     reason: str = Field(min_length=1, max_length=4000)
     rollback_class: Literal["key_retained", "policy_cas", "activation_revoke"] = "key_retained"
@@ -660,8 +673,6 @@ class PrivilegedOperationApproval(BaseModel):
         for field_name in (
             "policy_record_id",
             "policy_source",
-            "managed_set_id",
-            "managed_rule_id",
             "reason",
         ):
             object.__setattr__(
@@ -669,6 +680,16 @@ class PrivilegedOperationApproval(BaseModel):
                 field_name,
                 required_token(str(getattr(self, field_name)), field_name),
             )
+        if self.grant == "policy_administrator":
+            if self.descriptor_id != "production-backup-policy":
+                raise ValueError("Administrator backup approval is limited to backup policies.")
+            if self.managed_set_id or self.managed_rule_id:
+                raise ValueError("Administrator backup approval carries no managed rule.")
+        else:
+            for field_name in ("managed_set_id", "managed_rule_id"):
+                object.__setattr__(
+                    self, field_name, required_token(str(getattr(self, field_name)), field_name)
+                )
         if self.expires_at:
             object.__setattr__(self, "expires_at", _timestamp(self.expires_at, "expires_at"))
         return self
@@ -1282,6 +1303,8 @@ PrivilegedOperationSemanticReviewBlockerCode = Literal[
     "instances_not_singleton",
     "instance_not_exact",
     "secret_unreadable",
+    "privileged_operation_plan_stale",
+    "privileged_operation_planning_unavailable",
     "operation_past_expiry",
     "operation_expired",
     "execution_failed",

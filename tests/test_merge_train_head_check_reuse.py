@@ -3,6 +3,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from urllib.parse import unquote
+from unittest.mock import patch
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
@@ -10,12 +12,17 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_landing_plan,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.merge_train import MergeTrainDryRunSnapshot, build_merge_train_dry_run_result
+from control_plane.merge_train_controller_run_once import _uses_protected_candidate_pr
+from tests.test_merge_train import _pull_request
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     MergeTrainGitHubError,
-    MergeTrainGitHubRequest,
     merge_train_construction_ref,
 )
+from tests.support.merge_train_github import MergeTrainGitHubRequest
+from tests.merge_train_policy_fixtures import dependency_repository_policy
 from control_plane.workflows.merge_train_controller import (
     decide_merge_train_controller_record_action,
 )
@@ -50,6 +57,11 @@ class _ReuseTransport:
         self.base_history: list[dict[str, object]] = []
         self.unavailable_path = ""
         self.repository_full_name = "example/merge-train-repo"
+        self.user: object = {"id": 10, "type": "User"}
+        self.commit_author: object = self.user
+        self.commit_committer: object = self.user
+        self.commits: object = None
+        self.head_repository = self.repository_full_name
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         self.requests.append(MergeTrainGitHubRequest(method=method, path=path, body=body))
@@ -114,6 +126,18 @@ class _ReuseTransport:
                 return _git_commit(
                     sha, self.candidate_tree, parents=("candidate-after-1", "head-2")
                 )
+        if suffix == "/pulls/1/commits?per_page=100":
+            return (
+                self.commits
+                if self.commits is not None
+                else [
+                    {
+                        "sha": self.head_sha,
+                        "author": self.commit_author,
+                        "committer": self.commit_committer,
+                    }
+                ]
+            )
         if suffix.startswith("/pulls/"):
             self.pull_reads += 1
             head = self.head_sha
@@ -125,7 +149,8 @@ class _ReuseTransport:
                 "merged": False,
                 "draft": False,
                 "mergeable": None if self.change_unbound_fields and self.pull_reads == 1 else True,
-                "head": {"sha": head},
+                "user": self.user,
+                "head": {"sha": head, "repo": {"full_name": self.head_repository}},
                 "base": {
                     "sha": self.base_sha,
                     "ref": "main",
@@ -153,6 +178,10 @@ class HeadCheckReuseTests(unittest.TestCase):
     def setUp(self) -> None:
         self.transport = _ReuseTransport()
         self.client = GitHubMergeTrainClient(transport=self.transport)
+        self.client.begin_snapshot_pass(
+            policy=dependency_repository_policy(20, repository=self.transport.repository_full_name),
+            read_only=False,
+        )
         candidate = _batch_candidate()
         self.candidate = candidate.model_copy(update={"entries": candidate.entries[:1]})
 
@@ -187,6 +216,84 @@ class HeadCheckReuseTests(unittest.TestCase):
         self.assertEqual(restored, built)
         assert restored.structural_provenance is not None
         self.assertTrue(restored.structural_provenance.complete)
+
+    def test_secretless_or_unproven_source_heads_publish_full_candidate_ci(self) -> None:
+        scenarios: tuple[dict[str, object], ...] = (
+            {"user": {"id": 20, "type": "Bot"}},
+            {"commit_author": {"id": 20, "type": "Bot"}},
+            {"user": {"id": 30, "type": "Bot"}},
+            {"user": None},
+            {"commit_author": None},
+            {"commit_committer": {"id": 20, "type": "Bot"}},
+            {"head_repository": "fork/repository"},
+            {"commits": []},
+            {"commits": [{"sha": "stale-head", "author": {"id": 10, "type": "User"}}]},
+            {"unavailable_path": "/commits?"},
+        )
+        for changes in scenarios:
+            with self.subTest(changes=changes):
+                self.setUp()
+                for name, value in changes.items():
+                    setattr(self.transport, name, value)
+                built = self.build()
+                self.assertIsNone(built.head_check_reuse)
+                self.assertEqual(built.status, "ready_for_checks")
+                self.assertIn(built.candidate_ref.removeprefix("refs/heads/"), self.transport.refs)
+
+    def test_trusted_automation_keeps_full_head_check_reuse(self) -> None:
+        policy = dependency_repository_policy(20, repository=self.transport.repository_full_name)
+        policy.enqueue.trusted_automation_github_user_ids += (30,)
+        self.client.begin_snapshot_pass(policy=policy, read_only=False)
+        self.transport.user = {"id": 30, "type": "Bot"}
+        self.transport.commit_author = self.transport.user
+        self.assertIsNotNone(self.build().head_check_reuse)
+
+    def test_dependency_singleton_keeps_protected_candidate_full_ci_route(self) -> None:
+        self.transport.user = {"id": 20, "type": "Bot"}
+        built = self.build()
+        policy = build_test_merge_train_policy(repository=built.repository)
+        target = dependency_repository_policy(20, repository=built.repository)
+        policy = policy.model_copy(update={"policies": (target,)})
+        queue = build_merge_train_dry_run_result(
+            policy=policy,
+            snapshot=MergeTrainDryRunSnapshot(
+                repository=built.repository,
+                base_branch=built.base_branch,
+                pull_requests=(_pull_request(1, actor_id=20),),
+            ),
+            batch_landing=True,
+            new_candidate=True,
+        )
+        record = build_merge_train_batch_candidate_record(
+            candidate=built, source="test", updated_at=built.updated_at
+        )
+        self.assertEqual(built.status, "ready_for_checks")
+        self.assertEqual(queue.queue_order, (1,))
+        self.assertTrue(
+            _uses_protected_candidate_pr(
+                candidate_record=record, merge_method="merge", dry_run_result=queue
+            )
+        )
+
+    def test_unavailable_policy_storage_selects_full_candidate_ci(self) -> None:
+        self.client.end_snapshot_pass()
+        for error in (OSError("unavailable"), SQLAlchemyError("unavailable")):
+            with self.subTest(error=type(error).__name__):
+                with patch(
+                    "control_plane.merge_train_github.dependency_update_policy", side_effect=error
+                ):
+                    self.assertIsNone(self.build().head_check_reuse)
+
+    def test_standalone_reuse_requires_repository_identity_policy(self) -> None:
+        self.client.end_snapshot_pass()
+        self.assertIsNone(self.build().head_check_reuse)
+
+    def test_refreshed_dependency_head_loses_previously_recorded_reuse(self) -> None:
+        built = self.build()
+        self.transport.commit_author = {"id": 20, "type": "Bot"}
+        observed = self.client.observe_batch_candidate_checks(candidate=built)
+        self.assertIsNone(observed.head_check_reuse)
+        self.assertEqual(observed.status, "ready_for_checks")
 
     def test_provider_repository_casing_does_not_prevent_reuse(self) -> None:
         # GitHub reports the repository's own casing; the candidate stores it lowercased.

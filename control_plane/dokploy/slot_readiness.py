@@ -18,6 +18,7 @@ def verify_odoo_slot_readiness(
     browser_receipt: dict[str, Any],
     execute: ContainerCommand,
     retained_assets_verified: bool,
+    writers_fenced: bool,
 ) -> OdooSlotReadiness:
     """Preparation warms resources; the final HTTP probe only observes.
 
@@ -33,6 +34,7 @@ def verify_odoo_slot_readiness(
         or contract.get("database_uuid") != slot.runtime_identity.database_uuid
         or contract.get("runtime_identity") != identity
         or not retained_assets_verified
+        or not writers_fenced
     ):
         raise ValueError("native readiness contract/asset retention differs from exact slot")
     if (
@@ -56,7 +58,7 @@ value=json.loads(sys.stdin.read())
 with tempfile.TemporaryDirectory() as temporary:
     root=Path(temporary); contract=root/'contract.json'; evidence=root/'evidence.json'
     contract.write_text(json.dumps(value['contract'])); evidence.write_text(json.dumps(value['browser']))
-    argv=[sys.executable,'/opt/launchplane-readiness.py','--contract',str(contract),'--evidence',str(evidence)]
+    argv=[sys.executable,'/usr/local/bin/launchplane-readiness','--contract',str(contract),'--evidence',str(evidence)]
     prepared=subprocess.run(argv+['prepare'],capture_output=True,text=True,check=True)
     evidence.write_text(prepared.stdout)
     checked=subprocess.run(argv+['check'],capture_output=True,text=True,check=True)

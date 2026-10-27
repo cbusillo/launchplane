@@ -383,6 +383,8 @@ class ServiceRestartTests(unittest.TestCase):
                     self.store.read_deployment_record("newer-attempt").record_id,
                     response["error"]["message"],
                 )
+                self.assertEqual(response["error"]["reason"], "newer_deployment")
+                self.assertEqual(response["details"]["blocking_deployment_id"], "newer-attempt")
                 self.assertEqual(self.provider.writes, [])
 
     def test_unfinished_newer_attempt_refuses_despite_sorting_after_inventory(self) -> None:
@@ -615,14 +617,31 @@ class ServiceRestartTests(unittest.TestCase):
     def test_route_preserves_fixed_planner_refusal(self) -> None:
         from control_plane.lane_service_restart import ServiceRestartRefused
 
-        error = ServiceRestartRefused("The lane has no settled current deployment.")
-        with patch(
-            "control_plane.http_routes.lane_service_restart.plan_service_restart", side_effect=error
+        for reason, blocker in (
+            ("current_deployment_unsettled", None),
+            ("private reason", "legacy.record"),
+            ("newer_deployment", "deployment-123"),
         ):
-            status, response = self.invoke()
-        self.assertEqual(status, 409)
-        self.assertEqual(response["error"]["code"], "restart_refused")
-        self.assertEqual(response["error"]["message"], str(error))
+            with self.subTest(reason=reason, blocker=blocker):
+                error = ServiceRestartRefused(
+                    reason, "A different diagnostic sentence.", blocking_deployment_id=blocker
+                )
+                with patch(
+                    "control_plane.http_routes.lane_service_restart.plan_service_restart",
+                    side_effect=error,
+                ):
+                    status, response = self.invoke()
+                self.assertEqual(status, 409)
+                self.assertEqual(response["error"]["code"], "restart_refused")
+                self.assertEqual(response["error"]["message"], str(error))
+                self.assertEqual(
+                    response["error"].get("reason"), reason if reason != "private reason" else None
+                )
+                self.assertEqual(
+                    response.get("details"),
+                    {"blocking_deployment_id": blocker} if blocker == "deployment-123" else None,
+                )
+                self.assertEqual(self.provider.writes, [])
 
     def test_legacy_container_identity_keeps_its_reviewed_restart_digest(self) -> None:
         # A container deployed before the two-slot contract has no slot fields.
@@ -778,6 +797,35 @@ class ServiceRestartTests(unittest.TestCase):
         self.assertEqual(response["error"]["code"], "disposable_lane_safety_unknown")
         self.assertEqual(self.provider.writes, [])
 
+    def test_unhealthy_web_with_missing_docker_route_recovers_before_identity_verification(
+        self,
+    ) -> None:
+        self.app = self.create_app(
+            policy_runtime=LaunchplaneAuthzPolicyRuntime(LaunchplaneAuthzPolicy())
+        )
+        self.provider.config["State"]["Health"]["Status"] = "unhealthy"
+        record_lane_health(
+            self.store,
+            self.expected.product,
+            self.expected.context,
+            datetime.now(timezone.utc),
+            status=404,
+        )
+        record_safety(
+            self.store,
+            self.expected.product,
+            self.expected.context,
+            "testing",
+            usage="in_use",
+            data="unknown",
+            production_resources="unknown",
+        )
+        self.review()
+        status, response = self.invoke(key="unhealthy-web-recovery")
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["result"]["status"], "pass")
+        self.assertEqual(len(self.provider.writes), 1)
+
     def test_stopped_restart_refuses_known_production_sharing(self) -> None:
         self.provider.config["State"]["Running"] = False
         self.review()
@@ -823,6 +871,7 @@ class ServiceRestartTests(unittest.TestCase):
         self.provider.config["Config"]["Labels"]["com.docker.compose.service"] = "web"
         self.select_stopped_database()
         self.provider.config["State"]["Running"] = True
+        self.provider.config["State"]["Health"]["Status"] = "healthy"
         self.review()
         status, response = self.invoke(key="database-with-running-web")
         self.assertEqual(status, 409, response)

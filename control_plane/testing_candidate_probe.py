@@ -4,6 +4,14 @@ import inspect
 
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.docker_errors import docker_daemon_authorization_denied
+from control_plane.integration_readback import INTEGRATION_FAMILIES, IntegrationReadbackPolicy
+
+
+def sanitized_testing_readback_policy() -> IntegrationReadbackPolicy:
+    return IntegrationReadbackPolicy(
+        families=INTEGRATION_FAMILIES, allowed_integrations=(), protected_shopify_store_handles=()
+    )
+
 
 CANDIDATE_CONTAINER_PROBE = r"""
 import configparser, hmac, json, os, sys
@@ -64,12 +72,28 @@ except psycopg2.Error:
 try:
     with connection.cursor() as cursor:
         cursor.execute('SET TRANSACTION READ ONLY')
-        cursor.execute('SELECT password FROM res_users WHERE login = %s AND active',
-                       (os.environ.get('ODOO_ADMIN_LOGIN', '').strip() or 'admin',))
-        rows = cursor.fetchall()
-        if (len(rows) != 1 or not rows[0][0]
-                or not context.verify(os.environ['ODOO_ADMIN_PASSWORD'], rows[0][0])):
-            refuse_readiness()
+        preserved = False
+        if spec.get('copy_binding_sha256'):
+            sys.path.insert(0, '/volumes/scripts')
+            try:
+                from odoo_admin_password import restored_logins_preserved
+            except ImportError:
+                pass
+            else:
+                preserved = restored_logins_preserved(cursor) is True
+        login = os.environ.get('ODOO_ADMIN_LOGIN', '').strip() or 'admin'
+        if preserved:
+            cursor.execute('SELECT password FROM res_users WHERE login = ANY(%s) AND active',
+                           (list(dict.fromkeys(['admin', login])),))
+            default_context = CryptContext(schemes=['pbkdf2_sha512', 'plaintext'])
+            if any(row[0] and default_context.verify('admin', row[0]) for row in cursor.fetchall()):
+                refuse_readiness()
+        else:
+            cursor.execute('SELECT password FROM res_users WHERE login = %s AND active', (login,))
+            rows = cursor.fetchall()
+            if (len(rows) != 1 or not rows[0][0]
+                    or not context.verify(os.environ['ODOO_ADMIN_PASSWORD'], rows[0][0])):
+                refuse_readiness()
 finally:
     try:
         connection.rollback()
@@ -106,6 +130,31 @@ def one_inspection(identifier):
         raise RuntimeError('Candidate runtime inventory is incomplete')
     return values[0]
 
+def dokploy_endpoint_names(container: dict, *, include_dns_names: bool = False) -> list[str]:
+    networks = container['NetworkSettings']['Networks']
+    if not isinstance(networks, dict):
+        raise RuntimeError('Candidate endpoint names are unreadable')
+    if 'dokploy-network' not in networks:
+        return []
+    endpoint = networks['dokploy-network']
+    if not isinstance(endpoint, dict):
+        raise RuntimeError('Candidate endpoint names are unreadable')
+    names = []
+    for key in ('Aliases', 'DNSNames') if include_dns_names else ('Aliases',):
+        aliases = endpoint.get(key)
+        if aliases is None:
+            continue
+        if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
+            raise RuntimeError('Candidate endpoint names are unreadable')
+        names.extend(aliases)
+    if include_dns_names:
+        name = container.get('Name', '')
+        if not isinstance(name, str):
+            raise RuntimeError('Candidate endpoint name is unreadable')
+        if name:
+            names.append(name.lstrip('/'))
+    return names
+
 def probe(spec):
     global inspection_predicate
     inspection_predicate = ReadbackPredicate.RESOURCES
@@ -123,16 +172,13 @@ def probe(spec):
     if labels.get('traefik.enable') != 'false' or any(key.startswith('traefik.http.routers.') for key in labels):
         raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_ENDPOINT)
     namespace = spec['generation']['namespace']
-    aliases = observed['NetworkSettings']['Networks']['dokploy-network'].get('Aliases')
-    if not isinstance(aliases, list):
-        raise RuntimeError('Candidate endpoint aliases are unreadable')
-    if namespace not in aliases:
+    if namespace not in dokploy_endpoint_names(observed):
         raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_ENDPOINT)
     for identifier in docker('ps','-aq').decode().splitlines():
         other = one_inspection(identifier)
         if other['Id'] == observed['Id']:
             continue
-        if namespace in other.get('NetworkSettings',{}).get('Networks',{}).get('dokploy-network',{}).get('Aliases',[]):
+        if namespace.casefold() in {name.casefold() for name in dokploy_endpoint_names(other, include_dns_names=True)}:
             raise CopyReadbackRefused(ReadbackPredicate.PRIVATE_ENDPOINT)
     if observed['Image'] != containers['script-runner'][1]['Image']:
         raise CopyReadbackRefused(ReadbackPredicate.IMAGE)

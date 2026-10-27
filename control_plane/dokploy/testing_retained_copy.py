@@ -54,6 +54,76 @@ def retained_inventory_sha256(containers: list[dict[str, Any]], spec: dict[str, 
     ).hexdigest()
 
 
+def retained_web_process(containers: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str, str]:
+    web = [
+        item
+        for item in containers
+        if (item.get("Config", {}).get("Labels") or {}).get("com.docker.compose.project")
+        == spec["project"]
+        and (item.get("Config", {}).get("Labels") or {}).get("com.docker.compose.service") == "web"
+    ]
+    if len(web) != 1:
+        return {}
+    state = web[0].get("State", {})
+    if state.get("Status") != "running" or not all(
+        isinstance(value, str) and value for value in (web[0].get("Id"), state.get("StartedAt"))
+    ):
+        return {}
+    return {
+        "id": web[0]["Id"],
+        "status": state.get("Status", ""),
+        "started_at": state["StartedAt"],
+        "health": state.get("Health", {}).get("Status", ""),
+    }
+
+
+def matches_unavailable_web_process(original: object, current: object) -> bool:
+    return (
+        isinstance(original, dict)
+        and isinstance(current, dict)
+        and original.get("health") == "unhealthy"
+        and original.get("status") == current.get("status") == "running"
+        and all(
+            isinstance(original.get(key), str)
+            and bool(original[key])
+            and original[key] == current.get(key)
+            for key in ("id", "started_at")
+        )
+    )
+
+
+def retained_copy_availability(containers: list[dict[str, Any]], spec: dict[str, Any]) -> str:
+    members = [
+        item
+        for item in containers
+        if (item.get("Config", {}).get("Labels") or {}).get("com.docker.compose.project")
+        == spec["project"]
+    ]
+    if not members:
+        return "absent"
+    if any(
+        item.get("State", {}).get("Status")
+        not in {"running", "exited", "created", "paused", "restarting"}
+        for item in members
+    ):
+        return "unknown"
+    web = [
+        item
+        for item in members
+        if item["Config"]["Labels"].get("com.docker.compose.service") == "web"
+    ]
+    if len(web) > 1:
+        return "unknown"
+    if not web or web[0]["State"]["Status"] in {"exited", "created"}:
+        return "stopped"
+    if (
+        web[0]["State"]["Status"] == "running"
+        and web[0]["State"].get("Health", {}).get("Status") == "unhealthy"
+    ):
+        return "stopped"
+    return "available"
+
+
 def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str, Any]:
     """Runs on the managed host; no environment value leaves the host."""
     import hashlib
@@ -88,29 +158,43 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         for item in members
         if item["Config"]["Labels"].get("com.docker.compose.service") == "database"
     ]
-    if len(web_members) != 1 or len(database_members) != 1:
+    availability = retained_copy_availability(containers, spec)
+    unavailable = spec.get("allow_unavailable") is True and (
+        availability == "stopped"
+        or matches_unavailable_web_process(
+            spec.get("unavailable_web_process"), retained_web_process(containers, spec)
+        )
+    )
+    if not unavailable and (len(web_members) != 1 or len(database_members) != 1):
         raise CopyReadbackRefused(ReadbackPredicate.SERVICES)
-    web = web_members[0]
-    database = database_members[0]
+    web = web_members[0] if web_members else None
+    database = database_members[0] if database_members else None
     states = [item.get("State", {}).get("Status") for item in members]
     stopped = all(value in {"exited", "created"} for value in states)
-    environment = dict(item.split("=", 1) for item in web["Config"].get("Env", []) if "=" in item)
+    environment = (
+        dict(item.split("=", 1) for item in web["Config"].get("Env", []) if "=" in item)
+        if web
+        else {}
+    )
     identity = json.loads(environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", "null"))
-    if not isinstance(identity, dict) and not (
-        identity is None and stopped and spec.get("allow_unavailable") is True
-    ):
+    if not isinstance(identity, dict) and not (identity is None and unavailable):
         raise ValueError("Retained testing runtime identity is unreadable")
     if (
         isinstance(identity, dict)
         and (identity.get("context"), identity.get("instance")) != (spec["context"], "testing")
-        or environment.get("PLATFORM_INSTANCE") != "testing"
-        or environment.get("ODOO_DB_HOST") != "database"
+        or web is not None
+        and (
+            environment.get("PLATFORM_INSTANCE") != "testing"
+            or environment.get("ODOO_DB_HOST") != "database"
+        )
     ):
         raise CopyReadbackRefused(ReadbackPredicate.RUNTIME_IDENTITY)
     if spec.get("identity") is not None and identity != spec["identity"]:
         raise CopyReadbackRefused(ReadbackPredicate.RUNTIME_IDENTITY)
     resources = []
     for member, destination in ((web, "/volumes/data"), (database, "/var/lib/postgresql/data")):
+        if member is None:
+            continue
         mounts = [
             item for item in member.get("Mounts", []) if item.get("Destination") == destination
         ]
@@ -153,7 +237,7 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
     ).hexdigest()
     if spec.get("resource_binding") and spec["resource_binding"] != binding:
         raise CopyReadbackRefused(ReadbackPredicate.CUSTODY)
-    state = web.get("State", {}).get("Status")
+    state = web.get("State", {}).get("Status") if web else None
     if any(
         value not in {"running", "exited", "created", "paused", "restarting", "dead"}
         for value in states
@@ -161,11 +245,12 @@ def qualify_retained_copy(containers: list[dict[str, Any]], spec: dict[str, Any]
         raise ValueError("Retained testing process state is unknown")
     return {
         "type": "complete",
-        "web_id": web["Id"],
+        **({"web_id": web["Id"]} if web else {}),
         "identity": identity,
         "resource_binding": binding,
         "stopped": stopped,
-        "web_stopped": state in {"exited", "created", "paused"},
+        "web_stopped": availability == "stopped" or state == "paused",
+        "web_process": retained_web_process(containers, spec),
         "volumes": sorted(volumes),
     }
 
@@ -191,6 +276,9 @@ def retained_copy_host_program() -> str:
         + VOLUME_BACKING_INSPECTION_LIBRARY
         + inspect.getsource(qualify_retained_copy)
         + inspect.getsource(retained_inventory_sha256)
+        + inspect.getsource(retained_copy_availability)
+        + inspect.getsource(retained_web_process)
+        + inspect.getsource(matches_unavailable_web_process)
         + inspect.getsource(require_complete_container_inventory)
         + "\nHEALTH_PROGRAM="
         + repr(RETAINED_PRIVATE_HEALTH_PROGRAM)
@@ -225,7 +313,7 @@ try:
     if spec.get('physical_binding') and result['physical_binding']!=spec['physical_binding']:
         raise CopyReadbackRefused(ReadbackPredicate.BACKING_STORAGE)
     if spec.get('allow_unavailable') is True:
-        result['availability']=result.get('availability','stopped' if result['stopped'] else 'available')
+        result['availability']=retained_copy_availability(containers,spec)
         if result['availability']!='available':
             result['inventory_sha256']=retained_inventory_sha256(containers,spec)
             result['observation_sha256']=hashlib.sha256(json.dumps({'project':spec['project'],'context':spec['context'],'custody':result},sort_keys=True,separators=(',',':')).encode()).hexdigest()

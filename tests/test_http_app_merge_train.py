@@ -1568,12 +1568,21 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
                 },
             )
 
+            self.assertEqual(full_store.list_merge_train_batch_candidate_records(), ())
+            self.assertEqual(
+                next(
+                    record
+                    for record in full_store.list_merge_train_stack_collapse_plan_records(
+                        repository=executed_plan_record.plan.repository,
+                        base_branch=executed_plan_record.plan.base_branch,
+                    )
+                    if record.record_id == executed_plan_record.record_id
+                ),
+                executed_plan_record,
+            )
+
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["error"]["code"], "database_storage_required")
-        self.assertEqual(
-            response.json()["error"]["message"],
-            "Merge train stack collapse admission requires database-backed candidate records.",
-        )
 
     async def test_openapi_includes_stack_collapse_contract(self) -> None:
         response = await openapi_response()
@@ -2177,7 +2186,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                             else candidate
                         )
 
-                    def close_batch_pull_request(self, *, candidate: Any) -> None:
+                    def close_batch_pull_request(self, *, candidate: Any, reason: str) -> None:
                         closed.append(candidate.batch_id)
 
                     def land_batch_candidate(self, **_: Any) -> Any:
@@ -6130,6 +6139,10 @@ class FastApiMergeTrainPrFeedbackTests(unittest.IsolatedAsyncioTestCase):
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch("control_plane.http_app.resolve_merge_train_github_token", return_value="token"),
+            patch(
+                "control_plane.merge_train_pr_feedback.reconcile_completed_change",
+                return_value={"ok": True, "issues": []},
+            ),
         ):
             state_dir = Path(temporary_directory_name) / "state"
             _seed_merge_train_policy(state_dir)

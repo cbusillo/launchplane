@@ -3,7 +3,10 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
-from control_plane.contracts.outbox_delivery import OutboxDeliveryRecord
+from control_plane.contracts.outbox_delivery import (
+    OutboxDeliveryRecord,
+    RETIRED_DISCORD_SUMMARY_AGGREGATE_TYPE,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentRecord,
     PublicIngressNotificationPolicyRecord,
@@ -12,7 +15,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 
 class OutboxInspectionStore(Protocol):
     def list_outbox_delivery_records(
-        self, *, states: tuple[str, ...] = (), limit: int | None = None
+        self, *, states: tuple[str, ...] = (), limit: int | None = None, newest_first: bool = False
     ) -> tuple[OutboxDeliveryRecord, ...]: ...
 
     def list_public_ingress_notification_policy_records(
@@ -54,6 +57,8 @@ def _delivery_routing(
     if record.kind == "github_workflow_dispatch":
         routing["inputs"] = record.payload.get("inputs", {})
     if record.kind == "public_ingress_notification":
+        if record.aggregate_type == RETIRED_DISCORD_SUMMARY_AGGREGATE_TYPE:
+            return {**routing, "send_window": record.payload.get("send_window")}
         attempt = record.payload.get("attempt")
         if isinstance(attempt, dict):
             routing.update(
@@ -77,6 +82,10 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
     records = store.list_outbox_delivery_records(
         states=("pending", "running", "reconcile_required"), limit=limit + 1
     )
+    failures = store.list_outbox_delivery_records(
+        states=("failed",), limit=limit + 1, newest_first=True
+    )
+    selected = (*records[:limit], *failures[:limit])
     policies = store.list_public_ingress_notification_policy_records(
         status="enabled", limit=limit + 1
     )
@@ -91,7 +100,7 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
     }
     deliveries: list[dict[str, object]] = []
     incident_statuses: dict[str, str] = {}
-    for record in records[:limit]:
+    for record in selected:
         destination = record.payload.get("destination")
         deliveries.append(
             {
@@ -103,6 +112,7 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
                 "created_at": record.created_at,
                 "attempt": record.attempt,
                 "provider_started": bool(record.provider_operation_key),
+                "error_code": record.error_code,
                 "routing": _delivery_routing(store, record, incident_statuses),
                 "queued_destination": {
                     key: value for key, value in destination.items() if key in destination_keys
@@ -112,8 +122,8 @@ def inspect_outbox(store: OutboxInspectionStore, *, limit: int) -> OutboxInspect
             }
         )
     return OutboxInspection(
-        complete=len(records) <= limit and len(policies) <= limit,
-        counts=dict(Counter(f"{record.kind}:{record.state}" for record in records[:limit])),
+        complete=len(records) <= limit and len(failures) <= limit and len(policies) <= limit,
+        counts=dict(Counter(f"{record.kind}:{record.state}" for record in selected)),
         deliveries=tuple(deliveries),
         notification_policies=tuple(
             {

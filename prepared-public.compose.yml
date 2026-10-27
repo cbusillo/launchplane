@@ -1,0 +1,38 @@
+services:
+  prepared-public:
+    image: ${LAUNCHPLANE_PREPARED_IMAGE:?Select the retained immutable Launchplane image}
+    container_name: ${LAUNCHPLANE_PREPARED_CONTAINER:?Select the lane prepared server}
+    restart: unless-stopped
+    init: true
+    user: launchplane-browser
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+    environment:
+      HOME: /tmp
+      LAUNCHPLANE_PREPARED_PUBLIC_ROOT: /prepared
+    command:
+      - /app/.venv/bin/uvicorn
+      - control_plane.dokploy.prepared_host:prepared_service_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    volumes:
+      - prepared-public:/prepared:ro
+    networks:
+      - private
+
+volumes:
+  prepared-public:
+    external: true
+    name: ${LAUNCHPLANE_PREPARED_VOLUME:?Select the dedicated public bundle volume}
+networks:
+  private:
+    external: true
+    name: ${LAUNCHPLANE_PREPARED_NETWORK:?Select the admitted private cutover network}

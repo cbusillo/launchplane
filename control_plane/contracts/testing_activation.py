@@ -10,6 +10,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.testing_application import TestingApplicationSpecification
+from control_plane.contracts.testing_external_resources import TestingExternalCapabilityProof
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
@@ -49,6 +50,7 @@ class TestingApplicationReadiness(BaseModel):
 
 
 class TestingActivationRefusalCode(StrEnum):
+    EXTERNAL_CAPABILITY_UNVERIFIED = "testing_external_capability_unverified"
     QUALIFICATION_UNVERIFIED = "testing_activation_unverified"
     DEPENDENCY_UNVERIFIED = "testing_activation_dependency_unverified"
     ROUTES_REQUIRE_CUTOVER = "testing_activation_routes_require_cutover"
@@ -96,7 +98,7 @@ class TestingActivationRequest(BaseModel):
     # These are existing lane setting names, never volume names or port values.
     volume_keys: dict[str, str]
     port_keys: tuple[str, ...]
-    mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
+    mode: Literal["dry-run", "apply", "refuse", "readback", "receipt", "inspect"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     application: TestingApplicationSpecification | None = Field(
@@ -127,6 +129,9 @@ class TestingActivationRecord(BaseModel):
     scope: str
     request: TestingActivationRequest
     plan_sha256: str
+    external_capabilities: tuple[TestingExternalCapabilityProof, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
     namespace: str
     preparation_record_id: str
     retained_target: DokployTargetRecord
@@ -201,6 +206,9 @@ class TestingActivationResult(TestingActivationPlan):
     applied: Literal[True] = True
     separation_verified: Literal[True] = True
     qualified_at: str
+    external_capabilities: tuple[TestingExternalCapabilityProof, ...] = Field(
+        default=(), exclude_if=lambda value: not value
+    )
 
 
 class TestingActivationRefusedResult(TestingActivationPlan):

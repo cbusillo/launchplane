@@ -501,6 +501,39 @@ def adopt_dokploy_target(
     )
 
 
+def plan_dokploy_application_target(
+    *,
+    project_id: str,
+    project_name: str,
+    environment_id: str,
+    environment_name: str,
+    target_name: str,
+    app_name: str,
+    server_id: str,
+) -> DokployTargetCreatePlan:
+    return DokployTargetCreatePlan(
+        project={
+            "action": _project_plan_action(
+                project_id=project_id,
+                environment_id=environment_id,
+            ),
+            "project_id": project_id,
+            "project_name": project_name,
+        },
+        environment={
+            "action": "use_existing" if environment_id else "create",
+            "environment_id": environment_id,
+            "environment_name": environment_name,
+        },
+        application={
+            "action": "create",
+            "target_name": target_name,
+            "app_name": app_name.strip(),
+            "server_id": server_id.strip(),
+        },
+    )
+
+
 def create_dokploy_application_target(
     *,
     record_store: DokployTargetAdoptionRecordStore,
@@ -546,7 +579,7 @@ def create_dokploy_application_target(
             "Dokploy target creation requires --project-id or --project-name when --environment-id is not supplied"
         )
 
-    provider_requests = _planned_provider_requests(
+    provider_requests = planned_application_provider_requests(
         project_id=normalized_project_id,
         project_name=normalized_project_name,
         project_description=project_description,
@@ -558,26 +591,14 @@ def create_dokploy_application_target(
         application_description=application_description,
         server_id=server_id,
     )
-    plan = DokployTargetCreatePlan(
-        project={
-            "action": _project_plan_action(
-                project_id=normalized_project_id,
-                environment_id=normalized_environment_id,
-            ),
-            "project_id": normalized_project_id,
-            "project_name": normalized_project_name,
-        },
-        environment={
-            "action": "use_existing" if normalized_environment_id else "create",
-            "environment_id": normalized_environment_id,
-            "environment_name": normalized_environment_name,
-        },
-        application={
-            "action": "create",
-            "target_name": normalized_target_name,
-            "app_name": app_name.strip(),
-            "server_id": server_id.strip(),
-        },
+    plan = plan_dokploy_application_target(
+        project_id=normalized_project_id,
+        project_name=normalized_project_name,
+        environment_id=normalized_environment_id,
+        environment_name=normalized_environment_name,
+        target_name=normalized_target_name,
+        app_name=app_name,
+        server_id=server_id,
     )
 
     _ensure_create_route_has_no_provider_target(
@@ -1075,7 +1096,7 @@ def _provider_string_field(
     return ""
 
 
-def _planned_provider_requests(
+def planned_application_provider_requests(
     *,
     project_id: str,
     project_name: str,

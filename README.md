@@ -25,13 +25,13 @@ uv run launchplane service serve --help
 (cd frontend && pnpm validate)
 ```
 
-Frontend validation runs unit tests, the OpenAPI drift check, TypeScript, and the
-production Vite build. The TypeScript OpenAPI client is an ignored build artifact;
-development, type checks, browser checks, and production builds generate it from
-the checked UI schema. After a backend contract change, run
-`(cd frontend && pnpm generate:openapi)` and commit the schemas and agent contract.
-CI rejects drift in those checked artifacts. Existing branches that still commit
-the TypeScript client may need one final refresh to adopt its removal.
+Frontend validation runs unit tests, the agent-contract drift check, TypeScript,
+and the production Vite build. The canonical OpenAPI JSON, UI slice and TypeScript
+client are ignored build artifacts generated from Python source before frontend
+tests, development, type checks and production builds, including Docker and CI.
+Python contract tests and inventory scripts also derive schemas from source.
+After a backend contract change, run `(cd frontend && pnpm generate:openapi)`
+and commit only the agent contract. CI still rejects drift in that runtime contract.
 For IDE type resolution before the first build, run
 `(cd frontend && pnpm generate:openapi-types)` once.
 `(cd frontend && pnpm test:browser)` runs the Playwright
@@ -43,12 +43,8 @@ uv run --extra dev python -m unittest tests.test_module_name
 ```
 
 Replace `tests.test_module_name` with the module for the changed behavior.
-During the [Q326 trial](docs/style/testing.md#local-test-loop), routine changes
-use focused local tests plus lint, type checks, and IDE inspection; the full
-sharded suite runs only in CI and must pass before `gh-pr.py ready` and merge.
-The approved Q375 refinement keeps safety classifications and adds whole
-modules for touched safety areas to local focused tests; testing style owns
-the selection rules.
+Follow [testing style](docs/style/testing.md#local-test-loop) for local safety
+module selection, the Q778 focused PR pilot and the full candidate merge gate.
 
 Implementation goes through a task branch and PR. Once required checks pass and
 review findings are accounted for, follow [AGENTS.md](AGENTS.md) to hand the PR

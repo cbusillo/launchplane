@@ -549,22 +549,64 @@ existing reviewed-baseline operational policy route above; this source change
 does not change live policy. Recovery is an ordinary source revert through the
 train; explicit-label admission remains supported for the prior service.
 
-`dependency_update_github_user_ids` names dependency-update bots, for example
-Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
-request from one of them enqueues without the enqueue label only when every
-change commit on it is authored by that bot and signed by GitHub (committer
-`web-flow`, verified), nobody else force-pushed the branch, the commits match the
-pull request head the train read, and every dependency the update names stays
-within one major version. Transitive lockfile changes are not classified; the
-pull request's required checks still gate them. The adapter derives that from Dependabot's
-`updated-dependencies` commit trailer and the "from X to Y" lines, because the
-trailer often omits `update-type`. Balanced single- or double-quoted dependency
-names match the unquoted names in those version lines. A major version, a `0.x`
-minor bump, a changed version suffix, a non-version reference such as a commit SHA, an
-unparseable message, or a commit by anyone else leaves the pull request
-ineligible with `dependency update needs agent review`. The label still
-enqueues any trusted pull request as before. An empty list, the default, changes
-nothing and is omitted from the policy digest.
+`enqueue.dependency_update_bots` is the policy table for automatic dependency
+admission. Each row selects an immutable `github_user_id`, a `metadata_format`
+(`dependabot_trailer` or `renovate_metadata`) and nonempty
+`allowed_update_types` from `patch`, `minor` and `digest`. IDs must be unique
+and already belong to `trusted_automation_github_user_ids`. Bot type is still
+required. No login, ID or enabled update type is inferred in code. Adding or
+removing a bot that uses a supported format is a policy proposal for the
+signed-in admin, with no code change. Multiple identities can share a parser.
+
+For example, this illustrative row enables an already trusted test identity:
+
+```json
+{
+  "github_user_id": 711,
+  "metadata_format": "renovate_metadata",
+  "allowed_update_types": ["patch", "minor", "digest"]
+}
+```
+
+The legacy `dependency_update_github_user_ids` field stays readable for retained
+record and digest compatibility. It supplies no parser or admission authority.
+The managed proposal planner refuses new legacy ID entries while allowing
+existing ones to be preserved or removed. Existing records require an approved migration into the explicit table; an
+absent table withholds automatic admission. Ordinary checked Ready and trusted
+label admission remain supported while an admin reviews that migration.
+
+Every change commit must be authored by the configured bot and GitHub-signed
+(`web-flow`, verified), match the observed PR head and have no foreign
+force-push. The configured parser extracts all named updates. Dependabot uses
+its `updated-dependencies` trailer and the "from X to Y" lines; an omitted
+update-type is derived from those versions. Renovate uses one `Renovate-Updates`
+JSON array per commit, emitted by the shared preset's supported
+[`commitBody`](https://docs.renovatebot.com/configuration-options/#commitbody)
+and [`toJSON`/`toObject`](https://docs.renovatebot.com/templates/) helpers.
+
+Every update must have an allowed type and satisfy the same generic safety
+rule. Patch/minor metadata must agree with the version movement and stay within
+one major with an unchanged suffix; a `0.x` minor bump needs review. Digest
+updates need full old/new digests and identical nonempty branch/tag values.
+Majors, unknown types and incomplete evidence remain for agent review even
+when a bot is configured. Transitive lockfile changes are not classified;
+required checks still gate the PR.
+
+The train and Client-note consumers resolve the same repository/base policy.
+Removing a bot also removes its automatic dependency-only Client exemption.
+Release checklist readers use the current policy too; recorded engineering notes
+remain readable, but a removed bot cannot supply a new inferred exemption.
+Both formats require a complete immutable same-repository dependency-only diff.
+`workspace.toml` qualifies only when complete immutable TOML documents differ
+solely in exact devkit/runtime ref pins; shared-addon and other changes keep
+review. Workflows, application code, renames from code and unavailable evidence
+withhold admission. Explicit Client-review overrides remain enforced.
+
+Renovate automerge stays disabled; only the train lands changes. The empty table
+is omitted from policy serialization so it does not alter historical digests.
+After the schema deploys, use the existing managed merge-train policy proposal
+flow to migrate current bot identities and select their formats/types. The
+proposer cannot approve or apply; post its review URL for Chris as admin.
 
 The train's own base-refresh merge commits do not count as dependency changes
 when a persisted branch-refresh record binds the exact commit, repository, PR,
@@ -801,6 +843,13 @@ sorts, waits for the next candidate. A failed candidate keeps the whole-queue
 comparison described under Blocker Isolation. `max_batch_size` caps each new
 candidate.
 
+Configured dependency-bot PRs each occupy one candidate. Ordinary work before
+one can form its own batch; work after it waits for the next candidate. Both
+the explicit bot table and retained legacy dependency IDs impose this boundary,
+independently of update classification or an explicit enqueue label. This does
+not mark dependency PRs for original-PR landing: merge-method singletons keep
+the protected candidate PR and its full build checks.
+
 At a new candidate boundary, pending or unknown engineering heads step aside
 when another eligible head has passing checks and known mergeability. Their
 queue entries report the deferred head and its check/mergeability reason;
@@ -845,6 +894,16 @@ passed on the exact head with the required App bindings. PR identity/head/base
 and the base branch are confirmed after those reads. Missing, pending, failed,
 stale or unreadable evidence selects the normal publication and candidate CI;
 multiple queued PRs always take that path, even if a tree happens to match.
+Reuse also requires the repository/base identity policy, a same-repository PR,
+and a complete commit list ending at the recorded head. The PR author and every
+commit author and committer must have readable user identities; bots must be
+trusted automation. Configured dependency identities, including retained legacy
+IDs, never qualify, even after a trusted refresh. Forks, unknown identities,
+missing policy and unreadable or truncated commit evidence take full candidate
+CI. Construction, controller revalidation and live landing admission share this
+source check. This guard precedes the tenant rollout of secretless source-only
+checks; it neither enables those checks nor retires existing credentials.
+
 PRs with recorded retargets or base force pushes also run full candidate CI:
 their historical head checks may have tested another merge-ref tree. Incomplete
 or unreadable timeline history cannot qualify reuse. The filtered
@@ -921,7 +980,40 @@ screening evidence, but they do not prove the combined tree is safe to land.
 Launchplane must fail closed when candidate check evidence is missing, pending,
 failed, stale, or attached to a different commit SHA.
 
-The single-entry tree-identity proof above is the only exception. Before planning
+Active products whose stored profile selects the Odoo driver always require
+full Build on the constructed candidate, including trusted equal-tree singletons.
+They cannot use the single-entry head-check shortcut. The controller creates the
+existing generated candidate PR before observing checks even when CODEOWNERS or
+the merge method requires landing through the original PR. This triggers the
+repository's existing trusted PR Build without changing its workflow, secrets,
+grants or branch settings. The generated PR remains a validation carrier on
+an original-PR route; it is closed during completed-landing cleanup before the
+candidate ref is deleted. Protected batch routes still merge the generated PR.
+
+For these Odoo candidates, a GitHub Actions `build` check must report `success`
+on the exact constructed SHA. Missing, pending, skipped, neutral or unbound
+checks cannot qualify it. A failed Build fails the candidate even when branch
+protection does not require Build. A source-head Build or a later main Build
+cannot substitute for this evidence. Candidate observation, passed-record
+revalidation and fresh landing admission enforce this rule. The profile is
+read from runtime records; there is no checked-in repository list or additional
+gate for other drivers or repositories.
+
+Odoo landings use `POST /v1/work-graph/merge-train/controller/run-once`.
+The Level 1 ordered worker and direct tenant-admission controller do not
+construct candidates; for Odoo they return a wait or blocked result pointing
+to that supported controller, without merging. Other repositories retain
+their existing routes. Generated Odoo candidate PRs do not allocate product
+previews; source PR previews keep their existing behavior.
+
+Missing Build diagnostics use the existing candidate observation and PR feedback.
+Failed Builds participate in the existing failure classifier, base attribution
+and retry/isolation path. A candidate waiting for Build remains visible to the
+existing stall monitor; the monitor still reports progress failures and never
+supplies missing validation or authorizes landing. An optional Build outside
+the candidate verdict cannot produce those wait/failure signals.
+
+Other repositories retain the single-entry tree-identity exception. Before planning
 its landing, the controller calls observation, which
 re-reads its head checks and live required-check policy rather than treating the
 recorded pass as current authority. If reuse stops being provable, it publishes
@@ -935,8 +1027,9 @@ and the protected expected-head merge; no
 checks are copied to a new SHA and no provider requirement is changed.
 
 Head screening, candidate observation, base verification, head-check reuse and
-native/tenant admission share one required-check evaluator. Only signals matching
-a live required name and its App binding determine the required-check verdict.
+native/tenant admission share one required-check evaluator. Signals matching
+a live required name and its App binding determine the branch-required verdict;
+Odoo candidate validation additionally requires full Build as described above.
 Same-name commit statuses and check runs both participate when they match that
 requirement; one source's pass cannot erase another matching failure or pending
 signal. A required check with no matching evidence remains pending. Optional
@@ -1016,7 +1109,21 @@ no administration access. A pinned App requirement needs explicit matching App
 identity on its check run or commit status; a creator login cannot supply that
 identity. Commit statuses without verified App attribution can satisfy unpinned
 or `app_id = -1` any-App requirements. Tenant admission records an unprotected
-policy as unavailable. A missing named or pinned check is explicitly pending even after
+policy as unavailable.
+
+A policy proposal that enrolls a repository branch is refused at planning,
+before anyone reviews it, when the branch requires no status checks or the
+repository lacks the target's enqueue label. The refusal names each missing
+setting and the supported fix: the codex-skills `gh-rulesets.py` standard
+ruleset pair and its `checks-plan`, or the label. If an enrolled branch later
+loses its required checks, the controller reports `target_not_ready` instead
+of waiting: ready pull requests get a blocked comment naming the setting, and
+the stall monitor raises `target_not_ready` with the same text at once. A batch
+whose checks were being observed is kept; one whose members can no longer be
+admitted is closed with that reason. The train resumes on its own once the setting exists.
+Every batch pull request the controller closes gets a comment with the reason.
+
+A missing named or pinned check is explicitly pending even after
 unrelated checks finish. Failed, pending, stale or unavailable required evidence
 cannot qualify a candidate.
 
@@ -1667,10 +1774,12 @@ The deployed merge train resolves the policy's `github_app` source instead.
 See the [configuration boundary](config-boundary.md#bootstrap-env-only) for
 retired chooser-source settings and self-deploy cleanup.
 
-Passing `--mutate` applies exactly one ordered-queue worker transition from that
-fresh snapshot. Use it only from the intended admin environment for the smoke
-or configured target; the command is a narrow bootstrap surface, not the full
-batch train scheduler.
+Local `--mutate` refuses before reading credentials or creating a provider
+transport. Mutations use the deployed service's
+`POST /v1/work-graph/merge-train/run-once`; Odoo uses
+`POST /v1/work-graph/merge-train/controller/run-once` for full candidate Build.
+This removes the token-only local mutation carrier for every repository, while
+leaving non-Odoo service admission and required checks unchanged.
 
 The dry-run orders eligible pull requests by `created_at` and then PR number. It
 excludes draft, closed, unlabeled, or unauthorized entries and fails closed when
@@ -2441,11 +2550,18 @@ clock is later: the new receipt retains that later observed timestamp and its
 fresh creation order. A completed record with a saved planning receipt is not
 queued again; legacy completion without that receipt can recover. Newer feedback
 from a different controller attempt remains protected. Queueing performs no
-provider calls under the controller lease.
+provider calls under the controller lease. Completion is queued and reconciled
+even when the landing repository's policy has no trusted automation authors.
+Missing author trust remains a source-review hold in the receipt; it never silently skips
+reconciliation or grants metadata authority.
 
 For a merged PR on the default branch, completed feedback discovers its native
-closing references and their direct blocking dependents and parents, including
-neighbors of non-plan or held sources. The deduplicated neighborhood is bounded
+closing references and explicit source references in its title, body and issue
+comments from the PR author, repository owner or numerically trusted automation,
+using the catalog's shared reference parser. It refreshes their direct
+blocking dependents and parents, including neighbors of non-plan or held sources.
+Timeline-only issue mentions are recorded for review without expanding their
+neighborhood or changing them. The deduplicated neighborhood is bounded
 to 100 records and is discovered before metadata writes; it is not recursive.
 Each planning target's status and labels derive from its current open native
 blockers and trusted structured wait through the same pinned pure package used
@@ -2464,6 +2580,14 @@ with an actual or unread wait can receive only lifecycle label cleanup; its
 full completion remains unverified. An issue-specific Project membership gap
 also permits label cleanup while keeping full completion in review. Configured
 Project mutations retain their existing capability and readback requirements.
+Open non-closing sources receive `review_open_finish_line` in the saved receipt;
+their review is informational and does not prevent successful independent metadata
+repairs or delivery of the landing comment. Closing sources still require verified
+completion. The authoring agent supplies completion judgment before Ready, closing
+what the PR completes and splitting remaining work into owned follow-up issues
+with a named next actor. Landing reconciliation records unresolved judgment in its
+receipt. The existing stranded-work digest independently reports open linked issues;
+neither treats a reference as completion evidence.
 
 Every target uses its actual default branch's `.github/github.json`, or verified
 standard planning labels when that file is absent. Same-account foreign targets
@@ -2491,9 +2615,17 @@ completion are distinct. A known repository denial prevents that repository's
 writes while independent authorized repositories can continue. A global identity
 failure or unknown write outcome stops later writes. Discovery-time failures
 apply before any metadata write and retain already discovered neighbors. Failed
-source provider evidence withholds comment delivery; terminal source holds can
-publish the existing incomplete-planning note. These outcomes do not undo the
-landing or grant access.
+source evidence remains failed, with every verified prior result retained.
+A verified landing can publish terminal partial receipts through the existing
+incomplete-planning note while reconciliation remains failed. Incomplete source
+reference discovery or a neighborhood coverage overflow retains known targets
+and explicitly partial coverage without metadata writes.
+Unknown writes, global identity failures, denial in the source repository and
+transient/quota failures still suppress publication. Existing retry classification
+and quota backoff remain; pending keyword projection also retains its retry when
+another source has a terminal error.
+Terminal planning failures remain failed in the existing feedback protocol even
+when their note was delivered. These outcomes do not undo the landing or grant access.
 
 Provider failures use terminal feedback's existing retry and quota backoff.
 Completion and retry share a sanitized classification cached on the original
@@ -2510,7 +2642,8 @@ slightly future merge timestamp wait only within 15 minutes of the verified
 merge time. Every still-open closing source receives this projection check before
 its planning, authorship or wait-history guards, so a non-plan or reporter-owned
 source cannot leave a delivered receipt before its dependent sees closure.
-Still-open sources after that grace require owning review.
+Still-open closing sources after that grace require owning review. A non-closing
+reference does not await keyword projection; its finish line needs review immediately.
 
 The persisted feedback record schema remains compatible with older workers
 through rolling deployment and rollback. A receipt is evidence, never authority.

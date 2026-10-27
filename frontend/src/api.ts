@@ -1,3 +1,4 @@
+import { validateRemovalResponse } from "./runtime-setting-removal";
 import type { BackupCredentialBindingRequest, AcceptedEvidenceResponse, QualifyProductionBackupPreflightData } from "./generated/openapi.ts";
 import type { DiscussionTopicsResponse } from "./generated/openapi.ts";
 import type { ApplyTestingHoldData, ApplyTestingHoldResponse, ReadTestingHoldData, ReadTestingHoldResponse } from "./generated/openapi.ts";
@@ -22,6 +23,7 @@ import type {
   ProductListPayload,
 } from "./types";
 import type { InspectTestingRebuildData, InspectTestingRebuildResponse, ReadTestingRebuildResponse, SubmitTestingRebuildData, SubmitTestingRebuildResponse, LookupTestingRebuildData, LookupTestingRebuildResponse, ResumeTestingRebuildData, ResumeTestingRebuildResponse } from "./generated/openapi.ts";
+import type { SettleTestingRebuildData, SettleTestingRebuildResponse } from "./generated/openapi.ts";
 import type {
   ApplyProductionBackupAuthorityData,
   ApplyProductionBackupAuthorityResponse,
@@ -57,7 +59,6 @@ import type {
   EnqueueOdooProdRollbackResponse,
   EnqueueProductionBackupGateData,
   EnqueueProductionBackupGateResponse,
-  EveryCodeSummaryResponse,
   GovernanceProjectionResponse,
   ListHumanPrivilegedOperationsData,
   ListHumanPrivilegedOperationsResponse,
@@ -102,8 +103,9 @@ import type {
   WriteProductReviewDecisionData,
   RetryProductReviewFeedbackData,
   ReleaseReviewResponse,
+  ReleaseReviewAccessResponse,
   ReleaseReviewDecisionEnvelope,
-  UrgentReleaseReviewEnvelope,
+  ReleaseRequestEnvelope,
   ReadProductionBackupGateOperationData,
   ReadProductionBackupGateOperationResponse,
   ReadOdooProdPromotionOperationData,
@@ -482,18 +484,6 @@ export function readProductPromotionWorkflowDelivery(
   );
 }
 
-export function readEveryCodeSummary(
-  limit = 12,
-  signal?: AbortSignal,
-): Promise<EveryCodeSummaryResponse> {
-  return requestJson<EveryCodeSummaryResponse>(
-    `/v1/every-code/summary?limit=${encodeURIComponent(String(limit))}`,
-    "GET",
-    undefined,
-    signal,
-  );
-}
-
 export function readTenantAdmissionEvaluation(
   request: Pick<ReadTenantAdmissionEvaluationData, "query">,
   signal?: AbortSignal,
@@ -848,6 +838,11 @@ export function lookupTestingRebuild(product: string, payload: LookupTestingRebu
     options.signal, options.idempotencyKey);
 }
 
+export function settleTestingRebuild(product: string, payload: SettleTestingRebuildData["body"], options: BrowserOperationOptions): Promise<SettleTestingRebuildResponse> {
+  const path = BROWSER_WRITE_ROUTES.testingRebuildSettle.replace("{product}", encodeURIComponent(product));
+  return requestJson(path, "POST", payload, options.signal, options.idempotencyKey);
+}
+
 export function resumeTestingRebuild(product: string, operationId: string, payload: ResumeTestingRebuildData["body"], options: BrowserOperationOptions): Promise<ResumeTestingRebuildResponse> {
   const path = BROWSER_WRITE_ROUTES.testingRebuildResume.replace("{product}", encodeURIComponent(product)).replace("{operation_id}", encodeURIComponent(operationId));
   return requestJson(path, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch);
@@ -925,12 +920,16 @@ export function readReleaseReview(product: string, signal?: AbortSignal): Promis
   return requestJson<ReleaseReviewResponse>(`/v1/release-review?${new URLSearchParams({ product })}`, "GET", undefined, signal);
 }
 
+export function readReleaseReviewAccess(product: string, signal?: AbortSignal): Promise<ReleaseReviewAccessResponse> {
+  return requestJson<ReleaseReviewAccessResponse>(`/v1/release-review/access?${new URLSearchParams({ product })}`, "GET", undefined, signal);
+}
+
 export function writeReleaseReviewDecision(payload: ReleaseReviewDecisionEnvelope): Promise<ReleaseReviewResponse> {
   return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewDecision, "POST", payload);
 }
 
-export function openUrgentReleaseReview(payload: UrgentReleaseReviewEnvelope): Promise<ReleaseReviewResponse> {
-  return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewUrgentOpening, "POST", payload);
+export function requestReleaseReview(payload: ReleaseRequestEnvelope): Promise<ReleaseReviewResponse> {
+  return requestJson<ReleaseReviewResponse>(BROWSER_WRITE_ROUTES.releaseReviewRequest, "POST", payload);
 }
 
 export function writeProductReviewDecision(
@@ -1199,4 +1198,41 @@ export function readProviderHoldAttention(
   if (page.limit !== undefined) query.set("limit", String(page.limit));
   if (page.cursor) query.set("cursor", page.cursor);
   return requestJson(`${PROVIDER_HOLD_ATTENTION_ROUTE}${query.size ? `?${query}` : ""}`, "GET", undefined, signal);
+}
+
+export async function removeRuntimeSettings(
+  payload: import("./generated/openapi.ts").RuntimeSettingRemovalRequest,
+  options: import("./browser-operation").BrowserOperationOptions,
+): Promise<import("./runtime-setting-removal").RemovalResponse> {
+  const response = await requestJson<import("./generated/openapi.ts").RuntimeSettingRemovalResponse>(
+    BROWSER_WRITE_ROUTES.runtimeSettingRemoval, "POST", payload, options.signal, options.idempotencyKey, options.onDispatch,
+  );
+  return validateRemovalResponse(response, payload);
+}
+
+export interface PromotionRecoveryTarget {
+  product: string;
+  decisionRecordId: string;
+  attempt: 1 | 2;
+  step: "promote" | "rollback";
+}
+
+function promotionRecoveryPath(target: PromotionRecoveryTarget, path = "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}"): string {
+  return path.replace("{product}", encodeURIComponent(target.product)).replace("{decision_record_id}", encodeURIComponent(target.decisionRecordId));
+}
+
+function promotionRecoveryQuery(target: PromotionRecoveryTarget): string {
+  return `?${new URLSearchParams({ attempt: String(target.attempt), step: target.step })}`;
+}
+
+export function readPromotionRecovery(target: PromotionRecoveryTarget): Promise<import("./generated/openapi.ts").PromotionRecoveryPlan> {
+  return requestJson(promotionRecoveryPath(target) + promotionRecoveryQuery(target));
+}
+
+export function reviewPromotionRecovery(target: PromotionRecoveryTarget, reason: string): Promise<import("./generated/openapi.ts").PromotionRecoveryPlan> {
+  return requestJson(promotionRecoveryPath(target, BROWSER_WRITE_ROUTES.promotionRecoveryReview) + promotionRecoveryQuery(target), "POST", { reason });
+}
+
+export function applyPromotionRecovery(target: PromotionRecoveryTarget, body: import("./generated/openapi.ts").PromotionRecoveryApply): Promise<import("./generated/openapi.ts").PromotionRecoveryApplied> {
+  return requestJson(promotionRecoveryPath(target, BROWSER_WRITE_ROUTES.promotionRecoveryApply) + promotionRecoveryQuery(target), "POST", body);
 }

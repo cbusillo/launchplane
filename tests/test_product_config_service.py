@@ -17,10 +17,10 @@ from control_plane.contracts.secret_record import (
 )
 from control_plane.product_config import ProductConfigError
 from control_plane.product_config_service import (
-    apply_product_config_service_request,
     product_config_service_error,
     product_config_write_prerequisites,
 )
+from tests.support.product_config_service import apply_product_config_service_request
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from tests.support.profiles import _generic_site_profile_payload
 

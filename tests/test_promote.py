@@ -1,3 +1,5 @@
+from tests.support.runtime_environments import _parse_runtime_environment_definition
+from tests.support.runtime_environments import build_runtime_environment_records_from_definition
 import os
 import json
 import subprocess
@@ -13,7 +15,6 @@ from click.testing import CliRunner
 
 from control_plane import secrets as control_plane_secrets
 from control_plane import dokploy as control_plane_dokploy
-from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.cli import (
     _resolve_dokploy_target,
     _resolve_native_promotion_request,
@@ -196,16 +197,14 @@ def _write_control_plane_dokploy_source_of_truth(repo_root: Path, payload: str) 
 def _write_runtime_environments_file(repo_root: Path, payload: str) -> Path:
     runtime_environments_file = repo_root / "runtime-environments.toml"
     runtime_environments_file.write_text(payload.strip() + "\n", encoding="utf-8")
-    definition = control_plane_runtime_environments._parse_runtime_environment_definition(
+    definition = _parse_runtime_environment_definition(
         tomllib.loads(payload.strip()),
         source_file=runtime_environments_file,
     )
     store = PostgresRecordStore(database_url=_runtime_environments_database_url(repo_root))
     store.ensure_schema()
     try:
-        for (
-            record
-        ) in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+        for record in build_runtime_environment_records_from_definition(
             definition,
             updated_at="2026-04-22T00:00:00Z",
             source_label="test",

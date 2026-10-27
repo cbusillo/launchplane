@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.provider_hold_attention import PROVIDER_HOLD_ATTENTION_ROUTE
 
 import json
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from fastapi import FastAPI
@@ -120,14 +122,6 @@ def canonical_openapi_document() -> dict[str, Any]:
     app = build_deterministic_export_app()
     openapi_payload: dict[str, Any] = app.openapi()
     scrubbed_payload: dict[str, Any] = _scrub_openapi_payload(openapi_payload)
-    info = scrubbed_payload.get("info", {})
-    if not isinstance(info, dict):
-        info = {}
-    scrubbed_payload["info"] = {
-        **info,
-        "title": "Launchplane API",
-        "version": "0.1.0",
-    }
     scrubbed_payload["x-launchplane-ui-read-operations"] = UI_OPENAPI_READ_OPERATIONS
     scrubbed_payload["x-launchplane-ui-write-operations"] = UI_OPENAPI_WRITE_OPERATIONS
     return scrubbed_payload
@@ -136,14 +130,17 @@ def canonical_openapi_document() -> dict[str, Any]:
 def write_canonical_openapi(output_path: Path) -> Path:
     payload = canonical_openapi_document()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    with TemporaryDirectory(dir=output_path.parent, prefix=".openapi-") as directory:
+        temporary_path = Path(directory) / "schema.json"
+        temporary_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        temporary_path.replace(output_path)
     return output_path
 
 
 UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
+    "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}": "read_promotion_recovery",
     PROVIDER_HOLD_ATTENTION_ROUTE: "read_provider_hold_attention",
     "/v1/product-config/testing-hold": "read_testing_hold",
     "/v1/products/{product}/discussion-topics": "list_discussion_topics",
@@ -186,8 +183,6 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/products/{product}/environments/{environment}/promotion/workflow-deliveries/{delivery_id}": (
         "read_product_promotion_workflow_delivery"
     ),
-    "/v1/every-code/summary": "read_every_code_summary",
-    "/v1/every-code/work-requests": "list_every_code_work_requests",
     "/v1/previews/readiness": "read_preview_readiness",
     "/v1/repo-product-mapping": "read_repo_product_mapping",
     "/v1/work-graph/merge-train/controller/status": "read_merge_train_controller_status",
@@ -197,6 +192,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/product-review": "read_product_review",
     "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/release-review": "read_release_review",
+    "/v1/release-review/access": "read_release_review_access",
     "/v1/production-backup-gates/operations/{operation_id}": (
         "read_production_backup_gate_operation"
     ),
@@ -211,11 +207,15 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
 
 
 UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
+    "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/dry-run": "dry_run_promotion_recovery",
+    "/v1/admin/generic-web/promotion-recovery/{product}/{decision_record_id}/apply": "apply_promotion_recovery",
+    "/v1/admin/runtime-settings/removal": "runtime_setting_removal",
     "/v1/product-config/testing-hold/apply": "apply_testing_hold",
     "/v1/dokploy-targets/setup": "setup_dokploy_target",
     "/v1/route-bindings/reconcile": "reconcile_route_binding",
     "/v1/products/{product}/testing-rebuild": "submit_testing_rebuild",
     "/v1/products/{product}/testing-rebuild/lookup": "lookup_testing_rebuild",
+    "/v1/products/{product}/testing-rebuild/settle": "settle_testing_rebuild",
     "/v1/products/{product}/testing-rebuild/operations/{operation_id}/resume": "resume_testing_rebuild",
     "/v1/product-retirement": "execute_product_retirement",
     "/v1/production-backup-authority/proposals/{operation_id}/decision": "decide_backup_policy_proposal",
@@ -251,7 +251,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/owner-secret-inputs/submit": "submit_owner_secret_input",
     "/v1/local-consumer-deliveries": "deliver_testing_local_consumer",
     "/v1/release-review/decisions": "write_release_review_decision",
-    "/v1/release-review/urgent-openings": "open_urgent_release_review",
+    RELEASE_REQUEST_ROUTE: "request_release_review",
     "/v1/production-backup-gates": "enqueue_production_backup_gate",
     "/v1/odoo-prod-promotions": "enqueue_odoo_prod_promotion",
     SERVICE_RESTART_ROUTE: "restart_lane_service",

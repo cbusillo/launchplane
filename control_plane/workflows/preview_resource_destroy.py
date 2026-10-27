@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -76,7 +77,9 @@ def destroy_dokploy_resource(
     missing_resource_is_clean: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
     propagate_domain_lookup_error: bool = False,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> PreviewResourceDestroyResult:
+    guard = provider_mutation_guard or nullcontext
     normalized_resource_id = resource_id.strip()
     normalized_domain_host = domain_host.strip().lower()
     steps: list[PreviewResourceDestroyStep] = []
@@ -96,10 +99,11 @@ def destroy_dokploy_resource(
         )
         steps.append(PreviewResourceDestroyStep("domain_lookup", normalized_resource_id))
         for domain_id in domain_ids:
-            if before_provider_mutation is not None:
-                before_provider_mutation("domain_delete")
-            domain_mutation_attempted = True
-            _delete_domain(host=host, token=token, domain_id=domain_id)
+            with guard():
+                if before_provider_mutation is not None:
+                    before_provider_mutation("domain_delete")
+                domain_mutation_attempted = True
+                _delete_domain(host=host, token=token, domain_id=domain_id)
             steps.append(PreviewResourceDestroyStep("domain_delete", domain_id))
     except click.ClickException as exc:
         if propagate_domain_lookup_error and not domain_mutation_attempted:
@@ -113,19 +117,26 @@ def destroy_dokploy_resource(
                 cleanup_errors=tuple(cleanup_errors),
             )
 
+    resource_mutation_attempted = False
     try:
-        if before_provider_mutation is not None:
-            before_provider_mutation(f"{resource_type}_destroy")
-        _delete_preview_resource(
-            host=host,
-            token=token,
-            resource_type=resource_type,
-            resource_id=normalized_resource_id,
-            delete_volumes=delete_volumes,
-        )
+        with guard():
+            if before_provider_mutation is not None:
+                before_provider_mutation(f"{resource_type}_destroy")
+            resource_mutation_attempted = True
+            _delete_preview_resource(
+                host=host,
+                token=token,
+                resource_type=resource_type,
+                resource_id=normalized_resource_id,
+                delete_volumes=delete_volumes,
+            )
         steps.append(PreviewResourceDestroyStep(f"{resource_type}_delete", normalized_resource_id))
     except click.ClickException as exc:
-        if not (missing_resource_is_clean and _is_resource_delete_not_found(exc)):
+        if not (
+            missing_resource_is_clean
+            and resource_mutation_attempted
+            and _is_resource_delete_not_found(exc)
+        ):
             cleanup_errors.append(f"{resource_type} cleanup failed: {exc}")
         else:
             steps.append(

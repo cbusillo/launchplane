@@ -28,6 +28,7 @@ from control_plane.workflows.dokploy_target_adoption import (
     COMPOSE_CREATE_PATH,
 )
 from tests import test_testing_replacement_resources as resources
+from tests.support.stored_profiles import persist_historical_preview_transport
 
 
 class TestingCandidateTests(unittest.TestCase):
@@ -210,6 +211,9 @@ class TestingCandidateTests(unittest.TestCase):
         )
 
     def test_independent_storage_never_publishes_candidate_as_serving(self) -> None:
+        persist_historical_preview_transport(
+            self.store, self.product, seed_command="", migration_command=""
+        )
         result = self.prepare()
         self.assert_serving_unchanged()
         self.assertEqual(

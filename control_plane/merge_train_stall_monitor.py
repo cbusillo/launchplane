@@ -62,12 +62,13 @@ def observe_stall(
     orphaned_lease: bool = False,
     recovered_failure: bool = False,
     wait_reason: str = "",
+    setting_gaps: tuple[str, ...] = (),
 ) -> MergeTrainStallObservation:
     changed = progress_key != previous.progress_key
     since = now if changed or not previous.progress_since else previous.progress_since
     ready_since = {key: previous.ready_since.get(key, now) for key in ready}
     blocked_since = {key: previous.blocked_since.get(key, now) for key in blocked}
-    reasons: list[str] = []
+    reasons: list[str] = ["target_not_ready"] if setting_gaps else []
     if busy and _age(now, since) >= STALL_SECONDS:
         reasons.append("controller_unchanged")
         if wait_reason in {
@@ -97,6 +98,7 @@ def observe_stall(
         blocked_since=blocked_since,
         reasons=tuple(reasons),
         suspected_signals=tuple(signals),
+        setting_gaps=setting_gaps,
     )
 
 
@@ -222,6 +224,7 @@ def _issue_body(record: MergeTrainStallRecord) -> str:
                 f"  - Train-blocked change `{key}` since {since}."
                 for key, since in sorted(observation.blocked_since.items())
             )
+            lines.extend(f"  - Missing setting: {gap}" for gap in observation.setting_gaps)
     if not any(item.reasons for item in record.observations.values()):
         lines.append("Resolved: no actionable stall condition remains.")
     lines.extend(
@@ -270,9 +273,12 @@ def run_stall_monitor_pass(
                         include_permissions=True,
                     )
                     client = GitHubMergeTrainClient(
-                        transport=UrllibMergeTrainGitHubTransport(token=token)
+                        transport=UrllibMergeTrainGitHubTransport(token=token),
+                        source_screening=True,
+                        product_profile_store=store,
                     )
                     client.begin_snapshot_pass(policy=target, read_only=True)
+                    setting_gaps = client.target_setting_gaps(repository_policy=target)
                     snapshot = client.read_merge_train_snapshot(
                         repository=repository, base_branch=target.base_branch
                     )
@@ -348,7 +354,7 @@ def run_stall_monitor_pass(
                             }
                         }
                     )
-                    recovered = any(
+                    recovered = not setting_gaps and any(
                         r.candidate.status == "failed"
                         and r.candidate.required_checks_status == "fail"
                         and r.candidate.candidate_sha
@@ -376,6 +382,7 @@ def run_stall_monitor_pass(
                         wait_reason=str(
                             getattr(getattr(state, "last_result", None), "reason_code", "")
                         ),
+                        setting_gaps=setting_gaps,
                     ).model_copy(update={"queue_suspended": release_held})
                 current_reasons = {
                     base: item.reasons for base, item in observations.items() if item.reasons

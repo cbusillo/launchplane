@@ -109,6 +109,23 @@ def observe_dokploy_mutations(observer: MutationObserver) -> Iterator[None]:
         _mutation_observer.reset(context_token)
 
 
+@contextmanager
+def guard_dokploy_mutations(check: Callable[[], None]) -> Iterator[None]:
+    previous = _mutation_observer.get()
+
+    def observe(
+        host: str, path: str, payload: JsonObject, send: Callable[[], JsonValue]
+    ) -> JsonValue:
+        def guarded_send() -> JsonValue:
+            check()
+            return send()
+
+        return previous(host, path, payload, guarded_send) if previous else guarded_send()
+
+    with observe_dokploy_mutations(observe):
+        yield
+
+
 type DeploymentHistoryState = Literal["present", "no_history", "unknown"]
 
 
@@ -268,10 +285,7 @@ def list_deployments_for_target(
                 raise click.ClickException("Dokploy deployment history is incomplete.")
             assert isinstance(deployments_payload, list)
             deployments = _collect_object_items(deployments_payload)
-            ids = [deployment_key(item) for item in deployments]
-            if not all(ids) or len(set(ids)) != len(ids):
-                raise click.ClickException("Dokploy deployment history is ambiguous.")
-            return deployments
+            return require_unique_deployment_ids(deployments)
         if not isinstance(deployments_payload, list):
             return []
         return _collect_object_items(deployments_payload)
@@ -283,9 +297,21 @@ def list_deployments_for_target(
             path="/api/deployment.all",
             query={"applicationId": target_id},
         )
-        return extract_deployments(payload)
+        deployments = extract_deployments(payload)
+        if require_complete:
+            if parse_deployment_history(payload).state == "unknown":
+                raise click.ClickException("Dokploy deployment history is incomplete.")
+            return require_unique_deployment_ids(deployments)
+        return deployments
 
     raise click.ClickException(f"Unsupported Dokploy target type: {target_type}")
+
+
+def require_unique_deployment_ids(deployments: list[JsonObject]) -> list[JsonObject]:
+    ids = [deployment_key(item) for item in deployments]
+    if not all(ids) or len(set(ids)) != len(ids):
+        raise click.ClickException("Dokploy deployment history is ambiguous.")
+    return deployments
 
 
 def deployment_for_target_by_title(
@@ -1299,6 +1325,12 @@ _DEPLOYMENT_FAILURE_STATUSES = frozenset(
 )
 
 
+def deployment_is_terminal(deployment: JsonObject) -> bool:
+    return (
+        deployment_status(deployment) in _DEPLOYMENT_SUCCESS_STATUSES | _DEPLOYMENT_FAILURE_STATUSES
+    )
+
+
 def resolve_dokploy_user_id(*, host: str, token: str) -> str:
     payload = dokploy_request(host=host, token=token, path="/api/user.session")
     payload_as_object = as_json_object(payload)
@@ -1950,6 +1982,9 @@ def validate_dokploy_schedule_script(schedule_payload: JsonObject) -> int:
         from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 
         raise ScheduleMaterializationTooLarge()
+    from control_plane.dokploy.host_package import validate_bootstrap_scripts
+
+    validate_bootstrap_scripts(schedule_payload)
     return materialization_bytes
 
 
@@ -2413,14 +2448,12 @@ def as_json_object(value: JsonValue) -> JsonObject | None:
 
 
 def extract_schedules(raw_payload: JsonValue) -> list[JsonObject]:
-    if isinstance(raw_payload, list):
-        return _collect_object_items(raw_payload)
-    if isinstance(raw_payload, dict):
-        for key_name in ("data", "schedules", "items", "result"):
-            nested_items = raw_payload.get(key_name)
-            if isinstance(nested_items, list):
-                return _collect_object_items(nested_items)
-    return []
+    if not isinstance(raw_payload, list):
+        raise click.ClickException("Dokploy schedule inventory is unavailable.")
+    schedules = _collect_object_items(raw_payload)
+    if len(schedules) != len(raw_payload):
+        raise click.ClickException("Dokploy schedule inventory is incomplete.")
+    return schedules
 
 
 def extract_deployments(raw_payload: JsonValue) -> list[JsonObject]:

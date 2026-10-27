@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.release_request import RELEASE_REQUEST_ROUTE
 from control_plane.testing_retry import TESTING_RETRY_ROUTE
+from control_plane.client_release_backup_continuation import BACKUP_CONTINUATION_ROUTE
 from control_plane.http_routes.discussion_topics import ROUTE as DISCUSSION_TOPICS_ROUTE
 from control_plane.private_testing_transport import ROUTE as PRIVATE_TESTING_TRANSPORT_ROUTE
 from control_plane.private_testing_activation import ROUTE as PRIVATE_TESTING_ACTIVATION_ROUTE
@@ -16,6 +18,7 @@ from control_plane.contracts.disposable_lane import (
 )
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 from control_plane.testing_generation_retirement import ROUTE as TESTING_GENERATION_RETIREMENT_ROUTE
+from control_plane.testing_address import ROUTE as TESTING_ADDRESS_ROUTE
 from control_plane.generic_web_deploy_recovery_http import (
     GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
     GENERIC_WEB_DEPLOY_RECOVERY_APPLY_ROUTE,
@@ -103,6 +106,42 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/aggregate-counts",
+        "Read bounded aggregate counts from a qualified sanitized disposable testing copy with provenance and no data writes.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
+    OperationSpec(
+        "POST",
+        RELEASE_REQUEST_ROUTE,
+        "Record a Director request or agreed finish-line release decision and deliver its Client invitation without accepting or deploying.",
+        ("service_api", "browser"),
+        ("request",),
+        "body",
+        ("checklist_digest", "decision_reference"),
+    ),
+    OperationSpec(
+        "POST",
+        BACKUP_CONTINUATION_ROUTE,
+        "Review or requeue only a proved pre-capture failure under the original accepted release; retain failed history and unknown-effect fences.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "body",
+        ("expected_digest",),
+    ),
+    OperationSpec(
+        "GET",
+        "/v1/products/{product}/environments/{environment}/discord-identity",
+        "Identify an exact testing Discord credential through fixed provider reads without changing origin or qualifying isolation.",
+        ("service_api",),
+        ("read",),
+        "none",
+        (),
+    ),
     OperationSpec(
         "POST",
         GENERIC_WEB_DEPLOY_RECOVERY_DRY_RUN_ROUTE,
@@ -240,35 +279,37 @@ OPERATION_SPECS = (
     ),
     OperationSpec(
         "POST",
+        TESTING_ADDRESS_ROUTE,
+        "Amend the current native Odoo testing lane's canonical hostname from exact retained custody, preserving its copy, original hostname and operation fences; verify both public runtime identities before publishing canonical metadata. Cancel an unpublished amendment under its original request and key to restore the route preimage.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
+        "POST",
         TESTING_GENERATION_RETIREMENT_ROUTE,
         "Retain an incomplete legacy testing generation and its unknown history without releasing the operation; an isolated successor remains separately qualified.",
         ("service_api",),
-        ("dry-run", "apply", "readback"),
+        ("dry-run", "apply", "readback", "inspect"),
         "apply",
         ("reviewed_plan_sha256",),
     ),
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
-        "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate. Reviewed certificate repair preserves the original generation, copy, and queue without retrying.",
+        "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
         ("service_api",),
-        (
-            "dry-run",
-            "apply",
-            "readback",
-            "route-repair-dry-run",
-            "route-repair-apply",
-            "route-repair-readback",
-        ),
+        ("dry-run", "apply", "readback"),
         "apply",
         ("reviewed_plan_sha256",),
     ),
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_RESOURCES_ROUTE,
-        "Prepare fresh empty Odoo testing resources while preserving the retained target, then qualify their actual backing storage; this never restores data or starts web.",
+        "Prepare fresh empty Odoo testing resources while preserving the retained target, qualify their actual backing storage or release an unused initial preparation; this never restores data or starts web.",
         ("service_api",),
-        ("dry-run", "apply", "readback"),
+        ("dry-run", "apply", "readback", "release"),
         "apply",
         ("reviewed_plan_sha256",),
     ),

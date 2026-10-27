@@ -2,11 +2,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import PostgresRecordStore, OutboxWithIdempotencyRequest
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.workflows.public_ingress_monitor import (
     INCIDENT_RESOLVED_SUPERSESSION_ACTION,
     PublicIngressNotificationDriverSet,
+    _reconcile_duplicate_incident,
+    _public_ingress_notification_outbox_deliveries,
 )
 from tests.support.stores import _sqlite_database_url
 from tests import test_public_ingress_direct_outbox as direct_outbox
@@ -14,6 +16,106 @@ from tests.test_public_ingress_monitor import _notification_policy, _profile
 
 
 class IncidentOutboxSupersessionTests(unittest.TestCase):
+    def test_interrupted_github_create_uses_marker_for_recovery_without_recreating(self) -> None:
+        for issue_exists, issue_number in ((False, None), (True, None), (False, 1)):
+            with (
+                self.subTest(issue_exists=issue_exists, issue_number=issue_number),
+                TemporaryDirectory() as directory,
+            ):
+                store = PostgresRecordStore(
+                    database_url=_sqlite_database_url(Path(directory) / "db")
+                )
+                self.addCleanup(store.close)
+                store.ensure_schema()
+                store.write_product_profile_record(_profile())
+                store.write_public_ingress_notification_policy_record(
+                    _notification_policy(
+                        PublicIngressNotificationDestination(
+                            destination_id="ops",
+                            kind="github_issue",
+                            github_repository="example/ops",
+                            github_label="incident",
+                            github_issue_number=issue_number,
+                        )
+                    )
+                )
+                actions: list[str] = []
+
+                def github(action: str, payload: dict[str, object]) -> dict[str, object]:
+                    actions.append(action)
+                    if action == "create" or (action == "comment" and issue_number is not None):
+                        raise KeyboardInterrupt()
+                    if action == "find_marker" and not issue_exists:
+                        return {}
+                    return {"url": "https://github.com/example/ops/issues/1", "id": "issue-1"}
+
+                drivers = PublicIngressNotificationDriverSet(github_client=github)
+                direct_outbox.DirectNotificationOutboxTests._probe(
+                    store, 503, "2026-05-29T12:00:00Z"
+                )
+                with self.assertRaises(KeyboardInterrupt):
+                    direct_outbox.DirectNotificationOutboxTests._work(
+                        store, drivers, "2026-05-29T12:00:01Z"
+                    )
+                direct_outbox.DirectNotificationOutboxTests._probe(
+                    store, 200, "2026-05-29T12:01:00Z"
+                )
+                unknown = direct_outbox.DirectNotificationOutboxTests._work(
+                    store, drivers, "2026-05-29T12:06:01Z"
+                )
+                self.assertEqual(unknown.error_code, "delivery_outcome_unknown")
+                direct_outbox.DirectNotificationOutboxTests._work(
+                    store, drivers, "2026-05-29T12:07:01Z"
+                )
+                self.assertEqual(
+                    actions,
+                    ["comment"]
+                    if issue_number is not None
+                    else ["create", "find_marker", "close"]
+                    if issue_exists
+                    else ["create", "find_marker"],
+                )
+
+    def test_duplicate_cleanup_does_not_send_endpoint_recovery(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(database_url=_sqlite_database_url(Path(directory) / "db"))
+            self.addCleanup(store.close)
+            store.ensure_schema()
+            store.write_product_profile_record(_profile())
+            destination = direct_outbox.DirectNotificationOutboxTests._destination("email")
+            store.write_public_ingress_notification_policy_record(_notification_policy(destination))
+            sent: list[object] = []
+            drivers = PublicIngressNotificationDriverSet(
+                email_sender=lambda _destination, message: sent.append(message),
+                secret_resolver=lambda _name: "mock-credential",
+            )
+            direct_outbox.DirectNotificationOutboxTests._probe(store, 503, "2026-05-29T12:00:00Z")
+            direct_outbox.DirectNotificationOutboxTests._work(
+                store, drivers, "2026-05-29T12:00:01Z"
+            )
+            self.assertEqual(len(sent), 1)
+            incident = store.list_public_ingress_incident_records()[0]
+            resolved, event = _reconcile_duplicate_incident(
+                incident=incident, reconciled_at="2026-05-29T12:01:00Z"
+            )
+            store.write_public_ingress_incident_record(resolved)
+            observation = store.read_public_ingress_observation_record(
+                resolved.resolved_observation_id
+            )
+            for delivery in _public_ingress_notification_outbox_deliveries(
+                record_store=store,
+                incident_records=(resolved,),
+                incident_events=(event,),
+                observation=observation,
+            ):
+                store.enqueue_outbox_delivery_with_idempotency(
+                    OutboxWithIdempotencyRequest(delivery=delivery)
+                )
+            direct_outbox.DirectNotificationOutboxTests._work(
+                store, drivers, "2026-05-29T12:02:00Z"
+            )
+            self.assertEqual(len(sent), 1)
+
     def test_resolved_incident_backlog_is_superseded_without_sending(self) -> None:
         for kind in ("email", "discord", "github_issue"):
             with self.subTest(kind=kind), TemporaryDirectory() as directory:

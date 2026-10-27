@@ -65,7 +65,10 @@ def read_original_review_history(
     for stored in store.list_merge_train_stack_collapse_plan_records(
         repository=repository, base_branch=base_branch
     ):
-        if stored.plan.repository == repository and stored.plan.base_branch == base_branch:
+        if (
+            stored.plan.repository.casefold() == repository.casefold()
+            and stored.plan.base_branch == base_branch
+        ):
             groups.setdefault(stored.plan.collapse_id, []).append(stored)
     entries = []
     for collapse_id, group in sorted(groups.items()):

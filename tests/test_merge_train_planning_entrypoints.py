@@ -80,7 +80,7 @@ def _policy(*, authorized: bool = True, target_author: int = 73) -> MergeTrainPo
 
 
 def _graph() -> tuple[NativeGraphProvider, dict[str, str]]:
-    graph = NativeGraphProvider()
+    graph = NativeGraphProvider(pull_number=9)
     target = graph.add(_TARGET, 8, wait="waiting")
     target.default_branch = "release"
     names = {key: f"target:{key}" for key in DEFAULT_STATUS_LABELS}
@@ -325,6 +325,70 @@ class NativePlanningHttpTests(IsolatedAsyncioTestCase):
 
 
 class NativePlanningSchedulerTests(TestCase):
+    def test_completed_feedback_projects_only_matching_service_authorization(self) -> None:
+        for authorized in (False, True):
+            with self.subTest(authorized=authorized), TemporaryDirectory() as directory:
+                graph, _names = _graph()
+                target = graph.nodes[_TARGET, 8]
+                before = copy.deepcopy(target.issue)
+                policy = _policy(authorized=authorized)
+                store = FilesystemRecordStore(Path(directory))
+                store.write_merge_train_policy_record(policy)
+                landed = MergeTrainControllerRunOnceResult(
+                    accepted_result={
+                        "repository": _REPO,
+                        "base_branch": "main",
+                        "controller_action": "batch_landed",
+                        "landing_plan": {
+                            "entries": [{"pull_request_number": 9, "status": "merged"}]
+                        },
+                    },
+                    records={"merge_train_batch_landing_plan_record_id": "landed"},
+                )
+                with (
+                    patch.object(completion, "github_api_request", side_effect=graph.request),
+                    patch.object(scope_module, "github_api_request", side_effect=graph.request),
+                    patch.object(
+                        scheduler,
+                        "resolve_merge_train_github_token",
+                        side_effect=_token_reader(graph, policy),
+                    ) as mint,
+                    patch.object(
+                        scheduler, "execute_merge_train_controller_run_once", return_value=landed
+                    ),
+                    patch(
+                        "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+                        return_value={
+                            "action": "updated_comment",
+                            "comment_id": 3,
+                            "comment_url": "",
+                        },
+                    ),
+                ):
+                    scheduler._run_controller(
+                        record_store=store,
+                        control_plane_root=Path(directory),
+                        policy_record=policy,
+                        repository_policy=policy.policy.policies[0],
+                        token=graph.token(_REPO),
+                        trace_id="scheduler-authorization",
+                        now=lambda: _TIME,
+                    )
+                saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
+                rows = {(row["repo"], row["number"]): row for row in _receipt(saved)["issues"]}
+                self.assertTrue(rows[_REPO, 7]["verified"])
+                if authorized:
+                    self.assertTrue(rows[_TARGET, 8]["verified"])
+                    self.assertTrue(target.writes)
+                    self.assertIn(
+                        _TARGET, [call.kwargs["repository"] for call in mint.call_args_list]
+                    )
+                else:
+                    mint.assert_not_called()
+                    self.assertFalse(any(call["repo"] == _TARGET for call in graph.calls))
+                    self.assertFalse(target.writes)
+                    self.assertEqual(target.issue, before)
+
     def test_initial_feedback_and_idle_retry_use_current_target_scope(self) -> None:
         graph, names = _graph()
         target = graph.nodes[_TARGET, 8]

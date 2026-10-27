@@ -30,7 +30,6 @@ from control_plane.contracts.merge_train_policy import (
     build_merge_train_policy_record_id,
     merge_train_policy_provider_expectation_projection,
     merge_train_policy_sha256,
-    merge_train_repository_policy_delivery_semantics_sha256,
     parse_merge_train_policy_toml,
 )
 from control_plane.merge_train_stack_disposition import resolve_stack_child_disposition_label
@@ -132,10 +131,6 @@ class MergeTrainPolicyTests(unittest.TestCase):
         }
         managed = MergeTrainPolicy.model_validate(payload)
         self.assertNotEqual(managed.policy_sha256, historical.policy_sha256)
-        self.assertEqual(
-            merge_train_repository_policy_delivery_semantics_sha256(managed.policies[0]),
-            merge_train_repository_policy_delivery_semantics_sha256(historical.policy.policies[0]),
-        )
 
     def test_provider_delivery_expectation_normalizes_exact_provider_semantics(self) -> None:
         pull_request = ProviderPullRequestExpectationV1(
@@ -303,40 +298,6 @@ class MergeTrainPolicyTests(unittest.TestCase):
             {},
         )
 
-    def test_delivery_semantics_digest_includes_consumed_fields_and_excludes_credentials(
-        self,
-    ) -> None:
-        repository_policy = build_test_merge_train_policy().policies[0]
-        excluded_change_payload = repository_policy.model_dump(mode="json")
-        excluded_change_payload["merge_identity"]["name"] = "replacement-identity"
-        excluded_change_payload["service_authz"]["context"] = "replacement-context"
-        excluded_change_payload["github_token"]["github_app"]["private_key_context"] = (
-            "replacement_context"
-        )
-        excluded_change_payload["scheduler"]["enabled"] = True
-        excluded_change = MergeTrainRepositoryPolicy.model_validate(excluded_change_payload)
-        selected_change_payload = repository_policy.model_dump(mode="json")
-        selected_change_payload["enqueue_label"] = "new-ready-label"
-        selected_change = MergeTrainRepositoryPolicy.model_validate(selected_change_payload)
-        expectation_change_payload = repository_policy.model_dump(mode="json")
-        expectation_change_payload["provider_delivery_protection_expectation"] = (
-            _provider_delivery_expectation().model_dump(mode="json")
-        )
-        expectation_change = MergeTrainRepositoryPolicy.model_validate(expectation_change_payload)
-
-        self.assertEqual(
-            merge_train_repository_policy_delivery_semantics_sha256(repository_policy),
-            merge_train_repository_policy_delivery_semantics_sha256(excluded_change),
-        )
-        self.assertNotEqual(
-            merge_train_repository_policy_delivery_semantics_sha256(repository_policy),
-            merge_train_repository_policy_delivery_semantics_sha256(selected_change),
-        )
-        self.assertNotEqual(
-            merge_train_repository_policy_delivery_semantics_sha256(repository_policy),
-            merge_train_repository_policy_delivery_semantics_sha256(expectation_change),
-        )
-
     def test_policy_can_include_multiple_repository_branch_entries(self) -> None:
         policy = build_test_merge_train_policy_with_codex_skills()
 
@@ -442,10 +403,20 @@ class MergeTrainPolicyTests(unittest.TestCase):
                 }
             ],
         }
-        for label in ("stack-landed", "", None):
-            with self.subTest(label=label):
+        for label, dependency_id in (
+            ("stack-landed", None),
+            ("", None),
+            (None, None),
+            ("stack-landed", 711),
+        ):
+            with self.subTest(label=label, dependency_id=dependency_id):
                 payload = json.loads(json.dumps(legacy_payload))
                 repository = payload["policies"][0]
+                if dependency_id is not None:
+                    repository["enqueue"].update(
+                        trusted_automation_github_user_ids=[dependency_id],
+                        dependency_update_github_user_ids=[dependency_id],
+                    )
                 if label is None:
                     repository.pop("stack_child_disposition_label")
                 else:

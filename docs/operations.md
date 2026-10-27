@@ -129,6 +129,14 @@ running call is waiting, send the web process `SIGUSR1`, for example
 `docker kill --signal=USR1 <container>`. It writes every thread's stack to
 stderr and does not stop the service.
 
+Pending native testing rebuilds log bounded source module/line locations from
+their observation's exception chain, correlated with the original operation ID.
+Each exception contributes its innermost source location so deeper causes cannot
+displace the observation's own raise site.
+The same logger retains nested causes for handled HTTP errors. It omits exception
+text, payloads and local variables; these locations explain the waiting checkpoint
+without changing the operation's status, original key or recovery fences.
+
 ## Retired Approval Policies
 
 Change-impact and Client policy endpoints are removed. Do not repair
@@ -377,8 +385,14 @@ cannot have committed the atomic profile write.
 ## Transactional Outbox Workers
 
 External deliveries now use PostgreSQL outbox rows instead of request-thread
-provider calls when the business transition must commit before the effect. Run
-outbox workers only against Launchplane shared storage:
+provider calls when the business transition must commit before the effect.
+The normal Compose deployment owns the `launchplane-outbox-workers` service,
+which runs the existing dispatcher against shared storage after the API is
+healthy. It uses the same image, bootstrap database wiring, runtime volume and
+managed destination resolver as the service. SIGTERM finishes the current
+delivery and durable attempt before exiting; the container has a five-minute
+stop grace for bounded provider/reconciliation calls and loop waits.
+Standalone workers also require Launchplane shared storage:
 
 ```bash
 uv run launchplane service outbox-workers run \
@@ -408,13 +422,30 @@ include their queued inputs and credential context name, so a reviewer can
 distinguish dry runs from production effects. These are routing inputs, not
 credential values. Discussion reminders still need their own routing review;
 notification-policy ownership alone does not settle those effects.
+Starting or replacing this composition immediately attempts due queued work;
+deploying it is activation, not a diagnostic read.
 
 Queued incident deliveries whose incident is already resolved complete without
 a provider call. Their terminal outbox action and durable skipped attempt record
 say `superseded_incident_resolved`. This includes queued recovery messages.
 An existing provider-start marker remains an unknown outcome instead of being
-reported as superseded. Still-open incidents retain the existing send, lease,
-retry and completion rules.
+reported as superseded.
+The first dispatcher claim groups the existing pending email and Discord
+incident deliveries by incident, policy and destination in one transaction.
+It includes expired unmarked claims and excludes provider-start markers and
+active leases. Each group retains one summary delivery; the other rows complete
+with `superseded_incident_backlog` and skipped attempts. The summary reads the
+incident's current observation when it sends. This selection is persisted in
+the existing row payload, so a restart cannot revive the discarded backlog.
+The existing idempotency store retains a completion receipt in that same
+transaction, making this a one-time snapshot without a schema change. Worker
+restarts and the `run-once` path reuse its selection; new alerts queued after
+that transaction follow the normal delivery rules.
+The selection receipt does not prove delivery. Activation readback must inspect
+all selected incidents for failed deliveries or exhausted retries as well as
+successful and skipped attempts; an unavailable destination or exhausted summary
+leaves a visible failure and does not revive the superseded backlog.
+GitHub issue lifecycle deliveries and marked unknown outcomes are unchanged.
 Resolved GitHub rows also retain unknown outcomes without provider reconciliation.
 
 Historical provider retirement records may retain an empty target list. They
@@ -432,6 +463,15 @@ exponential backoff and retain any provider marker so the next attempt
 reconciles before resending. Attempts are bounded by the row's `max_attempts`;
 invalid payloads and exhausted retries become terminal failures. Do not update
 outbox rows manually or clear provider markers to force a retry.
+
+Release-affecting workflow-dispatch claims and all provider-start markers share
+the existing service-deploy admission lock. Replacement waits for an admitted
+dispatch to finish. New
+unstarted dispatches stay queued until the matching replacement image and
+deployment marker confirm startup; an old image cannot resume them. Marked
+deliveries can still reconcile, and notifications can still progress. An expired
+claim without a provider-start marker cannot start a provider and does not hold
+replacement indefinitely. No separate outbox replacement fence is used.
 
 Generic-web promotion workflow dispatches are queued by
 the automation route `POST /v1/drivers/generic-web/prod-promotion-workflow` or
@@ -930,6 +970,9 @@ Legacy originals without a saved event request remain held. A changed safety
 observation or binding makes the reviewed digest stale; repeat dry-run and review
 before applying. Explicit original-request service calls retain their existing
 deploy authorization; the installed helper uses the safer opaque reference flow.
+The service-marked Director `local_operator` can perform this bounded event-testing
+abandonment and its exact completed replay without the mixed deploy grant.
+Other recovery actions and identities retain their existing authority requirements.
 
 `settle_testing_failure` requires attributable terminal execution and runs only
 the original schedule hold before publishing truthful failure. Its HTTP 202
@@ -1071,7 +1114,6 @@ Current implementation scope:
 - `POST /v1/products/public-ingress-monitor/run-once`
 - `GET /v1/health-alert-drills` and `POST /v1/health-alert-drills` —
   [current routing and isolated Discord test alerts](health-alert-drills.md)
-- `POST /v1/every-code/notification-policies/apply`
 - `POST /v1/public-ingress/notification-policies/apply`
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/drivers/odoo/post-deploy`
@@ -1522,9 +1564,9 @@ metadata. Use the configured public Launchplane URL so its origin matches
 calling through a different origin fails closed. Bearer-token and GitHub Actions
 OIDC callers do not use this browser preflight.
 
-Normal Launchplane deployment does not mutate authorization policy. It deploys
-the reviewed image and may reconcile runtime key-safety policy, but authz grants
-remain DB-backed service state. This prevents a checked-in catalog or ordinary
+Normal Launchplane deployment does not mutate authorization or runtime
+key-safety policy. It deploys the reviewed image; authz grants and key-safety
+rules remain DB-backed service state. This prevents a checked-in catalog or ordinary
 image rollout from silently expanding or replacing live authority.
 
 The former append-oriented authz maintenance bridge is retired. Do not add
@@ -1970,6 +2012,23 @@ refusal, not a failed delivery: it records a skipped
 notification. It neither changes production nor resolves any existing incident.
 Failures after a deploy starts, other rejections, and uncertain outcomes remain
 delivery incidents.
+An artifact's later successful production delivery resolves its delivery incident.
+A failed generic-web rollback deployment also recovers when a later rollback on
+the same production lane passes, even when its target artifact differs. Every
+failure retained in the incident must identify a failed rollback deployment for
+that artifact or source. Recovery must follow the newest failure, including
+failures merged into the incident between monitor passes. New generic-web
+in-place deployment evidence records forward or rollback intent; legacy promotion-recovery
+and drill deployments retain recognition by their rollback record ID suffix, and
+two-slot switch-backs by their recorded deploy mode. Unmarked legacy admin
+rollbacks, provider-recovered records without original intent, and Odoo deployments
+retain matching-artifact recovery only. Reminders do not move the actual failure
+time. Different failures at the same time retain distinct observations, while an
+exact replay is idempotent. A concurrent new failure defers recovery to the next
+monitor pass without opening a monitoring-unavailable incident.
+Recovery uses the ordinary passing observation and preserves the original failure.
+Runtime health alone, a newer forward delivery of another artifact, an unsuccessful
+rollback, or a rollback on another lane cannot resolve that failure.
 The service's independent delivery-monitor thread checks terminal deployment,
 promotion and queued Odoo release failures once per minute, including products
 without HTTP health checks. As with other incidents, existing matching
@@ -1994,7 +2053,9 @@ never rewrites runtime health or gates merge, deploy, promotion or acceptance.
 A later successful deployment of the lane's current desired candidate resolves
 its earlier delivery attention, including an exhausted candidate superseded by
 a newer verified build. An unrelated build, production success or passing
-old-build health cannot do so. A pre-plan source-read incident also resolves
+old-build health cannot do so. An older retained-database credential refusal
+does not prevent that recovery after a successful desired-candidate rebuild;
+it still creates no new delivery incident. A pre-plan source-read incident also resolves
 when a later successful reconciliation confirms the desired build is already
 deployed; it needs no unnecessary redeploy. A pre-plan read blip adds no second
 incident to a lane that already has delivery attention. Product deactivation or
@@ -2062,14 +2123,13 @@ effective production checks are fresh and passing strictly after the most recent
 refusal, and the current runtime matches the expected release identity. A refusal
 at or after a passing check keeps the incident open until a later healthy check.
 Repeated monitor observations that merely retain an unresolved incident are not
-new requests. No manual reconciliation call or caller-retirement attestation is
-needed for scheduled recovery.
+new requests.
 
 Real delivery failures, mixed or uncertain histories, missing/stale/failed checks,
 unverified identity and concurrent incident changes stay open. Scheduled rechecks
-and explicit reconciliation share the delivery monitor's lane lock. New refusal
-requests retain their normal nonblocking evidence write. Changed product authority
-also blocks persistence. Rechecks select only incidents whose full retained history contains refusals.
+use the delivery monitor's lane lock. New refusal requests retain their normal
+nonblocking evidence write. Changed product authority also blocks persistence.
+Rechecks select only incidents whose full retained history contains refusals.
 Their history stays unchanged without a repeated failure appended on each pass.
 Mixed histories keep the normal failure observations and reminders. The latest
 refusal-event lookup runs only when a refusal-only candidate exists.
@@ -2082,18 +2142,6 @@ deployment. Reconciliation sends no recovery notification; the normal outbox
 worker skips queued failure notices for resolved refusals before resolving a
 destination, while interrupted sends retain an unknown outcome. Source deployment
 makes this behavior available; ordinary scheduled checks must still prove recovery.
-
-The existing admin API remains available for explicit caller-retirement evidence:
-`POST /v1/products/public-ingress-monitor/run-once`, authorized by
-`public_ingress_monitor.run_once`, with an `Idempotency-Key` and optional
-`refused_production_requests`. Each entry has `incident_id`, `caller_retired: true`,
-`caller_retired_at` (timezone-aware), and `caller_retirement_evidence`. This separate
-path verifies fresh passing health after attested retirement, current runtime
-identity, full refusal-only history and no subsequent refusal. It reports
-`refused_production_requests_resolved`, or 409
-`refused_request_reconciliation_blocked` for a blocked entry; earlier entries may
-already have resolved. Read back before retrying. Replays already marked
-`request_refused` are harmless; another resolved outcome cannot be reclassified.
 
 Exact replays of an unresolved candidate retain its original reason and trace and
 reuse the incident/outbox. A different failure stage updates that incident, and
@@ -2117,6 +2165,41 @@ incident detail for material events, delivery attempts and outbox state; transpo
 recovery does not resolve a delivery failure. Existing outbox retry and
 unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
 durable notification delivery runs through the service's DB-backed outbox.
+Incident detail also reads the exact opening observation independently of its
+bounded recent-observation window. Missing, unreadable or differently scoped opening evidence
+is returned as absent. Deploy-fence observations expose only canonical opaque
+provider-operation references and opaque reservation record IDs, including IDs retained
+in legacy provider summaries. For historical service-started testing deploys whose
+summary retained a private key instead of a record ID, the service derives the ID
+with the canonical reservation builder. It accepts only the original summary
+format and an exact product/context/testing key prefix; it never returns the key.
+These are diagnostic links, not proof of settlement
+or authority to recover. Missing reservations and unmatched incarnations remain
+held until their corresponding supported recovery proves disposition.
+For a service-started testing original already completed by reviewed abandonment,
+the opening observation's `testing_recovery_reference` is populated only after
+the exact captured reservation and creation time match the retained archive,
+original request, lane, physical origin and receipt. The existing explicit-reference
+recovery dry-run then reports its completed disposition; the default held-only
+lookup can still return 404. An abandoned executor outcome remains unknown and
+possible fixture residue remains recorded.
+
+The natural monitor can reconcile the legacy unavailable-reference marker only
+when the complete retained incident observation history and material-event chain
+prove each legacy original completed through that same supported abandonment.
+Retained attention references and the unavailable marker remain attached until
+that history is proved. Later operations with a captured strong reference can
+instead use the existing completed-state proof with matching retained origin,
+nonce and captured creation time. Completion settles that operation without
+claiming successful deployment verification. Dated and nonce-backed witnesses
+for one operation are joined; conflicting epochs, nonces or custody remain held.
+Later observations without a new material event are included. Dated historical
+witnesses can bind an earlier legacy attention reference only when the exact
+incarnation predates that reference. Missing history, required archive, custody, incarnation
+or receipt evidence keeps the incident open. The monitor locks and rechecks the
+proof with the existing provider-source gate before publication. This changes no
+provider resource, replays no executor, invents no nonce and supplies no deployment
+verification; health, identity, TLS and freshness retain their separate gates.
 The outbox worker sends email and Discord as well as GitHub notifications for
 still-open incidents. Recovery does not manufacture another notification to
 resume delivery; resolved-incident deliveries are superseded. Each delivery keeps the original event and rendered body;
@@ -2287,18 +2370,14 @@ when their old claims expire because older callbacks discarded credentials.
 Never copy credentials into existing session rows. Expiring and long-lived
 GitHub tokens are both supported without changing the app's expiration setting.
 
-OAuth ciphertext and verification time live in the existing DB session payload;
-there is no schema migration. Logout and revocation remove the row and its credential. New sign-ins and
-provider-refresh attempts opportunistically purge expired rows, skipping locked
-rows until the next pass. An unused service performs no sweep; its encrypted
-expired rows remain until the next sign-in or refresh. Database backups may retain ciphertext under
-their existing retention policy; keep the bootstrap secret out of those exports.
-The scrubbed stored-record export excludes the session table entirely. A normal
-bootstrap-secret rotation invalidates both old cookies and credential custody,
-so affected people sign in again. Do not change production session secrets by
-hand for this feature. Rollback to the previous image needs no data repair:
-older code ignores the added payload fields and resumes its original 24-hour
-absolute claims cutoff. Recovery is a normal interactive GitHub sign-in.
+OAuth ciphertext and verification time use the existing DB session payload;
+there is no schema migration. See the
+[credential retirement contract](service-boundary.md#human-oauth-credential-retirement)
+for collection timing, provider validity and historical-backup limits. Keep the
+bootstrap secret out of database exports. Do not change production session
+secrets by hand for this feature. Rollback to the previous image needs no data
+repair: older code ignores the added payload fields and resumes its original
+24-hour absolute claims cutoff. Recovery is a normal interactive GitHub sign-in.
 
 - Keep test and deploy automation separate.
 - `CI` is the gate for Launchplane code changes and must pass before a deploy
@@ -2533,6 +2612,11 @@ as a verified administrator. Domain authority and Route binding are separate
 decisions: enter a reason, review the current and proposed records, then Apply,
 Leave records unchanged, or Investigate evidence. A blocked binding names its
 missing evidence and cannot be applied; an unchanged review needs no write.
+The domain verdict covers stored hostnames only; it says nothing about whether
+a route binding exists. The binding verdict uses the same persisted lane record
+as `GET /v1/route-bindings/records/current`. An unchanged binding review requires
+that record to be present, with matching current, expected and proposed digests;
+the browser rejects contradictory evidence instead of advising no change.
 The domain review preserves the destination and shows the proposed primary
 domain. These operations update Launchplane records only; they do not modify
 Dokploy, DNS or TLS, or establish website health. Existing no-op ingress audit
@@ -2614,6 +2698,26 @@ Each names object has its own `complete` flag, separate from task/container
 diagnostic coverage. An incomplete set cannot prove
 that a key is absent. A stopped or restarting process may leave no attributable
 running-container evidence, even when the service still lists the desired input.
+
+Each task's nullable `container_id_present` reports whether its captured status
+contains a well-formed Docker container ID, including for nonrunning tasks.
+False means that ID is missing or empty; malformed or unobserved metadata stays
+null. The ID itself is not added to the task output. This uses the existing task
+read and proves neither that a container still exists nor that its image is
+immutable. It changes no readiness, image, capability or settlement verdict.
+
+Task diagnostics also retain bounded, redacted `error` and `message`, the
+provider's `status_timestamp`, and its integer `exit_code`. Missing or malformed
+fields remain null; these facts use the existing task read and add no container
+inspection. Application testing failures retain that bounded runtime snapshot as
+JSON in `post_deploy_update.evidence.application_runtime_failure` on the deployment
+record, before task churn can erase the candidate. Existing failure evidence is
+preserved on recovery. Diagnostics do not enter recovery digests or alter rollout
+qualification. Application log tails have no task attribution or complete-history
+guarantee, so old-image output must not be assigned to a failed candidate.
+Bind each task error with that task's own deployment record ID and image.
+Unknown or unqualified outcomes may have no retained failure snapshot; missing
+evidence does not prove that no task failed.
 
 The read rechecks provider placement and the tracked lane binding before
 returning. `diagnostic_complete`, task coverage, observation time and
@@ -3051,6 +3155,10 @@ Conventional onboarding creates new products only.
   refuse every unreviewed provider-only key. Both consumers recheck retirement
   intent and application declarations before writing. Execution uses the current
   approved configuration; an earlier replacement plan does not freeze it.
+  For a sanitized testing generation, recorded upstream and workflow SSH source
+  settings remain restore inputs rather than application settings. Existing
+  provider entries for those recorded inputs are omitted on replacement without
+  being misclassified as unrecorded drift; unknown provider keys still refuse.
   Clearing intent does not
   restore removed values; recovery requires a separately reviewed application
   configuration or managed secret update. Do not roll the service back to a
@@ -3159,6 +3267,17 @@ Conventional onboarding creates new products only.
   the JSON bundle on an admin-controlled machine or inside the hosted
   Launchplane execution context, run `--dry-run` first, then run `--apply` only
   after the key/action summary matches the approved change.
+
+For Odoo calendar-policy configuration, use that route's standalone
+`odoo_business_hours` inspect/set/clear section described in
+[release review](release-review.md#odoo-business-hours). Qualify actual company
+and calendar references before setting them, including for prelaunch products;
+do not turn a product live to obtain evidence. Apply and persisted readback do
+not prove live activation, Client acceptance or a release drill. The service
+and installed caller must both support the operation; caller delivery is tracked
+in codex-skills#2538. Existing real-system mutation boundaries still apply.
+Private company labels stay in private inspection evidence, not public issues.
+
 
 Example product config bundle shape:
 
@@ -3516,8 +3635,9 @@ alone is not proof that an existing testing copy has been repaired.
     testing or dev lane, and a lane with no tracked target record. Every other
     target policy, including the Shopify protected store keys, is left as it is.
   - An unchanged allowance keeps its original `recorded_by` and `recorded_at`.
-  - Both routes first prove the product owns the lane, because authorization
-    names a product while storage selects by context and instance.
+  - Both routes first prove the product owns the lane for every driver,
+    including generic-web, because authorization names a product while storage
+    selects by context and instance.
   - Apply writes with a locking compare-and-write, so a target record changed
     after the review, for example by a domain repair, is refused as `stale`
     rather than overwritten. A retried apply whose first attempt wrote but lost
@@ -4517,6 +4637,10 @@ Successful empty scans say no previews observed; disabled previews are not
 applicable. Missing or unsuccessful scans cannot establish absence. Do not edit
 records to renew freshness. Service logs and the separate
 `launchplane:preview-inventory-scheduler:v1` slot receipts retain collection outcomes.
+The product overview warns when observed previews have no active lifecycle
+record, using the existing inventory mismatch. A fresh successful scan proves
+inventory freshness, not cleanup convergence. Retained failed preview operations
+remain covered by the existing provider-fence incidents and notifications.
 Rollback is the normal previous-service-image rollback: scans retain the strict v1 payload shape with versioned scope metadata in the
 existing source field, the prior daily job remains supported, and evidence naturally
 expires if collection stops. No grants, workflow settings or credentials are added
@@ -4537,6 +4661,8 @@ results, which Product Ops shows per product. Destructive provider cleanup
 still requires an explicit `apply=true` request to
 `POST /v1/previews/lifecycle-sweep` from a separately authorized caller; the
 manual `Preview Lifecycle` workflow dispatch remains that route.
+An authenticated Director agent may run the report-only sweep without cleanup
+mutation authority. Apply requests keep their existing authorization checks.
 Preview-disabled products are excluded from the sweep. PR feedback goes through
 `POST /v1/previews/pr-feedback`; Launchplane renders and upserts the anchored PR
 comment when runtime GitHub credentials are available, then records delivery
@@ -5030,7 +5156,12 @@ current plans and provider idleness cannot reconstruct the original proof.
 A typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
 reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
-pre-effect. The absolute ten-minute drain budget survives polls and service
+pre-effect, including when an earlier poll lost its response. The request action
+retains authoritative timeout and definite pre-effect refusal responses so the
+alert keeps its blocker references and no unnecessary rollback starts. The
+action and deploy reporter share the error-code contract in the action's
+`dist/self-deploy-pre-effect-errors.json`; authentication refusal after a lost
+reply still preserves dispatch uncertainty. The absolute ten-minute drain budget survives polls and service
 restarts. For a legacy drain without a saved budget, its first updated poll anchors
 the budget to the prior stored observation. This budget is independent of the
 worker stop, provider deployment and health-verification budgets after dispatch.
@@ -5139,7 +5270,18 @@ credential reclassification or external secret copy is part of this route.
 
 Supply the exact PR manifest and digest-pinned image through the normal preview
 inputs. The issued plan fingerprints the selected source settings, binding
-version and allowance. Apply that service-issued plan through the existing
+version, allowance and qualified testing runtime. The source settings come from
+the exact verified installed importer and shared payload producer, typed testing
+overrides, the actual delivered payload and persisted testing parameters. Omitted
+overrides preserve persisted parameters; installed producer defaults apply only
+when the parameter is absent. Legacy field environments and copied defaults are
+not a fallback. Uninstalled addons, missing password delivery, conflicting or
+secret-backed non-secret authority, unverified TLS and drift refuse the optional
+source. Ordinary previews without the source remain available. Planning compares the
+selected managed password with delivered metadata in memory; it does not copy
+the password into its response or evidence digest.
+
+Apply that service-issued plan through the existing
 `POST /v1/drivers/odoo/preview-apply` route with its plan id as the idempotency
 key. Changed source authority requires a new plan. Plaintext source settings
 and passwords are never accepted as caller input or returned in the plan.
@@ -5231,6 +5373,89 @@ changes no configuration, binding, account, grants, runtime, source data or
 business data, and invokes no importer, deployment or synchronization.
 
 
+#### Installed importer prerequisites
+
+`GET /v1/products/{product}/environments/testing/odoo-source-prerequisites`
+is a separate fixed, value-free read requiring the product's existing
+`operations.read` authority. It accepts no query parameters or caller-supplied
+SQL, paths, endpoints or credentials, and returns `Cache-Control: no-store`.
+It does not use an Odoo HTTP account or initialize an Odoo registry.
+
+The service binds the current runtime to its verified release artifact and the
+canonical complete source inventory. The host verifies the actual Docker image's
+immutable repository digest, then brackets execution with container/image
+inspection. The container checks the fixed importer producer, getter, client and
+package files against the tenant inventory. It also verifies the shared
+`launchplane_settings` package, applier and pure payload producer against a
+unique complete addon source inventory at `/opt/project/addons/shared`.
+Missing or ambiguous shared provenance remains unknown. It rejects symlinks, code-overlay
+mounts and duplicate addon copies across configured roots, platform addons,
+the image's `/odoo` framework/community roots and existing data-addon version
+directories. It neither creates directories nor imports Odoo. Legacy, missing,
+incomplete or ambiguous provenance remains unknown.
+
+Each supported installed producer supplies `PARAMETER_KEYS`,
+`OPTION_PARAMETER_KEYS`, `resolve_connection_settings` and the password-free
+`resolve_connection_options`. The reader compiles the same verified producer
+bytes it hashed, suppresses producer output and consumes that producer's own
+defaults and parsing. Launchplane contains no copy of the tenant defaults.
+A bounded local PostgreSQL transaction explicitly requests and verifies
+read-only mode, reads only those parameter keys and the installation states of the fixed
+importers and shared applier, then rolls back and closes. An addon must be installed
+before its effective settings are reported. No source database connection,
+import, synchronization, account, configuration or lifecycle change occurs.
+
+Unavailable reads include nullable aggregate and per-source `failure_stage`
+fields from [the closed vocabulary](../control_plane/odoo_source_prerequisite_programs.py).
+A stage identifies the boundary that did not complete; it does not establish
+why it failed or authorize a correction. No exception text, file path, endpoint,
+login, parameter value or credential is added. Independent source failures have
+per-source stages without an aggregate stage. All existing unavailable and drift
+results remain unavailable.
+
+The closed response reports per-option `explicit`, `empty`, `absent` or
+`unknown` input provenance and effective agreement between authority, delivered
+and applied settings. Optional inputs use the verified connection producer's
+parsing and defaults. Omission from authority or delivered overrides does not
+clear a persisted Odoo parameter: when such a parameter is present, comparison
+for that omitted field stays unknown. A missing persisted optional parameter
+can resolve through the installed producer's default.
+Origins concern consumed producer keys: a constant enabled SSL setting can have
+an absent `use_ssl` input, as with the Fishbowl producer that ignores that key.
+Authority options come from the site's typed instance-override literals,
+normalized by the verified installed shared payload producer. Secret-backed
+option authority, conflicting legacy runtime inputs, retired keys and target
+overlays remain unknown. Global settings are not site delivery authority.
+Delivered settings come exclusively from `ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64`,
+using that same installed decoder and selected-key resolver. Legacy per-field
+environment variables are never a delivery fallback. The parser fixture is an
+immutable source artifact; tests do not read a sibling checkout or implement a
+second production parser. Missing or malformed payloads cannot become valid
+full delivered settings. Authority resolves only nonsecret options.
+Full delivered/applied settings and
+their password comparison stay inside the container, and their option
+projections must agree with the password-free resolver before evidence is used.
+Raw values, settings objects, passwords, hashes and exception text are never
+returned. Host and service independently validate the bounded, closed frame.
+
+TLS fields describe **configuration only**: `disabled`,
+`verification_disabled`, `enabled_with_verification` or `unknown`.
+`use_ssl=False` is always disabled even when certificate verification is enabled.
+These fields prove no handshake, privileges or credential safety. Safe binding
+selection, stored password-reference agreement and current version metadata are
+separate evidence. `managed_password_value_agreement` remains unknown: equality
+of applied and delivered passwords does not attest the selected managed value.
+This read supplies prerequisite evidence and does not replace or make the
+existing source-grant gate pass.
+
+The service rechecks authority, artifact, selection and delivered environment;
+the host rechecks image/container state; the container rereads local parameters,
+module state, configuration, roots and verified files. Drift discards evidence.
+Reads have a bounded concurrency limit, local SQL timeouts, a container timeout
+with forced cleanup and a provider deadline. Missing runtime support remains
+unknown and requires qualification after delivery; source tests do not qualify
+a live runtime.
+
 #### Runtime-origin source grants
 
 `GET /v1/products/{product}/environments/testing/odoo-source-grants` is the
@@ -5249,12 +5474,19 @@ substitute for runtime-origin privileges.
 
 The service verifies the testing lane, immutable artifact and container and
 requires already-delivered authentication settings to match the currently selected
-safe managed binding. Database-name keys differ by producer and are not required
+safe managed binding. It shares the prerequisite reader's immutable image,
+source inventory, installed producer, canonical payload parser and addon-state
+checks. Non-secret authority comes from typed instance overrides, with no legacy
+per-field environment fallback. Omitted overrides keep persisted parameters;
+defaults apply only when the corresponding parameter is absent. Explicit
+mismatches, missing password delivery and disabled or unverified TLS stay unknown.
+Database-name keys differ by producer and are not required
 by this account-wide SHOW GRANTS read, which selects no default database; their
 agreement remains with import-override reconciliation. It sends only fixed code and non-secret identity metadata
 through its registered provider transport. Inside the container, a read-only
 PostgreSQL session reads only the fixed source parameter keys and requires
-those applied values to agree with installed settings. Source passwords never
+those applied values to agree with the effective delivered authentication
+settings, including the producer's TLS-enabled and verification facts. Source passwords never
 leave the container; isolated children consume them through stdin for the same
 fixed verified-TLS/SHOW GRANTS probe. No writer fallback, new account, password
 copy, import or production credential comparison is performed.
@@ -5335,18 +5567,12 @@ health-alert policies and historical delivery evidence intact.
 ### Prepared retired-delivery table migration
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
-`RETIRED_TABLES` in that revision. Normal service startup targets discussion-topic
-revision `b81ca763d924`, which follows the separately approved Q533
-preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
-`e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
-and a green PR do not authorize applying the drop to the shared database.
-The candidate runtime accepts the common predecessor, either branch revision,
-their original empty merge revision, `e9e3a7b1c5d8`, the additive topics revision,
-its existing held-path join `da72490fce13`, and the prepared hostname revisions
-and compatibility joins described below. It retains expiry/key-retirement,
+`RETIRED_TABLES` in that revision. Normal service startup targets the
+[canonical hostname activation](#canonical-hostname-activation), including the
+non-runtime profile archive, managed preview settings and idle retirement. The
+release default preserves all held delivery history. The candidate runtime
+requires that activation before it serves traffic. It retains expiry/key-retirement,
 activation/history/policy maintenance, custody evidence and native train fences.
-These are recognized revision paths; the HTTP service also requires the topics
-table and starts only after the release migration has added it.
 While this hold is active, schema initialization refuses a migration graph whose
 head has advanced beyond the reviewed compatibility join. A later schema change must
 reconcile the hold, runtime compatibility and supported migration targets in the
@@ -5355,11 +5581,11 @@ step; advancing an unrelated additive migration does not authorize it. Lifting
 the hold requires the shared-data/release approval below.
 
 The release default never traverses the held branch. If a database has already
-applied the held drop or the original join, startup applies the missing preview
-and topic migrations and joins the paths at `da72490fce13`.
-After explicit approval, requesting the held revision on a database already at
-the preview or topics revision applies the held drop, adds topics if missing,
-and joins at `da72490fce13`. These routes leave
+applied the held drop or one of its joins, startup joins the missing approved
+branches at `f87c72d690ab`. After explicit approval, requesting the held revision
+from an activated hostname-only schema reaches that same join. Earlier schemas
+keep their explicit historical application routes, followed by normal startup.
+These routes leave
 one recorded Alembic revision; startup never mistakes incomparable branches for
 ordered versions. Do not substitute Alembic `head` for the release migration
 target: `head` includes the held drop and is reserved for disposable rehearsals
@@ -5489,3 +5715,122 @@ A release that changes startup's migration target can activate the transition
 during automatic deployment. Complete the deployed-image qualification before
 that release reaches main. Image rollback then returns to this qualified
 compatibility image without downgrading the hostname schema.
+
+### Canonical hostname activation
+
+Startup activates the already-prepared hostname revision through
+`b2c4e6a8f0d3`, which also includes the profile archive, preview settings and
+idle retirement. A database that already applied the held delivery drop joins
+at `f87c72d690ab`; an explicit approved held-drop request from a hostname-only
+schema also reaches that join. Startup never applies that drop on its own.
+The runtime refuses earlier schemas until the supported migration completes.
+The four compatibility-prelude migration files remain unchanged.
+
+Ownership comparisons and PostgreSQL hostname fences share ASCII case folding,
+surrounding whitespace removal, trailing-dot removal and retained URL-host
+extraction. Existing payloads stay unchanged, and new public-host validation
+keeps its existing rules. Provider IDs, receipt ownership and exact original
+recipient checks remain exact.
+
+Every supported active private-endpoint write, including recipient publication
+and its scoped inverse, takes the existing hostname transaction fence before
+rechecking foreign target domains, public hosts and pending effects. Target writes,
+including compare-and-write domain repair, also refuse a foreign active endpoint
+claim under the same short authority transaction. A competing
+provider operation returns `public_hosts_authority_busy` (HTTP 409). A settled
+foreign target claim returns `private_health_endpoint_host_owned` (HTTP 409);
+review ownership before retrying. Failed endpoint applies save no success
+receipt. Disabled endpoint cleanup remains available. Endpoints may still share
+an internal monitoring host with each other. These are service/store writer
+fences, not a grant for direct database writes.
+
+Activation can hold a self-deploy or train worker startup when the transition
+mutex or target-table lock is busy. The migration remains transactional; retry
+through the supported self-deploy after writers or maintenance settle. Canonical
+aliases can now block an operation that previously passed an ownership check.
+Provider I/O retains only scoped name/target fences, so unrelated endpoint and
+product writers continue. A foreign claim acquired between recipient publication
+and its inverse refuses the inverse without overwriting that claim. Resolve the
+foreign ownership through its supported control-plane path, then retry the scoped inverse.
+
+Before checked Ready, qualify the immutable currently deployed image against
+both activated joins as the previous-image rollback target. It must include the
+non-runtime archive and every later applied migration; the old #4229 image is
+not compatible. Verify the supported self-deploy will capture that qualified
+image and that older HTTP replicas and workers have been replaced. Rollback
+starts that image on the compatible-ahead schema without downgrading it. The
+independent held-drop approval still applies to real data.
+
+### Non-runtime profile archive
+
+Release revision `a4c8e0f2b6d3` follows the topics revision. It copies every
+product profile whose payload names a classification other than
+`managed_runtime` into `launchplane_product_profile_archive`, with
+`migration:nonruntime-product-retirement` as its source and a fixed reason,
+then deletes those profile rows. Runtime profiles, repository inventory and
+every other record stay as they are. A database with no such rows only gains
+the empty archive table.
+
+Empty joins keep every recognized branch reachable without applying a held
+step. A database that already applied the delivery drop or its joins joins at
+`a5d9f1b3c7e4`; a hostname-only schema joins at `a6e0a2c4d8f5`; the
+hostname/retirement and compatibility joins reach the graph head
+`a7f1b3d5e9a6`. Explicitly requesting the delivery drop from the archive
+revision joins at `a5d9f1b3c7e4`; a hostname-only schema still refuses it.
+Hostname activation must target a join that includes this revision.
+
+Downgrade refuses. Images from before this revision reject it, so an image
+rollback across it needs this image or a later one; the hostname compatibility
+image above is no longer a rollback target once the archive has run.
+
+
+### Preview idle reservation retirement
+
+Release revision `b0a2c4e6f8d1` follows the managed preview-settings migration. It
+removes only the retired preview-idle scope's stop/start reservations and
+original-intent records. A matching database constraint refuses an overlapping
+old scheduler's late reservation writes before effects. Other operations, target
+fences and preview data are unchanged. The gateway's persisted receipt and
+current lane observation recover sleep and wake under the existing executor lock; see
+[preview idle behavior](clean-testing-snapshots.md).
+
+Through [stored-record preflight](stored-record-preflight.md#activation-order-and-recovery),
+startup migration selects `b1b3d5f7a9e2` for an already-applied delivery-drop
+branch, `b2c4e6a8f0d3` for an already-applied hostname-only branch, and
+`f87c72d690ab` for their already-applied compatibility joins. These empty joins
+retain each branch's existing approval boundary. They never activate the
+prepared delivery drop or hostname transition on an unapproved database.
+An explicit approved delivery-drop request from `b0a2c4e6f8d1` joins at
+`b1b3d5f7a9e2`; hostname-only histories continue to refuse that request.
+Downgrade cannot reconstruct deleted idle intents. An image rollback to code
+that still requires them cannot recover a sleeping preview from its gateway
+receipt alone; use this image or a later one.
+
+### Managed preview settings migration
+
+For the producer-first rollout and activation order, see
+[stored-record preflight activation](stored-record-preflight.md#activation-order-and-recovery).
+The managed-preview migration moves profile preview overrides into each
+product's existing runtime-environment records at instance `preview`, and removes
+the old profile values atomically. Existing testing and production records stay
+unchanged. See [shared preview settings](preview-settings.md) for
+configuration and conflict handling.
+
+An explicit `b8f2c4d6e0a7` migration target retains its historical joins:
+`b9a3d5e7f1b8` for retirement, `c0b4e6f8a2c9` for hostnames, and
+`c1c5f7a9b3d0` for their compatibility join. Its route from the archive never
+applies either unrelated branch. An approved delivery-drop request from this
+revision joins at `b9a3d5e7f1b8`; hostname-only histories still refuse it.
+The startup target includes idle retirement as described above.
+
+Downgrade retains the migrated values. An older image that does not recognize
+these revisions or still renders profile overrides is not a rollback target for
+this change; retain a compatible image or the pre-migration backup and matching
+image. Schema initialization's head fence continues rejecting unreviewed
+successors after the idle-retirement transition above.
+
+This data migration uses the shared preview validator. A restored database from
+before this revision must pass the validator in the selected image; later
+validation changes may therefore refuse older values transactionally at startup.
+Preflight that backup's preview settings against the selected image before
+release rather than weakening validation to admit them.

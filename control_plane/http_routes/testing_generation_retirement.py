@@ -18,6 +18,7 @@ from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecord
 from control_plane.testing_generation_retirement import (
     ROUTE,
     TestingGenerationRetirementRequest,
+    inspect_retained_testing_custody,
     retirement_snapshot,
 )
 
@@ -73,10 +74,18 @@ def register_testing_generation_retirement_routes(
                 ):
                     raise ValueError("The retained generation belongs to another request.")
                 plan = retained.plan
+                if body.mode == "inspect":
+                    return accepted_evidence_response(
+                        trace_id=trace,
+                        records={"operation": body.operation_id},
+                        result=inspect_retained_testing_custody(record_store, retained).model_dump(
+                            mode="json"
+                        ),
+                    )
                 if body.mode == "dry-run":
                     raise ValueError("The generation is already retained; use readback.")
             else:
-                if body.mode == "readback":
+                if body.mode in {"readback", "inspect"}:
                     raise ValueError("No retirement receipt is available.")
                 with record_store.testing_replacement_execution_lock(body.operation_id) as check:
                     if check is None:

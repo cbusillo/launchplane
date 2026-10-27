@@ -24,7 +24,10 @@ before the restart checkpoint, under the release lane reservation, it checks
 container preserves the image, configuration and volumes, so no fresh collection
 or positive data-custody/isolation proof is required. Staff-testing holds,
 protected use, target aliases and recorded production sharing still block. A
-running service keeps the full current disposable qualification. These checks
+running service uses that same recovery rule when the existing lane monitors
+verify it is down; a currently unhealthy Odoo web also qualifies repeated HTTP404
+observations from the managed Docker route. Otherwise a running service keeps
+the full current disposable qualification. These checks
 apply to the Director's testing restart even with an explicit grant; other
 callers and production keep their existing policy checks. Resolve holds through
 the testing-hold action and protective observations through

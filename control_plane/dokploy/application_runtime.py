@@ -15,7 +15,9 @@ from control_plane.contracts.deploy_reference import (
     canonical_docker_image_repository as _repository,
 )
 from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
+from control_plane.child_process_errors import redact_untrusted_text
 from control_plane.dokploy import api
+from control_plane.runtime_platform_credentials import find_platform_credentials
 from control_plane.dokploy.runtime_evidence import (
     DokployEvidenceProviderError,
     _read_container_config,
@@ -50,6 +52,7 @@ _DEPLOYMENT_PREFIX = "LAUNCHPLANE_DEPLOYMENT_RECORD_ID="
 _ENVIRONMENT_KEY = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,127}$")
 MAX_APPLICATION_DIAGNOSTIC_ITEMS = 100
 MAX_APPLICATION_ENVIRONMENT_KEYS = 256
+MAX_APPLICATION_TASK_DETAIL_LENGTH = 1000
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,20 @@ def _environment_keys(value: object) -> ApplicationEnvironmentKeys:
     return ApplicationEnvironmentKeys(tuple(sorted(names)), complete)
 
 
+def _task_container_id_present(status: dict[str, object]) -> bool | None:
+    captured = status.get("ContainerStatus")
+    if captured is None:
+        return False
+    if not isinstance(captured, dict):
+        return None
+    identifier = captured.get("ContainerID")
+    if identifier is None or identifier == "":
+        return False
+    if isinstance(identifier, str) and _CONTAINER_ID.fullmatch(identifier):
+        return True
+    return None
+
+
 @dataclass(frozen=True)
 class ApplicationContainerMetadata:
     container_id: str
@@ -93,6 +110,39 @@ class ApplicationTaskObservation:
     state: str
     task_id: str = ""
     desired_state: str = ""
+    container_id_present: bool | None = None
+    error: str | None = None
+    message: str | None = None
+    status_timestamp: str | None = None
+    exit_code: int | None = None
+
+
+def _task_detail(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if re.search(r"(?i)\b(?:proxy-)?authorization\s*[:=]", value):
+        return "[redacted]"
+    return redact_untrusted_text(
+        api.redact_dokploy_log_line(value),
+        fallback="",
+        maximum_length=MAX_APPLICATION_TASK_DETAIL_LENGTH,
+    )
+
+
+def _task_timestamp(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 100:
+        return None
+    try:
+        parse_launchplane_mutation_timestamp(value, field_name="status_timestamp")
+    except ValueError:
+        return None
+    return value
+
+
+def _task_exit_code(status: dict[str, object]) -> int | None:
+    captured = status.get("ContainerStatus")
+    value = captured.get("ExitCode") if isinstance(captured, dict) else None
+    return value if type(value) is int else None
 
 
 @dataclass(frozen=True)
@@ -115,6 +165,7 @@ class ApplicationRuntimeObservation:
     server_id: str = ""
     service_environment_keys: ApplicationEnvironmentKeys = ApplicationEnvironmentKeys()
     running_containers: tuple[ApplicationContainerMetadata, ...] = ()
+    service_version: int = 0
 
     @property
     def rollout_settled(self) -> bool:
@@ -259,6 +310,22 @@ def application_runtime_drift_fingerprint(
     ).hexdigest()
 
 
+def _environment_values(value: object) -> dict[str, str]:
+    if not isinstance(value, list):
+        raise DokployEvidenceProviderError("container-config")
+    result: dict[str, str] = {}
+    for row in value:
+        if not isinstance(row, str):
+            raise DokployEvidenceProviderError("container-config")
+        key, separator, item = row.partition("=")
+        if not separator or not _ENVIRONMENT_KEY.fullmatch(key) or key in result:
+            raise DokployEvidenceProviderError("container-config")
+        result[key] = item
+    if find_platform_credentials(result) or result.get("DOCKER_HOST"):
+        raise DokployEvidenceProviderError("container-config")
+    return result
+
+
 def _object(value: object) -> dict[str, object]:
     if not isinstance(value, dict):
         raise DokployEvidenceProviderError("container-config")
@@ -305,6 +372,7 @@ def fetch_application_runtime(
     host: str,
     token: str,
     application_id: str,
+    expected_environment: dict[str, str] | None = None,
 ) -> ApplicationRuntimeObservation:
     """Inspect the recorded server's exact service, tasks, containers and image digests.
 
@@ -313,7 +381,12 @@ def fetch_application_runtime(
     Raw provider responses never escape this reader, including environment values.
     """
     try:
-        return _fetch_application_runtime(host=host, token=token, application_id=application_id)
+        return _fetch_application_runtime(
+            host=host,
+            token=token,
+            application_id=application_id,
+            expected_environment=expected_environment,
+        )
     except click.ClickException:
         raise DokployEvidenceProviderError("target-inspect") from None
 
@@ -323,6 +396,7 @@ def _fetch_application_runtime(
     host: str,
     token: str,
     application_id: str,
+    expected_environment: dict[str, str] | None = None,
 ) -> ApplicationRuntimeObservation:
     target = api.fetch_dokploy_target_payload(
         host=host,
@@ -353,6 +427,11 @@ def _fetch_application_runtime(
     container_spec = _object(_object(spec.get("TaskTemplate")).get("ContainerSpec"))
     service_image = _image(container_spec.get("Image"))
     deployment_id = _deployment_identity(container_spec.get("Env"))
+    if (
+        expected_environment is not None
+        and _environment_values(container_spec.get("Env")) != expected_environment
+    ):
+        raise DokployEvidenceProviderError("container-config")
     replicas = _object(_object(spec.get("Mode")).get("Replicated")).get("Replicas")
     if type(replicas) is not int or replicas < 0:
         raise DokployEvidenceProviderError("container-config")
@@ -422,7 +501,18 @@ def _fetch_application_runtime(
             except DokployEvidenceProviderError:
                 task_image, task_record_id = "", ""
             task_observations.append(
-                ApplicationTaskObservation(task_image, task_record_id, state, task_id, desired)
+                ApplicationTaskObservation(
+                    task_image,
+                    task_record_id,
+                    state,
+                    task_id,
+                    desired,
+                    container_id_present=_task_container_id_present(status),
+                    error=_task_detail(status.get("Err")),
+                    message=_task_detail(status.get("Message")),
+                    status_timestamp=_task_timestamp(status.get("Timestamp")),
+                    exit_code=_task_exit_code(status),
+                )
             )
             if state != "running":
                 pending += desired in {"ready", "running"}
@@ -476,6 +566,13 @@ def _fetch_application_runtime(
             digests = image.get("RepoDigests")
             if image.get("Id") != image_id or not isinstance(digests, list):
                 raise DokployEvidenceProviderError("image-identity")
+            if expected_environment is not None:
+                image_environment = _object(image.get("Config")).get("Env")
+                inherited = _environment_values(
+                    [] if image_environment is None else image_environment
+                )
+                if _environment_values(config.get("Env")) != inherited | expected_environment:
+                    raise DokployEvidenceProviderError("container-config")
             matching = {
                 f"{_repository(value)}@{docker_image_digest(value)}"
                 for value in digests
@@ -529,6 +626,7 @@ def _fetch_application_runtime(
     ):
         raise DokployEvidenceProviderError("target-inspect")
     return ApplicationRuntimeObservation(
+        service_version=version,
         application_id=application_id,
         app_name=app_name,
         service_id=service_id,

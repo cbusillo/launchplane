@@ -12,7 +12,7 @@ import json
 from ipaddress import ip_address
 import time
 from pathlib import Path
-from typing import Iterator, Literal, Protocol, runtime_checkable
+from typing import Iterator, Literal, Protocol, cast, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -56,7 +56,8 @@ from control_plane import runtime_platform_credentials
 from control_plane.dokploy import memory_capacity
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
-from control_plane.dokploy.api import JsonObject, JsonValue
+from control_plane.dokploy.application_endpoint import application_endpoint_spec
+from control_plane.dokploy.api import JsonObject
 
 
 _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
@@ -276,7 +277,6 @@ class GenericWebPreviewTransportSummary(BaseModel):
     data_transport_mode: str
     copied_env_keys: tuple[str, ...]
     omitted_env_keys: tuple[str, ...]
-    override_env_keys: tuple[str, ...]
     preview_url_env_keys: tuple[str, ...]
     preview_domain_env_keys: tuple[str, ...]
     compatibility_status: Literal["supported", "unsupported_saved_intent"] = "supported"
@@ -553,10 +553,6 @@ def _ensure_application(
     return _fetch_application(host=host, token=token, application_id=created_application_id), True
 
 
-def _preview_endpoint_spec_swarm(template_application: JsonObject) -> JsonValue:
-    return template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
-
-
 def _configure_application(
     *,
     host: str,
@@ -585,7 +581,7 @@ def _configure_application(
             "sourceType": "docker",
             "autoDeploy": True,
             "replicas": template_application.get("replicas"),
-            "endpointSpecSwarm": _preview_endpoint_spec_swarm(template_application),
+            "endpointSpecSwarm": application_endpoint_spec(template_application),
             "createEnvFile": template_application.get("createEnvFile"),
             "triggerType": template_application.get("triggerType"),
             "enabled": template_application.get("enabled"),
@@ -823,7 +819,6 @@ def _transport_summary(
         ),
         copied_env_keys=profile.preview.copied_env_keys,
         omitted_env_keys=profile.preview.omitted_env_keys,
-        override_env_keys=tuple(sorted(profile.preview.override_env)),
         preview_url_env_keys=profile.preview.preview_url_env_keys,
         preview_domain_env_keys=profile.preview.preview_domain_env_keys,
         compatibility_status=(
@@ -973,6 +968,7 @@ def _render_preview_env_text(
     template_application: JsonObject,
     preview_url: str,
     runtime_identity: RuntimeIdentity | None = None,
+    preview_environment: control_plane_runtime_environments.SiteRuntimeEnvironment | None = None,
 ) -> str:
     template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
     preview_host = _preview_host(preview_url)
@@ -987,12 +983,15 @@ def _render_preview_env_text(
         target=preview_target,
         source="the template application env (preview copied_env_keys)",
     )
+    if preview_environment is not None:
+        updates.update(preview_environment.values)
+        for key in preview_environment.retired_keys:
+            updates.pop(key, None)
     runtime_platform_credentials.refuse_platform_credentials(
-        profile.preview.override_env,
+        updates,
         target=preview_target,
-        source="the product profile preview override_env",
+        source="managed preview runtime settings",
     )
-    updates.update(profile.preview.override_env)
     for key in profile.preview.preview_url_env_keys:
         updates[key] = preview_url
     for key in profile.preview.preview_domain_env_keys:
@@ -1012,9 +1011,21 @@ def _enforce_preview_copied_runtime_key_safety(
     template_lane: ProductLaneProfile,
     template_application: JsonObject,
     preview_slug: str,
+    preview_environment: control_plane_runtime_environments.SiteRuntimeEnvironment | None = None,
 ) -> None:
     template_env = dokploy_api.parse_dokploy_env_text(str(template_application.get("env") or ""))
-    copied_values = {key: template_env.get(key, "") for key in profile.preview.copied_env_keys}
+    overridden = (
+        preview_environment.setting_keys
+        | preview_environment.secret_keys
+        | preview_environment.retired_keys
+        if preview_environment is not None
+        else frozenset()
+    )
+    copied_values = {
+        key: template_env.get(key, "")
+        for key in profile.preview.copied_env_keys
+        if key not in overridden
+    }
     template_bindings = (
         preview_template_runtime_bindings(
             record_store=record_store,
@@ -1533,12 +1544,22 @@ def _execute_generic_web_preview_refresh_unserialized(
             raise click.ClickException(
                 target_error or "Generic web preview template payload is unavailable."
             )
+        preview_environment = (
+            control_plane_runtime_environments.resolve_preview_runtime_environment_from_store(
+                record_store=cast(
+                    control_plane_runtime_environments.SiteRuntimeEnvironmentStore, record_store
+                ),
+                context_name=resolved_profile.preview.context,
+                template_values={},
+            )
+        )
         _enforce_preview_copied_runtime_key_safety(
             record_store=record_store,
             profile=resolved_profile,
             template_lane=template_lane,
             template_application=template_application,
             preview_slug=request.preview_slug,
+            preview_environment=preview_environment,
         )
         preview_runtime_identity = _build_preview_runtime_identity(
             profile=resolved_profile,
@@ -1551,6 +1572,7 @@ def _execute_generic_web_preview_refresh_unserialized(
             template_application=template_application,
             preview_url=preview_url,
             runtime_identity=preview_runtime_identity,
+            preview_environment=preview_environment,
         )
         application, created_application = _ensure_application(
             record_store=record_store,

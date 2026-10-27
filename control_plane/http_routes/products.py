@@ -6,7 +6,7 @@ from pathlib import Path as FileSystemPath
 from typing import Annotated, Literal, Protocol, cast
 
 import click
-from fastapi import Depends, Path, Query
+from fastapi import Depends, Path, Query, Response
 from pydantic import AwareDatetime, BaseModel, ConfigDict
 
 from control_plane.lane_health_history import (
@@ -50,7 +50,10 @@ from control_plane.contracts.product_incident_read_model import (
     require_product_incident_read_store,
     preview_fence_incident_scope,
 )
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    product_profile_record_sha256,
+)
 from control_plane.contracts.read_coverage import ReadCoverage, read_coverage
 from control_plane.artifact_retention import (
     ArtifactRetentionPlan,
@@ -1697,6 +1700,7 @@ def register_product_profile_read_routes(
 
     def read_product_profile(
         product: Annotated[str, Path(min_length=1, pattern=r"^\S+$")],
+        response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> ProductProfileResponse:
@@ -1730,6 +1734,8 @@ def register_product_profile_read_routes(
                 code="authorization_denied",
                 message="Workflow cannot read the requested product profile.",
             )
+        response.headers["ETag"] = f'"{product_profile_record_sha256(profile)}"'
+        response.headers["Cache-Control"] = "no-store"
         return ProductProfileResponse(trace_id=trace_id, profile=profile)
 
     def read_product_profile_mutation_receipt(
@@ -1795,7 +1801,7 @@ def register_product_profile_read_routes(
         record_store: Annotated[object, Depends(common.get_record_store)],
     ) -> ProductReconcileRequestsResponse:
         profile = read_product_profile(
-            product=product, identity=identity, record_store=record_store
+            product=product, response=Response(), identity=identity, record_store=record_store
         ).profile
         trace_id = common.next_trace_id()
         if not hasattr(record_store, "list_product_reconcile_requests"):
@@ -1806,7 +1812,7 @@ def register_product_profile_read_routes(
                 message="Reading reconcile requests requires database storage.",
             )
         records = cast(ProductReconcileRequestReader, record_store).list_product_reconcile_requests(
-            product=profile.product
+            product=profile.product, limit=None
         )
         return ProductReconcileRequestsResponse(
             trace_id=trace_id,

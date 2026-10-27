@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -10,10 +10,22 @@ from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.secrets import LAUNCHPLANE_WORKER_SECRET_INTEGRATION
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.production_backup_gate import SSH_KNOWN_HOSTS, SSH_PRIVATE_KEY
+from control_plane.guest_capture_credentials import CAPTURE_KEYS as BACKUP_CREDENTIAL_KEYS
+from control_plane.guest_capture_credentials import (
+    capture_boundary,
+    plan_guest_capture_credential,
+    validate_guest_capture_enrollment,
+)
+from control_plane.contracts.guest_capture_credential import (
+    guest_capture_credential_from_event,
+    GuestCaptureCredential,
+)
+from control_plane.contracts.production_backup_authority import (
+    ProductionBackupPolicyRecord,
+    ProductionBackupTargetRecord,
+)
+from control_plane.contracts.secret_record import SecretAuditEvent
 from control_plane.workflows.ship import utc_now_timestamp
-
-BACKUP_CREDENTIAL_KEYS = (SSH_PRIVATE_KEY, SSH_KNOWN_HOSTS)
 
 
 class BackupCredentialBindingRequest(BaseModel):
@@ -23,6 +35,7 @@ class BackupCredentialBindingRequest(BaseModel):
     bindings: dict[str, str]
     reason: str = Field(min_length=1, max_length=500)
     reviewed_plan_sha256: str = ""
+    promotion_action: str = ""
 
     @model_validator(mode="after")
     def validate_bindings(self) -> "BackupCredentialBindingRequest":
@@ -78,7 +91,43 @@ def plan_credential_bindings(
     records: tuple[SecretRecord, ...],
     bindings: tuple[SecretBinding, ...],
     request: BackupCredentialBindingRequest,
-) -> tuple[dict[str, object], tuple[SecretBinding, ...]]:
+    capture_state: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, object], tuple[SecretBinding, ...], GuestCaptureCredential | None]:
+    policies = [
+        ProductionBackupPolicyRecord.model_validate(value) for value in capture_state["policies"]
+    ]
+    if request.promotion_action:
+        policies = [
+            policy for policy in policies if policy.promotion_action == request.promotion_action
+        ]
+        if not policies:
+            raise ValueError("The selected promotion action has no active backup authority.")
+    targets = {
+        target.target_id: target
+        for target in (
+            ProductionBackupTargetRecord.model_validate(value) for value in capture_state["targets"]
+        )
+    }
+    if any(not set(policy.target_ids) <= targets.keys() for policy in policies):
+        raise ValueError("Capture authority is unavailable for credential enrollment.")
+    boundaries = {
+        capture_boundary(
+            policy,
+            targets[policy.fast_snapshot.source_target_id],
+            targets[policy.independent_backup.destination_target_id],
+        )
+        for policy in policies
+    }
+    if len(boundaries) > 1:
+        raise ValueError("Select one promotion action for guest credential enrollment.")
+    boundary = next(iter(boundaries), None)
+    pins = [
+        guest_capture_credential_from_event(SecretAuditEvent.model_validate(value))
+        for value in capture_state["pins"]
+    ]
+    pinned_elsewhere = {
+        identifier for pin in pins if pin.boundary != boundary for identifier in pin.secret_ids
+    }
     available = {item["binding_id"] for item in credential_options(records, bindings)}
     by_id = {b.binding_id: b for b in bindings}
     selected = set(request.bindings.values())
@@ -89,7 +138,10 @@ def plan_credential_bindings(
         raise ValueError("Select two distinct credential records.")
     for key, identifier in request.bindings.items():
         if any(
-            b.binding_key == key and b.status == "configured" and b.binding_id != identifier
+            b.binding_key == key
+            and b.status == "configured"
+            and b.binding_id != identifier
+            and b.secret_id not in pinned_elsewhere
             for b in bindings
         ):
             raise ValueError("A different credential already supplies a shared backup key.")
@@ -110,7 +162,12 @@ def plan_credential_bindings(
                 "bindings": [
                     b.model_dump(mode="json") for b in sorted(bindings, key=lambda b: b.binding_id)
                 ],
-                "request": {"bindings": request.bindings, "reason": request.reason},
+                "request": {
+                    "bindings": request.bindings,
+                    "reason": request.reason,
+                    "promotion_action": request.promotion_action,
+                },
+                "capture_state": capture_state,
             },
             sort_keys=True,
         ).encode()
@@ -125,4 +182,28 @@ def plan_credential_bindings(
         for item in changes
         if item["from_key"] != item["to_key"]
     )
-    return {"plan_sha256": digest, "changes": changes, "changed": bool(replacements)}, replacements
+    enrollment: GuestCaptureCredential | None = None
+    if boundary is not None:
+        future = {binding.binding_id: binding for binding in bindings}
+        future.update({binding.binding_id: binding for binding in replacements})
+        selected_records = tuple(
+            record for record in records if record.secret_id in selected_secrets
+        )
+        enrollment = plan_guest_capture_credential(
+            boundary,
+            selected_records,
+            tuple(future.values()),
+            selected_records[0].context,
+            selected_records[0].instance,
+        )
+        validate_guest_capture_enrollment(enrollment, capture_state)
+    needs_pin = enrollment is not None and not any(pin == enrollment for pin in pins)
+    return (
+        {
+            "plan_sha256": digest,
+            "changes": changes,
+            "changed": bool(replacements) or needs_pin,
+        },
+        replacements,
+        enrollment,
+    )

@@ -15,6 +15,7 @@ from control_plane.contracts.durable_operation_authorization import (
 
 
 ODOO_PROD_PROMOTION_RUN_ACTION = "odoo_prod_promotion_run.execute"
+DEFAULT_ODOO_STABLE_WORKER_MAX_ATTEMPTS = 3
 ODOO_CUTOVER_RECONCILIATION_DELAY = timedelta(seconds=30)
 
 

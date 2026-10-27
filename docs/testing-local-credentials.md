@@ -171,6 +171,26 @@ budget leaves the relevant observation unavailable. Collection is bounded to 16
 partitions, 48 pages, 4,000 guilds, 256 KiB per response, 16 declared lane bindings
 and a shared 90-second network budget. HTTP calls each have at most 10 seconds.
 
+On HTTP 429 the observer retains a bounded `rate_limits` list, including the
+request phase, JSON `retry_after` and `global` (as `global_limit`), and the
+`X-RateLimit-Scope`, `X-RateLimit-Global` and `Retry-After` headers (as `scope`,
+`header_global` and `header_retry_after`). Only finite nonnegative delays,
+booleans and documented scope values are retained. `non_json_body` means no JSON
+could be parsed within the response bounds, including absent, malformed
+or oversized bodies; `cloudflare_error_page` identifies such a
+body containing Cloudflare's name. Non-JSON alone suggests an intermediary
+response and does not establish its cause. No body text, authorization header
+or credential is returned.
+
+The first 429 may retry the same request once within the shared deadline,
+waiting for the longer valid body/header delay and rechecking captured inputs
+before sending. There is no guessed delay or further automatic retry. An absent,
+invalid or out-of-budget delay returns the evidence immediately; callers must
+wait at least the reported delay before a separately authorized attempt. Evidence
+survives a successful retry. The invariant is that provider refusal preserves
+safe evidence needed for the next decision for unchanged captured inputs, while incomplete enumeration remains
+unavailable. See [Discord rate limits](https://docs.discord.com/developers/topics/rate-limits).
+
 The service captures authorized profiles, delivered bindings and the managed
 record/version read set used by the local overlap audit before either audit. It
 rechecks those inputs before every provider request and after collection. A change
@@ -187,3 +207,62 @@ remain unchanged and require their own authoritative evidence.
 
 Provider contract: [Discord current-user guilds](https://docs.discord.com/developers/resources/user#get-current-user-guilds)
 and [current application](https://docs.discord.com/developers/resources/application#get-current-application).
+
+## Testing Discord identity diagnostic
+
+`GET /v1/products/{product}/environments/testing/discord-identity` identifies the
+existing exact testing credential, including historical versions with unknown
+origin, without changing that origin or making it eligible for the external audit.
+The product must have one testing lane and one applicable stored `discord_bot`
+requirement. Its delivered binding must be testing-classified and owned by that
+exact context-instance. Other environments and query overrides are refused.
+Existing product-profile and environment read access must cover every participating
+product and stable lane before any value is decrypted. No new permission is added.
+
+The service compares the captured value with every product's managed production
+runtime values using constant-time comparisons. A match returns
+`matches_production` and sends nothing to Discord. A matching decoded bot ID
+also refuses external use, even when the stored token strings differ. Only this
+production-side ID comparison trims surrounding whitespace; stored values,
+delivery and the strict testing input remain unchanged.
+Incomplete comparison returns unavailable. Production values stay inside the
+service. These comparisons do not identify an unrecorded production bot.
+Service-generated origins are refused. Before external use, the service also
+requires a three-segment URL-safe bot-token shape whose first segment decodes to
+a valid bot ID; this rejects the service's local password formats. This structural
+check is not provider authentication. Only Discord's response establishes identity,
+and its bot ID must agree with the decoded segment.
+
+The diagnostic reuses the existing bounded Discord observer and its fixed HTTPS
+destinations, redirect refusal, pagination and response limits. It writes a
+redacted `resolution_attempted` event with the caller subject, trace and exact
+binding/version before any provider request. Internal overlap and shape checks
+decrypt only inside Launchplane before that external-use event. Audit persistence
+failure prevents external use. Authorized profiles, selected bindings, versions
+and the production comparison read set are checked before external use, before
+each provider request and after collection; drift discards the result.
+
+After compatible source deployment, use the existing caller from a checkout
+containing that source. Older strict response models cannot read the new fields:
+
+```sh
+uv run python scripts/prepare-testing-credentials.py audit --discord-identity \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product>
+```
+
+The response has `Cache-Control: no-store`. The caller prints only the exact
+binding/version, application/bot/guild IDs, collection times, fixed status
+codes and the allowlisted rate-limit evidence above. Credentials, token segments,
+fingerprints, provider bodies and exception text are never returned. Exit zero requires complete identity and guild
+observation. A failure or incomplete enumeration exits nonzero; retain its trace
+and evidence. Compare the returned IDs with the Director's authoritative testing
+records. A production match or unexpected identity is a stop, not permission to
+replace a token; the Director supplies credentials privately through the existing
+entry path.
+
+Every result retains `qualification: not_evaluated`. Identification does not
+establish historical origin, old-writer exclusion, direct-message/global reach,
+resource independence or permission to deploy. The existing external-audit origin
+guard, data reproducibility and testing activation/deployment guards remain
+unchanged. No token entry/reset, hold change, rebuild or provider mutation occurs.

@@ -151,6 +151,9 @@ def _validate_candidate(
         )
     except FileNotFoundError as error:
         raise ValueError("Website settings require the current testing release record.") from error
+    from control_plane.testing_serving_copy import require_published_testing_release
+
+    require_published_testing_release(store, candidate)
     if candidate.artifact_id != request.website_settings.artifact_id:
         raise ValueError("Website settings must name this product's current testing artifact.")
 

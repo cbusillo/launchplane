@@ -7,7 +7,7 @@ import json
 import subprocess
 from typing import Any
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.provider_target_origin import ProviderTargetOrigin
 from control_plane.contracts.durable_operation_authorization import DurableOperationAuthorization
@@ -43,6 +43,9 @@ class RecipientCutoverTests(unittest.TestCase):
     database_url = ""
 
     def setUp(self) -> None:
+        self.route_connector = self.enterContext(
+            patch("control_plane.production_recipient_cutover._ValidatedAddressConnector")
+        )
         self.publication_case = publication_tests.RecipientPublicationTests()
         self.publication_case.database_url = self.database_url
         with patch.object(self.publication_case, "customize_preparation", side_effect=self.seed):
@@ -225,7 +228,7 @@ class RecipientCutoverTests(unittest.TestCase):
                 side_effect=lambda: datetime.now(UTC).isoformat(),
             ),
             patch(
-                "control_plane.workflows.production_backup_gate.control_plane_secrets.resolve_lane_worker_secret_values",
+                "control_plane.workflows.production_backup_gate.resolve_guest_capture_values",
                 return_value={
                     "PRODUCTION_BACKUP_SSH_PRIVATE_KEY": "synthetic",
                     "PRODUCTION_BACKUP_SSH_KNOWN_HOSTS": "synthetic",
@@ -417,6 +420,43 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertEqual(self.deploys, 0)
         self.fixture.assert_old_preserved()
 
+    def test_cutover_accepts_both_compose_environment_forms(self) -> None:
+        application = self.record.request.application_service
+        database = self.record.request.database_service
+        for list_services in ((database,), (application,), (application, database)):
+            with self.subTest(list_services=list_services):
+                document = json.loads(self.record.compose_source)
+                for name in list_services:
+                    document["services"][name]["environment"] = [
+                        f"{key}={value}"
+                        for key, value in document["services"][name]["environment"].items()
+                    ]
+                record = self.record.model_copy(update={"compose_source": json.dumps(document)})
+                intent = cutover_intent(self.fixture.root, self.store, record, self.request)
+                binding = next(
+                    row
+                    for row in self.store.list_secret_bindings()
+                    if row.binding_id == self.request.writer_binding_id
+                )
+                self.assertEqual(intent["writer_secret_id"], binding.secret_id)
+                self.assertEqual(self.actions, [])
+
+    def test_cutover_refuses_api_credential_in_database_in_both_environment_forms(self) -> None:
+        for use_list in (False, True):
+            with self.subTest(use_list=use_list):
+                document = json.loads(self.record.compose_source)
+                database = document["services"][self.record.request.database_service]
+                environment = database["environment"]
+                environment["SYNC_API_TOKEN"] = "${SYNC_API_TOKEN}"
+                if use_list:
+                    database["environment"] = [
+                        f"{key}={value}" for key, value in environment.items()
+                    ]
+                record = self.record.model_copy(update={"compose_source": json.dumps(document)})
+                with self.assertRaises(ValueError):
+                    cutover_intent(self.fixture.root, self.store, record, self.request)
+                self.assertEqual(self.actions, [])
+
     def test_terminal_bad_health_stops_only_new_writer_and_restores_old(self) -> None:
         with patch(
             "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
@@ -433,6 +473,129 @@ class RecipientCutoverTests(unittest.TestCase):
         assert current is not None
         self.assertEqual(current.phase, "rolled_back")
         self.fixture.assert_old_preserved()
+
+    def test_passing_health_cannot_publish_without_passing_readiness(self) -> None:
+        def health(
+            evidence: HealthcheckEvidence, *, expected_runtime_identity: Any
+        ) -> HealthcheckEvidence:
+            if evidence.urls == (self.request.readiness_url,):
+                return HealthcheckEvidence(status="fail", urls=evidence.urls)
+            return self.health(evidence, expected_runtime_identity=expected_runtime_identity)
+
+        with patch(
+            "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
+            side_effect=health,
+        ):
+            result = self.run_release()
+        self.assertEqual(result.response_payload["result"]["promotion_status"], "fail")
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
+
+    def test_unreachable_health_route_refuses_intent_and_writer_dispatch(self) -> None:
+        with patch(
+            "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+            return_value=Mock(side_effect=TimeoutError("private-route")),
+        ):
+            with self.assertRaises(ValueError):
+                cutover_intent(self.fixture.root, self.store, self.record, self.request)
+            with self.assertRaises(ValueError):
+                self.run_release()
+        self.assertEqual(self.actions, [])
+        self.assertEqual(self.deploys, 0)
+        self.assertTrue(self.old_running)
+
+    def test_cold_health_listener_can_refuse_connection_on_a_reachable_route(self) -> None:
+        with patch(
+            "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+            return_value=Mock(side_effect=ConnectionRefusedError),
+        ):
+            intent = cutover_intent(self.fixture.root, self.store, self.record, self.request)
+        self.assertEqual(intent, self.record.activation)
+        self.assertEqual(self.actions, [])
+
+    def test_route_outage_does_not_prevent_reading_armed_intent(self) -> None:
+        with patch(
+            "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+            return_value=Mock(side_effect=TimeoutError()),
+        ):
+            intent = cutover_intent(
+                self.fixture.root,
+                self.store,
+                self.record,
+                self.request.model_copy(update={"mode": "readback"}),
+            )
+        self.assertEqual(intent, self.record.activation)
+
+    def test_diagnostic_write_failure_cannot_skip_native_rollback(self) -> None:
+        write = self.store.write_promotion_record
+        failed = False
+
+        def fail_diagnostic_once(record: Any) -> None:
+            nonlocal failed
+            if record.failure is not None and not failed:
+                failed = True
+                raise ConnectionError("diagnostic write unavailable")
+            write(record)
+
+        with (
+            patch.object(self.store, "write_promotion_record", side_effect=fail_diagnostic_once),
+            patch(
+                "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
+                return_value=HealthcheckEvidence(status="fail"),
+            ),
+        ):
+            result = self.run_release()
+        self.assertTrue(failed)
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
+        self.assertEqual(result.response_payload["result"]["rollback_status"], "pass")
+
+    def test_health_transport_failure_remains_readable_after_native_rollback(self) -> None:
+        from control_plane.client_release import _release_step_failure
+
+        with (
+            patch(
+                "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
+                side_effect=TimeoutError("sensitive://account:password@private-host/database"),
+            ),
+            self.assertLogs("control_plane.http_error_evidence") as logged,
+        ):
+            result = self.run_release()
+        self.assertFalse(self.new_running)
+        self.assertTrue(self.old_running)
+        failure = _release_step_failure(self.store, result.record, "fail")
+        assert failure is not None
+        promotion = self.store.read_promotion_record(failure.record_id)
+        from control_plane.contracts.promotion_record import promotion_failure
+
+        self.assertEqual(promotion.failure, promotion_failure("recipient_health_unverified"))
+        assert promotion.failure is not None
+        self.assertEqual(failure.reason, promotion.failure.description)
+        self.assertNotIn("sensitive", json.dumps(result.response_payload) + str(logged.output))
+        replay = self.run_release()
+        self.assertEqual(_release_step_failure(self.store, replay.record, "fail"), failure)
+
+    def test_unreachable_readiness_route_cannot_borrow_health_route_reachability(self) -> None:
+        for health, readiness in (
+            ("http://192.168.200.20:19220/health", "http://192.168.200.21:19220/readyz"),
+            ("http://192.168.200.20/health", "https://192.168.200.20/readyz"),
+        ):
+            request = self.request.model_copy(
+                update={
+                    "health_urls": {key: health for key in self.request.health_urls},
+                    "readiness_url": readiness,
+                }
+            )
+            with (
+                self.subTest(health=health, readiness=readiness),
+                patch(
+                    "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+                    return_value=Mock(side_effect=[ConnectionRefusedError(), TimeoutError()]),
+                ),
+            ):
+                with self.assertRaises(ValueError):
+                    cutover_intent(self.fixture.root, self.store, self.record, request)
+        self.assertEqual(self.actions, [])
 
     def test_unknown_deploy_keeps_original_fence_and_never_restarts_old(self) -> None:
         def unknown(**kwargs: Any) -> None:
@@ -598,6 +761,16 @@ class RecipientCutoverTests(unittest.TestCase):
                 with self.assertRaises(GenericWebPromotionSourceRefused):
                     run_second()
             source_qualified = True
+            actions_before_route_outage = list(self.actions)
+            with patch(
+                "control_plane.production_recipient_cutover._ValidatedAddressConnector",
+                return_value=Mock(side_effect=TimeoutError()),
+            ):
+                with self.assertRaises(ValueError):
+                    run_second()
+            self.assertEqual(self.actions, actions_before_route_outage)
+            self.assertTrue(self.old_running)
+            self.assertFalse(self.new_running)
             with patch(
                 "control_plane.production_recipient_cutover.writer_action",
                 side_effect=advance_after_pause,
@@ -762,6 +935,10 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertTrue(self.new_running)
         self.assertFalse(self.old_running)
         self.assertNotIn(("pause", False), self.actions)
+        promotion = self.store.list_promotion_records()[0]
+        self.assertEqual(promotion.deploy.status, "pass")
+        self.assertEqual(promotion.destination_health.status, "pass")
+        self.assertIsNone(promotion.failure)
 
     def test_predispatch_pause_refusal_releases_budget_and_original_key_can_retry(self) -> None:
         def refuse(*args: Any, **kwargs: Any) -> None:
@@ -943,6 +1120,12 @@ class RecipientCutoverTests(unittest.TestCase):
     def test_terminal_host_rollback_can_finish_its_journal_after_a_lost_write(self) -> None:
         original = self.store.write_production_recipient
         failed: list[bool] = []
+        write_promotion = self.store.write_promotion_record
+
+        def lose_diagnostic(record: Any) -> None:
+            if record.failure is not None and record.deploy.status == "pending":
+                raise ConnectionError("diagnostic write unavailable")
+            write_promotion(record)
 
         def lose_final_write(**kwargs: Any) -> None:
             if kwargs["replacement"]["phase"] == "rolled_back" and not failed:
@@ -955,6 +1138,7 @@ class RecipientCutoverTests(unittest.TestCase):
 
         with (
             patch.object(self.store, "write_production_recipient", side_effect=lose_final_write),
+            patch.object(self.store, "write_promotion_record", side_effect=lose_diagnostic),
             patch(
                 "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
                 return_value=HealthcheckEvidence(status="fail"),
@@ -971,6 +1155,13 @@ class RecipientCutoverTests(unittest.TestCase):
         current = custody(self.store, self.record.product, self.record.context)
         assert current is not None
         self.assertEqual(current.phase, "rolled_back")
+        from control_plane.client_release import _release_step_failure
+
+        failure = _release_step_failure(self.store, result.record, "fail")
+        assert failure is not None
+        promotion = self.store.read_promotion_record(failure.record_id)
+        assert promotion.failure is not None
+        self.assertEqual(failure.reason, promotion.failure.description)
 
     def test_inverse_preflight_peer_refusal_can_retry_under_the_same_key(self) -> None:
         from control_plane.production_recipient_inverse import RecipientInverseAdapter

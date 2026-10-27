@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Literal, NotRequired, Protocol, TypedDict, cast, get_args
 
 import click
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane import provider_key_adoption, runtime_platform_credentials
 from control_plane import product_secret_copy
+from control_plane.preview_settings import validate_preview_scope
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.public_hosts import normalize_public_hosts
@@ -39,9 +41,11 @@ from control_plane.runtime_key_safety import (
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
 from control_plane.storage.product_authority_bundle import RuntimeEnvironmentWrite
+from control_plane.storage.product_authority_bundle import RuntimeEnvironmentSetExpectation
 from control_plane.storage.product_authority_bundle import SecretCopySourceExpectation
 from control_plane.storage.product_authority_bundle import SecretDeliverySetExpectation
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.runtime_environments import site_secret_scopes
 
 
 ProductConfigMode = Literal["dry-run", "apply"]
@@ -103,6 +107,13 @@ class ProductConfigError(ValueError):
     def __init__(self, message: str, *, code: str = "invalid_request") -> None:
         super().__init__(message)
         self.code = code
+
+
+class ProductConfigSecretBindingDisableInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_key: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+    version_id: str = Field(min_length=1)
 
 
 def load_product_config_apply_payload(input_file: Path) -> dict[str, object]:
@@ -192,6 +203,42 @@ def normalize_product_config_payload(payload: dict[str, object]) -> dict[str, ob
         "runtime_env": normalized_runtime_input,
         "secrets": [dict(secret) for secret in secrets],
     }
+    if "odoo_business_hours" in payload:
+        from control_plane.contracts.odoo_business_hours import OdooBusinessHoursConfigRequest
+
+        try:
+            normalized["odoo_business_hours"] = OdooBusinessHoursConfigRequest.model_validate(
+                payload["odoo_business_hours"]
+            ).model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+        except ValueError as error:
+            raise ProductConfigError("Calendar configuration is invalid.") from error
+    if payload.get("disable_secret_bindings"):
+        if not context_name or instance_name != "testing":
+            raise ProductConfigError("Binding disable requires an exact testing lane.")
+        if (
+            secrets
+            or runtime_env
+            or runtime_input.get("retired_provider_keys") is not None
+            or runtime_input.get("adopt_provider_keys") is not None
+            or "public_hosts" in payload
+        ):
+            raise ProductConfigError(
+                "Binding disable cannot be combined with configuration writes."
+            )
+        try:
+            raw_disables = payload["disable_secret_bindings"]
+            if not isinstance(raw_disables, list):
+                raise ValueError("Expected a list.")
+            disables = [
+                ProductConfigSecretBindingDisableInput.model_validate(item) for item in raw_disables
+            ]
+            if len({item.binding_key for item in disables}) != len(disables):
+                raise ValueError("Duplicate binding keys.")
+        except ValueError as error:
+            raise ProductConfigError(
+                "Binding disable requires unique binding keys and version ids."
+            ) from error
+        normalized["disable_secret_bindings"] = [item.model_dump() for item in disables]
     if "public_hosts" in payload:
         if instance_name != "prod" or not context_name:
             raise ProductConfigError("Public hosts require an exact prod lane.")
@@ -234,6 +281,11 @@ def plan_product_config_authority_bundle(
     lane_provider_env_reader: LaneProviderEnvReader | None = None,
     secret_copy_source_authorizer: Callable[[SecretRecord], bool] | None = None,
 ) -> tuple[dict[str, object], ProductAuthorityBundle]:
+    if "odoo_business_hours" in payload:
+        raise ProductConfigError(
+            "Calendar policy requires the service product-config path.",
+            code="odoo_business_hours_service_required",
+        )
     if "public_hosts" in payload:
         raise ProductConfigError(
             "Public hosts require the service product-config dry-run/apply path.",
@@ -311,6 +363,17 @@ def plan_product_config_authority_bundle(
         copy_expectations.append(SecretCopySourceExpectation(record=record, binding=binding))
 
     existing_runtime_records = record_store.list_runtime_environment_records()
+    disabled_summaries, disabled_bundle = _plan_product_config_binding_disables(
+        record_store=record_store,
+        entries=cast(list[dict[str, str]], normalized_payload.get("disable_secret_bindings", [])),
+        context=context_name,
+        instance=instance_name,
+        runtime_records=existing_runtime_records,
+        lane_provider_env_reader=lane_provider_env_reader,
+        mode=mode,
+        actor=actor,
+        source_label=source_label,
+    )
     adopted_secret_values = _resolve_provider_secret_adoptions(
         record_store=record_store,
         secrets=secrets,
@@ -359,7 +422,39 @@ def plan_product_config_authority_bundle(
         retired_provider_keys=retired_provider_keys,
         source_label=source_label,
     )
-    secret_summaries: list[dict[str, object]] = []
+    if instance_name == "preview":
+        secret_keys = set(
+            control_plane_secrets.resolve_effective_secret_bindings_from_store(
+                record_store=record_store,
+                integration="runtime_environment",
+                context_name=context_name,
+                instance_name="preview",
+                scopes=site_secret_scopes("preview"),
+                excluded_binding_ids=frozenset(
+                    binding.binding_id for binding in disabled_bundle.secret_bindings
+                ),
+            )
+        ) | {
+            str(secret["binding_key"])
+            for secret in secrets
+            if secret["integration"] == "runtime_environment" and secret["instance"] == "preview"
+        }
+        current_preview_record = _find_runtime_environment_record(
+            existing_records=existing_runtime_records,
+            scope="instance",
+            context_name=context_name,
+            instance_name="preview",
+        )
+        plain = (
+            runtime_record.env
+            if runtime_record is not None
+            else (current_preview_record.env if current_preview_record else {})
+        )
+        try:
+            validate_preview_scope(plain, context=context_name, secret_keys=frozenset(secret_keys))
+        except ValueError as error:
+            raise ProductConfigError(str(error), code="runtime_setting_refused") from error
+    secret_summaries: list[dict[str, object]] = list(disabled_summaries)
     runtime_key_safety_summary = _evaluate_product_config_runtime_key_safety(
         record_store=record_store,
         context_name=context_name,
@@ -480,7 +575,7 @@ def plan_product_config_authority_bundle(
             }
 
     changed_secret_count = sum(
-        1 for item in secret_summaries if item["action"] in {"created", "rotated"}
+        1 for item in secret_summaries if item["action"] in {"created", "rotated", "disabled"}
     )
     result: dict[str, object] = {
         "status": "ok",
@@ -504,7 +599,11 @@ def plan_product_config_authority_bundle(
     bundle = ProductAuthorityBundle(
         expected_product_profiles=(copy_profile,) if copy_profile is not None else (),
         secret_copy_sources=tuple(copy_expectations),
-        secret_delivery_read_sets=generation_read_sets,
+        secret_delivery_read_sets=(
+            *generation_read_sets,
+            *disabled_bundle.secret_delivery_read_sets,
+        ),
+        runtime_environment_read_sets=disabled_bundle.runtime_environment_read_sets,
         absent_secret_ids=tuple(adopted_secret_ids),
         required_context_owners=tuple(sorted(copy_contexts | {(product, context_name)}))
         if copy_profile is not None
@@ -512,10 +611,141 @@ def plan_product_config_authority_bundle(
         runtime_environment_writes=runtime_environment_writes,
         secret_versions=tuple(secret_versions),
         secret_records=tuple(secret_records),
-        secret_bindings=tuple(secret_bindings),
-        secret_audit_events=tuple(secret_audit_events),
+        secret_bindings=(*secret_bindings, *disabled_bundle.secret_bindings),
+        secret_audit_events=(*secret_audit_events, *disabled_bundle.secret_audit_events),
     )
     return result, bundle
+
+
+def _plan_product_config_binding_disables(
+    *,
+    record_store: ProductConfigStore,
+    entries: list[dict[str, str]],
+    context: str,
+    instance: str,
+    runtime_records: tuple[RuntimeEnvironmentRecord, ...],
+    lane_provider_env_reader: LaneProviderEnvReader | None,
+    mode: ProductConfigMode,
+    actor: str,
+    source_label: str,
+) -> tuple[list[dict[str, object]], ProductAuthorityBundle]:
+    if not entries:
+        return [], ProductAuthorityBundle()
+    runtime = _find_runtime_environment_record(
+        existing_records=runtime_records,
+        scope="instance",
+        context_name=context,
+        instance_name=instance,
+    )
+    if runtime is None or not {item["binding_key"] for item in entries}.issubset(
+        runtime.retired_provider_keys
+    ):
+        raise ProductConfigError(
+            "Retire the selected provider keys before disabling their bindings."
+        )
+    if lane_provider_env_reader is None:
+        raise ProductConfigError(
+            "Binding disable requires a fresh service provider-environment read."
+        )
+    provider = lane_provider_env_reader()
+    if any(item["binding_key"] in provider.env for item in entries):
+        raise ProductConfigError(
+            "Sync retired keys out of provider configuration before disabling bindings."
+        )
+    records = record_store.list_secret_records(
+        integration="runtime_environment", context_name=context, limit=None
+    )
+    bindings = record_store.list_secret_bindings(
+        integration="runtime_environment", context_name=context, limit=None
+    )
+    writes: list[SecretBinding] = []
+    events: list[SecretAuditEvent] = []
+    summaries: list[dict[str, object]] = []
+    selected_binding_ids: set[str] = set()
+    for item in entries:
+        candidates = [
+            binding
+            for binding in bindings
+            if (binding.context, binding.instance, binding.binding_key)
+            == (context, instance, item["binding_key"])
+        ]
+        if len(candidates) != 1:
+            raise ProductConfigError("Binding disable requires one exact existing lane binding.")
+        binding = candidates[0]
+        record = next((record for record in records if record.secret_id == binding.secret_id), None)
+        if (
+            record is None
+            or record.scope != "context_instance"
+            or (record.context, record.instance) != (context, instance)
+            or record.current_version_id != item["version_id"]
+        ):
+            raise ProductConfigError(
+                "The selected binding version changed; review its current metadata."
+            )
+        selected_binding_ids.add(binding.binding_id)
+        action = "unchanged" if binding.status == "disabled" else "disabled"
+        if mode == "apply" and action == "disabled":
+            now = utc_now_timestamp()
+            writes.append(binding.model_copy(update={"status": "disabled", "updated_at": now}))
+            events.append(
+                SecretAuditEvent(
+                    event_id=control_plane_secrets._audit_event_id(
+                        secret_id=record.secret_id, event_type="disabled"
+                    ),
+                    secret_id=record.secret_id,
+                    event_type="disabled",
+                    recorded_at=now,
+                    actor=actor,
+                    metadata={
+                        "source": source_label,
+                        "binding_id": binding.binding_id,
+                        "binding_key": binding.binding_key,
+                        "context": context,
+                        "instance": instance,
+                        "version_id": item["version_id"],
+                    },
+                )
+            )
+        summaries.append(
+            {
+                "action": action,
+                "scope": record.scope,
+                "integration": binding.integration,
+                "name": record.name,
+                "binding_key": binding.binding_key,
+                "context": context,
+                "instance": instance,
+                "secret_id": record.secret_id,
+            }
+        )
+    effective_after = control_plane_secrets.resolve_effective_secret_bindings_from_store(
+        record_store=record_store,
+        integration="runtime_environment",
+        context_name=context,
+        instance_name=instance,
+        scopes=site_secret_scopes(instance),
+        excluded_binding_ids=frozenset(selected_binding_ids),
+    )
+    if any(item["binding_key"] in effective_after for item in entries):
+        raise ProductConfigError("Disabling these bindings would expose another configured secret.")
+    return summaries, ProductAuthorityBundle(
+        secret_bindings=tuple(writes),
+        secret_audit_events=tuple(events),
+        secret_delivery_read_sets=(
+            SecretDeliverySetExpectation(
+                integration="runtime_environment",
+                context=context,
+                instance=instance,
+                records=records,
+                bindings=bindings,
+            ),
+        ),
+        runtime_environment_read_sets=(
+            RuntimeEnvironmentSetExpectation(
+                contexts=(), instances=((context, instance),), records=(runtime,)
+            ),
+        ),
+    )
 
 
 def _default_runtime_scope(*, context_name: str, instance_name: str) -> str:
@@ -856,6 +1086,8 @@ def _product_config_secret_inputs(
             instance_name=secret_instance,
             index=index,
         )
+        if instance_name == "preview" and validated_scope != "context_instance":
+            raise ProductConfigError("Preview secrets require the exact preview instance scope.")
         context_scope_uses_instance_safety_target = (
             validated_scope == "context" and expected_scope == "context_instance"
         )
@@ -1381,48 +1613,6 @@ def _existing_generated_binding(
     if len(candidates) > 1:
         raise ProductConfigError("Generated testing credential binding is ambiguous.")
     return candidates[0] if candidates else None
-
-
-def _retire_disabled_runtime_secret_placeholders(
-    *,
-    record_store: ProductConfigStore,
-    configured_binding: SecretBinding,
-    updated_at: str,
-) -> None:
-    if (
-        configured_binding.integration
-        != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
-    ):
-        return
-    context_name = configured_binding.context.strip()
-    instance_name = configured_binding.instance.strip()
-    lookup_kwargs: _SecretBindingLookupKwargs = {
-        "integration": configured_binding.integration,
-        "limit": None,
-    }
-    if context_name:
-        lookup_kwargs["context_name"] = context_name
-    if instance_name:
-        lookup_kwargs["instance_name"] = instance_name
-    for binding in record_store.list_secret_bindings(
-        **lookup_kwargs,
-    ):
-        if binding.binding_id == configured_binding.binding_id:
-            continue
-        if binding.context != context_name or binding.instance != instance_name:
-            continue
-        if binding.binding_key != configured_binding.binding_key:
-            continue
-        if binding.status != "disabled":
-            continue
-        record_store.write_secret_binding(
-            binding.model_copy(
-                update={
-                    "integration": f"retired:{binding.integration}",
-                    "updated_at": updated_at,
-                }
-            )
-        )
 
 
 def _planned_disabled_runtime_secret_placeholder_retirements(

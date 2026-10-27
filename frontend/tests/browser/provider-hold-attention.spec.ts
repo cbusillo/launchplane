@@ -4,6 +4,7 @@ import { emptyResource } from "../../src/resource";
 
 import { expect, setClockTime, test, waitForState, type Page } from "./state";
 import type { ProviderHoldAttentionPage, ProviderHoldAttentionItem, ProductSiteOverview } from "../../src/generated/openapi.ts";
+import { smokeArtifact } from "../../browser-smoke-paths.mjs";
 
 const attentionPath = `**${PROVIDER_HOLD_ATTENTION_ROUTE}**`;
 
@@ -81,7 +82,7 @@ for (const empty of [false, true]) {
     await expect(page.locator("body")).not.toContainText("PRIVATE-");
     await expect(panel.getByRole("button", { name: /retry|release|clear|resume/i })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-    await page.screenshot({ path: `../tmp/browser-smoke/provider-attention-${empty ? "empty" : "lanes"}-${testInfo.project.name}.png`, fullPage: true });
+    await page.screenshot({ path: smokeArtifact(`provider-attention-${empty ? "empty" : "lanes"}-${testInfo.project.name}.png`), fullPage: true });
   });
 }
 

@@ -48,6 +48,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   recovery of an exhausted Odoo testing retry budget with retained data.
 - [preview-memory-admission.md](preview-memory-admission.md) — service-owned host
   memory floors and read-only preview-start admission.
+- [service-runtime-settings.md](service-runtime-settings.md) — reviewed writes
+  of declared non-secret settings on Launchplane's own service context.
 - [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
   preview workflow event, idempotency, feedback, and lifecycle contract.
 - [product-retirement.md](product-retirement.md) — reviewed product retirement,
@@ -134,6 +136,9 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — standing public-source posture,
   image and secret boundary, and ongoing public hygiene.
+- [preview-settings.md](preview-settings.md) — managed preview settings, secrets, precedence and migration.
+- [copy-aggregates.md](copy-aggregates.md) — read-only counts from frozen sanitized snapshots with source provenance.
+- [clean-testing-snapshots.md](clean-testing-snapshots.md) — independent sanitized testing snapshots, preview copies and transition prerequisites.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
 - [testing-local-credentials.md](testing-local-credentials.md) — Bounded external-provider
@@ -158,8 +163,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and
   code-quality guardrails.
-- [codex-lab-workers.md](codex-lab-workers.md) — executable selection, session
-  provenance, and retirement verification.
-- [every-code-feedback-resume.md](every-code-feedback-resume.md) — feedback
-  continuation contracts and evidence foundation; not connected to production,
-  and its plan (#2328) is closed.
+- [codex-lab-workers.md](codex-lab-workers.md) — historical worker compatibility
+  and retained engineering-review transport.
+
+- [host-program-package.md](host-program-package.md) — versioned host programs, installation and readback.

@@ -1,11 +1,11 @@
+from tests.merge_train_policy_fixtures import dependency_repository_policy
 from types import SimpleNamespace
 from typing import Any, cast
 import unittest
+import base64
 
-from control_plane.merge_train_github import (
-    GitHubMergeTrainSnapshotReader,
-    RecordingMergeTrainGitHubTransport,
-)
+from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from tests.test_merge_train_github import _github_pull_request
 
 
@@ -26,6 +26,7 @@ class DependabotClientReviewTests(unittest.TestCase):
         )
         reader = GitHubMergeTrainSnapshotReader(
             transport=transport,
+            repository_policy=dependency_repository_policy(),
             branch_refresh_store=cast(
                 Any, SimpleNamespace(list_product_profile_records=lambda: (profile,))
             ),
@@ -37,11 +38,12 @@ class DependabotClientReviewTests(unittest.TestCase):
         self.assertFalse(snapshot.owner_review_required)
 
     def test_only_complete_dependency_changes_qualify(self) -> None:
-        from control_plane.dependency_update_review import pure_dependabot_update
+        login = "configured-update-bot"
+        from control_plane.dependency_update_review import pure_dependency_update
 
         pull = _github_pull_request(16)
         pull["labels"] = []
-        pull["user"] = {"id": 49699333, "login": "dependabot[bot]", "type": "Bot"}
+        pull["user"] = {"id": 49699333, "login": login, "type": "Bot"}
         good = [
             {"filename": "frontend/package.json", "status": "modified"},
             {"filename": "frontend/pnpm-lock.yaml", "status": "modified"},
@@ -63,24 +65,76 @@ class DependabotClientReviewTests(unittest.TestCase):
         ):
             with self.subTest(changes=changes[:2], count=len(changes)):
                 self.assertEqual(
-                    pure_dependabot_update(pull, read=lambda _: {"files": changes}), expected
+                    pure_dependency_update(
+                        pull,
+                        read=lambda _: {"files": changes},
+                        repository_policy=dependency_repository_policy(),
+                    ),
+                    expected,
                 )
         for update in (
             {"user": {"login": "agent[bot]", "type": "Bot"}},
             {"user": {"login": "person", "type": "User"}},
+            {"user": {"login": login, "type": "User"}},
             {"head": {"sha": "new", "repo": {"full_name": "someone/fork"}}},
             {"changed_files": 3},
         ):
             with self.subTest(update=update):
                 self.assertFalse(
-                    pure_dependabot_update(pull | update, read=lambda _: {"files": good})
+                    pure_dependency_update(
+                        pull | update,
+                        read=lambda _: {"files": good},
+                        repository_policy=dependency_repository_policy(),
+                    )
                 )
 
         def refused(_: str) -> object:
             raise ValueError("read refused")
 
-        self.assertFalse(pure_dependabot_update(pull, read=refused))
-        self.assertFalse(pure_dependabot_update(pull, read=lambda _: {"message": "unavailable"}))
+        self.assertFalse(
+            pure_dependency_update(
+                pull, read=refused, repository_policy=dependency_repository_policy()
+            )
+        )
+        self.assertFalse(
+            pure_dependency_update(
+                pull,
+                read=lambda _: {"message": "unavailable"},
+                repository_policy=dependency_repository_policy(),
+            )
+        )
+
+    def test_workspace_only_exempts_devkit_runtime_pins_with_complete_immutable_files(self) -> None:
+        from control_plane.dependency_update_review import pure_dependency_update
+
+        for slot, extra, expected in (
+            ("devkit", "", True),
+            ("runtime", "", True),
+            ("shared_addons", "", False),
+            ("devkit", '\ncommand = "new"', False),
+        ):
+            with self.subTest(slot=slot, extra=extra):
+                old = f'[repos.{slot}]\nrepository = "example/tool"\nref = "' + "a" * 40 + '"'
+                new = old.replace("a" * 40, "b" * 40) + extra
+                pull = _github_pull_request(16)
+                pull["user"] = {"id": 49699333, "login": "any-bot", "type": "Bot"}
+
+                def read(path: str) -> object:
+                    if "/compare/" in path:
+                        return {"files": [{"filename": "workspace.toml", "status": "modified"}]}
+                    content = new if path.endswith("ref=head-16") else old
+                    return {
+                        "encoding": "base64",
+                        "content": base64.b64encode(content.encode()).decode(),
+                        "size": len(content.encode()),
+                    }
+
+                self.assertEqual(
+                    pure_dependency_update(
+                        pull, read=read, repository_policy=dependency_repository_policy()
+                    ),
+                    expected,
+                )
 
     def test_configured_review_override_still_requires_notes(self) -> None:
         from control_plane.client_test_notes import change_client_review
@@ -119,6 +173,7 @@ class DependabotClientReviewTests(unittest.TestCase):
                 responses=({"files": [{"filename": "requirements.txt", "status": "modified"}]},)
             ),
             branch_refresh_store=cast(Any, store),
+            repository_policy=dependency_repository_policy(),
         )
         snapshot = reader._pull_request_snapshot(
             repository_path="cbusillo/sellyouroutboard", pull_request=pull, enrich=False

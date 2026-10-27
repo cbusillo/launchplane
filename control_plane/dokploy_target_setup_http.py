@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.browser_route_repair import BrowserRouteRepairRequest
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.public_hosts import retained_hostname_identity
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetPolicies,
     DokployTargetRecord,
@@ -54,6 +55,8 @@ def require_empty_testing_target_creation(
     product: str,
     control_plane_root_path: Path,
     read_provider_source: bool = True,
+    allocation_scope: str = "",
+    allocation_key: str = "",
 ) -> None:
     """Stage new empty resources without borrowing authority over an existing lane."""
     from control_plane.authz_candidate_preparation import (
@@ -64,7 +67,12 @@ def require_empty_testing_target_creation(
     if not request.state_volume_path:
         from control_plane.application_state_volume import require_no_held_state_volume
 
-        require_no_held_state_volume(record_store, request.context)
+        require_no_held_state_volume(
+            record_store,
+            request.context,
+            original_scope=allocation_scope,
+            original_key=allocation_key,
+        )
 
     if (
         request.operation not in {"create-compose", "create-application"}
@@ -238,6 +246,8 @@ class DokployTargetSetupEnvelope(BaseModel):
     domains: tuple[str, ...] = ()
     runtime_port: int | None = Field(default=None, ge=1, le=65535)
     deploy_timeout_seconds: int | None = Field(default=None, ge=1)
+    retain_allocation: bool = False
+    expected_allocation_custody_sha256: str = ""
     retain_state_volume_allocation: bool = False
     expected_state_volume_custody_sha256: str = ""
     state_volume_path: str = ""
@@ -305,8 +315,18 @@ class DokployTargetSetupEnvelope(BaseModel):
             from control_plane.application_state_volume import validate_volume_request
 
             validate_volume_request(self)
-        elif self.mode == "readback":
-            raise ValueError("Setup readback requires an original state-volume plan.")
+        elif (
+            self.mode == "readback"
+            or self.retain_allocation
+            or self.expected_allocation_custody_sha256
+        ):
+            from control_plane.application_state_volume import validate_ordinary_allocation_request
+
+            validate_ordinary_allocation_request(self)
+        if self.state_volume_path and (
+            self.retain_allocation or self.expected_allocation_custody_sha256
+        ):
+            raise ValueError("Storage retention uses its original state-volume custody fields.")
         if self.replaces_operation_id and (
             self.operation != "create-compose"
             or self.instance != "testing"
@@ -654,7 +674,12 @@ def _execute_dokploy_target_setup(
 ) -> dict[str, object]:
     if request.state_volume_path and application_mutate is None:
         raise ValueError("State-volume creation requires its reviewed durable service operation.")
-    if request.mode == "apply" and request.instance == "testing" and not request.state_volume_path:
+    if (
+        request.mode == "apply"
+        and request.instance == "testing"
+        and not request.state_volume_path
+        and application_mutate is None
+    ):
         from control_plane.application_state_volume import require_no_held_state_volume
 
         require_no_held_state_volume(record_store, request.context)
@@ -678,7 +703,9 @@ def _execute_dokploy_target_setup(
         return mutate_dokploy_payload_for_target_setup(host, token, path, payload)
 
     apply_changes = request.mode == "apply"
-    if set(request.domains).intersection(record_store.retained_disposable_hostnames()):
+    if {retained_hostname_identity(host) for host in request.domains}.intersection(
+        retained_hostname_identity(host) for host in record_store.retained_disposable_hostnames()
+    ):
         raise ValueError("A hostname remains reserved by retained testing custody.")
     if disposable_placement is not None and disposable_checkpoint is None:
         raise ValueError("Resuming fresh placement requires its service-owned checkpoint.")

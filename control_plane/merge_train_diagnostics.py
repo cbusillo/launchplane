@@ -103,6 +103,9 @@ def controller_last_result(
     }:
         actor = "repository_agent"
         observation = "Post a fresh checked gh-pr.py ready handoff for the recovered current head."
+    elif reason == "merge_train_target_not_ready":
+        actor = "repository_agent"
+        observation = _text(_object(result.get("blocking_reason")).get("message"))
     elif reason in {"candidate_check_retry_used", "infrastructure_retry_used"}:
         actor = "repository_agent"
         observation = "Repair the failed checks; then let the controller reobserve the lineage."

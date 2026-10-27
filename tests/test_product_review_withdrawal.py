@@ -10,6 +10,7 @@ from control_plane.product_review_withdrawal import (
     ReviewWithdrawalRequest,
     ReviewWithdrawalService,
     ReviewWithdrawalRefused,
+    ReviewWithdrawalRefusalReason,
     ReviewWithdrawalUnsettled,
     ReviewWithdrawalChange,
     ReviewWithdrawalNotDispatched,
@@ -117,8 +118,11 @@ class ReviewWithdrawalTests(unittest.TestCase):
                     record.model_dump() | {"decision": outcome, "reason": "Client decided"}
                 )
                 self.store.write_product_review_decision_record(record)
-                with self.assertRaises(ReviewWithdrawalRefused):
+                with self.assertRaises(ReviewWithdrawalRefused) as caught:
                     self.apply()
+                self.assertIs(
+                    caught.exception.reason, ReviewWithdrawalRefusalReason.CLIENT_DECISION_EXISTS
+                )
                 self.assertEqual(self.source.deletes, 0)
                 self.assertFalse(self.source.comments)
 
@@ -166,10 +170,21 @@ class ReviewWithdrawalTests(unittest.TestCase):
         with self.assertRaises(ReviewWithdrawalRefused):
             self.service.run(self.request, key="", trace="new-plan")
 
+    def test_unlabeled_dry_run_exposes_a_bounded_refusal_without_dispatch(self) -> None:
+        self.source.labels.discard(REVIEW_LABEL)
+        with self.assertRaises(ReviewWithdrawalRefused) as caught:
+            self.service.run(self.request, key="", trace="plan")
+        self.assertIs(
+            caught.exception.reason, ReviewWithdrawalRefusalReason.NO_PENDING_LABELED_REQUEST
+        )
+        self.assertEqual(self.source.deletes, 0)
+        self.assertFalse(self.source.comments)
+
     def test_changed_head_and_missing_decision_citation_refuse(self) -> None:
         self.source.head = "b" * 40
-        with self.assertRaises(ReviewWithdrawalRefused):
+        with self.assertRaises(ReviewWithdrawalRefused) as caught:
             self.apply()
+        self.assertIs(caught.exception.reason, ReviewWithdrawalRefusalReason.HEAD_CHANGED)
         with self.assertRaises(ValueError):
             ReviewWithdrawalRequest.model_validate(
                 self.request.model_dump() | {"director_decision_url": ""}
@@ -208,7 +223,7 @@ class ReviewWithdrawalTests(unittest.TestCase):
         self.assertEqual(self.source.deletes, 1)
         self.assertEqual(len(self.source.comments), 1)
 
-    def test_before_checkpoint_failure_can_retry_the_original_request(self) -> None:
+    def interrupt_before_checkpoint(self) -> None:
         from unittest.mock import patch
 
         plan = self.service.run(self.request, key="", trace="plan")
@@ -222,7 +237,29 @@ class ReviewWithdrawalTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.apply()
         self.assertEqual(self.source.deletes, 0)
+
+    def test_before_checkpoint_failure_can_retry_the_original_request(self) -> None:
+        self.interrupt_before_checkpoint()
         self.assertTrue(self.apply()["applied"])
+
+    def test_retry_after_client_reroute_preserves_the_new_clients_label(self) -> None:
+        self.interrupt_before_checkpoint()
+        rerouted = self.profile.model_copy(
+            update={
+                "owner": self.profile.owner.model_copy(
+                    update={"github_login": "new-client", "github_id": "987654"}
+                )
+            }
+        )
+        self.store.write_product_profile_record(rerouted)
+        self.service = ReviewWithdrawalService(
+            self.store, self.source, rerouted, actor=self.service.actor
+        )
+        result = self.service.run(self.reviewed_request, key="withdraw-1", trace="rerouted-retry")
+        self.assertFalse(result["applied"])
+        self.assertTrue(result.get("replan_required"))
+        self.assertEqual(self.source.deletes, 0)
+        self.assertIn(rerouted.owner.review_label, self.source.labels)
 
     def test_renewed_request_settles_old_key_without_deletion_then_allows_fresh_review(
         self,
@@ -491,6 +528,27 @@ class ReviewWithdrawalHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(result.status_code, 202, result.text)
                 self.assertTrue(result.json()["result"]["applied"])
+                unlabeled = await request(
+                    app, "POST", "/v1/product-review/withdrawal", payload=payload
+                )
+                self.assertEqual(unlabeled.status_code, 409, unlabeled.text)
+                self.assertEqual(
+                    unlabeled.json()["detail"]["reason"],
+                    ReviewWithdrawalRefusalReason.NO_PENDING_LABELED_REQUEST.value,
+                )
+                self.assertEqual(source.deletes, 1)
+                mismatch = await request(
+                    app,
+                    "POST",
+                    "/v1/product-review/withdrawal",
+                    payload=apply | {"mode": "readback", "repository": "example/another"},
+                    headers={"Idempotency-Key": "test-1"},
+                )
+                self.assertEqual(mismatch.status_code, 409, mismatch.text)
+                self.assertNotIn("reason", mismatch.json()["detail"])
+                self.assertEqual(
+                    unlabeled.json()["detail"]["code"], mismatch.json()["detail"]["code"]
+                )
                 with patch(
                     "control_plane.http_routes.product_review_withdrawal.ReviewWithdrawalService.run",
                     side_effect=ReviewWithdrawalUnsettled("Outcome is unsettled"),

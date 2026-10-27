@@ -813,34 +813,6 @@ def trusted_maintenance_path_result(
     )
 
 
-def trusted_maintenance_path_result_from_store(
-    *,
-    store: TrustedMaintenanceAuthorityReadStore,
-    candidate: TenantMergeCandidate,
-    evaluated_at: str,
-) -> TenantAdmissionPathResult | None:
-    current = trusted_maintenance_current_authority(
-        store=store,
-        candidate=candidate,
-        evaluated_at=evaluated_at,
-    )
-    evidence = store.list_trusted_maintenance_evidence_records(
-        repository_id=candidate.repository_id,
-        repository_owner_id=candidate.repository_owner_id,
-        repository=candidate.repository,
-        product=candidate.product,
-        context=candidate.context,
-        pull_request_number=candidate.pull_request_number,
-    )
-    return trusted_maintenance_path_result(
-        candidate=candidate,
-        classification=current.classification,
-        policy_record=current.policy_record,
-        evidence_records=evidence,
-        evaluated_at=evaluated_at,
-    )
-
-
 def _validate_trusted_maintenance_policy_history(
     records: tuple[TrustedMaintenancePolicyRecord, ...],
 ) -> TrustedMaintenancePolicyRecord:

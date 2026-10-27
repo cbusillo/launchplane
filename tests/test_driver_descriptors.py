@@ -1,4 +1,5 @@
 import ast
+from starlette.routing import Route
 import inspect
 import json
 import textwrap
@@ -860,7 +861,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 state_dir=root / "state",
             )
 
-        native_post_routes = native_routes._fastapi_route_paths_by_method(app, "POST")
+        native_post_routes = frozenset(
+            route.path
+            for route in app.routes
+            if isinstance(route, Route) and "POST" in (route.methods or ())
+        )
         self.assertLessEqual(
             native_routes._NATIVE_FASTAPI_DRIVER_ROUTE_PATHS,
             native_post_routes,

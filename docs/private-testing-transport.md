@@ -32,12 +32,35 @@ creates the application's HTTP hostname and its own edge route; it does not
 rewrite existing application domains or an unrelated edge route. A successful
 receipt owns later disablement. The active private endpoint is the hostname's
 recorded claim; the public-host write guard also checks that claim before any
-provider effect for another lane. Successful creation or original-key adoption
+provider effect for another lane. Retained DNS claims compare with ASCII case folding
+after trimming surrounding whitespace and trailing dots, including target domains and
+pending hostname effects. Retained URL-form domains contribute their hostname rather
+than their scheme, port or path. PostgreSQL target/name fences use that same identity; this
+does not rewrite stored claims or relax new public-host input validation.
+Successful creation or original-key adoption
 also records it in the application's `domains`, under the existing name fences,
 without making it a public website. The edge retains its certificate, key, renewal
 and access list. The application owns its HTTP paths and bearer checks; the edge
 preserves authorization and WebSocket headers. Provider readback retains the
 access list, certificate and complete route configuration. No DNS operation is performed.
+The NPMplus collection read validates every host ID and hostname claim before
+selection, retaining duplicate claims across hosts, wildcards and regex claims. Malformed claims
+refuse the read. Configuration on unrelated hosts is not qualified as a
+Launchplane write payload. A selected host is read independently by ID and
+fully qualified, including its current names, loaded configuration, certificate,
+access list and ownership receipt, before any testing effect or successful readback.
+Selected-host responses normalize explicit `access_lists` relation IDs and older
+ACL ID fields to the same receipt payload. Relation IDs and request-ID arrays must agree;
+missing ACL evidence never defaults to public, and custom hosts still require
+exactly one positive ACL ID. Locations preserve the supported host-ACL inheritance:
+requests state it explicitly and response-only relation metadata stays out of receipt hashes.
+Independent, contradictory or incomplete location ACL policies refuse before a write.
+When the HTTP refusal retains its provider cause, the trace-bound
+`handled_error_cause` log also carries the statically bound model name,
+bounded validation kinds, schema-owned
+field locations and trusted validator source sites. Dynamic keys, provider
+values, exception messages and validation contexts are withheld. These diagnostics
+do not change accepted provider data or route qualification.
 The existing scoped ingress planner also accepts an active testing private
 endpoint hostname when an access list is supplied; public-route rules remain.
 

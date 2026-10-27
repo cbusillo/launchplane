@@ -16,6 +16,8 @@ from pydantic import BaseModel
 
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
+    DeliveryFailureObservation,
+    normalized_time,
     FILESYSTEM_TYPES,
     filesystem_index,
     source_changed,
@@ -52,14 +54,7 @@ from control_plane.contracts.every_code_notifications import (
     EveryCodeNotificationPolicyRecord,
 )
 from control_plane.contracts.every_code_work_request import (
-    EveryCodeWorkRequestHeartbeat,
     EveryCodeWorkRequestRecord,
-    EveryCodeWorkRequestStatusUpdate,
-    apply_every_code_work_request_status,
-    claim_every_code_work_request,
-    close_every_code_work_request_for_pull_request,
-    heartbeat_every_code_work_request,
-    recover_stale_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.generic_web_rollback import GenericWebRollbackPlanRecord
@@ -275,6 +270,7 @@ from control_plane.storage.product_authority_bundle import (
     odoo_instance_override_records_match,
     SecretRecordConflictError,
     require_bundle_context_owner,
+    require_absent_products,
     ProductAuthorityBundle,
     ProductProfileConflictError,
     ProviderTargetWrite,
@@ -540,8 +536,28 @@ class FilesystemRecordStore:
             return
         with self._product_authority_bundle_lock():
             profiles = self._list_product_profile_records_locked()
+            require_absent_products(bundle.absent_product_ids, profiles)
             require_bundle_context_owner(bundle, profiles)
             current_profiles = {profile.product: profile for profile in profiles}
+            for model_type, record_type, expected_records in (
+                (DokployTargetRecord, "dokploy_targets", bundle.expected_dokploy_targets),
+                (DokployTargetIdRecord, "dokploy_target_ids", bundle.expected_dokploy_target_ids),
+            ):
+                for expected in expected_records:
+                    try:
+                        current = self._read_model_locked(
+                            model_type,
+                            record_type,
+                            _context_instance_record_id(expected.context, expected.instance),
+                        )
+                    except FileNotFoundError as error:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target disappeared before onboarding commit."
+                        ) from error
+                    if current != expected:
+                        raise DokployTargetRecordChanged(
+                            "Adopted target changed before onboarding commit."
+                        )
             for expected_profile in bundle.expected_product_profiles:
                 if current_profiles.get(expected_profile.product) != expected_profile:
                     raise ProductProfileConflictError("Product profile changed before commit.")
@@ -2251,7 +2267,7 @@ class FilesystemRecordStore:
                 MergeTrainPrFeedbackRecord,
                 "launchplane_merge_train_pr_feedback",
             )
-            if (not repository or record.repository == repository)
+            if (not repository or record.repository == repository.lower())
             and (not base_branch or record.base_branch == base_branch)
             and (pr_number is None or record.pull_request_number == pr_number)
         ]
@@ -2841,7 +2857,7 @@ class FilesystemRecordStore:
                 MergeTrainStackCollapsePlanRecord,
                 "launchplane_merge_train_stack_collapse_plans",
             )
-            if (not repository or record.plan.repository == repository)
+            if (not repository or record.plan.repository == repository.lower())
             and (not base_branch or record.plan.base_branch == base_branch)
             and (not status or record.status == status)
             and (
@@ -3011,18 +3027,6 @@ class FilesystemRecordStore:
         with self._exclusive_record_lock(record_type, record.request_id):
             return self._write_model(record_type, record.request_id, record)
 
-    def create_every_code_work_request_record_if_absent(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> tuple[EveryCodeWorkRequestRecord, bool]:
-        created = self._create_model_if_absent(
-            "launchplane_every_code_work_requests",
-            record.request_id,
-            record,
-        )
-        if created:
-            return record, True
-        return self.read_every_code_work_request_record(record.request_id), False
-
     def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
         return EveryCodeWorkRequestRecord.model_validate(
             self._read_model(
@@ -3055,169 +3059,6 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
-
-    def close_every_code_work_request_for_pull_request_record(
-        self,
-        *,
-        request_id: str,
-        expected_lifecycle_id: str,
-        pr_url: str,
-        merged: bool,
-        closed_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            if record.lifecycle_id != expected_lifecycle_id:
-                return None
-            closed_record = close_every_code_work_request_for_pull_request(
-                record,
-                pr_url=pr_url,
-                merged=merged,
-                closed_at=closed_at,
-            )
-            if closed_record is None:
-                return None
-            self._write_model(record_type, request_id, closed_record)
-            return closed_record
-
-    def claim_every_code_work_request_record(
-        self,
-        *,
-        request_id: str,
-        host: str,
-        claimed_at: str,
-        lease_seconds: int = 1800,
-        idempotency_record_factory: (
-            Callable[[EveryCodeWorkRequestRecord], LaunchplaneIdempotencyRecord] | None
-        ) = None,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            claimed_record = claim_every_code_work_request(
-                record, host=host, claimed_at=claimed_at, lease_seconds=lease_seconds
-            )
-            if claimed_record is None:
-                return None
-            self._write_model(record_type, request_id, claimed_record)
-            if idempotency_record_factory is not None:
-                self.write_idempotency_record(idempotency_record_factory(claimed_record))
-            return claimed_record
-
-    def heartbeat_every_code_work_request_record(
-        self,
-        *,
-        request_id: str,
-        host: str,
-        fencing_token: int,
-        heartbeat_at: str,
-        lease_expires_at: str,
-        lease_seconds: int = 1800,
-    ) -> bool:
-        del lease_seconds
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            try:
-                record = self.read_every_code_work_request_record(request_id)
-            except FileNotFoundError:
-                return False
-            updated = heartbeat_every_code_work_request(
-                record,
-                EveryCodeWorkRequestHeartbeat(
-                    host=host,
-                    fencing_token=fencing_token,
-                    heartbeat_at=heartbeat_at,
-                    lease_expires_at=lease_expires_at,
-                ),
-            )
-            if updated is None:
-                return False
-            self._write_model(record_type, request_id, updated)
-            return True
-
-    def update_every_code_work_request_status_record(
-        self,
-        *,
-        request_id: str,
-        update: EveryCodeWorkRequestStatusUpdate,
-    ) -> EveryCodeWorkRequestRecord:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, request_id):
-            record = self.read_every_code_work_request_record(request_id)
-            if record.fencing_token > 0 and update.fencing_token != record.fencing_token:
-                raise ValueError(
-                    f"Every Code status update fencing token {update.fencing_token} "
-                    f"does not match record fencing token {record.fencing_token}"
-                )
-            updated = apply_every_code_work_request_status(record, update)
-            self._write_model(record_type, request_id, updated)
-            return updated
-
-    def compare_and_write_every_code_work_request_record(
-        self,
-        *,
-        expected_record: EveryCodeWorkRequestRecord,
-        record: EveryCodeWorkRequestRecord,
-        idempotency_record: LaunchplaneIdempotencyRecord | None = None,
-    ) -> Literal["updated", "changed", "missing"]:
-        if expected_record.request_id != record.request_id:
-            raise ValueError("Every Code compare-and-write requires matching request IDs")
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, expected_record.request_id):
-            try:
-                current = self.read_every_code_work_request_record(expected_record.request_id)
-            except FileNotFoundError:
-                return "missing"
-            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
-                return "changed"
-            self._write_model(record_type, record.request_id, record)
-            if idempotency_record is not None:
-                self.write_idempotency_record(idempotency_record)
-            return "updated"
-
-    def list_stale_every_code_work_request_records(
-        self,
-        *,
-        as_of: str,
-        limit: int = 50,
-    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
-        stale_states = {"claimed", "running"}
-        records = [
-            record
-            for record in self._list_models(
-                EveryCodeWorkRequestRecord,
-                "launchplane_every_code_work_requests",
-            )
-            if record.state in stale_states
-            and record.lease_expires_at
-            and record.lease_expires_at < as_of
-        ]
-        records.sort(key=lambda r: (r.lease_expires_at, r.request_id))
-        return tuple(records[:limit])
-
-    def recover_stale_every_code_work_request_record(
-        self,
-        *,
-        expected_record: EveryCodeWorkRequestRecord,
-        recovered_at: str,
-    ) -> EveryCodeWorkRequestRecord | None:
-        record_type = "launchplane_every_code_work_requests"
-        with self._exclusive_record_lock(record_type, expected_record.request_id):
-            try:
-                current = self.read_every_code_work_request_record(expected_record.request_id)
-            except FileNotFoundError:
-                return None
-            if current.model_dump(mode="json") != expected_record.model_dump(mode="json"):
-                return None
-            if not current.lease_expires_at or current.lease_expires_at >= recovered_at:
-                return None
-            recovered = recover_stale_every_code_work_request(
-                current,
-                recovered_at=recovered_at,
-            )
-            self._write_model(record_type, recovered.request_id, recovered)
-            return recovered
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
         return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)
@@ -4576,6 +4417,15 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
+    def read_public_ingress_observation_record(
+        self, record_id: str
+    ) -> PublicIngressObservationRecord:
+        return self._read_model(
+            PublicIngressObservationRecord,
+            "launchplane_public_ingress_observations",
+            record_id,
+        )
+
     def list_public_ingress_observation_records(
         self,
         *,
@@ -4610,6 +4460,27 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def list_delivery_failure_observations(
+        self, *, incident_id: str
+    ) -> tuple[DeliveryFailureObservation, ...]:
+        failures: dict[str, DeliveryFailureObservation] = {}
+        for observation in self._list_models(
+            PublicIngressObservationRecord, "launchplane_public_ingress_observations"
+        ):
+            if observation.incident_id != incident_id or observation.status != "fail":
+                continue
+            previous = failures.get(observation.summary)
+            observed_at = observation.observed_at
+            target_url = observation.targets[0].url if observation.targets else ""
+            if previous is not None:
+                if normalized_time(previous.observed_at) < normalized_time(observed_at):
+                    observed_at = previous.observed_at
+                target_url = max(target_url, previous.target_url)
+            failures[observation.summary] = DeliveryFailureObservation(
+                summary=observation.summary, observed_at=observed_at, target_url=target_url
+            )
+        return tuple(failures[summary] for summary in sorted(failures))
 
     def write_public_ingress_incident_record(self, record: PublicIngressIncidentRecord) -> Path:
         return self._write_model("launchplane_public_ingress_incidents", record.incident_id, record)

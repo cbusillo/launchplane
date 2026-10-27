@@ -908,6 +908,7 @@ h3 {
 
 .directory-lane .directory-evidence-detail,
 .directory-lane .directory-attention,
+.directory-lane .directory-hold,
 .directory-preview .directory-evidence-detail {
   overflow: visible;
   overflow-wrap: anywhere;

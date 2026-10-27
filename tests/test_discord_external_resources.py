@@ -8,10 +8,167 @@ from unittest.mock import patch
 
 from control_plane import discord_external_resources as reader
 from control_plane.outbound_http import PublicHttpResponse, request_public_http
+from control_plane.testing_external_resources import ExternalResourceInputsChanged
 from tests.test_outbound_http import _FakeConnection, _FakeResponse, _resolver_for
 
 
 class DiscordExternalResourcesTests(unittest.TestCase):
+    def test_rate_limit_evidence_survives_without_exposing_provider_secrets(self) -> None:
+        response = PublicHttpResponse(
+            429,
+            "",
+            0,
+            (
+                ("X-RateLimit-Scope", "global"),
+                ("X-RateLimit-Global", "true"),
+                ("Retry-After", "120"),
+                ("Authorization", "synthetic-bot-token"),
+            ),
+            json.dumps(
+                {"retry_after": 125.5, "global": True, "message": "synthetic-bot-token"}
+            ).encode(),
+        )
+        with patch.object(reader, "sleep", create=True) as sleep:
+            result = self.observe(lambda *_, **__: response)
+        evidence = result.rate_limits[0]
+        self.assertEqual(evidence.retry_after, 125.5)
+        self.assertIs(evidence.global_limit, True)
+        self.assertEqual(evidence.scope, "global")
+        self.assertIs(evidence.header_global, True)
+        self.assertEqual(evidence.header_retry_after, 120)
+        self.assertEqual(evidence.phase, "identity")
+        self.assertFalse(evidence.non_json_body)
+        self.assertFalse(evidence.cloudflare_error_page)
+        self.assertNotIn("synthetic-bot-token", result.model_dump_json())
+        self.assertFalse(result.guild_enumeration_complete)
+        sleep.assert_not_called()
+
+    def test_provider_backoff_retries_same_guild_read_once_and_retains_evidence(self) -> None:
+        for repeat in (False, True):
+            with self.subTest(repeat=repeat):
+                calls = []
+
+                def respond(url: str, **kwargs: Any) -> PublicHttpResponse:
+                    if "/guilds?" in url:
+                        calls.append(url)
+                        if len(calls) == 1 or repeat:
+                            return PublicHttpResponse(
+                                429,
+                                "",
+                                0,
+                                (("Retry-After", "0.5"),),
+                                b'{"retry_after":0.25,"global":false}',
+                            )
+                    return self.base(url, **kwargs)
+
+                with patch.object(reader, "sleep", create=True) as sleep:
+                    result = self.observe(respond)
+                sleep.assert_called_once_with(0.5)
+                self.assertEqual(calls[0], calls[1])
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(result.guild_enumeration_complete, not repeat)
+                self.assertEqual(result.rate_limits[0].phase, "guilds")
+                self.assertEqual(result.rate_limits[0].retry_after, 0.25)
+                if repeat:
+                    self.assertEqual(result.http_status, 429)
+
+    def test_non_json_and_cloudflare_rate_limits_are_classified_without_body_disclosure(
+        self,
+    ) -> None:
+        for body, cloudflare in (
+            (b"", False),
+            (b"not json", False),
+            (b"<html>Cloudflare error synthetic-bot-token</html>", True),
+        ):
+            with self.subTest(body=body):
+                with patch.object(reader, "sleep", create=True) as sleep:
+                    result = self.observe(lambda *_, **__: PublicHttpResponse(429, "", 0, (), body))
+                evidence = result.rate_limits[0]
+                self.assertTrue(evidence.non_json_body)
+                self.assertEqual(evidence.cloudflare_error_page, cloudflare)
+                self.assertNotIn("synthetic-bot-token", result.model_dump_json())
+                sleep.assert_not_called()
+
+    def test_oversized_rate_limit_body_is_not_reported_as_usable_json(self) -> None:
+        result = self.observe(
+            lambda *_, **__: PublicHttpResponse(
+                429,
+                "",
+                0,
+                (),
+                b" " * (reader.DISCORD_RESPONSE_LIMIT + 1),
+            )
+        )
+        self.assertEqual(result.http_status, 429)
+        self.assertTrue(result.rate_limits[0].non_json_body)
+
+    def test_invalid_backoff_and_untrusted_header_values_never_escape_or_retry(self) -> None:
+        for delay in (True, -1, "synthetic-bot-token", float("nan"), float("inf")):
+            with self.subTest(delay=delay):
+                response = PublicHttpResponse(
+                    429,
+                    "",
+                    0,
+                    (
+                        ("Retry-After", "synthetic-bot-token"),
+                        ("X-RateLimit-Scope", "synthetic-bot-token"),
+                        ("X-RateLimit-Global", "synthetic-bot-token"),
+                    ),
+                    json.dumps({"retry_after": delay, "global": "synthetic-bot-token"}).encode(),
+                )
+                with patch.object(reader, "sleep", create=True) as sleep:
+                    result = self.observe(lambda *_, **__: response)
+                self.assertIsNone(result.rate_limits[0].retry_after)
+                self.assertNotIn("synthetic-bot-token", result.model_dump_json())
+                sleep.assert_not_called()
+
+    def test_retry_rechecks_inputs_after_backoff_before_provider_call(self) -> None:
+        from unittest.mock import Mock
+
+        current = Mock(side_effect=[None, ExternalResourceInputsChanged()])
+        with (
+            patch.object(reader, "sleep", create=True) as sleep,
+            patch.object(
+                reader,
+                "request_public_http",
+                return_value=PublicHttpResponse(
+                    429,
+                    "",
+                    0,
+                    (),
+                    b'{"retry_after":0.25,"global":false}',
+                ),
+            ) as request,
+        ):
+            result = reader.observe_discord_bot(
+                "synthetic-bot-token", deadline=monotonic() + 60, check_current=current
+            )
+            self.assertEqual(result.failure_code, "inputs_changed")
+            self.assertEqual(result.rate_limits[0].retry_after, 0.25)
+        request.assert_called_once()
+        sleep.assert_called_once_with(0.25)
+        with (
+            patch.object(reader, "sleep"),
+            patch.object(reader, "monotonic", side_effect=[0, 0, 2]),
+            patch.object(
+                reader,
+                "request_public_http",
+                return_value=PublicHttpResponse(
+                    429,
+                    "",
+                    0,
+                    (),
+                    b'{"retry_after":0.25,"global":false}',
+                ),
+            ) as request,
+        ):
+            result = reader.observe_discord_bot(
+                "synthetic-bot-token", deadline=1, check_current=lambda: None
+            )
+        self.assertEqual(result.failure_code, "collection_budget_exhausted")
+        self.assertEqual(result.rate_limits[0].retry_after, 0.25)
+        request.assert_called_once()
+
     def observe(self, respond: Any) -> Any:
         with patch.object(reader, "request_public_http", side_effect=respond):
             return reader.observe_discord_bot(

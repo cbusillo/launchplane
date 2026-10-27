@@ -1,6 +1,5 @@
 """Activate only new testing resources; retain the old recipient and unknown effects."""
 
-import base64
 from collections.abc import Callable
 from dataclasses import dataclass
 import hmac
@@ -76,7 +75,8 @@ from control_plane.testing_activation_compose import (
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.testing_separation_resources import (
     ROUTE as PREPARATION_ROUTE,
-    SeparationResourcesResult,
+    SeparationResourcesRefusal,
+    parse_preparation_receipt,
     preparation_binding,
 )
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
@@ -264,7 +264,9 @@ def preparation_resources(
     )
     if row is None or row.state != "completed":
         raise TestingActivationRefusal("Use the original caller's completed allocation key.")
-    receipt = SeparationResourcesResult.model_validate(row.response_payload.get("result"))
+    receipt = parse_preparation_receipt(row.response_payload.get("result"))
+    if isinstance(receipt, SeparationResourcesRefusal):
+        raise TestingActivationRefusal("The original preparation refused allocation.")
     if (receipt.product, receipt.context) != (product, request.context):
         raise TestingActivationRefusal("Allocation belongs to another testing lane.")
     old_id = store.read_dokploy_target_id_record(
@@ -331,6 +333,14 @@ def preparation_resources(
     return resources, row.record_id
 
 
+def shared_read_only_binding(binding: SecretBinding) -> bool:
+    return bool(
+        binding.declared_secret_class == "shared_safe"
+        and binding.sharing_reason
+        and binding.sharing_reason.kind == "read_only_source"
+    )
+
+
 def runtime_values(
     store: PostgresRecordStore,
     root: Path,
@@ -388,11 +398,7 @@ def runtime_values(
             "testing",
         ):
             raise TestingActivationRefusal("Testing credentials must have lane-specific bindings.")
-        if (
-            binding.declared_secret_class == "shared_safe"
-            and binding.sharing_reason
-            and binding.sharing_reason.kind == "read_only_source"
-        ):
+        if shared_read_only_binding(binding):
             shared.add(key)
         elif binding.declared_secret_class not in {"testing", "non_prod"}:
             raise TestingActivationRefusal("A carried key can reach a live writable system.")
@@ -798,14 +804,10 @@ def inspect_new_resources(
         compose_name=resources.context,
         target_payload=payload,
     )
-    encoded = base64.b64encode(json.dumps(sorted(ports)).encode()).decode()
-    program = (
-        resources.script("readback")
-        + "\npython3 - "
-        + encoded
-        + " <<'LP_PORTS'\n"
-        + PORT_INSPECTION_PROGRAM
-        + "\nLP_PORTS\n"
+    from control_plane.host_package import host_schedule
+
+    program = host_schedule(
+        "activation", {"resources": resources.host_spec("readback"), "ports": sorted(ports)}
     )
     evidence = post_deploy.run_manual_data_schedule(
         host=host,
@@ -953,8 +955,14 @@ class TestingActivationAdapter:
         return replacement
 
     def verify_provider(self, record: TestingActivationRecord) -> None:
+        self.verify_compose_provider(record)
+
+    def verify_compose_provider(
+        self, record: TestingActivationRecord, *, values: dict[str, str] | None = None
+    ) -> None:
         resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
-        values = runtime_values(self.store, self.root, record, resources)
+        if values is None:
+            values = runtime_values(self.store, self.root, record, resources)
         expected = json.loads(record.compose_source)
         for volume in expected["volumes"].values():
             volume["external"] = True
@@ -1049,25 +1057,8 @@ class TestingActivationAdapter:
                     )
         try:
             actual = interpolate(actual, values)
-            # Dokploy adds this root declaration even without domains. Ignore only
-            # that exact unused declaration; attachments and aliases remain fenced.
-            if isinstance(actual, dict) and isinstance(actual.get("services"), dict):
-                networks = actual.get("networks")
-                provider_network = "dokploy-network"
-                if (
-                    not payload.get("domains")
-                    and isinstance(networks, dict)
-                    and networks.get(provider_network) == {"external": True}
-                    and provider_network not in expected.get("networks", {})
-                    and all(
-                        isinstance(service.get("networks", []), (list, dict))
-                        and provider_network not in service.get("networks", [])
-                        for service in actual["services"].values()
-                    )
-                ):
-                    networks.pop(provider_network)
-                    if not networks and "networks" not in expected:
-                        actual.pop("networks")
+            if not payload.get("domains") and isinstance(actual, dict):
+                compose.discard_unused_dokploy_network(actual, expected=expected)
             qualify_compose(
                 actual,
                 volumes=set(resources.volumes.values()),
@@ -1250,6 +1241,7 @@ class TestingActivationAdapter:
             image_reference=record.image_reference,
             host_ports=record.host_ports,
             qualified_at=record.qualified_at,
+            external_capabilities=record.external_capabilities,
         ).model_dump(mode="json")
 
     def publish(

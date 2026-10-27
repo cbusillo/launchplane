@@ -718,20 +718,6 @@ def _administrator_product_evidence_read_state(
     return "legacy" if environment_rule_contexts == ("launchplane",) else "current"
 
 
-def administrator_product_evidence_read_state(
-    policy: LaunchplaneAuthzPolicy,
-    *,
-    github_id: int,
-) -> AuthorizationCandidateState:
-    """Report the candidate's public availability without exposing legacy detail."""
-    state = _administrator_product_evidence_read_state(policy, github_id=github_id)
-    if state == "absent":
-        return "available"
-    if state in ("legacy", "current"):
-        return "active"
-    return "conflict"
-
-
 def compile_administrator_product_evidence_read_candidate(
     *,
     current_policy: LaunchplaneAuthzPolicy,
@@ -950,38 +936,21 @@ def _agent_product_setup_rule_state(
     return "present", grants
 
 
-def agent_product_setup_state(
-    policy: LaunchplaneAuthzPolicy,
-    *,
-    identity: LocalOperatorIdentity | None,
-) -> AuthorizationCandidateState:
-    """Report whether the set is absent, the exact prepared shape, or foreign."""
-    state, grants = _agent_product_setup_rule_state(policy)
-    if state == "absent":
-        return "available"
-    if state == "conflict":
-        return "conflict"
-    if identity is None or grants[0][2:] != (identity.subject, identity.token_label):
-        return "conflict"
-    return "active"
-
-
-def agent_product_setup_products(policy: LaunchplaneAuthzPolicy) -> tuple[str, ...]:
-    """Products the current set covers, or none when it is absent or foreign."""
-    state, grants = _agent_product_setup_rule_state(policy)
-    return tuple(grant[0] for grant in grants) if state == "present" else ()
-
-
-def product_context_owners(record_store: object) -> dict[str, frozenset[str]]:
+def product_context_owners(
+    record_store: object, *, config_scopes: bool = False
+) -> dict[str, frozenset[str]]:
     """Map each lane or historical context, case-folded, to the products using it."""
     lister = getattr(record_store, "list_product_profile_records", None)
     if not callable(lister):
         raise TypeError("Agent product setup requires product profile storage.")
     return product_context_owner_map(
-        record
-        if isinstance(record, LaunchplaneProductProfileRecord)
-        else LaunchplaneProductProfileRecord.model_validate(record)
-        for record in lister()
+        (
+            record
+            if isinstance(record, LaunchplaneProductProfileRecord)
+            else LaunchplaneProductProfileRecord.model_validate(record)
+            for record in lister()
+        ),
+        config_scopes=config_scopes,
     )
 
 

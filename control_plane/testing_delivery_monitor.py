@@ -137,8 +137,7 @@ def _record_attention(
         trace = operation.runner_trace_id or operation.operation_id
         failed_at = operation.finished_at or operation.updated_at
         break
-    # A hold or a known protective pre-effect refusal is not a failed service.
-    if plan.get("held") is True or reason == "deploy_blocked.retained_database_credential_changed":
+    if plan.get("held") is True:
         return
     if not reason:
         reason = (
@@ -219,7 +218,7 @@ def _record_attention(
                 observed_at=now,
             )
             recovered = recovered or incident.check_name == check_name
-    if recovered or not failed:
+    if recovered or not failed or reason == "deploy_blocked.retained_database_credential_changed":
         return
     if not candidate and any(
         incident.check_name.startswith(TESTING_DELIVERY_CHECK_PREFIX) for incident in existing

@@ -1,16 +1,18 @@
 """Host-side source capture and pre-registry sanitization for a fresh testing copy."""
 
 import base64
-import gzip
 import inspect
 import json
 from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane._odoo_rehearsal_attachment_validation import ATTACHMENT_VALIDATION_LIBRARY
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
+from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
 from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
-from typing import Literal, TypeVar, TypedDict
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from typing import Literal, TypeVar, TypedDict, NotRequired
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
+from control_plane.testing_address_settings_program import CANONICAL_ADDRESS_HOST_LIBRARY
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
 from control_plane.contracts.product_profile_record import (
@@ -65,6 +67,7 @@ class FreshOdooTestingGeneration(BaseModel):
     drill_storage_budget: OdooTestingDrillStorageBudget | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    clean_snapshot_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
     drill_database: str = Field(
         default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
     )
@@ -83,6 +86,8 @@ class FreshOdooTestingGeneration(BaseModel):
 
     @model_validator(mode="after")
     def _validate_source(self) -> "FreshOdooTestingGeneration":
+        if self.clean_snapshot_enabled and self.drill_storage_budget is None:
+            raise ValueError("Clean testing snapshots require reviewed storage headroom.")
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
         if bool(self.discard_drill_database) != bool(self.discard_copy_binding) or (
@@ -121,7 +126,7 @@ def fresh_testing_mode_refusal(
 ) -> tuple[OdooTargetReplacementPlanBlockerCode, str] | None:
     if generation is None:
         return None
-    if not generation.reconcile_requested_at:
+    if not (generation.completed_at or generation.reconcile_requested_at):
         return (
             "fresh_testing_bootstrap_incomplete",
             "Finish the original bootstrap route and queue preparation before executing this generation.",
@@ -161,7 +166,7 @@ from run_odoo_data_workflows import LocalServerSettings, OdooDataWorkflowRunner
     + r"""
 logging.disable(logging.CRITICAL)
 expected_copy_instance = globals().get("expected_copy_instance", "testing")
-if expected_copy_instance not in {"testing", "rehearsal"} or os.environ.get("PLATFORM_INSTANCE") != expected_copy_instance:
+if expected_copy_instance not in {"testing", "rehearsal", "preview"} or os.environ.get("PLATFORM_INSTANCE") != expected_copy_instance:
     raise SystemExit("Testing copy requires its exact instance")
 for key in tuple(os.environ):
     if key.startswith("ODOO_UPSTREAM_") or key.startswith("DATA_WORKFLOW_SSH_"):
@@ -172,45 +177,6 @@ os.environ["NO_SANITIZE"] = "false"
 
 
 class CopyRunner(OdooDataWorkflowRunner):
-    _rehearsal_logging_arguments = ("--logfile=/dev/stderr", "--log-level=error", "--log-handler=:ERROR")
-
-    def _rehearsal_command(self, invoke, *arguments):
-        try:
-            return invoke(*arguments)
-        except Exception as error:
-            if expected_copy_instance == "rehearsal":
-                cause = error
-                while cause is not None:
-                    if isinstance(cause, subprocess.CalledProcessError):
-                        if cause.stderr is not None:
-                            # Captured preflight output is unavailable here;
-                            # its artifact exception supplies the diagnosis.
-                            raise
-                        # Keep the bounded tail for Odoo's own exception, not
-                        # repeated argv and the artifact wrapper's chain.
-                        raise RuntimeError(f"Odoo command exited {cause.returncode}") from None
-                    cause = cause.__cause__
-            raise
-
-    def run_command(self, command):
-        if expected_copy_instance == "rehearsal":
-            arguments = command.split(None, 2)
-            if arguments[:1] == ["/odoo/odoo-bin"] or arguments[:2] == ["/venv/bin/python", "/odoo/odoo-bin"]:
-                # Config-directed logging must not hide the upgrade exception
-                # from the host's bounded, private original-operation receipt.
-                command += " " + " ".join(self._rehearsal_logging_arguments)
-                return self._rehearsal_command(super().run_command, command)
-        return super().run_command(command)
-
-    def _odoo_shell_command(self):
-        command = super()._odoo_shell_command()
-        if expected_copy_instance == "rehearsal":
-            command += list(self._rehearsal_logging_arguments)
-        return command
-
-    def _run_odoo_shell(self, script, label):
-        return self._rehearsal_command(super()._run_odoo_shell, script, label)
-
     def validate_native_attachments(self) -> None:
         if sys.argv[7:] != ['container-export']:
             return
@@ -261,6 +227,8 @@ class CopyRunner(OdooDataWorkflowRunner):
         if checked.returncode or b"integration_readback_ok=true" not in checked.stdout.splitlines():
             raise RuntimeError("Testing copy pre-registry integration readback failed")
         print("testing_copy_pre_registry_sanitized=true", flush=True)
+        if globals().get("rehearsal_timing_marker"):
+            print(rehearsal_timing_marker+"sql_sanitized="+datetime.now(timezone.utc).isoformat(), flush=True)
 
 
 if not callable(getattr(OdooDataWorkflowRunner, "prepare_credentials_before_registry", None)):
@@ -322,8 +290,11 @@ finally:
 
 
 def rehearsal_copy_runner(*, sanitize_source_only: bool) -> str:
+    from control_plane.contracts.odoo_rehearsal_timing import REHEARSAL_TIMING_MARKER
+
     return (
-        "expected_copy_instance = 'rehearsal'\n"
+        "from datetime import datetime, timezone\nexpected_copy_instance = 'rehearsal'\n"
+        + f"rehearsal_timing_marker = {REHEARSAL_TIMING_MARKER!r}\n"
         + f"sanitize_source_only = {sanitize_source_only!r}\n"
         + TESTING_COPY_RUNNER
     )
@@ -342,6 +313,8 @@ def finish_copy_upgrade(runner):
         raise RuntimeError("Fresh copy lacks completed module update witnesses")
     print("odoo_module_update_completed=true", flush=True)
     print("odoo_module_update_modules_configured=true", flush=True)
+    if globals().get("rehearsal_timing_marker"):
+        print(rehearsal_timing_marker+"module_update_completed="+datetime.now(timezone.utc).isoformat(), flush=True)
     runner.assert_core_schema_healthy()
     runner.ensure_gpt_users()
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
@@ -462,6 +435,7 @@ class FreshRestoreScriptArguments(TypedDict):
     runtime_environment: dict[str, str]
     clear_stale_lock: bool
     data_workflow_lock_path: str
+    clean_snapshot_retirements: NotRequired[list[dict[str, object]]]
 
 
 def build_fresh_testing_restore_script(
@@ -478,6 +452,7 @@ def build_fresh_testing_restore_script(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
     native_capture: dict[str, object] | None = None,
+    clean_snapshot_retirements: list[dict[str, object]] | None = None,
 ) -> str:
     spec = fresh_testing_restore_spec(
         generation=generation,
@@ -492,13 +467,11 @@ def build_fresh_testing_restore_script(
         clear_stale_lock=clear_stale_lock,
         data_workflow_lock_path=data_workflow_lock_path,
         native_capture=native_capture,
+        clean_snapshot_retirements=clean_snapshot_retirements,
     )
     return render_fresh_testing_restore_spec(spec)
 
 
-# Native capture is a separate bounded literal, so reserving this many script
-# bytes before capture/delivery bounds the exact final script independently of
-# how the rest of the input compresses.
 NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES = 1024
 
 
@@ -520,31 +493,14 @@ def render_fresh_testing_restore_spec(spec: dict[str, object]) -> str:
                 "filestore",
             )
         }
-        if len(repr(capture).encode()) > NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES:
+        if len(json.dumps(capture, sort_keys=True).encode()) > NATIVE_CAPTURE_SCRIPT_RESERVE_BYTES:
             from control_plane.contracts.provider_schedule import ScheduleMaterializationTooLarge
 
             raise ScheduleMaterializationTooLarge()
-    encoded = base64.b64encode(
-        gzip.compress(json.dumps(spec, sort_keys=True).encode(), mtime=0)
-    ).decode()
-    program = base64.b64encode(
-        gzip.compress(FRESH_TESTING_RESTORE_HOST_PROGRAM.encode(), mtime=0)
-    ).decode()
-    return (
-        "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_FRESH_COPY'\n"
-        + "import base64,gzip,json,sys\n"
-        + "spec=json.loads(gzip.decompress(base64.b64decode("
-        + repr(encoded)
-        + ")))\n"
-        + "spec['native_capture']="
-        + repr(capture)
-        + "\n"
-        + "sys.argv=['fresh-copy',base64.b64encode(json.dumps(spec).encode()).decode()]\n"
-        + "exec(compile(gzip.decompress(base64.b64decode("
-        + repr(program)
-        + ")), '<fresh-testing-restore>', 'exec'), {})"
-        + "\nLP_FRESH_COPY\n"
-    )
+    from control_plane.host_package import host_schedule
+
+    spec["native_capture"] = capture
+    return host_schedule("restore", spec)
 
 
 def fresh_testing_restore_spec(
@@ -561,6 +517,7 @@ def fresh_testing_restore_spec(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
     native_capture: dict[str, object] | None = None,
+    clean_snapshot_retirements: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     from control_plane.dokploy.compose import (
         ODOO_DATABASE_DATA_DIRECTORY,
@@ -578,6 +535,7 @@ def fresh_testing_restore_spec(
         readback_spec=readback_spec,
     )
     spec = {
+        "clean_snapshot_retirements": clean_snapshot_retirements or [],
         "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
         "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
         "runner_healthcheck_command": ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
@@ -603,8 +561,12 @@ def fresh_testing_restore_spec(
         "native_files_program": NATIVE_TESTING_FILES_PROGRAM,
         "website_settings_program": WEBSITE_SETTINGS_PROGRAM,
         "workflow_environment": workflow_environment,
-        "ssh_key_path": source_environment.get("DATA_WORKFLOW_SSH_KEY", ""),
-        "ssh_directory": source_environment.get("DATA_WORKFLOW_SSH_DIR", ""),
+        "ssh_key_path": source_environment.get(
+            "DATA_WORKFLOW_SSH_KEY", runtime_environment.get("DATA_WORKFLOW_SSH_KEY", "")
+        ),
+        "ssh_directory": source_environment.get(
+            "DATA_WORKFLOW_SSH_DIR", runtime_environment.get("DATA_WORKFLOW_SSH_DIR", "")
+        ),
     }
     return spec
 
@@ -821,7 +783,7 @@ class TestingProviderDenied(Exception):
 
 def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False)
+        stderr=subprocess.PIPE, check=False, pass_fds=inherited_lock_descriptors)
     if result.returncode:
         if arguments[0]=='docker' and docker_daemon_authorization_denied(result.stderr):
             raise TestingProviderDenied('The testing runtime refused this identity')
@@ -929,6 +891,33 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
         os.close(directory)
 
 
+def restore_lock_path(namespace):
+    return Path(tempfile.gettempdir()) / (namespace + "-copy.lock")
+
+
+def discard_interrupted_restore_staging(staging):
+    if staging.exists():
+        shutil.rmtree(staging)
+
+
+def unpause_runner_left_by_interrupted_landing(containers):
+    if containers["script-runner"][1].get("State", {}).get("Status") == "paused":
+        docker("unpause", containers["script-runner"][0])
+
+
+def move_staged_filestore_into_volume(runner, staged, destination):
+    docker("pause", runner)
+    try:
+        if destination.resolve() != destination:
+            raise RuntimeError("Testing filestore is aliased")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            os.rename(destination, staged.parent / "replaced-filestore")
+        os.rename(staged, destination)
+    finally:
+        docker("unpause", runner)
+
+
 def restore_main():
     global inspection_predicate, inspection_only
     inspection_predicate = ReadbackPredicate.INPUT
@@ -951,6 +940,11 @@ def restore_main():
     containers = inspect_copy_runtime(spec, expected_instance="testing")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
+    if spec.get('canonical_settings'):
+        if not spec.get('verification_only'):
+            raise RuntimeError('Canonical settings require the qualified copy lock')
+        canonical_address_settings(spec, containers)
+        return
     if spec.get('storage_maintenance'):
         storage_maintenance(spec, containers)
         return
@@ -1076,12 +1070,15 @@ def restore_main():
             artifacts=files['artifacts']
         print(prefix+json.dumps({'type':'complete','runner':containers['script-runner'][1]['Id'],'resume':present=='1','artifacts':artifacts}),flush=True)
         return
+    unpause_runner_left_by_interrupted_landing(containers)
     present = docker("exec", "-i", containers["database"][0], "sh", "-c",
         'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
         "_", database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
     if present not in {"0", "1"}:
         raise RuntimeError("Fresh testing database inventory is ambiguous")
     resume = present == "1"
+    if gen.get('clean_snapshot_enabled'):
+        retire_clean_snapshots(spec)
     staged_bytes = 0
     assembly_bytes = 0
     if not resume and gen.get('drill_storage_budget') and gen.get('source_mode') == 'container-export':
@@ -1091,7 +1088,11 @@ def restore_main():
         files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
         staged_bytes = sum(item['size'] for item in files['chunks'])
         assembly_bytes = sum(capture[part]['size'] for part in ('database', 'filestore'))
-    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes):
+    data_backing = Path(json.loads(docker("volume", "inspect", namespace + "-data"))[0]["Mountpoint"]).resolve(strict=True)
+    restore_staging = restore_staging_path(data_backing)
+    discard_interrupted_restore_staging(restore_staging)
+    clones = {}
+    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes, clone_decisions=clones):
         raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
@@ -1113,7 +1114,7 @@ def restore_main():
                 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*", source[key]):
                     raise RuntimeError("Unsupported restore source coordinate")
             path = source["ODOO_UPSTREAM_FILESTORE_PATH"]
-            if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path):
+            if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path) or (source["ODOO_UPSTREAM_USER"] == "root" and len(Path(path).parts) == 1):
                 raise RuntimeError("Unsupported restore source filestore")
             destination = source["ODOO_UPSTREAM_USER"] + "@" + source["ODOO_UPSTREAM_HOST"]
             ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
@@ -1133,17 +1134,26 @@ def restore_main():
             ssh.extend(["-i", key_path, "-o", "IdentitiesOnly=yes", "-o", "UserKnownHostsFile=" + str(ssh_directory / "known_hosts")])
             # The host's existing identity is used only by these two fixed source reads.
             # No key, agent socket or SSH directory enters an application container.
-            remote = shlex.join(["sudo", "-u", source["ODOO_UPSTREAM_DB_USER"], "pg_dump", "-Fc", "--", source["ODOO_UPSTREAM_DB_NAME"]])
-            staging = Path(tempfile.mkdtemp(prefix=namespace + "-copy-"))
+            remote = shlex.join(
+                ["sudo", "-u", source["ODOO_UPSTREAM_DB_USER"], "pg_dump", "-Fc", "--", source["ODOO_UPSTREAM_DB_NAME"]]
+                if source["ODOO_UPSTREAM_USER"] == "root"
+                else ["pg_dump", "-U", source["ODOO_UPSTREAM_DB_USER"], "-Fc", source["ODOO_UPSTREAM_DB_NAME"]]
+            )
+            restore_staging.mkdir(mode=0o700)
+            staging = restore_staging
             dump = staging / "database.dump"
             with dump.open("xb") as output:
                 command([*ssh, destination, remote], stdout=output)
             filestore = staging / "filestore"
             filestore.mkdir()
-            command(["rsync", "-a", "--safe-links", "--no-devices", "--no-specials", "--protect-args",
+            rsync_options = (
+                ["-a", "--safe-links", "--no-devices", "--no-specials", "--protect-args"]
+                if source["ODOO_UPSTREAM_USER"] == "root"
+                else ["-a", "--no-links", "--no-devices", "--no-specials"]
+            )
+            command(["rsync", *rsync_options,
                 "-e", shlex.join(ssh), destination + ":" + path.rstrip("/") + "/", str(filestore) + "/"])
-            docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
-            docker("cp", str(filestore) + "/.", runner + ":/volumes/data/filestore/" + database)
+            move_staged_filestore_into_volume(runner, filestore, data_backing / "filestore" / database)
             docker("cp", str(dump), runner + ":" + dump_path)
             docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
         uid = docker("exec", runner, "id", "-u").decode().strip()
@@ -1171,6 +1181,11 @@ def restore_main():
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
+        if gen.get('clean_snapshot_enabled'):
+            snapshot = capture_clean_snapshot(spec, containers, clones.get('snapshot'))
+            print('clean_testing_snapshot_completed=true')
+            print('clean_snapshot_database_sha256=' + snapshot['database_sha256'])
+            print('clean_snapshot_filestore_sha256=' + snapshot['filestore_sha256'])
         # Emit only the established value-free protocol markers, never runner logs.
         for line in output.splitlines():
             if re.fullmatch(r"(?:website_bootstrap_[a-z_]+|odoo_[a-z_]+)=(?:true|false|[0-9]+)", line):
@@ -1195,7 +1210,7 @@ def restore_main():
 
 
 def main():
-    global inspection_only
+    global inspection_only, inherited_lock_descriptors
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     inspection_only = bool(spec.get('inspection_only'))
     namespace = spec["generation"]["namespace"]
@@ -1204,18 +1219,20 @@ def main():
     if spec.get('inspection_only') and not spec.get('verification_only'):
         restore_main()
         return
-    path = str(Path(tempfile.gettempdir()) / (namespace + "-copy.lock"))
+    path = restore_lock_path(namespace)
     # This coordination file is disposable across host reboot/tmp cleanup. Its
     # existence is not copy evidence; every execution uses the same flock inode.
     descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        inherited_lock_descriptors = (descriptor,)
         restore_main()
     finally:
         os.close(descriptor)
 
 
 __LP_STORAGE_MAINTENANCE_LIBRARY__
+__LP_CLEAN_SNAPSHOT_LIBRARY__
 
 inspection_predicate = ReadbackPredicate.NATIVE_READ
 inspection_only = False
@@ -1250,7 +1267,18 @@ FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
     "__LP_STORAGE_MAINTENANCE_LIBRARY__", STORAGE_MAINTENANCE_LIBRARY
-)
+).replace("__LP_CLEAN_SNAPSHOT_LIBRARY__", CLEAN_TESTING_SNAPSHOT_LIBRARY)
+
+
+def _testing_generation_hold_blocks_read(
+    target: DokployTargetRecord, *, task_account_cleanup: bool, resource_qualification: bool
+) -> bool:
+    hold = target.policies.staff_testing_hold
+    return (
+        hold is not None
+        and not task_account_cleanup
+        and not (resource_qualification and hold.purpose == "isolation_staging")
+    )
 
 
 def read_current_testing_generation(
@@ -1261,6 +1289,7 @@ def read_current_testing_generation(
     instance: str,
     bootstrap_preparation: bool = False,
     task_account_cleanup: bool = False,
+    resource_qualification: bool = False,
 ) -> FreshOdooTestingGeneration | None:
     if instance != "testing":
         return None
@@ -1272,7 +1301,11 @@ def read_current_testing_generation(
         publication = published_testing_copy(store, product=product, context=context)
         if publication is not None:
             target = store.read_dokploy_target_record(context_name=context, instance_name=instance)
-            if target.policies.staff_testing_hold is not None and not task_account_cleanup:
+            if _testing_generation_hold_blocks_read(
+                target,
+                task_account_cleanup=task_account_cleanup,
+                resource_qualification=resource_qualification,
+            ):
                 raise ValueError("The adopted testing copy has a staff testing hold.")
             # Native publication's queue/copy/route receipt replaces the old
             # bootstrap and resource-adoption receipts. Empty copies carry none.
@@ -1312,7 +1345,11 @@ def read_current_testing_generation(
         context_name=context, instance_name="testing"
     )
     if (
-        target.policies.staff_testing_hold is not None and not task_account_cleanup
+        _testing_generation_hold_blocks_read(
+            target,
+            task_account_cleanup=task_account_cleanup,
+            resource_qualification=resource_qualification,
+        )
     ) or target.pending_public_host_effects:
         raise ValueError("Fresh testing generation has a use or route hold.")
     values: dict[str, object] = {}
@@ -1596,5 +1633,6 @@ FRESH_TESTING_RESTORE_HOST_PROGRAM = (
     COPY_RUNTIME_INSPECTION_LIBRARY
     + "\n"
     + inspect.getsource(docker_daemon_authorization_denied)
+    + CANONICAL_ADDRESS_HOST_LIBRARY
     + FRESH_TESTING_RESTORE_HOST_PROGRAM
 )

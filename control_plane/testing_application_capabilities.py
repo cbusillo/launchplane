@@ -12,6 +12,10 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_reference import docker_image_repository, docker_image_digest
 from control_plane.contracts.runtime_identity import parse_runtime_identity_payload
 from control_plane.dokploy import api, source
+from control_plane.dokploy.application_runtime import fetch_application_runtime
+from control_plane.dokploy.runtime_evidence import DokployEvidenceProviderError
+from control_plane.dokploy.native_copy_stream import NATIVE_PROGRAM_SOURCE_SITE_LIMIT
+from control_plane.dokploy.native_copy_stream import CAPABILITY_FAILURE_SITES_MARKER
 from control_plane.generic_web_testing_exclusion import bind_testing_recipient, _target_reservations
 from control_plane.provider_operations import build_provider_operation_key
 from control_plane.storage.postgres import PostgresRecordStore
@@ -23,6 +27,8 @@ from control_plane.workflows.generic_web_deploy_provider import generic_web_prov
 from control_plane.workflows.generic_web_deploy_provider import (
     decode_generic_web_provider_reconciliation_target,
 )
+
+RETAINED_CAPABILITY_PROGRAM_NAME = "Launchplane retained application capabilities"
 
 
 def retained_application_capability_spec(
@@ -70,9 +76,15 @@ def retained_application_capability_spec(
     from control_plane.drivers.generic_web_dispatch import GenericWebDeployEnvelope
 
     deployments = {}
-    for row in _target_reservations(
-        store, product=product, context=context, target_key=key, target_id=target_id.target_id
-    ):
+    reservations = _target_reservations(
+        store,
+        product=product,
+        context=context,
+        target_key=key,
+        target_id=target_id.target_id,
+        require_complete=True,
+    )
+    for row in reservations:
         if row.provider_target_key != key:
             continue
         captured = decode_generic_web_provider_reconciliation_target(row.reconciliation_key)
@@ -118,6 +130,54 @@ def retained_application_capability_spec(
                 "provider_reference": identity.image_reference,
                 "source": identity.source_git_ref,
             }
+    if not reservations:
+        try:
+            observed = fetch_application_runtime(
+                host=host, token=token, application_id=target_id.target_id
+            )
+        except DokployEvidenceProviderError as error:
+            raise ValueError("The retained application runtime is unavailable.") from error
+        if (
+            observed.application_id != target_id.target_id
+            or observed.app_name != payload.get("appName")
+            or observed.server_id != (payload.get("serverId") or "")
+            or not observed.service_deployment_record_id
+        ):
+            raise ValueError("The retained runtime has no attributable application identity.")
+        try:
+            original = store.read_deployment_record(observed.service_deployment_record_id)
+        except FileNotFoundError as error:
+            raise ValueError("The retained runtime deployment is unavailable.") from error
+        identity = parse_runtime_identity_payload(original.runtime_identity)
+        if (
+            original.record_id != observed.service_deployment_record_id
+            or (original.context, original.instance) != (context, "testing")
+            or original.deployed_target is None
+            or (
+                original.deployed_target.provider_id,
+                original.deployed_target.target_category,
+                original.deployed_target.target_id,
+            )
+            != (provider.provider_id, "application", target_id.target_id)
+            or identity is None
+            or (
+                identity.product,
+                identity.context,
+                identity.instance,
+                identity.deployment_record_id,
+            )
+            != (product, context, "testing", original.record_id)
+            or not docker_image_digest(identity.artifact_id)
+            or original.artifact_identity is None
+            or original.artifact_identity.artifact_id != identity.artifact_id
+            or original.source_git_ref != identity.source_git_ref
+        ):
+            raise ValueError("The retained runtime deployment does not identify this application.")
+        deployments[original.record_id] = {
+            "artifact": identity.artifact_id,
+            "provider_reference": identity.image_reference,
+            "source": identity.source_git_ref,
+        }
     app_name = payload.get("appName")
     if not isinstance(app_name, str) or not app_name or not deployments:
         raise ValueError("The retained original has no attributable application identity.")
@@ -135,9 +195,9 @@ def runtime_capability_program_header() -> str:
     return (
         "import re\nfrom dataclasses import dataclass\nfrom urllib.parse import urlparse\n"
         "from typing import Literal, Any\nfrom collections.abc import Mapping\n"
-        + "PLATFORM_CREDENTIAL_KEYS="
-        + repr(credentials.PLATFORM_CREDENTIAL_KEYS)
-        + "\n"
+        + "PLATFORM_CREDENTIAL_KEYS=frozenset({"
+        + ", ".join(repr(key) for key in sorted(credentials.PLATFORM_CREDENTIAL_KEYS))
+        + "})\n"
         + "GITHUB_TOKEN_VALUE_PATTERN=re.compile("
         + repr(credentials.GITHUB_TOKEN_VALUE_PATTERN.pattern)
         + ")\n"
@@ -217,6 +277,56 @@ def retained_application_capability_program(spec: dict[str, object]) -> str:
     )
 
 
+def capability_program_matches(observed: object, expected: str) -> bool:
+    if _capability_program_matches(observed, expected):
+        return True
+    if expected.count(CAPABILITY_FAILURE_REPORT) != 1:
+        return False
+    historical = expected.replace(CAPABILITY_FAILURE_REPORT, LEGACY_CAPABILITY_FAILURE_REPORT, 1)
+    if _capability_program_matches(observed, historical):
+        return True
+    for fragment in (
+        PREPARED_CONTAINER_CAPABILITY_PROGRAM,
+        PREPARED_CONTAINER_LOOKUP,
+        PREPARED_CONTAINER_READBACK,
+    ):
+        if historical.count(fragment) != 1:
+            break
+        historical = historical.replace(fragment, "", 1)
+    else:
+        if _capability_program_matches(observed, historical):
+            return True
+    return False
+
+
+def capability_program_body(script: str) -> str:
+    _, separator, tail = script.partition("<<'LP_RETAINED_CAPABILITY'\n")
+    body, ending, _ = tail.rpartition("\nLP_RETAINED_CAPABILITY\n")
+    return body if separator and ending else ""
+
+
+def _capability_program_matches(observed: object, expected: str) -> bool:
+    if not isinstance(observed, str) or len(observed) != len(expected):
+        return False
+    if observed == expected:
+        return True
+    anchor = "\nPLATFORM_CREDENTIAL_KEYS=frozenset({"
+    if expected.count(anchor) != 1:
+        return False
+    prefix, _, tail = expected.partition(anchor)
+    _, separator, suffix = tail.partition("})\n")
+    if not separator:
+        return False
+    prefix += anchor
+    suffix = separator + suffix
+    if not observed.startswith(prefix) or not observed.endswith(suffix):
+        return False
+    tokens = observed[len(prefix) : -len(suffix)].split(", ")
+    return len(tokens) == len(credentials.PLATFORM_CREDENTIAL_KEYS) and set(tokens) == {
+        repr(key) for key in credentials.PLATFORM_CREDENTIAL_KEYS
+    }
+
+
 def inspect_retained_application_capabilities(
     *,
     store: PostgresRecordStore,
@@ -233,10 +343,11 @@ def inspect_retained_application_capabilities(
         retained_target_id=str(spec["application_id"]),
         context=context,
         namespace=namespace,
-        name="Launchplane retained application capabilities",
+        name=RETAINED_CAPABILITY_PROGRAM_NAME,
         prepare_script=script,
         readback_script=script,
         before_effect=before_effect,
+        script_matches=capability_program_matches,
     )
     if result.get("testing_resources_ok") != "true" or result.get(
         "testing_resources_binding_sha256"
@@ -245,7 +356,82 @@ def inspect_retained_application_capabilities(
     return canonical_json_sha256(spec)
 
 
-RETAINED_APPLICATION_CAPABILITY_PROGRAM = r"""
+LEGACY_CAPABILITY_FAILURE_REPORT = """except Exception:
+    print("testing_resources_ok=false")
+    sys.exit(1)
+"""
+CAPABILITY_FAILURE_REPORT = f"""except Exception as error:
+    failure_sites = []
+    failure_traceback = error.__traceback__
+    while failure_traceback is not None:
+        if failure_traceback.tb_frame.f_code.co_filename == "<stdin>":
+            failure_sites.append(failure_traceback.tb_lineno)
+        failure_traceback = failure_traceback.tb_next
+    print({CAPABILITY_FAILURE_SITES_MARKER!r} + "=" + ",".join(map(str, failure_sites[-{NATIVE_PROGRAM_SOURCE_SITE_LIMIT}:])))
+    print("testing_resources_ok=false")
+    sys.exit(1)
+"""
+
+
+PREPARED_CONTAINER_CAPABILITY_PROGRAM = r"""
+prepared = {}
+
+def prepared_container_id(task, identifiers, service, nodes, values):
+    candidates = []
+    for identifier in identifiers:
+        found = json.loads(docker("inspect", identifier))
+        if not isinstance(found, list) or len(found) != 1 or found[0].get("Id") != identifier:
+            raise ValueError("container inventory incomplete")
+        container = found[0]
+        if (container.get("Config", {}).get("Labels") or {}).get("com.docker.swarm.task.id") == task["ID"]:
+            candidates.append(container)
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ValueError("prepared task container is ambiguous")
+    container = candidates[0]
+    labels = container.get("Config", {}).get("Labels") or {}
+    slot = task.get("Slot")
+    if (task.get("Status", {}).get("State") != "ready" or type(slot) is not int or slot < 1
+        or task.get("NodeID") != nodes[0]["ID"]
+        or labels.get("com.docker.swarm.service.id") != service["ID"]
+        or labels.get("com.docker.swarm.service.name") != service["Spec"]["Name"]
+        or labels.get("com.docker.swarm.node.id") != task["NodeID"]
+        or container.get("Name") != "/" + service["Spec"]["Name"] + "." + str(slot) + "." + task["ID"]
+        or container.get("State", {}).get("Status") != "created"
+        or container.get("State", {}).get("Running") is not False
+        or container.get("Config", {}).get("Image") != task["Spec"]["ContainerSpec"].get("Image")
+        or json.loads(docker("inspect", "--type", "container", container["Name"][1:])) != [container]):
+        raise ValueError("prepared task container ownership unavailable")
+    image_id = container.get("Image")
+    if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
+        raise ValueError("prepared task image unavailable")
+    image = json.loads(docker("image", "inspect", image_id))
+    if not isinstance(image, list) or len(image) != 1 or image[0].get("Id") != image_id:
+        raise ValueError("prepared task image unavailable")
+    merged = capability({"Env": image[0].get("Config", {}).get("Env") or []})
+    merged.update(values)
+    if capability(container.get("Config")) != merged:
+        raise ValueError("prepared task container inputs changed")
+    prepared[task["ID"]] = (task, container)
+    return container["Id"]
+"""
+
+PREPARED_CONTAINER_LOOKUP = r"""
+            if not container_id and "@" not in configuration.get("Image", ""):
+                container_id = prepared_container_id(task[0], container_ids, service[0], local_nodes, values)
+"""
+
+PREPARED_CONTAINER_READBACK = r"""
+    for task, container in prepared.values():
+        if (json.loads(docker("inspect", "--type", "task", task["ID"])) != [task]
+            or json.loads(docker("inspect", container["Id"])) != [container]):
+            raise ValueError("prepared task container changed")
+"""
+
+
+RETAINED_APPLICATION_CAPABILITY_PROGRAM = (
+    r"""
 def docker(*arguments):
     result = subprocess.run(["docker", *arguments], check=False, capture_output=True, text=True, timeout=60)
     if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
@@ -293,7 +479,9 @@ def image_matches(reference, artifact, provider):
     if "@" in reference:
         return repository(reference) == repository(artifact) and docker_image_digest(reference) == docker_image_digest(artifact)
     return reference == provider
-
+"""
+    + PREPARED_CONTAINER_CAPABILITY_PROGRAM
+    + r"""
 try:
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     service = json.loads(docker("service", "inspect", spec["application"]))
@@ -326,7 +514,9 @@ try:
                 or not docker_image_digest(artifact) or not image_matches(configuration.get("Image", ""), artifact, provider)):
                 raise ValueError("retained immutable image unavailable")
             container_id = task[0].get("Status", {}).get("ContainerStatus", {}).get("ContainerID")
-            if container_id and container_id in container_ids:
+"""
+    + PREPARED_CONTAINER_LOOKUP
+    + r"""            if container_id and container_id in container_ids:
                 container = json.loads(docker("inspect", container_id))[0]
                 image_id = container.get("Image")
                 if not isinstance(image_id, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_id):
@@ -354,14 +544,15 @@ try:
             continue
         capability(configuration)
         mounts(container[0].get("Mounts"))
-    if (not attributable or rows("service", "ps", "--no-trunc", "-q", spec["application"]) != task_ids
+"""
+    + PREPARED_CONTAINER_READBACK
+    + r"""    if (not attributable or rows("service", "ps", "--no-trunc", "-q", spec["application"]) != task_ids
         or rows("ps", "-aq", "--no-trunc", "--filter", container_filter) != container_ids
         or json.loads(docker("service", "inspect", spec["application"])) != service
         or single_local_swarm_node(docker) != local_nodes):
         raise ValueError("retained attribution changed")
     print("testing_resources_binding_sha256=" + hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
     print("testing_resources_ok=true")
-except Exception:
-    print("testing_resources_ok=false")
-    sys.exit(1)
 """
+    + CAPABILITY_FAILURE_REPORT
+)

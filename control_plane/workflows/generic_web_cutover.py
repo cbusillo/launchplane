@@ -90,7 +90,14 @@ def execute_web_cutover(
     checkpoint: Callable[[str], None] = lambda _step: None,
     before_deployment_records: Callable[[], None] | None = None,
 ) -> GenericWebCutoverRecord:
-    plan = GenericWebCutoverPlan.model_validate(plan.model_dump())
+    try:
+        admitted = store.load(record_id)
+    except FileNotFoundError:
+        plan = GenericWebCutoverPlan.model_validate(plan.model_dump())
+    else:
+        if admitted.plan != plan:
+            raise ValueError("cannot change the stored cutover plan")
+        plan = GenericWebCutoverRecord.model_validate(admitted.model_dump()).plan
     require_candidate_deploy_reference(
         target_type=plan.new.target_type,
         image=plan.new.image,
@@ -190,8 +197,8 @@ def rollback_web_cutover(
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     checkpoint: Callable[[str], None] = lambda _step: None,
 ) -> GenericWebCutoverRecord:
-    initial = store.load(record_id)
-    plan = GenericWebCutoverPlan.model_validate(initial.plan.model_dump())
+    initial = GenericWebCutoverRecord.model_validate(store.load(record_id).model_dump())
+    plan = initial.plan
     if plan.compatibility.classification != "compatible":
         raise ValueError("incompatible rollback requires authorized data recovery")
     with provider.exclusive(plan):

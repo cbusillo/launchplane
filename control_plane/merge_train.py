@@ -277,16 +277,6 @@ class MergeTrainBranchUpdateResult(BaseModel):
     detail: str
 
 
-class MergeTrainRereadResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["reread", "skipped"]
-    repository: str
-    base_branch: str
-    refreshed_result: MergeTrainDryRunResult | None = None
-    detail: str
-
-
 class MergeTrainWaitResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -365,6 +355,8 @@ def build_merge_train_dry_run_result(
         planned_dependency_heads=planned_dependency_heads,
         planned_handoff_heads=planned_handoff_heads,
     )
+    if batch_landing and new_candidate:
+        queue = _defer_unsupported_stacks(policy=policy, snapshot=snapshot, queue=queue)
     eligible_entries = tuple(entry for entry in queue if entry.eligible)
     if batch_landing:
         # Accepted features start a batch; remaining planned heads keep its
@@ -439,6 +431,11 @@ def build_merge_train_dry_run_result(
             for pr in snapshot.pull_requests
             if _targets_merge_train_base(pull_request=pr, base_branch=snapshot.base_branch)
         }
+        dependency_numbers = {
+            pr.number
+            for pr in snapshot.pull_requests
+            if pr.actor_id in repository_policy.enqueue.dependency_identity_ids
+        }
         group_areas = new_candidate and not any(
             entry.owner_review_required for entry in eligible_entries
         )
@@ -447,6 +444,11 @@ def build_merge_train_dry_run_result(
         for entry in eligible_entries:
             if batch_size is not None and len(batch_entries) == batch_size:
                 deferred_reason = "waiting for the next candidate: maximum batch size reached"
+                break
+            if entry.number in dependency_numbers:
+                if not batch_entries:
+                    batch_entries.append(entry)
+                deferred_reason = "waiting for the next candidate: dependency update isolation"
                 break
             if entry.requires_individual_landing:
                 if not batch_entries:
@@ -537,6 +539,46 @@ def merge_train_snapshot_of(
                 if pull_request.number in numbers
             )
         }
+    )
+
+
+def _defer_unsupported_stacks(
+    *,
+    policy: MergeTrainPolicy,
+    snapshot: MergeTrainDryRunSnapshot,
+    queue: tuple[MergeTrainQueueEntry, ...],
+) -> tuple[MergeTrainQueueEntry, ...]:
+    child_bases = {
+        pr.base_ref for pr in snapshot.pull_requests if pr.base_ref != snapshot.base_branch
+    }
+    stacked_roots = {pr.number for pr in snapshot.pull_requests if pr.head_ref in child_bases}
+    refusals: dict[int, tuple[str, ...]] = {}
+    for entry in queue:
+        if (
+            not entry.eligible
+            or entry.number not in stacked_roots
+            or entry.required_checks_status == "fail"
+            or entry.mergeable == "conflicting"
+        ):
+            continue
+        discovery = discover_merge_train_stack(
+            policy=policy, snapshot=snapshot, root_pull_request_number=entry.number
+        )
+        if discovery.status == "unsupported":
+            refusals[entry.number] = discovery.unsupported_reasons
+    if not refusals or not any(entry.eligible and entry.number not in refusals for entry in queue):
+        return queue
+    return tuple(
+        entry.model_copy(
+            update={
+                "eligible": False,
+                "ineligible_reasons": (*entry.ineligible_reasons, *refusals[entry.number]),
+                "deferred_reasons": refusals[entry.number],
+            }
+        )
+        if entry.number in refusals
+        else entry
+        for entry in queue
     )
 
 
@@ -717,33 +759,6 @@ def apply_merge_train_branch_update_intent(
     )
 
 
-def reread_merge_train_after_branch_update(
-    *,
-    branch_update_result: MergeTrainBranchUpdateResult,
-    policy: MergeTrainPolicy,
-    snapshot_reader: MergeTrainSnapshotReader,
-) -> MergeTrainRereadResult:
-    if not branch_update_result.reread_required:
-        return MergeTrainRereadResult(
-            status="skipped",
-            repository=branch_update_result.repository,
-            base_branch=branch_update_result.base_branch,
-            detail="Branch update result does not require a reread.",
-        )
-    snapshot = snapshot_reader.read_merge_train_snapshot(
-        repository=branch_update_result.repository,
-        base_branch=branch_update_result.base_branch,
-    )
-    refreshed_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
-    return MergeTrainRereadResult(
-        status="reread",
-        repository=branch_update_result.repository,
-        base_branch=branch_update_result.base_branch,
-        refreshed_result=refreshed_result,
-        detail="Re-read mergeability and required checks after branch update.",
-    )
-
-
 def build_merge_train_wait_result(
     *, dry_run_result: MergeTrainDryRunResult
 ) -> MergeTrainWaitResult:
@@ -831,7 +846,7 @@ def _build_queue_entry(
         ineligible_reasons.append(f"held by {repository_policy.blocked_label} label")
     is_dependency_update = (
         pull_request.actor_id is not None
-        and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
+        and repository_policy.enqueue.dependency_bot(pull_request.actor_id) is not None
     )
     label_refusal = enqueue_label_refusal(
         repository_policy, labels=pull_request.labels, label_actors=pull_request.label_actors

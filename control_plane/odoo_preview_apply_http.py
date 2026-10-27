@@ -1,11 +1,12 @@
-from contextlib import AbstractContextManager
-from collections.abc import Callable
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import base64
+import binascii
 import hashlib
 from pathlib import Path
 from typing import Any, cast
-import re
 
 import click
 from pydantic import Field, model_validator
@@ -14,9 +15,20 @@ from control_plane import odoo_instance_overrides as control_plane_odoo_instance
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
+from control_plane.clean_testing_snapshot import preview_snapshot
+from control_plane.odoo_testing_restore import preflight_fresh_testing_intent
+from control_plane.integration_readback import INTEGRATION_FAMILIES
+from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.preview_settings import validate_preview_scope
+from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+from control_plane.odoo_addon_settings_override import (
+    OdooAddonSettingsStore,
+    _protected_store_keys,
+    _validate_store_key,
+)
 from control_plane.odoo_preview_import_source import (
     PreviewImportSourceStore,
     PreviewImportSourceError,
@@ -44,7 +56,11 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
-from control_plane.contracts.odoo_stable_target_replacement import apply_artifact_odoo_version
+from control_plane.contracts.odoo_stable_target_replacement import (
+    apply_artifact_odoo_version,
+    LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+    merge_odoo_install_modules,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_execution import (
     ODOO_PREVIEW_DESTROY_REASON_PREFIX as _ODOO_PREVIEW_DESTROY_REASON_PREFIX,
@@ -122,12 +138,20 @@ class OdooPreviewApplyConfigError(click.ClickException):
 class OdooPreviewApplyEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     apply: OdooPreviewDokployApplyRequest
+    preserve_original_reservation_id: str = Field(
+        default="",
+        max_length=128,
+        pattern=r"^(?:mutation-reservation-[a-f0-9]{64})?$",
+        exclude_if=lambda value: not value,
+    )
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooPreviewApplyEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo preview apply")
         if self.product.strip() != self.apply.dry_run_plan.product.strip():
             raise ValueError("Odoo preview apply requires matching product values.")
+        if self.preserve_original_reservation_id and self.apply.dry_run_plan.operation != "destroy":
+            raise ValueError("Original preview preservation requires a destroy operation.")
         return self
 
 
@@ -196,12 +220,32 @@ def _build_odoo_preview_apply_inputs(
     )
     if result.status != "ready" or result.operation != "refresh":
         return result
+    if profile.preview.clean_testing_snapshot:
+        if request.fishbowl_source is not None:
+            raise ValueError("Snapshot previews cannot connect to an import source.")
+        retained = preview_has_completed_restore(
+            record_store=record_store,
+            profile=profile,
+            plan=result.dry_run_plan,
+            pr_number=request.pr_number,
+        )
+        if not retained:
+            snapshot = preview_snapshot(cast(Any, record_store), profile)
+            result = result.model_copy(
+                update={
+                    "dry_run_plan": result.dry_run_plan.model_copy(
+                        update={"clean_snapshot": snapshot}
+                    )
+                }
+            )
     if request.fishbowl_source is not None:
         source = resolve_fishbowl_preview_source(
             store=cast(PreviewImportSourceStore, record_store),
             profile=profile,
             preview_slug=result.preview_slug,
             copy_from=request.fishbowl_source,
+            control_plane_root=control_plane_root,
+            database_url=database_url,
         )
         return result.model_copy(update={"fishbowl_source_sha256": source.authority_sha256})
     try:
@@ -355,6 +399,7 @@ def refresh_odoo_preview_issued_plan(
     issued_plan: OdooPreviewApplyInputsResult,
     database_url: str | None,
     observed_at: datetime | None = None,
+    retained_preservation_retry: bool = False,
 ) -> OdooPreviewApplyEnvelope:
     provenance = issued_plan.plan_provenance
     if provenance is None:
@@ -371,7 +416,7 @@ def refresh_odoo_preview_issued_plan(
             code="odoo_preview_plan_mismatch",
             message="Odoo preview plan issuance timestamp is in the future.",
         )
-    if resolved_observed_at >= provenance.expires_at:
+    if resolved_observed_at >= provenance.expires_at and not retained_preservation_retry:
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_plan_expired",
             message="Odoo preview plan has expired; request fresh apply inputs.",
@@ -421,9 +466,24 @@ def execute_odoo_preview_apply_result(
     deployment_record_id: str,
     runtime_identity: RuntimeIdentity | None = None,
     propagate_domain_lookup_error: bool = False,
-    qualify_existing_refresh: bool = False,
+    qualify_existing_preview: bool = False,
     provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    recovery_reservation: object = None,
 ) -> dict[str, object]:
+    from control_plane.preview_preservation import (
+        PREVIEW_PRESERVATION_PHASES,
+        is_retained_preservation_retry,
+    )
+
+    retained_preservation_retry = is_retained_preservation_retry(
+        store=record_store,
+        profile=profile,
+        issued_plan=issued_plan,
+        request=request,
+        operation_record_id=deployment_record_id,
+        reservation=recovery_reservation,
+    )
+
     current_request = refresh_odoo_preview_issued_plan(
         control_plane_root=control_plane_root_path,
         record_store=record_store,
@@ -431,6 +491,7 @@ def execute_odoo_preview_apply_result(
         request=request,
         issued_plan=issued_plan,
         database_url=database_url,
+        retained_preservation_retry=retained_preservation_retry,
     )
     if current_request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
         raise ValueError("Odoo preview apply repository does not match product profile.")
@@ -493,6 +554,80 @@ def execute_odoo_preview_apply_result(
             "smoke_check": service_dry_run_plan.operation == "refresh",
         }
     )
+    upstream_source = preview_uses_upstream_restore(profile, resolved_environment_values)
+    snapshot_source = (
+        profile.preview.clean_testing_snapshot and service_dry_run_plan.operation == "refresh"
+    )
+    retained_copy = (upstream_source or snapshot_source) and preview_has_completed_restore(
+        record_store=record_store,
+        profile=profile,
+        plan=service_dry_run_plan,
+        pr_number=issued_plan.plan_request.pr_number,
+    )
+    if snapshot_source and not retained_copy and service_dry_run_plan.clean_snapshot is None:
+        raise ValueError("A new snapshot preview requires its issued clean source.")
+    effective_mutation_guard = provider_mutation_guard
+    if current_request.preserve_original_reservation_id:
+        from control_plane.preview_preservation import (
+            require_preview_preservation_admission,
+            run_preview_preservation,
+        )
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        if (
+            not isinstance(record_store, PostgresRecordStore)
+            or provider_effect_checkpoint is None
+            or provider_lease_check is None
+        ):
+            raise ValueError("Original preview preservation requires durable provider custody.")
+
+        def verify_preservation() -> None:
+            run_preview_preservation(
+                store=record_store,
+                profile=profile,
+                issued_plan=issued_plan,
+                original_reservation_id=current_request.preserve_original_reservation_id,
+                operation_record_id=deployment_record_id,
+                control_plane_root=control_plane_root_path,
+                mode="verify",
+                timeout_seconds=current_request.apply.timeout_seconds,
+                check=provider_lease_check,
+            )
+
+        @contextmanager
+        def preserved_mutation_guard() -> Iterator[None]:
+            verify_preservation()
+            with provider_mutation_guard() if provider_mutation_guard else nullcontext():
+                yield
+
+        if (
+            retained_preservation_retry
+            and getattr(recovery_reservation, "provider_effect_phase", "")
+            not in PREVIEW_PRESERVATION_PHASES
+        ):
+            require_preview_preservation_admission(
+                store=record_store,
+                profile=profile,
+                issued_plan=issued_plan,
+                original_reservation_id=current_request.preserve_original_reservation_id,
+                operation_record_id=deployment_record_id,
+            )
+            verify_preservation()
+        else:
+            run_preview_preservation(
+                store=record_store,
+                profile=profile,
+                issued_plan=issued_plan,
+                original_reservation_id=current_request.preserve_original_reservation_id,
+                operation_record_id=deployment_record_id,
+                control_plane_root=control_plane_root_path,
+                mode="preserve",
+                timeout_seconds=current_request.apply.timeout_seconds,
+                check=provider_lease_check,
+                effect_checkpoint=provider_effect_checkpoint,
+                mutation_guard=provider_mutation_guard,
+            )
+        effective_mutation_guard = preserved_mutation_guard
     driver_result = execute_odoo_preview_dokploy_apply(
         record_store=record_store,
         preview_context=profile.preview.context,
@@ -505,10 +640,112 @@ def execute_odoo_preview_apply_result(
         expected_runtime_identity=resolved_runtime_identity,
         propagate_domain_lookup_error=propagate_domain_lookup_error,
         integration_allowances=resolved_environment.integration_allowances,
-        qualify_existing_refresh=qualify_existing_refresh,
-        provider_mutation_guard=provider_mutation_guard,
+        qualify_existing_preview=qualify_existing_preview,
+        restore_upstream=upstream_source and not retained_copy,
+        restore_clean_snapshot=snapshot_source and not retained_copy,
+        preserve_existing_data=retained_copy,
+        provider_mutation_guard=effective_mutation_guard,
     )
     return driver_result.model_dump(mode="json")
+
+
+def preview_uses_upstream_restore(
+    profile: LaunchplaneProductProfileRecord, environment: dict[str, str]
+) -> bool:
+    return (
+        not profile.preview.clean_testing_snapshot
+        and profile.preview.data_transport_mode == "driver"
+        and any(
+            key.startswith("ODOO_UPSTREAM_") and value.strip() for key, value in environment.items()
+        )
+    )
+
+
+def preview_has_completed_restore(
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    plan: OdooPreviewDokployDryRunPlan,
+    pr_number: int,
+) -> bool:
+    store = cast(Any, record_store)
+    preview = find_preview_record(
+        record_store=store,
+        context_name=profile.preview.context,
+        anchor_repo=_odoo_preview_anchor_repo(profile.repository),
+        anchor_pr_number=pr_number,
+    )
+    if preview is None or preview.state == "destroyed":
+        return False
+    read_operation = getattr(store, "read_idempotency_record_by_id", None)
+    generations = store.list_preview_generation_records(preview_id=preview.preview_id)
+    if callable(read_operation):
+        for generation in generations:
+            identity = generation.runtime_identity
+            if (
+                generation.state not in {"ready", "superseded"}
+                or generation.preview_id != preview.preview_id
+                or identity is None
+                or identity.product != profile.product
+                or identity.environment_kind != "preview"
+                or identity.preview_id != preview.preview_id
+                or identity.preview_generation_id != generation.generation_id
+                or identity.context != profile.preview.context
+                or identity.instance != plan.compose_name
+            ):
+                continue
+            operation = read_operation(identity.deployment_record_id)
+            if (
+                operation is None
+                or operation.state != "completed"
+                or operation.route_path != ODOO_PREVIEW_APPLY_ROUTE
+                or operation.response_status_code not in {200, 202}
+            ):
+                continue
+            payload = operation.response_payload
+            records = payload.get("records", {})
+            if (
+                not isinstance(records, dict)
+                or records.get("preview_id") != preview.preview_id
+                or records.get("generation_id") != generation.generation_id
+            ):
+                continue
+            try:
+                result = OdooPreviewDokployApplyResult.model_validate(payload.get("result"))
+            except ValueError:
+                continue
+            if (
+                result.status == "pass"
+                and result.operation == "refresh"
+                and result.product == profile.product
+                and result.repository == profile.repository
+                and result.preview_slug == plan.preview_slug
+                and result.compose_id == plan.compose_ref
+                and result.compose_name == plan.compose_name
+                and result.module_install_update_status == "pass"
+                and (
+                    profile.preview.clean_testing_snapshot
+                    or (
+                        result.module_install_update_evidence.get("odoo_restore_completed")
+                        == "true"
+                        and any(
+                            result.module_install_update_evidence.get(key) == "true"
+                            for key in (
+                                "upstream_restore_requested",
+                                "clean_snapshot_restore_requested",
+                            )
+                        )
+                    )
+                )
+            ):
+                return True
+    if profile.preview.clean_testing_snapshot and not any(
+        item.state in {"ready", "superseded"} for item in generations
+    ):
+        return False
+    raise click.ClickException(
+        "Existing preview has no matching completed upstream restore; preserve its data and inspect its original operation."
+    )
 
 
 def observe_odoo_preview_apply_result(
@@ -969,6 +1206,7 @@ def odoo_preview_supersession_is_quiescent(
     request: OdooPreviewApplyEnvelope,
     database_url: str | None,
     schedule_binding: object = None,
+    require_snapshot_custody: bool = False,
 ) -> bool:
     from control_plane.dokploy.post_deploy import ComposeDataWorkflowBinding
 
@@ -982,6 +1220,7 @@ def odoo_preview_supersession_is_quiescent(
         request=request.apply,
         database_url=database_url,
         schedule_binding=binding,
+        require_snapshot_custody=require_snapshot_custody,
     )
 
 
@@ -1038,6 +1277,8 @@ def _odoo_preview_service_environment(
 ) -> _OdooPreviewServiceEnvironment:
     if plan.operation == "destroy":
         return _OdooPreviewServiceEnvironment(values={})
+    if profile.preview.clean_testing_snapshot and fishbowl_source is not None:
+        raise ValueError("Snapshot previews cannot receive source credentials.")
     preview_profile = profile.preview
     template_instance = preview_profile.template_instance.strip()
     # The preview runs unmerged code, so it gets only the template lane's site
@@ -1050,13 +1291,22 @@ def _odoo_preview_service_environment(
             database_url=database_url,
         ).values
     )
-    environment_values = dict(template_values)
-    runtime_platform_credentials.refuse_platform_credentials(
-        preview_profile.override_env,
-        target=f"{profile.product} preview {plan.compose_name}",
-        source="the product profile preview override_env",
+    preview_environment = (
+        control_plane_runtime_environments.resolve_preview_runtime_environment_from_store(
+            record_store=cast(
+                control_plane_runtime_environments.SiteRuntimeEnvironmentStore, record_store
+            ),
+            context_name=preview_profile.context,
+            template_values=template_values,
+        )
     )
-    environment_values.update(preview_profile.override_env)
+    environment_values = dict(preview_environment.values)
+    payload_key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+    encoded_preview = (
+        environment_values.get(payload_key, "")
+        if payload_key in preview_environment.setting_keys
+        else ""
+    )
     try:
         template_override_record = cast(Any, record_store).read_odoo_instance_override_record(
             context_name=preview_profile.context,
@@ -1074,20 +1324,25 @@ def _odoo_preview_service_environment(
         environment_values.update(preview_bootstrap_environment.inline_environment)
     environment_values["ODOO_PROJECT_NAME"] = plan.compose_name
     environment_values["ODOO_STACK_NAME"] = plan.compose_name
-    environment_values["ODOO_DB_NAME"] = _odoo_preview_identifier(plan.compose_name, suffix="db")
-    environment_values["ODOO_DATA_VOLUME"] = _odoo_preview_identifier(
-        plan.compose_name, suffix="data"
-    )
-    environment_values["ODOO_LOG_VOLUME"] = _odoo_preview_identifier(
-        plan.compose_name, suffix="logs"
-    )
-    environment_values["ODOO_DB_VOLUME"] = _odoo_preview_identifier(
-        plan.compose_name, suffix="db-volume"
-    )
+    from control_plane.odoo_preview_resources import preview_resource_environment
+
+    environment_values.update(preview_resource_environment(plan.compose_name))
     for key in preview_profile.preview_url_env_keys:
         environment_values[key] = plan.preview_url
     for key in preview_profile.preview_domain_env_keys:
         environment_values[key] = plan.domain_host
+    connection_keys = {
+        config_parameter_runtime_key(key)
+        for family in INTEGRATION_FAMILIES
+        for key in family.config_parameters
+    }
+    if preview_profile.clean_testing_snapshot:
+        for key in list(environment_values):
+            if (
+                key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_", "OPENUPGRADE_"))
+                or key in connection_keys
+            ):
+                environment_values.pop(key)
     # A declared key the site environment no longer supplies (for example one that
     # only exists as a global value) fails closed instead of silently dropping out.
     declared_keys = control_plane_live_target_runtime.declared_runtime_keys(
@@ -1095,6 +1350,13 @@ def _odoo_preview_service_environment(
         context_name=preview_profile.context,
         instance_name=template_instance,
     )
+    if preview_profile.clean_testing_snapshot:
+        declared_keys = {
+            key
+            for key in declared_keys
+            if key not in connection_keys
+            and not key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_", "OPENUPGRADE_"))
+        }
     # The preview runs the artifact being applied, so its recorded Odoo version wins.
     apply_artifact_odoo_version(
         environment_values, artifact_manifest=manifest, declared_keys=declared_keys
@@ -1128,6 +1390,7 @@ def _odoo_preview_service_environment(
             key: value
             for key, value in template_values.items()
             if environment_values.get(key) == value
+            and key not in preview_environment.setting_keys | preview_environment.secret_keys
         },
     )
     for key in omitted_keys:
@@ -1139,6 +1402,8 @@ def _odoo_preview_service_environment(
             profile=profile,
             preview_slug=plan.preview_slug,
             copy_from=fishbowl_source,
+            control_plane_root=control_plane_root_path,
+            database_url=database_url,
             include_secret_value=True,
         )
     if import_source is not None:
@@ -1163,12 +1428,93 @@ def _odoo_preview_service_environment(
         environment_values.update(import_source.environment)
         environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "true"
         omitted_keys = tuple(key for key in omitted_keys if key not in import_source.environment)
+    _merge_preview_addon_settings(
+        environment_values,
+        profile=profile,
+        record_store=record_store,
+        encoded_preview=encoded_preview,
+    )
+    if preview_profile.clean_testing_snapshot:
+        environment_values.update(
+            {
+                "BOOTSTRAP": "false",
+                "OPENUPGRADE_ENABLED": "false",
+                "NO_SANITIZE": "false",
+                "ODOO_MAX_CRON_THREADS": "0",
+                "ENV_OVERRIDE_DISABLE_CRON": "true",
+            }
+        )
+        preflight_fresh_testing_intent(
+            modules=merge_odoo_install_modules(
+                LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+                manifest.odoo_install_modules if manifest else (),
+                environment_values.get("ODOO_INSTALL_MODULES", ""),
+            ),
+            encoded_payload=environment_values.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", ""),
+        )
     return _OdooPreviewServiceEnvironment(
         values=environment_values,
         omitted_integration_credential_keys=omitted_keys,
         integration_allowances=(import_source.allowance,) if import_source else (),
         fishbowl_source_sha256=import_source.authority_sha256 if import_source else "",
     )
+
+
+def _merge_preview_addon_settings(
+    environment: dict[str, str],
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    record_store: object,
+    encoded_preview: str,
+) -> None:
+    key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+    if not encoded_preview.strip():
+        return
+    try:
+        preview = validate_preview_scope({key: encoded_preview}, context=profile.preview.context)
+        if preview is None:
+            return
+        if not preview.addon_settings:
+            return
+        if any(item.addon == "shopify" for item in preview.addon_settings):
+            if control_plane_odoo_instance_overrides.odoo_instance_is_production(
+                profile.preview.template_instance
+            ):
+                raise ValueError("Preview Shopify settings require a non-production template")
+            protected = _protected_store_keys(
+                record_store=cast(OdooAddonSettingsStore, record_store),
+                product=profile.product,
+                context=profile.preview.context,
+                instance=profile.preview.template_instance,
+            )
+            for item in preview.addon_settings:
+                if (
+                    item.addon == "shopify"
+                    and item.setting in control_plane_odoo_instance_overrides.SHOPIFY_STORE_SETTINGS
+                ):
+                    if item.value.source != "literal" or not isinstance(item.value.value, str):
+                        raise ValueError("Shopify store selection requires a literal")
+                    _validate_store_key(
+                        shop_url_key=item.value.value.strip().lower(),
+                        protected_store_keys=protected,
+                    )
+        if any(
+            not environment.get(name, "").strip()
+            for name in preview.required_container_environment_keys
+        ):
+            raise ValueError("Preview addon secret is not delivered")
+        if environment.get(key) == encoded_preview:
+            return
+        generated = OdooPostDeployPayload.model_validate_json(
+            base64.b64decode(environment[key], validate=True)
+        )
+    except (ValueError, binascii.Error):
+        raise click.ClickException("Invalid preview addon settings payload.") from None
+    merged = generated.model_copy(update={"addon_settings": preview.addon_settings})
+    environment[key] = base64.b64encode(merged.to_wire_json_bytes()).decode("ascii")
+    environment[
+        control_plane_odoo_instance_overrides.LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY
+    ] = "true"
 
 
 # The preview runs unmerged code against whatever its copied environment reaches, so a
@@ -1219,11 +1565,3 @@ def _copied_integration_credentials_to_omit(
     refused_keys = {finding.binding_key for finding in evaluation.findings if finding.binding_key}
     # A failure not tied to a key leaves every copied credential out.
     return tuple(sorted(refused_keys)) if refused_keys else copied_keys
-
-
-def _odoo_preview_identifier(value: str, *, suffix: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip()).strip("_").lower()
-    if not normalized:
-        normalized = "odoo_preview"
-    suffix_identifier = re.sub(r"[^a-zA-Z0-9]+", "_", suffix.strip()).strip("_").lower()
-    return f"{normalized}_{suffix_identifier}" if suffix_identifier else normalized

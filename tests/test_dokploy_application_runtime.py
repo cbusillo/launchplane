@@ -14,6 +14,7 @@ from control_plane.dokploy.application_runtime import (
     application_runtime_matches,
     fetch_application_runtime,
     MAX_APPLICATION_ENVIRONMENT_KEYS,
+    MAX_APPLICATION_TASK_DETAIL_LENGTH,
 )
 from control_plane.dokploy.application_runtime_summary import summarize_application_runtime
 from datetime import datetime, timezone
@@ -154,7 +155,9 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
             return [result]
         return result
 
-    def read(self) -> ApplicationRuntimeObservation:
+    def read(
+        self, *, expected_environment: dict[str, str] | None = None
+    ) -> ApplicationRuntimeObservation:
         with (
             patch(
                 "control_plane.dokploy.api.fetch_dokploy_target_payload",
@@ -166,7 +169,26 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 host="https://provider.example",
                 token="fixture-token",
                 application_id="application-1",
+                expected_environment=expected_environment,
             )
+
+    def test_environment_proof_merges_image_defaults_and_rejects_service_or_container_drift(
+        self,
+    ) -> None:
+        expected = {
+            "LAUNCHPLANE_DEPLOYMENT_RECORD_ID": "deployment-1",
+            "APP_TOKEN": "do-not-expose",
+        }
+        self.image["Config"] = {"Env": ["GPG_KEY=public-image-signing-key"]}
+        config = self.container["Config"]
+        assert isinstance(config, dict)
+        config["Env"].append("GPG_KEY=public-image-signing-key")
+        self.assertTrue(self.read(expected_environment=expected).ready)
+        config["Env"][-1] = "GPG_KEY=untracked-runtime-value"
+        self.assertFalse(self.read(expected_environment=expected).ready)
+        config["Env"][-1] = "GPG_KEY=public-image-signing-key"
+        with self.assertRaises(DokployEvidenceProviderError):
+            self.read(expected_environment={**expected, "APP_TOKEN": "different-provider-token"})
 
     def observe_artifact(self) -> GenericWebRuntimeArtifactObservation:
         self.target.setdefault("dockerImage", _TAG)
@@ -333,6 +355,7 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
         self.assertTrue(summary["image_matches_expected"])
         self.assertNotIn("private-", str(summary))
         self.assertNotIn("inner", str(summary))
+
         for extra in (
             ["BAD-NAME=private-malformed"],
             ["APP_TOKEN=private-one", "APP_TOKEN=private-two"],
@@ -352,6 +375,81 @@ class DokployApplicationRuntimeTests(unittest.TestCase):
                 self.assertFalse(keys.complete)
                 self.assertLessEqual(len(keys.names), MAX_APPLICATION_ENVIRONMENT_KEYS)
                 self.assertNotIn("private-", str(asdict(observed)))
+
+    def test_nonrunning_task_container_identity_is_observed_without_values(self) -> None:
+        for state in ("ready", "failed"):
+            for captured, expected in (
+                (None, False),
+                ({}, False),
+                ({"ContainerID": ""}, False),
+                ({"ContainerID": _CONTAINER_ID}, True),
+                ({"ContainerID": "private-invalid-id"}, None),
+                ({"ContainerID": 123}, None),
+                ("private-invalid-status", None),
+            ):
+                with self.subTest(state=state, captured=captured):
+                    self.task["Status"] = {"State": state, "ContainerStatus": captured}
+                    observed = self.read()
+                    self.assertIs(observed.tasks[0].container_id_present, expected)
+                    summary = summarize_application_runtime(
+                        observed, expected_image=_IMAGE, observed_at=datetime.now(timezone.utc)
+                    )
+                    self.assertNotIn("private-", str(summary))
+                    self.assertFalse(observed.ready)
+
+    def test_failed_task_diagnostics_preserve_errors_without_credentials(self) -> None:
+        def task_summary(observed: ApplicationRuntimeObservation) -> dict[str, object]:
+            summary = summarize_application_runtime(
+                observed, expected_image=_IMAGE, observed_at=datetime.now(timezone.utc)
+            )
+            tasks = summary["tasks"]
+            assert isinstance(tasks, list)
+            task = tasks[0]
+            assert isinstance(task, dict)
+            return task
+
+        exit_code = 23
+        timestamp = "2026-10-20T03:08:27.123456789Z"
+        failure = {
+            "State": "failed",
+            "Err": "task: non-zero exit (23); APP_TOKEN=synthetic-private-token",
+            "Message": "Authorization: Bearer synthetic-private-header",
+            "Timestamp": timestamp,
+            "ContainerStatus": {"ContainerID": _CONTAINER_ID, "ExitCode": exit_code},
+        }
+        self.task["Status"] = failure
+        observed = self.read()
+        task = task_summary(observed)
+        error = task["error"]
+        assert isinstance(error, str)
+        self.assertIn("non-zero exit", error)
+        self.assertEqual(task["exit_code"], exit_code)
+        self.assertEqual(task["status_timestamp"], timestamp)
+        self.assertNotIn("synthetic-private", str(asdict(observed)))
+        self.assertNotIn("Authorization", str(task))
+        self.assertFalse(observed.ready)
+
+        self.task["Status"] = {"State": "failed"}
+        missing = task_summary(self.read())
+        for field in ("error", "message", "status_timestamp", "exit_code"):
+            self.assertIsNone(missing[field])
+
+        long_message = "task failed " * 1000
+        self.task["Status"] = {
+            "State": "failed",
+            "Err": {"APP_TOKEN": "synthetic-private-invalid"},
+            "Message": long_message,
+            "Timestamp": "synthetic-private-invalid-date",
+            "ContainerStatus": {"ContainerID": _CONTAINER_ID, "ExitCode": True},
+        }
+        malformed = task_summary(self.read())
+        self.assertIsNone(malformed["error"])
+        self.assertIsNone(malformed["exit_code"])
+        self.assertIsNone(malformed["status_timestamp"])
+        message = malformed["message"]
+        assert isinstance(message, str)
+        self.assertLessEqual(len(message), MAX_APPLICATION_TASK_DETAIL_LENGTH)
+        self.assertNotIn("synthetic-private", str(malformed))
 
     def test_exact_convergence_proves_actual_image_digest_and_exposes_no_values(self) -> None:
         observed = self.read()

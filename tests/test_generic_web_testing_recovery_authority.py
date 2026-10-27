@@ -398,8 +398,25 @@ class GenericWebTestingRecoveryAuthorityTests(unittest.TestCase):
         self.reserve(outcome="absent")
         record_safety(self.store, self.profile.product, self.lane.context, self.lane.instance)
         reviewed = self.inspect()
-        status, payload = self.apply(reviewed["recovery_digest"])
+        import asyncio
+        from control_plane import generic_web_deploy_recovery_http as recovery_http
+
+        from control_plane.provider_operations import resume_acquired_provider_operation as resume
+
+        worker_calls = []
+
+        def resume_off_event_loop(**arguments: Any) -> Any:
+            with self.assertRaises(RuntimeError):
+                asyncio.get_running_loop()
+            worker_calls.append("worker")
+            return resume(**arguments)
+
+        with patch.object(
+            recovery_http, "resume_acquired_provider_operation", side_effect=resume_off_event_loop
+        ):
+            status, payload = self.apply(reviewed["recovery_digest"])
         self.assertEqual(status, 202, payload)
+        self.assertEqual(worker_calls, ["worker"])
         status, replay = self.apply(reviewed["recovery_digest"])
         self.assertEqual(status, 202, replay)
         self.executor.assert_called_once()

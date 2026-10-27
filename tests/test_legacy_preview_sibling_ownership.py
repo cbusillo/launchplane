@@ -178,6 +178,10 @@ class LegacyGenericSiblingOwnershipTests(LegacyPreviewReconciliationFixture):
         with self.provider_inventory():
             plan = await self.plan()
             self.assertTrue(plan["apply_eligible"])
+            name = self.application["name"]
+            self.application["name"] = "renamed-sibling"
+            self.assertEqual((await self.call("inspect")).status_code, 409)
+            self.application["name"] = name
             for changed in (
                 receipt.model_copy(update={"response_status_code": 409}),
                 receipt.model_copy(

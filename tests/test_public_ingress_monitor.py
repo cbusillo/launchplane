@@ -52,7 +52,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationDestination
 from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
-from control_plane.contracts.public_ingress_monitoring import build_public_ingress_lane_incident_id
+from tests.support.ingress_incidents import build_public_ingress_lane_incident_id
 from control_plane.contracts.public_ingress_monitoring import build_public_ingress_observation_id
 from control_plane.contracts.public_ingress_monitoring import (
     public_ingress_incident_record_sha256,
@@ -77,13 +77,12 @@ from control_plane.workflows.public_ingress_monitor import (
     PublicIngressMonitorResult,
     _deliver_github_issue_notification,
     _gh_issue_client,
-    _incident_event,
     check_public_ingress_target,
     deliver_public_ingress_notification_outbox_delivery,
     discover_public_ingress_monitor_targets,
-    reconcile_public_ingress_incident,
     run_public_ingress_monitor_once,
 )
+from tests.support.ingress_incidents import reconcile_public_ingress_incident
 from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsCertificate
 from control_plane.outbound_http import PublicTlsProbeResult
@@ -1524,7 +1523,6 @@ class PublicIngressMonitorTests(unittest.TestCase):
         tls_incident = next(
             incident for incident in store.incidents if incident.check_kind == "tls"
         )
-        self.assertEqual(_incident_event(incident=tls_incident), "opened")
         self.assertEqual(
             [
                 event.event
@@ -2816,7 +2814,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
 
         self.assertEqual([event.event for event in store.incident_events], ["opened", "reminder"])
         self.assertEqual(len(store.notification_attempts), 2)
-        self.assertEqual(len(discord_posts), 2)
+        self.assertEqual(len(discord_posts), 1)
+        self.assertEqual(store.notification_attempts[-1].delivery_status, "skipped")
         reminder_state = store.reminder_states[0]
         self.assertEqual(reminder_state.last_window_index, 1)
         self.assertEqual(reminder_state.next_reminder_at, "2026-05-29T12:30:00Z")
@@ -3452,7 +3451,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         delivered = deliver_public_ingress_notification_outbox_delivery(
             record=reminder_record,
             drivers=PublicIngressNotificationDriverSet(github_client=github_client),
-            mark_provider_started=lambda _key, _provider: None,
+            mark_provider_started=lambda _record, _key, _provider: None,
         )
 
         self.assertEqual([action for action, _payload in calls], ["find_marker", "comment"])
@@ -3832,7 +3831,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
         result = deliver_public_ingress_notification_outbox_delivery(
             record=record,
             drivers=PublicIngressNotificationDriverSet(github_client=github_client),
-            mark_provider_started=lambda _provider_operation_key, _provider_id: self.fail(
+            mark_provider_started=lambda _record, _provider_operation_key, _provider_id: self.fail(
                 "existing provider marker must not be replaced"
             ),
         )
@@ -3888,7 +3887,7 @@ class PublicIngressMonitorTests(unittest.TestCase):
                     "resolution without a prior issue must not call GitHub"
                 )
             ),
-            mark_provider_started=lambda _key, _provider: self.fail(
+            mark_provider_started=lambda _record, _key, _provider: self.fail(
                 "skipped resolution must not start a provider operation"
             ),
         )

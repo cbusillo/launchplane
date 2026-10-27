@@ -2,7 +2,7 @@ from collections.abc import Iterable
 import hashlib
 import json
 import re
-from typing import Literal, get_args
+from typing import Annotated, Literal, get_args
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane
@@ -17,7 +17,13 @@ from control_plane.contracts.product_health_monitoring_migration import (
 )
 from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
 from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthPolicy
+from control_plane.contracts.release_request import ReleaseRequestDecisionRecord
 from control_plane.contracts.public_dns import PublicDnsExpectedTarget
+from control_plane.contracts.snapshot_protocol import (
+    LaneInstance,
+    snapshot_protocol,
+    snapshot_protocol_default,
+)
 
 
 ProductLifecycleState = Literal["active", "retiring", "retired"]
@@ -29,6 +35,18 @@ BumpLevel = Literal["patch", "minor", "major"]
 FRESH_TESTING_LOCAL_CREDENTIAL_KEYS = frozenset(
     {"ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"}
 )
+TRANSPORT_DATABASE_PREFIX_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
+PROMOTION_WORKFLOW_INPUTS = (
+    "dry_run",
+    "bump",
+    "artifact_id",
+    "deploy_reference",
+    "source_git_ref",
+    "promotion_intent_id",
+)
+PromotionWorkflowInput = Annotated[
+    str, Field(json_schema_extra=snapshot_protocol(*PROMOTION_WORKFLOW_INPUTS))
+]
 
 
 class ProductProfileChangedError(ValueError):
@@ -324,7 +342,7 @@ class ProductLaneProfile(BaseModel):
         json_schema_extra={"x-launchplane-optional-response": True},
     )
 
-    instance: str
+    instance: LaneInstance
     context: str
     base_url: str = ""
     generic_web_extensions: GenericWebLaneExtensions = Field(
@@ -371,8 +389,13 @@ class ProductPreviewProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    clean_testing_snapshot: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     context: str = ""
-    slug_template: str = "pr-{number}"
+    slug_template: str = snapshot_protocol_default("pr-{number}")
     app_name_prefix: str = ""
     app_name_suffix: str = Field(
         default="",
@@ -381,7 +404,7 @@ class ProductPreviewProfile(BaseModel):
         json_schema_extra={"x-launchplane-optional-response": True},
         pattern=r"^(-[a-z0-9-]+)?$",
     )
-    template_instance: str = "testing"
+    template_instance: LaneInstance = "testing"
     generic_web_extensions: GenericWebLaneExtensions = Field(
         default_factory=GenericWebLaneExtensions,
         exclude_if=lambda value: not value.configured,
@@ -490,7 +513,7 @@ class ProductPreviewProfile(BaseModel):
             raise ValueError("preview transport extension requires driver data transport")
         if self.transport_extension and (
             not self.app_name_prefix.strip()
-            or not re.fullmatch(r"[a-z][a-z0-9_]*", self.transport_database_prefix)
+            or not TRANSPORT_DATABASE_PREFIX_PATTERN.fullmatch(self.transport_database_prefix)
         ):
             raise ValueError(
                 "declared PostgreSQL transport requires application and safe database prefixes"
@@ -504,14 +527,14 @@ class ProductPreviewProfile(BaseModel):
 class ProductPromotionWorkflowProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    workflow_id: str = "promote-prod.yml"
-    ref: str = "main"
-    dry_run_input: str = "dry_run"
-    bump_input: str = "bump"
-    artifact_id_input: str = "artifact_id"
-    deploy_reference_input: str = "deploy_reference"
-    source_git_ref_input: str = "source_git_ref"
-    promotion_intent_input: str = "promotion_intent_id"
+    workflow_id: str = snapshot_protocol_default("promote-prod.yml")
+    ref: str = snapshot_protocol_default("main")
+    dry_run_input: PromotionWorkflowInput = "dry_run"
+    bump_input: PromotionWorkflowInput = "bump"
+    artifact_id_input: PromotionWorkflowInput = "artifact_id"
+    deploy_reference_input: PromotionWorkflowInput = "deploy_reference"
+    source_git_ref_input: PromotionWorkflowInput = "source_git_ref"
+    promotion_intent_input: PromotionWorkflowInput = "promotion_intent_id"
     default_bump: str = Field(
         default="patch",
         json_schema_extra={"x-launchplane-snapshot-protocol": list(get_args(BumpLevel))},
@@ -557,7 +580,7 @@ class ProductRuntimeConfigRequirement(BaseModel):
 
     key: str
     context: str = ""
-    instance: str = ""
+    instance: LaneInstance = ""
 
     @model_validator(mode="after")
     def _validate_requirement(self) -> "ProductRuntimeConfigRequirement":
@@ -582,9 +605,9 @@ class ProductSecretConfigRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     binding_key: str
-    integration: str = "runtime_environment"
+    integration: str = snapshot_protocol_default("runtime_environment")
     context: str = ""
-    instance: str = ""
+    instance: LaneInstance = ""
     owner_input: ProductOwnerSecretInput | None = None
     external_provider: Literal["discord_bot"] | None = Field(
         default=None,
@@ -735,7 +758,14 @@ class LaunchplaneProductProfileRecord(BaseModel):
     # product serializes exactly as before the switch existed, so digests over
     # profiles do not change.
     release_on_acceptance: ReleaseOnAcceptance = Field(
-        default="held", exclude_if=lambda value: value == "held"
+        default="held",
+        exclude_if=lambda value: value == "held",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    release_request: ReleaseRequestDecisionRecord | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
     product: str
     display_name: str
@@ -743,8 +773,8 @@ class LaunchplaneProductProfileRecord(BaseModel):
     repository_id: str = ""
     repository_owner_id: str = ""
     default_branch: str = "main"
-    driver_id: str
-    image: ProductImageProfile
+    driver_id: str = ""
+    image: ProductImageProfile = Field(default_factory=ProductImageProfile)
     runtime_port: int = Field(default=0, ge=0, le=65535)
     health_path: str = ""
     lanes: tuple[ProductLaneProfile, ...] = ()
@@ -762,6 +792,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneProductProfileRecord":
+        if not self.driver_id.strip():
+            raise ValueError("product profile requires driver_id")
+        if "image" not in self.model_fields_set:
+            raise ValueError("managed runtime product profile requires image")
         if self.driver_id == "odoo" and any(
             requirement.external_provider is not None
             and requirement.binding_key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
@@ -815,10 +849,17 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 raise ValueError(f"product profile {label} must be a numeric GitHub ID")
         if any(character.isspace() for character in self.default_branch):
             raise ValueError("product profile default_branch cannot contain whitespace")
-        if not self.driver_id.strip():
-            raise ValueError("product profile requires driver_id")
         if self.preview.transport_extension and self.driver_id != "generic-web":
             raise ValueError("declared preview transport requires the generic-web driver")
+        if self.preview.clean_testing_snapshot:
+            testing = [lane for lane in self.lanes if lane.instance == "testing"]
+            if (
+                self.driver_id != "odoo"
+                or self.preview.template_instance != "testing"
+                or len(testing) != 1
+                or testing[0].context != self.preview.context
+            ):
+                raise ValueError("Clean snapshots require an owned Odoo testing lane.")
         self.health_path = self.health_path.strip()
         if self.health_path and not self.health_path.startswith("/"):
             raise ValueError("product profile health_path must start with /")
@@ -877,6 +918,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
         )
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
+        if self.preview.override_env:
+            raise ValueError(
+                "Use managed product configuration with instance preview instead of preview.override_env."
+            )
         legacy_extensions = self.preview.transport_extension == "verireel-postgres" or any(
             lane.generic_web_extensions.verification_extension == "verireel-testing"
             for lane in self.lanes
@@ -925,6 +970,14 @@ def product_profile_historical_context_overlap(
     if profile.preview.enabled and profile.preview.context.strip() in historical_contexts:
         overlaps.add(("preview", profile.preview.context.strip()))
     return frozenset(overlaps)
+
+
+def product_profiles_share_repository(
+    first: LaunchplaneProductProfileRecord, second: LaunchplaneProductProfileRecord
+) -> bool:
+    return first.repository.strip().lower() == second.repository.strip().lower() or (
+        bool(first.repository_id) and first.repository_id == second.repository_id
+    )
 
 
 def validate_product_profile_history_transition(
@@ -977,11 +1030,14 @@ LAUNCHPLANE_SERVICE_PRODUCT_CONTEXT = "launchplane"
 
 def product_context_owner_map(
     profiles: Iterable[LaunchplaneProductProfileRecord],
+    *,
+    config_scopes: bool = False,
 ) -> dict[str, frozenset[str]]:
     """Map each lane or historical context, case-folded, to the products using it."""
     owners: dict[str, set[str]] = {}
     for profile in profiles:
-        contexts = {lane.context for lane in profile.lanes} | set(profile.historical_contexts)
+        targets = product_config_targets(profile) if config_scopes else profile.lanes
+        contexts = {lane.context for lane in targets} | set(profile.historical_contexts)
         for context in contexts:
             if context.strip():
                 owners.setdefault(context.strip().lower(), set()).add(profile.product)
@@ -1001,17 +1057,47 @@ def is_exclusive_product_context(
     )
 
 
+def product_config_targets(
+    profile: LaunchplaneProductProfileRecord,
+) -> tuple[ProductLaneProfile, ...]:
+    if not profile.preview.context.strip():
+        return profile.lanes
+    return (*profile.lanes, ProductLaneProfile(context=profile.preview.context, instance="preview"))
+
+
+def product_config_target(
+    profile: LaunchplaneProductProfileRecord, environment: str
+) -> ProductLaneProfile:
+    for target in product_config_targets(profile):
+        if target.instance == environment.strip():
+            return target
+    raise FileNotFoundError("Product configuration scope was not found.")
+
+
 def product_target_owner_products(
-    profiles: Iterable[LaunchplaneProductProfileRecord], *, context: str, instance: str = ""
+    profiles: Iterable[LaunchplaneProductProfileRecord],
+    *,
+    context: str,
+    instance: str = "",
+    config_scopes: bool = False,
 ) -> frozenset[str]:
     """Owners of a trimmed lane, or every current/historical claim on a context."""
     if not instance:
-        return product_context_owner_map(profiles).get(context.lower(), frozenset())
+        profiles = tuple(profiles)
+        if config_scopes and not any(
+            lane.context.strip().lower() == context.lower()
+            for profile in profiles
+            for lane in profile.lanes
+        ):
+            return frozenset()
+        return product_context_owner_map(profiles, config_scopes=config_scopes).get(
+            context.lower(), frozenset()
+        )
     return frozenset(
         profile.product
         for profile in profiles
         if any(
             lane.context.strip().lower() == context.lower() and lane.instance.strip() == instance
-            for lane in profile.lanes
+            for lane in (product_config_targets(profile) if config_scopes else profile.lanes)
         )
     )

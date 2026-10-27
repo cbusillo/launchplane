@@ -48,9 +48,14 @@ from control_plane.testing_restore_prerequisite import (
     incomplete_testing_restore,
 )
 
-from control_plane.client_test_notes import ClientTestNotes, change_client_review
-from control_plane.dependency_update_review import pure_dependabot_update
+from control_plane.client_test_notes import (
+    ClientTestNotes,
+    change_client_review,
+    open_client_questions,
+)
+from control_plane.dependency_update_review import pure_dependency_update
 from control_plane.client_release_repositories import recorded_train_candidate
+from control_plane.product_reconcile_read import preview_refresh_failure
 from control_plane import secrets
 from control_plane.runtime_environments import RuntimeEnvironmentRecordStore
 from control_plane.dokploy.api import (
@@ -700,6 +705,7 @@ def reconcile_testing_target(
     )
     # The request the product's testing-deploy workflow sent before Launchplane took over.
     from control_plane.odoo_testing_restore import (
+        fresh_testing_mode_refusal,
         generation_binding,
         read_current_testing_generation,
     )
@@ -715,10 +721,13 @@ def reconcile_testing_target(
     except (ValueError, FileNotFoundError, click.ClickException):
         plan.update(action="wait", held=True, reason="fresh_testing_authority_unverified")
         return ReconcileOutcome(plan)
-    if generation is not None and not generation.reconcile_requested_at:
-        plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
-        return ReconcileOutcome(plan)
     fresh_generation = generation is not None and not generation.completed_at
+    data_source_mode: Literal["existing", "upstream_restore"] = (
+        "upstream_restore" if fresh_generation else "existing"
+    )
+    if refusal := fresh_testing_mode_refusal(generation, data_source_mode):
+        plan.update(action="wait", held=True, reason=refusal[0])
+        return ReconcileOutcome(plan)
     generation_sha256 = generation_binding(generation) if fresh_generation and generation else ""
     rearmed_after = testing_retry_after_operation(
         record_store=record_store,
@@ -734,7 +743,7 @@ def reconcile_testing_target(
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
             allow_empty_data=fresh_generation or not bool(rearmed_after),
-            data_source_mode="upstream_restore" if fresh_generation else "existing",
+            data_source_mode=data_source_mode,
             artifact_id=manifest.artifact_id,
             source_git_ref=manifest.source_commit,
         ),
@@ -2061,9 +2070,9 @@ def _preview_cleanup_guard(
     store: ProductReconcileStore,
     profile: LaunchplaneProductProfileRecord,
     number: int,
+    original_reservation_id: str = "",
 ) -> None:
     from control_plane.disposable_lanes import (
-        DisposableLaneSafetyUnknown,
         DisposableLaneStore,
         resolve_disposable_preview,
         require_lane_target_ownership,
@@ -2077,12 +2086,24 @@ def _preview_cleanup_guard(
         )
     instance = profile.preview.slug_template.format(number=number)
     try:
-        resolve_disposable_preview(
-            cast(DisposableLaneStore, store),
-            profile,
-            profile.preview.context,
-            instance,
-        )
+        if original_reservation_id:
+            from control_plane.preview_reservation_recovery import (
+                require_unrecorded_preview_original,
+            )
+
+            require_unrecorded_preview_original(
+                cast(PostgresRecordStore, store),
+                profile=profile,
+                number=number,
+                reservation_id=original_reservation_id,
+            )
+        else:
+            resolve_disposable_preview(
+                cast(DisposableLaneStore, store),
+                profile,
+                profile.preview.context,
+                instance,
+            )
         target_store = cast(PreviewTargetOwnershipStore, store)
         require_lane_target_ownership(
             (
@@ -2092,7 +2113,7 @@ def _preview_cleanup_guard(
             context=profile.preview.context,
             instance=instance,
         )
-    except DisposableLaneSafetyUnknown as error:
+    except ValueError as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
 
 
@@ -2145,29 +2166,63 @@ def _plan_preview_target(
         plan.update(action="wait", held=True, reason="preview_cleanup_pr_state_unknown")
         return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     if pull_request.get("state") != "open":
+        if not live and isinstance(record_store, PostgresRecordStore):
+            from control_plane.preview_reservation_recovery import (
+                require_unrecorded_preview_original,
+            )
+
+            for reservation in record_store.list_odoo_preview_cleanup_originals(
+                product=profile.product, number=pull_request_number
+            ):
+                try:
+                    require_unrecorded_preview_original(
+                        record_store,
+                        profile=profile,
+                        number=pull_request_number,
+                        reservation_id=reservation.record_id,
+                    )
+                except ValueError:
+                    continue
+                live = True
+                lifecycle_token = (
+                    f"original:{reservation.record_id}:{reservation.request_fingerprint}"
+                )
+                plan["unrecorded_original_reservation_id"] = reservation.record_id
+                break
         return without_preview("pull_request_not_open")
     intent = change_client_review(
         body=str(pull_request.get("body") or ""),
         labels=_labels(pull_request),
         review_label=profile.owner.review_label,
-        pure_dependency_update=pure_dependabot_update(pull_request, read=transport.get_json),
+        pure_dependency_update=pure_dependency_update(
+            pull_request,
+            read=transport.get_json,
+            store=record_store,
+        ),
         director_standing=profile.release_on_acceptance == "director_standing",
     )
-    if not intent.explicit_override and recorded_train_candidate(
+    train_candidate = recorded_train_candidate(
         store=record_store,
         repository=profile.repository,
         head=pull_request.get("head"),
         base_branch=str(
             _object(pull_request.get("base", {}), "pull request base").get("ref") or ""
         ),
-    ):
+    )
+    if train_candidate and profile.driver_id == "odoo":
+        return without_preview("merge_train_candidate")
+    if train_candidate and not intent.explicit_override:
         intent = ClientTestNotes(False)
     plan["owner_review_requested"] = intent.review_required and (
         profile.owner.is_set
         or profile.owner.review_label.strip().casefold()
         in {label.casefold() for label in _labels(pull_request)}
     )
-    if profile.owner.is_set and intent.error:
+    if (
+        profile.owner.is_set
+        and intent.error
+        and not open_client_questions(str(pull_request.get("body") or ""))
+    ):
         plan.update(
             action="wait", reason="client_test_notes_required", detail=intent.error, held=False
         )
@@ -2308,7 +2363,12 @@ def _run_preview_operation(
         ):
             raise _PullRequestMovedError
         if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
-            _preview_cleanup_guard(record_store, profile, pull_request_number)
+            _preview_cleanup_guard(
+                record_store,
+                profile,
+                pull_request_number,
+                str(plan.get("unrecorded_original_reservation_id") or ""),
+            )
 
     def execute_apply(**kwargs: object) -> dict[str, object]:
         checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
@@ -2540,7 +2600,11 @@ def _preview_failure(plan: dict[str, object], code: str) -> ReconcileOutcome:
         plan["missing_keys"] = list(keys)
         if keys:
             summary += f" Missing: {', '.join(keys)}."
-    plan.update(last_failed_error_code=code, last_failed_error_summary=summary)
+    plan.update(
+        last_failed_error_code=code,
+        last_failed_error_summary=summary,
+        last_failed_head_sha=plan.get("head_sha", ""),
+    )
     return ReconcileOutcome(plan, error=summary)
 
 
@@ -2943,6 +3007,20 @@ def run_product_reconcile_once(
                 if key in request.last_plan:
                     outcome.plan[key] = request.last_plan[key]
     plan = dict(outcome.plan)
+    if (
+        request.target_kind == "preview"
+        and not outcome.error
+        and plan.get("action") != "destroy"
+        and plan.get("reason") not in {"pull_request_not_open", "already_serving"}
+        and plan.get("preview_result_status") != "pass"
+        and preview_refresh_failure(request)
+    ):
+        for key in ("last_failed_error_code", "last_failed_error_summary"):
+            if key in request.last_plan:
+                plan[key] = request.last_plan[key]
+        plan["last_failed_head_sha"] = request.last_plan.get(
+            "last_failed_head_sha", request.last_plan.get("head_sha", "")
+        )
     feedback = post_reconcile_feedback(
         record_store=record_store,
         request=request,
@@ -2957,14 +3035,50 @@ def run_product_reconcile_once(
             record_store=record_store,
             control_plane_root=control_plane_root,
             public_origin=public_origin,
+            preview_request=request.model_copy(
+                update={"last_plan": plan, "last_error": outcome.error}
+            ),
         ),
     )
     if feedback is not None:
         plan[PR_FEEDBACK_PLAN_KEY] = feedback
-    if request.target_kind == "preview" and _needs_absent_preview_feedback_recovery(plan):
+    retired_failure = False
+    if (
+        request.target_kind == "preview"
+        and feedback is not None
+        and feedback.get("status") == "failed"
+        and (
+            (
+                outcome.error
+                and plan.get("action") not in {"apply", "destroy"}
+                and plan.get("reason") != "held_preview_recovery_required"
+            )
+            or plan.get("reason") == "preview_cleanup_pr_state_unknown"
+        )
+    ):
+        try:
+            profile = record_store.read_product_profile_record(request.product)
+            previews = record_store.list_preview_records(
+                anchor_repo=_preview_anchor_repo(profile),
+                anchor_pr_number=request.pull_request_number,
+            )
+            retired_failure = request.pull_request_number in _retired_preview_numbers(
+                previews, context=profile.preview.context
+            )
+        except (FileNotFoundError, OSError, ValueError, SQLAlchemyError) as error:
+            _LOGGER.warning(
+                "Preview feedback retirement could not be read (%s).", type(error).__name__
+            )
+    if request.target_kind == "preview" and _needs_absent_preview_feedback_recovery(
+        plan, include_failed=retired_failure
+    ):
         # Only unresolved reads or terminal clear delivery consume this budget. Open
         # PRs waiting for builds retain their ordinary event/sweep coverage.
-        if outcome.error or plan.get("reason") == "pull_request_not_open":
+        if (
+            outcome.error
+            or plan.get("reason") == "pull_request_not_open"
+            or (retired_failure and plan.get("reason") == "preview_cleanup_pr_state_unknown")
+        ):
             closed = not outcome.error and plan.get("reason") == "pull_request_not_open"
             previously_closed = request.last_plan.get("feedback_recovery_closed_observed") is True
             attempts = _feedback_recovery_failed_attempts(request.last_plan)
@@ -3013,6 +3127,7 @@ def _owner_review_status_writer(
     record_store: object,
     control_plane_root: Path | None,
     public_origin: Callable[[], str],
+    preview_request: ProductReconcileRequestRecord | None = None,
 ) -> OwnerReviewStatusWriter | None:
     """Project Client review through the Delivery and Advisory Apps."""
     if control_plane_root is None:
@@ -3027,7 +3142,12 @@ def _owner_review_status_writer(
     ) -> OwnerReviewStatus | None:
         return OwnerReviewStatusPublisher(
             control_plane_root=control_plane_root, public_origin=public_origin() or None
-        ).publish(store=review_store, profile=profile, pull_request_number=pull_request_number)
+        ).publish(
+            store=review_store,
+            profile=profile,
+            pull_request_number=pull_request_number,
+            preview_request=preview_request,
+        )
 
     return write
 
@@ -3121,11 +3241,60 @@ def request_product_reconcile_sweep(
         from control_plane.preview_reservation_recovery import (
             held_preview_reservations,
             original_preview_intent,
+            require_unrecorded_preview_original,
         )
 
-        for reservation in held_preview_reservations(record_store, product=profile.product):
+        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
+        originals = {
+            item.record_id: item
+            for item in held_preview_reservations(record_store, product=profile.product)
+        }
+        if isinstance(record_store, PostgresRecordStore) and product_profile_uses_odoo_driver(
+            profile
+        ):
+            from control_plane.preview_inventory_evidence import read_preview_inventory_evidence
+            from control_plane.workflows.generic_web_preview import preview_pr_number_from_slug
+
+            inventory = read_preview_inventory_evidence(
+                record_store=record_store,
+                context=profile.preview.context,
+                product=profile.product,
+                repository=profile.repository,
+            )
+            tracked = {
+                item.anchor_pr_number
+                for item in previews
+                if item.context == profile.preview.context
+                and item.state not in _ENDED_PREVIEW_STATES
+            }
+            if inventory.status in {"empty", "nonempty"}:
+                for slug in inventory.observed_slugs:
+                    number = preview_pr_number_from_slug(
+                        preview_slug=slug, slug_template=profile.preview.slug_template
+                    )
+                    if (
+                        number is None
+                        or number <= 0
+                        or number in tracked
+                        or profile.preview.slug_template.format(number=number) != slug
+                    ):
+                        continue
+                    originals.update(
+                        (item.record_id, item)
+                        for item in record_store.list_odoo_preview_cleanup_originals(
+                            product=profile.product, number=number
+                        )
+                    )
+        for reservation in originals.values():
             try:
                 original = original_preview_intent(reservation, profile=profile, store=record_store)
+                if reservation.state == "completed":
+                    require_unrecorded_preview_original(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        number=original.issued_plan.plan_request.pr_number,
+                        reservation_id=reservation.record_id,
+                    )
             except ValueError:
                 continue
             targets.append(
@@ -3143,7 +3312,6 @@ def request_product_reconcile_sweep(
                     product=profile.product, target_kind="preview", pull_request_number=number
                 )
             )
-        previews = record_store.list_preview_records(anchor_repo=_preview_anchor_repo(profile))
         for preview in previews:
             if preview.state not in _ENDED_PREVIEW_STATES:
                 targets.append(
@@ -3158,6 +3326,9 @@ def request_product_reconcile_sweep(
             for preview in previews
             if preview.state not in _ENDED_PREVIEW_STATES
         }
+        destroyed_preview_numbers = _retired_preview_numbers(
+            previews, context=profile.preview.context
+        )
         if profile.preview.enabled:
             try:
                 requests = record_store.list_product_reconcile_requests(
@@ -3173,7 +3344,10 @@ def request_product_reconcile_sweep(
                     request.target_kind == "preview"
                     and request.state in {"done", "failed"}
                     and request.pull_request_number not in preview_numbers
-                    and _needs_absent_preview_feedback_recovery(request.last_plan)
+                    and _needs_absent_preview_feedback_recovery(
+                        request.last_plan,
+                        include_failed=request.pull_request_number in destroyed_preview_numbers,
+                    )
                     and _feedback_recovery_failed_attempts(request.last_plan)
                     < PREVIEW_FEEDBACK_RECOVERY_MAX_FAILED_ATTEMPTS
                 ):
@@ -3195,10 +3369,32 @@ def _feedback_recovery_failed_attempts(plan: Mapping[str, object]) -> int:
     return max(0, count) if isinstance(count, int) and not isinstance(count, bool) else 0
 
 
-def _needs_absent_preview_feedback_recovery(plan: Mapping[str, object]) -> bool:
+def _retired_preview_numbers(previews: tuple[PreviewRecord, ...], *, context: str) -> set[int]:
+    live = {
+        preview.anchor_pr_number
+        for preview in previews
+        if preview.state not in _ENDED_PREVIEW_STATES
+    }
+    return {
+        preview.anchor_pr_number
+        for preview in previews
+        if preview.state == "destroyed"
+        and preview.context == context
+        and preview.anchor_pr_number not in live
+    }
+
+
+def _needs_absent_preview_feedback_recovery(
+    plan: Mapping[str, object], *, include_failed: bool = False
+) -> bool:
     feedback = plan.get(PR_FEEDBACK_PLAN_KEY)
     return isinstance(feedback, dict) and (
         feedback.get("status") == "pending"
+        or (
+            include_failed
+            and feedback.get("status") == "failed"
+            and plan.get("reason") != "pull_request_not_open"
+        )
         or (feedback.get("status") == "cleared" and feedback.get("delivery_status") != "delivered")
     )
 

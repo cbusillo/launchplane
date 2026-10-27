@@ -1,3 +1,4 @@
+from tests.merge_train_policy_fixtures import dependency_bot_policy
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,7 +46,7 @@ from control_plane.merge_train import (
     MergeTrainPullRequestSnapshot,
     MergeTrainReviewConversations,
 )
-from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
+from tests.support.merge_train_github import RecordingMergeTrainGitHubTransport
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.tenant_admission_controller import (
@@ -153,6 +154,20 @@ class _PassingTechnicalCheckClient(TenantAdmissionControllerGitHubClient):
             ),
             evaluated_at=evaluated_at,
         )
+
+
+class _CandidateProofClient(_PassingTechnicalCheckClient):
+    def __init__(self, full_candidate_passed: bool) -> None:
+        super().__init__()
+        self.full_candidate_passed = full_candidate_passed
+        self.observed_heads: list[str] = []
+
+    def read_technical_checks(self, **arguments: str) -> TenantAdmissionTechnicalChecks:
+        self.observed_heads.append(arguments["head_sha"])
+        result = super().read_technical_checks(**arguments)
+        if self.full_candidate_passed:
+            return result
+        return result.model_copy(update={"status": "pending", "signals": ()})
 
 
 class _EmptyEngineeringReviewStore:
@@ -385,10 +400,14 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
             head_sha=evidence.target.head_sha,
             tree_sha=evidence.target.tree_sha,
         )
-        for mergeable, state, accepted in (
-            (True, "success", True),
-            (None, "success", True),
-            (None, "failure", False),
+        for mergeable, state, accepted, focused, full_candidate_passed in (
+            (True, "success", True, False, True),
+            (None, "success", True, False, True),
+            (None, "failure", False, False, True),
+            (True, "success", True, True, True),
+            (None, "success", True, True, True),
+            (True, "success", True, True, False),
+            (True, "failure", False, True, True),
         ):
             with self.subTest(mergeable=mergeable, checks=state), TemporaryDirectory() as directory:
                 pull = _github_pull_request(
@@ -413,10 +432,19 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     [pull],
                     [handoff],
                     pull,
-                    _protected_branch_with_checks("ci-status", app_id=None),
+                    _protected_branch_with_checks(
+                        "ci-gate" if focused else "ci-status", app_id=None
+                    ),
                     [],
                     _combined_status(state=state),
-                    {"check_runs": [_required_check_run("ci-status", "completed", "success")]},
+                    {
+                        "check_runs": [
+                            _required_check_run(
+                                "pr-ci-gate" if focused else "ci-status", "completed", state
+                            )
+                            | {"app": {"id": 15368, "slug": "github-actions"}}
+                        ]
+                    },
                     _conversation_rule(),
                     [],
                     *(
@@ -427,7 +455,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     [{"filename": "application.py"}],
                     pull,
                 )
-                client = _PassingTechnicalCheckClient()
+                client = _CandidateProofClient(full_candidate_passed)
                 transport = RecordingMergeTrainGitHubTransport(responses=responses)
                 client.transport = transport
                 evaluator = LiveMergeAdmissionEvaluator(
@@ -463,7 +491,13 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                         )
 
                     if accepted:
-                        self.assertEqual(evaluate().readiness.state, "ready")
+                        evaluation = evaluate()
+                        self.assertEqual(
+                            evaluation.readiness.state == "ready", full_candidate_passed
+                        )
+                        self.assertEqual(
+                            client.observed_heads, [landing.landing_plan.candidate_sha]
+                        )
                     else:
                         with self.assertRaises(MergeAdmissionDeniedError):
                             evaluate()
@@ -508,7 +542,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
         policy_payload["policies"][0]["enqueue"].update(
             {
                 "trusted_automation_github_user_ids": [bot_id],
-                "dependency_update_github_user_ids": [bot_id],
+                "dependency_update_bots": [dependency_bot_policy(bot_id).model_dump()],
             }
         )
         policy_record = MergeTrainPolicyRecord.model_validate(
@@ -560,6 +594,7 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                             _change(),
                             _change(),
                             [],
+                            _change(),
                             pull_request,
                             {"permission": "read"},
                             _protected_branch_with_checks("ci-status", app_id=None),
@@ -969,7 +1004,7 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
         policy_record = build_test_merge_train_policy_record(repository=REPOSITORY)
         policy_payload = policy_record.model_dump(mode="json")
         enqueue = policy_payload["policy"]["policies"][0]["enqueue"]
-        enqueue["dependency_update_github_user_ids"] = [42]
+        enqueue["dependency_update_bots"] = [dependency_bot_policy(42).model_dump()]
         enqueue["trusted_automation_github_user_ids"] = [42]
         policy_payload["policy_sha256"] = ""
         policy_record = MergeTrainPolicyRecord.model_validate(policy_payload)

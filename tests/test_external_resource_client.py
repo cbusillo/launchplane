@@ -35,8 +35,9 @@ class ExternalResourceClientTests(unittest.TestCase):
         )
         self.reader = Mock(
             side_effect=lambda **_: {
+                "future_response_field": {"added": True},
                 "trace_id": "launchplane_req_fixture",
-                "profile": self.profile.model_dump(mode="json"),
+                "profile": {**self.profile.model_dump(mode="json"), "future_profile_field": True},
             }
         )
         self.writer = Mock(side_effect=self.write)
@@ -80,6 +81,7 @@ class ExternalResourceClientTests(unittest.TestCase):
                 ),
             )
         return {
+            "future_response_field": {"added": True},
             "status": "accepted",
             "trace_id": "launchplane_req_fixture",
             "records": {"product_profile": self.profile.product},

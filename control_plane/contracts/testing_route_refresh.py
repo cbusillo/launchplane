@@ -1,7 +1,16 @@
 """Private source digests held stable through a native route attestation write."""
 
+from __future__ import annotations
+
 from datetime import datetime
-from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
+from typing import TYPE_CHECKING
+from control_plane.contracts.route_binding_record import (
+    EnvironmentRouteBindingRecord,
+    RouteBindingDomain,
+)
+
+if TYPE_CHECKING:
+    from control_plane.dokploy.testing_route import TestingLaneRoute
 
 from control_plane.contracts.prepared_public_site import FrozenRecord
 
@@ -17,6 +26,13 @@ class TestingRouteRefreshSources(FrozenRecord):
     snapshot_sha256: str
     profile_sha256: str
     observed_at: datetime
+
+
+def testing_route_domains(route: TestingLaneRoute) -> tuple[RouteBindingDomain, ...]:
+    return (
+        RouteBindingDomain(domain_name=route.host),
+        *(RouteBindingDomain(domain_name=alias, role="alias") for alias in route.aliases),
+    )
 
 
 def is_native_testing_binding(record: EnvironmentRouteBindingRecord) -> bool:

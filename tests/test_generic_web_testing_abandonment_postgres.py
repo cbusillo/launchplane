@@ -1,4 +1,5 @@
 from tests import test_generic_web_testing_abandonment as abandonment
+from tests import test_testing_abandonment_authority as native_authority
 from tests.test_postgres_integration import _head_postgres_database
 from tests.support.auth import local_operator_policy
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
@@ -8,6 +9,12 @@ from unittest.mock import patch
 from typing import Any
 from control_plane import generic_web_testing_abandonment as qualification
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+
+
+class NativeTestingAbandonmentPostgresTests(native_authority.TestingAbandonmentAuthorityTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
 
 
 class TestingAbandonmentPostgresTests(abandonment.GenericWebTestingAbandonmentTests):
@@ -26,6 +33,59 @@ class TestingAbandonmentPostgresTests(abandonment.GenericWebTestingAbandonmentTe
                 ),
             )
         )
+
+    def test_legacy_fence_recovers_only_with_complete_retained_abandonment_history(self) -> None:
+        from sqlalchemy import select, text, update
+        from sqlalchemy.exc import OperationalError
+        from psycopg.errors import LockNotAvailable
+        from control_plane.storage.postgres import (
+            PostgresRecordStore,
+            LaunchplaneIdempotencyRow,
+            LaunchplanePublicIngressIncidentRow,
+            LaunchplanePublicIngressIncidentEventRow,
+            LaunchplanePublicIngressObservationRow,
+        )
+
+        snapshot = PostgresRecordStore._provider_hold_lane_snapshot
+        checked = False
+
+        def prove_and_check_lock(*args: Any, **kwargs: Any) -> Any:
+            nonlocal checked
+            result = snapshot(*args, **kwargs)
+            if args[1]._proof_for_update:
+                incidents = select(LaunchplanePublicIngressIncidentRow.incident_id).where(
+                    LaunchplanePublicIngressIncidentRow.product == self.fixture.profile.product,
+                    LaunchplanePublicIngressIncidentRow.context == self.deployment.context,
+                    LaunchplanePublicIngressIncidentRow.instance == "testing",
+                )
+                statements = (
+                    update(LaunchplaneIdempotencyRow)
+                    .where(LaunchplaneIdempotencyRow.record_id == self.original.record_id)
+                    .values(response_status_code=LaunchplaneIdempotencyRow.response_status_code),
+                    update(LaunchplanePublicIngressIncidentRow)
+                    .where(LaunchplanePublicIngressIncidentRow.incident_id.in_(incidents))
+                    .values(state_version=LaunchplanePublicIngressIncidentRow.state_version),
+                    update(LaunchplanePublicIngressIncidentEventRow)
+                    .where(LaunchplanePublicIngressIncidentEventRow.incident_id.in_(incidents))
+                    .values(occurred_at=LaunchplanePublicIngressIncidentEventRow.occurred_at),
+                    update(LaunchplanePublicIngressObservationRow)
+                    .where(LaunchplanePublicIngressObservationRow.incident_id.in_(incidents))
+                    .values(status=LaunchplanePublicIngressObservationRow.status),
+                )
+                for statement in statements:
+                    with self.assertRaises(OperationalError) as refused:
+                        with self.store._session_factory.begin() as concurrent:
+                            concurrent.execute(text("SET LOCAL lock_timeout = '200ms'"))
+                            concurrent.execute(statement)
+                    self.assertIsInstance(refused.exception.orig, LockNotAvailable)
+                checked = True
+            return result
+
+        with patch.object(
+            self.store, "_provider_hold_lane_snapshot", side_effect=prove_and_check_lock
+        ):
+            super().test_legacy_fence_recovers_only_with_complete_retained_abandonment_history()
+        self.assertTrue(checked)
 
     def test_concurrent_reviewed_applies_replay_one_exact_disposition(self) -> None:
         plan = self.inspect()

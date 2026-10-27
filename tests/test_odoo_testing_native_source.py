@@ -34,6 +34,7 @@ from control_plane.copy_readback_diagnostics import ReadbackPredicate
 from control_plane.odoo_testing_native_source import (
     capture_native_testing_source,
     prepare_native_testing_delivery,
+    remove_completed_native_capture_cache,
     verify_native_capture_files,
 )
 from control_plane.odoo_testing_restore import generation_binding, NATIVE_TESTING_FILES_PROGRAM
@@ -90,6 +91,78 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_container_field_diagnostics_are_closed_and_never_change_failure_authority(
+        self,
+    ) -> None:
+        program = "fixture program"
+        baseline = transport.NativeProgramFailed("baseline")
+        private = "private-container-field-sentinel"
+        valid = [{"field": "DNSConfig", "difference": "service_only"}]
+        for fields, expected in (
+            (valid, (("DNSConfig", "service_only"),)),
+            ([{"field": private, "difference": "unequal"}], ()),
+            ([{"field": "Env", "difference": private}], ()),
+            ([{"field": "Env", "difference": "unequal", "value": private}], ()),
+            ([{"field": [], "difference": "unequal"}], ()),
+            (valid + [{"field": "DNSConfig", "difference": "unequal"}], ()),
+            (private, ()),
+        ):
+            with self.subTest(fields=fields):
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        Connection({"type": "failed", "sites": [1], "container_fields": fields}),
+                        program=program,
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda frame: None,
+                    )
+                error = raised.exception
+                self.assertEqual(error.container_fields, expected)
+                self.assertEqual(error.evidence, baseline.evidence)
+                self.assertEqual(error.has_diagnostic, baseline.has_diagnostic)
+                self.assertEqual(error.code, baseline.code)
+                self.assertEqual(error.unavailable, baseline.unavailable)
+                self.assertNotIn(private, str(error) + repr(error.container_fields))
+
+    def test_native_program_sites_are_bounded_and_cannot_carry_provider_prose(self) -> None:
+        program = "first fixture line\nsecond fixture line"
+        baseline = transport.NativeProgramFailed("baseline")
+        private = "private-program-site-sentinel"
+        for sites, expected in (
+            ([1], (1,)),
+            ([True], ()),
+            ([-1], ()),
+            ([0], ()),
+            ([len(program.splitlines()) + 1], ()),
+            ([[]], ()),
+            ([private], ()),
+            (private, ()),
+            ([1] * (transport.NATIVE_PROGRAM_SOURCE_SITE_LIMIT + 1), ()),
+        ):
+            with self.subTest(sites=sites):
+                connection = Connection(
+                    {"type": "failed", "sites": sites, "sha": private, "message": private}
+                )
+                with self.assertRaises(transport.NativeProgramFailed) as raised:
+                    transport._read_program(
+                        connection,
+                        program=program,
+                        payload={},
+                        timeout_seconds=5,
+                        receive=lambda frame: None,
+                    )
+                error = raised.exception
+                self.assertEqual(error.program_sites, expected)
+                if expected:
+                    self.assertEqual(
+                        error.program_sha256, hashlib.sha256(program.encode()).hexdigest()
+                    )
+                self.assertEqual(error.evidence, baseline.evidence)
+                self.assertEqual(error.code, baseline.code)
+                self.assertEqual(error.has_diagnostic, baseline.has_diagnostic)
+                self.assertEqual(error.unavailable, baseline.unavailable)
+                self.assertNotIn(private, str(error) + json.dumps(error.evidence))
+
     def test_failed_frame_keeps_only_registered_predicates_and_closed_observations(self) -> None:
         for predicate, kind in (
             (ReadbackPredicate.RUNNER_RUNNING, "refused"),
@@ -403,6 +476,40 @@ class NativeSourceTransportTests(unittest.TestCase):
     def test_long_private_payload_is_read_after_loader_disables_tty_echo_and_canonical_mode(
         self,
     ) -> None:
+        payload: dict[str, object] = {"fixture": "private-fixture" * 5000}
+        program = "import sys,json,base64; value=json.loads(base64.b64decode(sys.argv[1])); print(sys.argv[2]+json.dumps({'type':'complete','length':len(value['fixture'])}),flush=True)"
+        program = repr("fixture program" * 20000) + "\n" + program
+        frames, raw, sent = self.terminal_program(program, payload)
+        self.assertEqual(frames, [{"type": "complete", "length": len(str(payload["fixture"]))}])
+        private = json.loads(next(message for message in sent if message.startswith("{")))[
+            "payload"
+        ]
+        self.assertNotIn(private[:512].encode(), raw)
+
+    @unittest.skipUnless(os.name == "posix", "The registered terminal transport uses a POSIX tty")
+    def test_packaged_source_loads_in_memory_and_dispatch_guard_runs_once(self) -> None:
+        calls = []
+
+        def guard(send: Callable[[], None]) -> None:
+            calls.append("dispatch")
+            send()
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}):
+            with self.assertRaises(transport.NativeProgramFailed):
+                self.terminal_program(
+                    transport.NATIVE_ODOO_SOURCE_READ_PROGRAM,
+                    {"source": {}, "mode": "probe"},
+                    guard,
+                )
+            self.assertFalse(list(Path(directory).iterdir()))
+        self.assertEqual(calls, ["dispatch"])
+
+    def terminal_program(
+        self,
+        program: str,
+        payload: dict[str, object],
+        dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+    ) -> tuple[list[dict[str, object]], bytes, list[str]]:
         import pty
 
         master, slave = pty.openpty()
@@ -432,8 +539,6 @@ class NativeSourceTransportTests(unittest.TestCase):
                     data = data[os.write(master, data) :]
 
         frames: list[dict[str, object]] = []
-        payload: dict[str, object] = {"fixture": "private-fixture" * 5000}
-        program = "import sys,json,base64; value=json.loads(base64.b64decode(sys.argv[1])); print(sys.argv[2]+json.dumps({'type':'complete','length':len(value['fixture'])}),flush=True)"
         try:
             transport._read_program(
                 Terminal(),
@@ -441,13 +546,10 @@ class NativeSourceTransportTests(unittest.TestCase):
                 payload=payload,
                 timeout_seconds=10,
                 receive=frames.append,
+                dispatch_guard=dispatch_guard,
             )
             child.wait(timeout=5)
-            self.assertEqual(frames, [{"type": "complete", "length": len(str(payload["fixture"]))}])
-            private = json.loads(next(message for message in sent if message.startswith("{")))[
-                "payload"
-            ]
-            self.assertNotIn(private[:512].encode(), raw)
+            return frames, bytes(raw), sent
         finally:
             if child.poll() is None:
                 child.kill()
@@ -556,6 +658,27 @@ class NativeSourceTransportTests(unittest.TestCase):
             )
         self.assertFalse(connection.sent)
 
+    def test_chunk_transport_contains_only_its_action_program(self) -> None:
+        import zipfile
+
+        connection = Connection()
+        transport._read_program(
+            connection,
+            program=transport.NATIVE_TESTING_CHUNK_WRITE_PROGRAM,
+            payload={},
+            timeout_seconds=5,
+            receive=lambda _: None,
+        )
+        lines = next(message for message in connection.sent if message.startswith("{")).splitlines()
+        content = b"".join(base64.b64decode(line) for line in lines[1:])
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            programs = [
+                archive.read(name).decode()
+                for name in archive.namelist()
+                if name.startswith("programs/")
+            ]
+        self.assertEqual(programs, [transport.NATIVE_TESTING_CHUNK_WRITE_PROGRAM])
+
     def test_truncation_never_supplies_completion(self) -> None:
         connection = Connection({"type": "data", "part": "database", "data": "Zml4dHVyZQ=="})
         with self.assertRaises(TimeoutError):
@@ -629,7 +752,7 @@ class NativeCopyCustodyTests(unittest.TestCase):
         )
 
     def test_receipt_is_published_after_bytes_and_original_capture_is_reused(self) -> None:
-        def persist(receipt: NativeTestingCopyCapture) -> None:
+        def persist(receipt: NativeTestingCopyCapture, **_: object) -> None:
             files = verify_native_capture_files(receipt)
             self.assertEqual([path.read_bytes() for path in files], list(self.data.values()))
             self.assertTrue(all(path.stat().st_mode & 0o077 == 0 for path in files))
@@ -663,8 +786,34 @@ class NativeCopyCustodyTests(unittest.TestCase):
         self.store.write_native_testing_copy_capture.assert_not_called()
         self.assertFalse(any(path.is_file() for path in self.root.rglob("*")))
 
+    def test_completed_cleanup_removes_orphan_attempts_without_other_generation_bytes(self) -> None:
+        self.store.write_native_testing_copy_capture.side_effect = OSError("Fixture commit failed")
+        with patch(
+            "control_plane.odoo_testing_native_source.read_native_source", side_effect=self.stream
+        ):
+            with self.assertRaises(OSError):
+                self.capture()
+            self.store.write_native_testing_copy_capture.side_effect = None
+            capture = self.capture()
+        root = verify_native_capture_files(capture)[0].parent.parent
+        self.assertEqual(len(list(root.iterdir())), 2)
+        interrupted = root / "capture-interrupted"
+        interrupted.mkdir()
+        (interrupted / "database").write_bytes(self.data["database"])
+        retained = root.parent / ("0" * 64)
+        retained.mkdir()
+        witness = retained / "original"
+        witness.write_bytes(self.data["filestore"])
+        (root / "outside-link").symlink_to(retained, target_is_directory=True)
+        remove_completed_native_capture_cache(capture)
+        self.assertFalse(root.exists())
+        self.assertEqual(witness.read_bytes(), self.data["filestore"])
+        remove_completed_native_capture_cache(capture)
+        self.assertFalse(root.exists())
+        self.assertEqual(witness.read_bytes(), self.data["filestore"])
+
     def test_lost_receipt_commit_reply_retains_published_bytes_for_resume(self) -> None:
-        def committed(receipt: NativeTestingCopyCapture) -> None:
+        def committed(receipt: NativeTestingCopyCapture, **_: object) -> None:
             self.store.read_native_testing_copy_capture.return_value = receipt
             raise OSError("fixture lost commit reply")
 

@@ -8,6 +8,8 @@ import click
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.clean_testing_snapshot import snapshot_storage_budget
+from control_plane.contracts.odoo_testing_drill import TESTING_STORAGE_BUDGET_REQUIRED
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementRequest,
@@ -112,6 +114,14 @@ def inspect_testing_rebuild(
             "testing_rebuild_inputs_unverified",
             "The retained testing inputs could not be verified.",
         ) from error
+    if apply.data_source_mode != "empty":
+        try:
+            snapshot_storage_budget(intent.profile, lane.context)
+        except ValueError as error:
+            raise TestingRebuildRefused(
+                TESTING_STORAGE_BUDGET_REQUIRED,
+                "Clean snapshots require reviewed testing storage headroom.",
+            ) from error
     try:
         candidate_credential_authority(store, lane.context)
     except NativeSourceAuthorizationDenied:

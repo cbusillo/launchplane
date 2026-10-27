@@ -1,9 +1,5 @@
-"""Read value-free retirement evidence through the existing operator transport.
-
-This client has no apply mode. Routes come from the canonical OpenAPI artifact.
-"""
-
 import argparse
+from functools import cache
 import http.client
 import json
 from pathlib import Path
@@ -20,17 +16,19 @@ from control_plane.contracts.authz_retirement_evidence import (
     AuthzWorkflowEvidenceCandidate,
 )
 from control_plane.http_routes.operational_records import RuntimeSettingsResponse
+from control_plane.openapi_export import canonical_openapi_document
+
+
+@cache
+def _canonical_paths() -> dict[str, Any]:
+    paths: dict[str, Any] = canonical_openapi_document()["paths"]
+    return paths
 
 
 def operation_route(operation: str, method: str) -> str:
-    document = json.loads(
-        (
-            Path(__file__).resolve().parents[1] / "frontend/generated/openapi-canonical.json"
-        ).read_text()
-    )
     matches = [
         path
-        for path, methods in document["paths"].items()
+        for path, methods in _canonical_paths().items()
         if methods.get(method, {}).get("operationId") == operation
     ]
     if len(matches) != 1:
@@ -54,7 +52,7 @@ def inspect_settings(
     raw = transport["request_launchplane_read"](
         service_url=settings["service_url"], path=path, settings=settings, query={}, timeout=30
     )
-    response = RuntimeSettingsResponse.model_validate(raw)
+    response = RuntimeSettingsResponse.model_validate(raw, extra="ignore")
     if (response.context, response.instance) != (args.context, args.instance):
         raise ValueError("Runtime inventory scope mismatch.")
     records = []
@@ -165,7 +163,8 @@ def inspect_policy(
                 settings=settings,
                 body=request.model_dump(mode="json"),
                 timeout=30,
-            )
+            ),
+            extra="ignore",
         )
         expected = request.policy_record_id, request.policy_revision, request.policy_sha256
         if (

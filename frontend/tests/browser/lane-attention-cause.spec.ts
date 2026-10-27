@@ -84,3 +84,26 @@ test("a red private lane never headlines a retained passing public observation",
   // The retained observation stays visible, labelled as history rather than current health.
   await expect(workspaceLane).toContainText(`Recorded public observation: ${fixtures.retained}`);
 });
+
+test("a held testing lane says its deploys are held and why", async ({ page }) => {
+  await page.goto("/ui/products?fixture=products");
+  const product = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const module = await import(modulePath) as typeof import("../../src/dev-fixtures");
+    const product = structuredClone(module.productsForFixture("products")[0]);
+    product.environments.find(lane => lane.environment === "testing")!.deploy_hold = "isolation_staging";
+    return { product, identity: module.fixtureIdentity };
+  });
+  await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { status: "error", trace_id: "unused-read", error: { code: "authorization_denied", message: "Fixture read unavailable" } } }));
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: product.identity } }));
+  await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", trace_id: "products", products: [product.product] } }));
+  await page.route(`**/v1/products/${product.product.product}`, route => route.fulfill({ json: { status: "ok", trace_id: "product", product: product.product } }));
+  await page.goto("/ui/products");
+
+  const held = /deploys held until testing is proven separate from production/i;
+  await expect(page.locator('.directory-lane[data-lane="testing"]')).toContainText(held);
+  await expect(page.locator('.directory-lane[data-lane="prod"]')).not.toContainText(/deploys held/i);
+  await page.getByRole("list", { name: "Launchplane products" })
+    .getByRole("link", { name: new RegExp(product.product.display_name) }).click();
+  await expect(page.locator('.environment-row[data-lane="testing"]')).toContainText(held);
+});

@@ -30,11 +30,18 @@ from control_plane.dokploy.testing_route_execution import (
 )
 from control_plane.testing_application_capabilities import retained_application_inventory_header
 from control_plane.docker_errors import docker_daemon_authorization_denied
-from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceUnavailable
+from control_plane.dokploy.native_copy_stream import (
+    _read_remote,
+    NativeSourceUnavailable,
+    NATIVE_PROGRAM_SOURCE_SITE_LIMIT,
+    NATIVE_CONTAINER_SPEC_FIELDS,
+)
+from control_plane.dokploy.native_service_read import read_stored_docker_service
 from control_plane.dokploy.route_rules import host_rule_may_match
 from control_plane.dokploy.testing_route import (
     TestingLaneRoute,
     observe_testing_route,
+    route_document,
     route_document_content,
     route_document_digest,
     redirects_to_https,
@@ -42,9 +49,19 @@ from control_plane.dokploy.testing_route import (
     canonical_acme_challenge,
     router_configuration,
     testing_route_static_sha256,
+    testing_route_rule,
+    amend_testing_route_address,
+    possible_lane_routers,
+)
+from control_plane.dokploy.testing_address_recipients import (
+    qualify_testing_address_recipients,
+    qualify_testing_address_tcp_routes,
+    testing_address_tcp_may_match,
 )
 from control_plane.dokploy.testing_retained_copy import (
     retained_inventory_sha256,
+    retained_copy_availability,
+    retained_web_process,
     require_complete_container_inventory,
 )
 
@@ -85,11 +102,19 @@ def testing_route_host_program() -> str:
         + inspect.getsource(router_configuration)
         + inspect.getsource(canonical_acme_challenge)
         + inspect.getsource(select_testing_route_raw)
+        + inspect.getsource(testing_route_rule)
+        + inspect.getsource(testing_address_tcp_may_match)
+        + inspect.getsource(qualify_testing_address_tcp_routes)
+        + inspect.getsource(qualify_testing_address_recipients)
         + "\n"
         + inspect.getsource(docker_daemon_authorization_denied)
         + "\n"
+        + inspect.getsource(read_stored_docker_service)
+        + "\n"
         + inspect.getsource(parse_testing_route_fence)
         + inspect.getsource(retained_inventory_sha256)
+        + inspect.getsource(retained_copy_availability)
+        + inspect.getsource(retained_web_process)
         + inspect.getsource(require_complete_container_inventory)
         + "\nDIRECTORY="
         + repr(TRAEFIK_DYNAMIC_DIRECTORY)
@@ -107,7 +132,27 @@ def testing_route_host_program() -> str:
         + repr(MAX_TRAEFIK_API_BYTES)
         + "\nAPI_READER="
         + repr(READ_TRAEFIK_API)
+        + "\nSOURCE_SITE_LIMIT="
+        + repr(NATIVE_PROGRAM_SOURCE_SITE_LIMIT)
+        + "\nCONTAINER_SPEC_FIELDS="
+        + repr(NATIVE_CONTAINER_SPEC_FIELDS)
         + r"""
+
+class RetainedTaskSpecMismatch(RuntimeError):
+    def __init__(self, task: object, service: dict[str, Any]) -> None:
+        super().__init__('Retained task inputs differ from the current template')
+        self.container_fields=[]
+        if not isinstance(task,dict):
+            self.container_fields.append({'field':'other','difference':'unequal'})
+            return
+        missing=object()
+        changed={key for key in task.keys()|service.keys() if task.get(key,missing)!=service.get(key,missing)}
+        for field in CONTAINER_SPEC_FIELDS:
+            if field in changed:
+                difference='service_only' if field not in task else 'task_only' if field not in service else 'unequal'
+                self.container_fields.append({'field':field,'difference':difference})
+        if changed-set(CONTAINER_SPEC_FIELDS):
+            self.container_fields.append({'field':'other','difference':'unequal'})
 
 def docker(*arguments, stdin=None):
     result = subprocess.run(['docker', *arguments], input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60, check=False)
@@ -116,6 +161,20 @@ def docker(*arguments, stdin=None):
             raise PermissionError('The managed testing route operation was refused')
         raise RuntimeError('The managed testing route operation did not complete')
     return result.stdout
+
+def read_service_ids() -> list[str]:
+    prefixes=docker('service','ls','-q').decode().splitlines()
+    if (len(prefixes)>10000 or len(prefixes)!=len(set(prefixes))
+        or any(not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}',value) for value in prefixes)):
+        raise RuntimeError('Service inventory prefixes are incomplete')
+    if not prefixes:
+        return []
+    resolved=[json.loads(line) for line in docker('service','inspect','--format','{{json .ID}}',*prefixes).splitlines()]
+    if (len(resolved)!=len(prefixes)
+        or any(not isinstance(value,str) or not value.startswith(prefix) for prefix,value in zip(prefixes,resolved))
+        or len(resolved)!=len(set(resolved))):
+        raise RuntimeError('Complete service identities are unavailable')
+    return resolved
 
 WRITE_STARTED=False
 
@@ -174,8 +233,8 @@ def application_container(containers, binding, proxy_networks):
     attachments=service.get('Spec',{}).get('TaskTemplate',{}).get('Networks')
     if not network_ids or not isinstance(attachments,list) or not any(item.get('Target') in network_ids for item in attachments):
         raise RuntimeError('Application service network ownership is unavailable')
-    service_ids=docker('service','ls','-q','--no-trunc').decode().splitlines()
-    if len(service_ids)>10000 or len(service_ids)!=len(set(service_ids)) or service['ID'] not in service_ids:
+    service_ids=read_service_ids()
+    if service['ID'] not in service_ids:
         raise RuntimeError('Application service inventory is incomplete')
     for identifier in service_ids:
         if identifier==service['ID']: continue
@@ -190,7 +249,7 @@ def application_container(containers, binding, proxy_networks):
         if item['Id']!=container['Id'] and binding['name'].casefold() in proxy_dns_names(item,proxy_networks):
             raise RuntimeError('Application private name is shared')
     if (json.loads(docker('service','inspect',binding['name']))[0]!=service or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
-        or docker('service','ls','-q','--no-trunc').decode().splitlines()!=service_ids):
+        or read_service_ids()!=service_ids):
         raise RuntimeError('Application service changed during route observation')
     return container,identity,shared
 
@@ -212,6 +271,21 @@ def retained_application_backend(containers, binding, proxy_networks):
     if ((binding.get('service_id') and service['ID']!=binding['service_id'])
         or (binding.get('task_template_sha256') and template_sha256!=binding['task_template_sha256'])):
         raise RuntimeError('The admitted retained service template changed')
+    api_version=docker('version','--format','{{.Client.APIVersion}}').decode().strip()
+    stored=read_stored_docker_service(service['ID'],api_version,max_bytes=MAX_API_BYTES)
+    version=service.get('Version',{}).get('Index')
+    stored_specification=stored.get('Spec')
+    if (stored.get('ID')!=service['ID'] or type(version) is not int or version<=0
+        or type(stored.get('Version',{}).get('Index')) is not int
+        or stored['Version']['Index']!=version or not isinstance(stored_specification,dict)
+        or stored_specification.get('Name')!=binding['name']):
+        raise RuntimeError('The stored retained service witness changed')
+    stored_template=stored_specification.get('TaskTemplate')
+    stored_configuration=stored_template.get('ContainerSpec') if isinstance(stored_template,dict) else None
+    if (not isinstance(stored_configuration,dict)
+        or any(key not in configuration or configuration[key]!=value for key,value in stored_configuration.items())):
+        raise RuntimeError('Stored and displayed retained service inputs differ')
+    configuration=stored_configuration
     def environment(items):
         if not isinstance(items,list): raise RuntimeError('Retained environment is unavailable')
         values={}
@@ -258,7 +332,7 @@ def retained_application_backend(containers, binding, proxy_networks):
         if task.get('NodeID') and task['NodeID']!=local_nodes[0]['ID']:
             raise RuntimeError('Retained task is outside the local inventory')
         if task.get('DesiredState') not in {'shutdown','remove'} and task.get('Spec',{}).get('ContainerSpec')!=configuration:
-            raise RuntimeError('Retained task inputs differ from the current template')
+            raise RetainedTaskSpecMismatch(task.get('Spec',{}).get('ContainerSpec'),configuration)
         tasks[identifier]=task
     owned=[]
     actual_image=False
@@ -291,6 +365,8 @@ def retained_application_backend(containers, binding, proxy_networks):
                 raise RuntimeError('Retained actual container inputs differ from image and task')
             actual_image=True
         elif container.get('State',{}).get('Status')=='running':
+            if task is not None and task.get('Spec',{}).get('ContainerSpec')!=configuration:
+                raise RetainedTaskSpecMismatch(task.get('Spec',{}).get('ContainerSpec'),configuration)
             raise RuntimeError('A running retained container differs from the current template')
         if container.get('State',{}).get('Status')=='running':
             attached=container.get('NetworkSettings',{}).get('Networks',{})
@@ -300,8 +376,8 @@ def retained_application_backend(containers, binding, proxy_networks):
             exact_endpoints.extend('http://'+alias+':'+str(binding['port']) for alias in proxy_dns_names(container,proxy_networks))
     if not pinned and not actual_image:
         raise RuntimeError('A tag-only retained template has no actual immutable image proof')
-    service_ids=docker('service','ls','-q','--no-trunc').decode().splitlines()
-    if len(service_ids)>10000 or len(service_ids)!=len(set(service_ids)) or service['ID'] not in service_ids:
+    service_ids=read_service_ids()
+    if service['ID'] not in service_ids:
         raise RuntimeError('Application service inventory is incomplete')
     for identifier in service_ids:
         if identifier==service['ID']: continue
@@ -317,8 +393,8 @@ def retained_application_backend(containers, binding, proxy_networks):
             raise RuntimeError('Application private name is shared')
     if (json.loads(docker('service','inspect',binding['name']))[0]!=service
         or docker('service','ps','--no-trunc','-q',binding['name']).decode().splitlines()!=identifiers
-        or docker('service','ls','-q','--no-trunc').decode().splitlines()!=service_ids
-        or sorted(docker('ps','-aq').decode().splitlines())!=sorted(item['Id'] for item in containers)
+        or read_service_ids()!=service_ids
+        or sorted(docker('ps','-aq','--no-trunc').decode().splitlines())!=sorted(item['Id'] for item in containers)
         or any(json.loads(docker('inspect',item['Id']))!=[item] for item in owned)
         or single_local_swarm_node(docker)!=local_nodes):
         raise RuntimeError('Retained inventory changed during route observation')
@@ -348,10 +424,22 @@ def main(spec):
     global WRITE_STARTED
     if not re.fullmatch(r'lp-testing-route-[a-f0-9]{32}',spec['route_id']) or not re.fullmatch(r'[a-zA-Z0-9.-]+',spec['host']):
         raise RuntimeError('Testing route identity is invalid')
+    public_aliases=spec.get('aliases',[])
+    if not isinstance(public_aliases,list) or len(public_aliases)>1 or any(not isinstance(alias,str) or not re.fullmatch(r'[a-zA-Z0-9.-]+',alias) for alias in public_aliases) or len({host.casefold() for host in [spec['host'],*public_aliases]})!=1+len(public_aliases):
+        raise RuntimeError('Testing route aliases are invalid')
     identifiers=docker('ps','-aq','--no-trunc').decode().splitlines()
     containers=json.loads(docker('inspect',*identifiers)) if identifiers else []
     if not isinstance(containers,list) or any(not isinstance(item,dict) for item in containers) or len(set(identifiers))!=len(identifiers) or len(containers)!=len(identifiers) or {item.get('Id') for item in containers}!=set(identifiers):
         raise RuntimeError('Managed container inventory is incomplete')
+    recipient_sha256=''
+    recipients=None if spec.get('address_inverse') else spec.get('address_recipients')
+    if recipients is not None:
+        require_complete_container_inventory(containers)
+        if recipients.get('hostname')!=spec['host'] or set(recipients.get('entrypoints',[]))!=set(spec['entrypoints']):
+            raise RuntimeError('Retained hostname recipients crossed their address or listeners')
+        recipient_sha256=qualify_testing_address_recipients(containers,recipients)
+        if recipients.get('expected_sha256') and recipients['expected_sha256']!=recipient_sha256:
+            raise RuntimeError('Retained hostname recipients changed')
     if spec.get('unavailable_predecessor') is not None:
         require_complete_container_inventory(containers)
     proxies=[item for item in containers if item.get('State',{}).get('Status')=='running' and (item.get('Name')=='/dokploy-traefik' or (item.get('Config',{}).get('Labels') or {}).get('com.docker.swarm.service.name')=='dokploy-traefik')]
@@ -425,7 +513,9 @@ def main(spec):
     if len(response)>MAX_API_BYTES:
         raise RuntimeError('Managed proxy API response exceeds its bound')
     raw=json.loads(response)
-    raw=select_testing_route_raw(raw,spec['host'],spec['entrypoints'],spec.get('external_middlewares'),discover_external_redirects=spec.get('unavailable_predecessor') is not None and 'external_middlewares' not in spec)
+    if recipients is not None:
+        qualify_testing_address_tcp_routes(raw,spec['host'],tuple(spec['entrypoints']))
+    raw=select_testing_route_raw(raw,spec['host'],spec['entrypoints'],spec.get('external_middlewares'),discover_external_redirects=spec.get('unavailable_predecessor') is not None and 'external_middlewares' not in spec,aliases=tuple(public_aliases))
     name=spec['route_id']+'.yml'
     file_read=docker('exec',proxy['Id'],'sh','-c','set -eu; p="$1/$2"; test ! -L "$1"; test ! -L "$p"; if test -e "$p"; then test -f "$p"; printf "present\\n"; cat "$p"; else printf "absent\\n"; fi','_',DIRECTORY,name).decode()
     presence, separator, content=file_read.partition('\n')
@@ -451,10 +541,9 @@ def main(spec):
         if expected and expected!=application_file_sha256:
             raise RuntimeError('The original application route file changed')
     old_project=spec['old_project']
-    members=[item for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==old_project]
-    states={item['State']['Status'] for item in members}
-    old_availability='absent' if not members else 'stopped' if states<={'exited','created'} else 'available' if states&{'running','restarting','paused'} else 'unknown'
+    old_availability=retained_copy_availability(containers,{'project':old_project})
     old_inventory_sha256=retained_inventory_sha256(containers,{'project':old_project})
+    old_web_process=retained_web_process(containers,{'project':old_project})
     unavailable=spec.get('unavailable_predecessor')
     old=[item for item in containers if (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project')==old_project and (item.get('Config',{}).get('Labels') or {}).get('com.docker.compose.service')=='web']
     endpoints=[]
@@ -513,7 +602,10 @@ def main(spec):
                     raise RuntimeError('The candidate testing alias is absent or shared')
                 candidate=matching[0]
                 labels=candidate.get('Config',{}).get('Labels') or {}
-                if candidate.get('State',{}).get('Status')!='running' or labels.get('com.docker.compose.project')!=desired.hostname or labels.get('com.docker.compose.service')!='web':
+                desired_project=spec.get('desired_compose_project') or desired.hostname
+                if not isinstance(desired_project,str) or not re.fullmatch(re.escape(desired.hostname)+r'(?:-[a-z0-9]{6})?',desired_project):
+                    raise RuntimeError('The candidate testing project crossed its namespace')
+                if candidate.get('State',{}).get('Status')!='running' or labels.get('com.docker.compose.project')!=desired_project or labels.get('com.docker.compose.service')!='web':
                     raise RuntimeError('The candidate testing alias changed ownership')
                 environment=dict(item.split('=',1) for item in candidate.get('Config',{}).get('Env',[]) if '=' in item)
                 port=environment.get('ODOO_HTTP_PORT') or '8069'
@@ -547,8 +639,13 @@ def main(spec):
         if set(document)!={'http'} or set(http)-{'routers','services','middlewares'} or set(http.get('services',{}))!={spec['route_id']}:
             raise RuntimeError('Testing publication contains another route or service')
         for router_name,item in http.get('routers',{}).items():
-            if not re.fullmatch(re.escape(spec['route_id'])+r'-[0-9]+',router_name) or item.get('rule')!='Host(`'+spec['host']+'`)' or item.get('service')!=spec['route_id'] or not set(item.get('entryPoints',[]))<=set(spec['entrypoints']):
+            if spec.get('address_inverse') and len(public_aliases)!=1:
+                raise RuntimeError('The original testing address preimage is unavailable')
+            allowed_rule=testing_route_rule(public_aliases[0]) if spec.get('address_inverse') else testing_route_rule(spec['host'],tuple(public_aliases))
+            if not re.fullmatch(re.escape(spec['route_id'])+r'-[0-9]+',router_name) or item.get('rule')!=allowed_rule or item.get('service')!=spec['route_id'] or not set(item.get('entryPoints',[]))<=set(spec['entrypoints']):
                 raise RuntimeError('Testing publication crosses its lane host')
+            if recipients is not None and item.get('priority')!=spec.get('address_priorities',{}).get(router_name):
+                raise RuntimeError('The retained hostname routing priority changed')
         if not http.get('routers') or spec['desired_backend'] not in spec['allowed_backends'] or http['services'][spec['route_id']].get('loadBalancer',{}).get('servers')!=[{'url':spec['desired_backend']}]:
             raise RuntimeError('Testing publication selected an unbound backend')
         if http.get('middlewares',{}) not in ({},{spec['route_id']+'-connections':{'headers':{'contentSecurityPolicy':CSP}}}) or any(not redirects_to_https(raw,item) and spec['route_id']+'-connections@file' not in item.get('middlewares',[]) for item in http['routers'].values()):
@@ -564,7 +661,7 @@ def main(spec):
         return {'type':'complete','execution_key':spec['execution_key'],'document_sha256':hashlib.sha256(document).hexdigest(),'execution_custody':custody,'writer_outcome':outcome}
     elif spec['mode']!='read':
         raise RuntimeError('Unsupported testing route operation')
-    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'old_availability':old_availability,'old_inventory_sha256':old_inventory_sha256,'old_service_id':old_service_id,'old_task_template_sha256':old_task_template_sha256,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem), 'application_file':application_file,'application_file_name':application_file_name if application_file is not None else '', 'application_file_sha256':application_file_sha256}
+    return {'type':'complete','static_configuration':static,'raw':raw,'owned_file':observed,'file_sha256':digest,'old_endpoints':endpoints,'proxy_id':proxy['Id'],'old_identity':old_identity,'old_availability':old_availability,'old_inventory_sha256':old_inventory_sha256,'old_web_process':old_web_process,'old_service_id':old_service_id,'old_task_template_sha256':old_task_template_sha256,'execution_custody':custody,'execution_fence':read_fence(proxy['Id'],name,filesystem), 'application_file':application_file,'application_file_name':application_file_name if application_file is not None else '', 'application_file_sha256':application_file_sha256,'address_recipients_sha256':recipient_sha256}
 
 if __name__=='__main__':
     payload={}
@@ -574,9 +671,18 @@ if __name__=='__main__':
     except PermissionError:
         print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
         sys.exit(1)
-    except Exception:
+    except Exception as error:
         kind='route_write_not_started' if payload.get('mode') in {'publish_v2','initialize_v2','allocate_lock_v2'} and not WRITE_STARTED else 'failed'
-        print(sys.argv[2]+json.dumps({'type':kind}),flush=True)
+        sites=[]
+        trace=error.__traceback__
+        while trace is not None:
+            if trace.tb_frame.f_code.co_filename==main.__code__.co_filename:
+                sites.append(trace.tb_lineno)
+            trace=trace.tb_next
+        frame={'type':kind,'sites':sites[-SOURCE_SITE_LIMIT:]}
+        if isinstance(error,RetainedTaskSpecMismatch):
+            frame['container_fields']=error.container_fields
+        print(sys.argv[2]+json.dumps(frame),flush=True)
         sys.exit(1)
 """
     )
@@ -601,18 +707,25 @@ class DokployTestingRouteTransport:
         external_middlewares: tuple[str, ...] | None = None,
         old_application: dict[str, object] | None = None,
         new_application: dict[str, object] | None = None,
+        public_aliases: tuple[str, ...] = (),
+        address_recipients: dict[str, object] | None = None,
     ) -> None:
         from control_plane.dokploy.testing_route import testing_route_id
 
         self.host, self.token, self.server_id = host, token, server_id
         self.old_runtime_identity = old_runtime_identity
         self.product, self.context = product, context
+        self.public_aliases = public_aliases
         self.payload: dict[str, object] = {
             "route_id": testing_route_id(product, context),
             "host": public_host,
             "old_project": old_project,
             "entrypoints": entrypoints,
         }
+        if public_aliases:
+            self.payload["aliases"] = public_aliases
+        if address_recipients is not None:
+            self.payload["address_recipients"] = address_recipients
         if old_application is not None:
             self.payload.update(old_application=old_application, new_application=new_application)
         elif old_runtime_identity is None and unavailable_predecessor is None:
@@ -718,13 +831,27 @@ class DokployTestingRouteTransport:
         )
 
     def execution_intent(
-        self, plan: TestingLaneRoute, backend: str | None, *, operation_id: str
+        self,
+        plan: TestingLaneRoute,
+        backend: str | None,
+        *,
+        operation_id: str,
+        address_preimage: TestingLaneRoute | None = None,
+        address_inverse: bool = False,
     ) -> TestingRouteExecutionIntent:
-        if (plan.route_id, plan.host) != (
+        if (plan.route_id, plan.host, plan.aliases) != (
             self.payload["route_id"],
             self.payload["host"],
+            self.public_aliases,
         ) or backend not in {plan.old_backend, plan.new_backend}:
             raise ValueError("The route execution crosses its original lane.")
+        document_plan = plan
+        if address_inverse:
+            if address_preimage is None or plan != amend_testing_route_address(
+                address_preimage, plan.host
+            ):
+                raise ValueError("An address inverse requires its exact original route preimage.")
+            document_plan = address_preimage
         frame = self.read()
         return TestingRouteExecutionIntent(
             operation_id=operation_id,
@@ -732,7 +859,7 @@ class DokployTestingRouteTransport:
             route_id=plan.route_id,
             route_digest=plan.digest,
             backend=backend,
-            document_sha256=route_document_digest(plan, backend),
+            document_sha256=route_document_digest(document_plan, backend),
             custody=TestingRouteExecutionCustody.model_validate(frame["execution_custody"]),
         )
 
@@ -895,16 +1022,32 @@ class DokployTestingRouteTransport:
         execution: TestingRouteExecutionIntent,
         execution_key: str,
         writer_attempt: TestingRouteWriterAttempt,
+        desired_compose_project: str | None = None,
+        address_preimage: TestingLaneRoute | None = None,
+        address_inverse: bool = False,
     ) -> Literal["applied", "excluded", "busy", "unknown", "superseded"]:
         if plan.unavailable_preimage is None and self.old_runtime_identity is None:
             raise ValueError("Publication requires the originally observed retained runtime.")
         if not self.payload["entrypoints"]:
             raise ValueError("Testing publication requires its discovered entrypoints to be bound.")
-        if (plan.route_id, plan.host) != (
+        if (plan.route_id, plan.host, plan.aliases) != (
             self.payload["route_id"],
             self.payload["host"],
+            self.public_aliases,
         ) or expected_backend not in {plan.old_backend, plan.new_backend}:
             raise ValueError("Testing route publication crossed its admitted lane or copy.")
+        if plan.address_only != (address_preimage is not None):
+            raise ValueError("An address-only publication needs its original route preimage.")
+        if plan.address_only and not address_inverse and "address_recipients" not in self.payload:
+            raise ValueError("An address amendment requires its retained recipient qualification.")
+        if address_preimage is not None and plan != amend_testing_route_address(
+            address_preimage, plan.host
+        ):
+            raise ValueError("Address publication changed its original backend or route topology.")
+        if address_inverse and address_preimage is None:
+            raise ValueError("An address inverse requires its original route.")
+        document_plan = address_preimage if address_inverse else plan
+        assert document_plan is not None
         if desired_runtime_identity is None:
             if backend is not None or plan.unavailable_preimage is None:
                 raise ValueError("Only an unavailable inverse may omit its runtime identity.")
@@ -929,7 +1072,7 @@ class DokployTestingRouteTransport:
             plan.route_id,
             plan.digest,
             backend,
-            route_document_digest(plan, backend),
+            route_document_digest(document_plan, backend),
         ):
             raise ValueError("The original route execution intent changed.")
         if writer_attempt.execution != execution or writer_attempt.key != execution_key:
@@ -957,16 +1100,29 @@ class DokployTestingRouteTransport:
         owned = None if frame["owned_file"] is None else json.loads(frame["owned_file"])
         if frame["owned_file"] is not None and not isinstance(owned, dict):
             raise ValueError("Testing route file is not an owned document.")
-        content = route_document_content(plan, backend)
+        content = route_document_content(document_plan, backend)
         intended = json.loads(content) if content is not None else None
-        if backend is None and plan.unavailable_preimage is not None:
+        if address_inverse:
+            if owned not in (intended, route_document(plan, backend)):
+                raise ValueError("An address inverse cannot replace another route's document.")
+        elif backend is None and plan.unavailable_preimage is not None:
             if frame["owned_file"] not in {
                 content,
                 route_document_content(plan, plan.new_backend),
             }:
                 raise ValueError("The inverse cannot overwrite a foreign testing route file.")
         else:
-            observed = observe_testing_route(plan, frame["raw"], owned)
+            admitted = (
+                address_preimage
+                if address_preimage is not None
+                and owned == route_document(address_preimage, address_preimage.new_backend)
+                else plan
+            )
+            if admitted is address_preimage and possible_lane_routers(
+                frame["raw"], plan.host, plan.public_entrypoints
+            ):
+                raise ValueError("The requested canonical hostname acquired an applied router.")
+            observed = observe_testing_route(admitted, frame["raw"], owned)
             if observed not in {expected_backend, backend}:
                 raise ValueError("Testing route no longer identifies its admitted previous copy.")
         if (backend is not None and owned == intended) or frame["owned_file"] == content:
@@ -1004,6 +1160,17 @@ class DokployTestingRouteTransport:
         receipt = self._run(
             {
                 "mode": "publish_v2",
+                **({"address_inverse": True} if address_inverse else {}),
+                **(
+                    {
+                        "address_priorities": {
+                            name: router["priority"]
+                            for name, router in plan.template["http"]["routers"].items()
+                        }
+                    }
+                    if address_preimage is not None and not address_inverse
+                    else {}
+                ),
                 "execution_key": execution_key,
                 "execution_custody": writer_attempt.custody.model_dump(mode="json"),
                 "document": intended,
@@ -1014,6 +1181,7 @@ class DokployTestingRouteTransport:
                 else None,
                 "retained_backend": plan.old_backend,
                 "desired_backend": backend,
+                "desired_compose_project": desired_compose_project,
                 "allowed_backends": [plan.old_backend, plan.new_backend],
                 "expected_old_identity_sha256": canonical_json_sha256(frame["old_identity"]),
                 "expected_desired_identity_sha256": canonical_json_sha256(desired_identity),

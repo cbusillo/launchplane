@@ -28,7 +28,7 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     execute_odoo_prod_backup_gate,
 )
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
-from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.contracts.odoo_cutover import OdooCutoverPlan, ODOO_CUTOVER_TERMINAL_STEPS
 from control_plane.odoo_cutover_plan import (
     decision_bound_cutover_plan,
     resolve_profile_cutover_plan,
@@ -79,17 +79,54 @@ def admit_odoo_prod_promotion_run(
     record_store: OdooProdPromotionRunStore,
     request: OdooProdPromotionRunRequest,
     release_decision: ReleaseReviewDecisionRecord | None = None,
+    continuation_plan: OdooCutoverPlan | None = None,
 ) -> OdooProdPromotionRunAdmission:
     """Check ready inputs, release approval, and the verified infrastructure backup."""
 
-    inputs_result = resolve_odoo_prod_promotion_inputs(
-        record_store=record_store,
-        request=OdooProdPromotionInputsRequest(
+    original_promotion = None
+    if continuation_plan is not None:
+        from control_plane.odoo_cutover_plan import cutover_record_id
+
+        original_promotion = record_store.read_promotion_record(
+            "promotion-cutover-" + cutover_record_id(continuation_plan)
+        )
+        if (
+            original_promotion.context,
+            original_promotion.from_instance,
+            original_promotion.to_instance,
+            original_promotion.artifact_identity.artifact_id,
+        ) != (
+            request.context,
+            request.from_instance,
+            request.to_instance,
+            continuation_plan.candidate.artifact_id,
+        ):
+            raise ValueError("continuation lacks its original promotion and logical backup binding")
+    inputs_result = (
+        OdooProdPromotionInputsResult(
             context=request.context,
             from_instance=request.from_instance,
             to_instance=request.to_instance,
             request_id=request.request_id,
-        ),
+            input_status="ready",
+            artifact_id=continuation_plan.candidate.artifact_id,
+            source_git_ref=continuation_plan.candidate.source_commit,
+            backup_record_id=original_promotion.backup_record_id
+            if original_promotion is not None
+            else "",
+            image_repository=continuation_plan.candidate.image.repository,
+            image_digest=continuation_plan.candidate.image.digest,
+        )
+        if continuation_plan is not None
+        else resolve_odoo_prod_promotion_inputs(
+            record_store=record_store,
+            request=OdooProdPromotionInputsRequest(
+                context=request.context,
+                from_instance=request.from_instance,
+                to_instance=request.to_instance,
+                request_id=request.request_id,
+            ),
+        )
     )
     if inputs_result.input_status != "ready":
         return OdooProdPromotionRunAdmission(
@@ -103,12 +140,26 @@ def admit_odoo_prod_promotion_run(
             blocked_reason="Testing no longer carries the accepted release; a new decision is required.",
         )
     try:
-        current_decision = require_release_approval(
-            control_plane_root=control_plane_root,
-            record_store=record_store,
-            product=request.product,
-            artifact_id=inputs_result.artifact_id,
-            source_commit=inputs_result.source_git_ref,
+        if continuation_plan is not None:
+            recovery = persisted_cutover(record_store, continuation_plan)
+            if (
+                recovery is None
+                or continuation_plan.release_id != request.request_id
+                or continuation_plan.new.binding.product_id != request.product
+                or continuation_plan.new.runtime_identity.context != request.context
+                or continuation_plan.new.binding.environment_id != request.to_instance
+            ):
+                raise ValueError("continuation requires its exact persisted admitted cutover")
+        current_decision = (
+            release_decision
+            if continuation_plan is not None
+            else require_release_approval(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                product=request.product,
+                artifact_id=inputs_result.artifact_id,
+                source_commit=inputs_result.source_git_ref,
+            )
         )
         release_decision = release_decision or current_decision
         admitted_plan = resolve_profile_cutover_plan(
@@ -119,12 +170,20 @@ def admit_odoo_prod_promotion_run(
             artifact_id=inputs_result.artifact_id,
             release_id=request.request_id,
         )
+        if continuation_plan is not None and admitted_plan is None:
+            raise ValueError("continuation lost its admitted two-slot lane")
         if admitted_plan is not None:
-            admitted_plan = decision_bound_cutover_plan(admitted_plan, release_decision)
+            admitted_plan = decision_bound_cutover_plan(
+                admitted_plan,
+                release_decision,
+                stored=persisted_cutover(record_store, admitted_plan) is not None,
+            )
+            if continuation_plan is not None and admitted_plan != continuation_plan:
+                raise ValueError("continuation crossed its original admitted plan")
         recovery = persisted_cutover(record_store, admitted_plan)
         if admitted_plan is not None and any(
             item.odoo_cutover is not None
-            and item.odoo_cutover.step not in {"complete", "rolled_back"}
+            and item.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
             and item.odoo_cutover.plan != admitted_plan
             for item in record_store.list_deployment_records(
                 context_name=request.context, instance_name=request.to_instance
@@ -162,6 +221,8 @@ def execute_odoo_prod_promotion_run(
     phase_checkpoint: Callable[[OdooProdPromotionOperationPhase], None] | None = None,
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     hold_uncertain_effects: bool = False,
+    cutover_dispatch_guard: Callable[[], None] | None = None,
+    continuation_plan: OdooCutoverPlan | None = None,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
     release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooProdPromotionRunResult:
@@ -181,6 +242,7 @@ def execute_odoo_prod_promotion_run(
         record_store=record_store,
         request=request,
         release_decision=release_decision,
+        continuation_plan=continuation_plan,
     )
     release_decision = admission.release_decision
     inputs_result = admission.inputs_result
@@ -201,7 +263,7 @@ def execute_odoo_prod_promotion_run(
         if (
             isinstance(prior, DeploymentRecord)
             and prior.odoo_cutover is not None
-            and prior.odoo_cutover.step not in {"complete", "rolled_back"}
+            and prior.odoo_cutover.step not in ODOO_CUTOVER_TERMINAL_STEPS
         ):
             raise RuntimeError("Cutover remains unfinished; retain its recovery hold.")
         return _result_from_inputs(
@@ -228,7 +290,11 @@ def execute_odoo_prod_promotion_run(
                 error_message="Two-slot release requires an activated lane-bound provider; in-place fallback is refused.",
             )
         try:
-            cutover_plan = decision_bound_cutover_plan(cutover_plan, release_decision)
+            cutover_plan = decision_bound_cutover_plan(
+                cutover_plan,
+                release_decision,
+                stored=persisted_cutover(record_store, cutover_plan) is not None,
+            )
             cutover_provider = cutover_provider_factory(cutover_plan)
             cutover_provider.preflight(cutover_plan)
         except ValueError as error:
@@ -273,6 +339,8 @@ def execute_odoo_prod_promotion_run(
             backup_status="pass",
         )
     else:
+        if continuation_plan is not None:
+            raise ValueError("continuation lacks its original ordinary logical backup gate")
         backup_result = execute_odoo_prod_backup_gate(
             control_plane_root=control_plane_root,
             record_store=record_store,
@@ -317,6 +385,7 @@ def execute_odoo_prod_promotion_run(
             no_cache=request.no_cache,
         ),
         provider_effect_checkpoint=provider_effect_checkpoint,
+        cutover_dispatch_guard=cutover_dispatch_guard,
         hold_uncertain_effects=hold_uncertain_effects,
         cutover_provider=cutover_provider,
         cutover_plan=cutover_plan,

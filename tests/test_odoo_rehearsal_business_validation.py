@@ -1,6 +1,7 @@
 """Fixed product invocation preserves isolation, original custody and value-free evidence."""
 
 import json
+from datetime import datetime
 import unittest
 from typing import Any, cast
 from unittest.mock import Mock, patch
@@ -378,6 +379,88 @@ class BusinessValidationAdapterTests(unittest.TestCase):
             "fixture-trace",
         )
 
+    def test_verify_requires_passing_candidate_business_validation_before_effects_and_publication(
+        self,
+    ) -> None:
+        verify = self.fixture.adapter("verify")
+        with self.assertRaises(RehearsalRefused):
+            verify.inputs()
+        snapshot: dict[str, object] = {
+            "state": "verified",
+            "copies": [
+                *(copy.model_dump(mode="json") for copy in self.record.copies),
+                self.fixture.copy("final_upgrade").model_dump(mode="json"),
+            ],
+            "elapsed_seconds": {},
+        }
+        with self.assertRaises(RehearsalRefused):
+            verify.publish(self.record, snapshot)
+        self.assertEqual(
+            self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id), self.record
+        )
+        verify.request = verify.request.model_copy(update={"mode": "readback"})
+        self.assertEqual(verify.inputs()[0], self.record)
+
+    def test_verify_refuses_business_receipt_for_another_candidate(self) -> None:
+        verify = self.fixture.adapter("verify")
+        validation = BusinessValidationReceipt.model_validate(receipt(self.plan))
+        valid = self.record.model_copy(update={"business_validations": (validation,)})
+        self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.record, valid)
+        self.assertEqual(verify.inputs()[0], valid)
+        for field, changed in (
+            ("product", "another-product"),
+            ("artifact_id", "another-artifact"),
+            ("source_commit", "f" * 40),
+        ):
+            previous = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+            assert previous is not None
+            current = self.record.model_copy(
+                update={"business_validations": (validation.model_copy(update={field: changed}),)}
+            )
+            self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(previous, current)
+            with self.subTest(field=field), self.assertRaises(RehearsalRefused):
+                verify.inputs()
+
+    def test_validation_requires_switched_copy_and_cannot_rewrite_a_prior_attempt(self) -> None:
+        result: dict[str, Any] = {
+            "state": "switched",
+            "copies": [item.model_dump(mode="json") for item in self.record.copies],
+            "elapsed_seconds": {},
+            "business_validation": receipt(self.plan),
+        }
+        for state in ("prepared", "upgraded"):
+            changed = self.record.model_copy(update={"state": state})
+            self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(self.record, changed)
+            with self.subTest(state=state), self.assertRaises(RehearsalRefused):
+                from control_plane.odoo_upgrade_rehearsal import require_rehearsal_transition
+
+                require_rehearsal_transition(changed, "validate-business")
+            self.fixture.store.compare_and_write_odoo_upgrade_rehearsal(changed, self.record)
+        self.adapter.publish(self.record, result)
+        current = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+        assert current is not None
+        self.adapter.publish(current, result)
+        current = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+        assert current is not None
+        changed_result = {
+            **result,
+            "business_validation": {
+                **result["business_validation"],
+                "checks": [
+                    {
+                        "key": "delivered",
+                        "passed": True,
+                        "records": [{"model": "sale.order", "id": 35}],
+                    }
+                ],
+            },
+        }
+        with self.assertRaises(RehearsalRefused):
+            self.adapter.publish(current, changed_result)
+        self.assertEqual(
+            self.fixture.store.read_odoo_upgrade_rehearsal(current.rehearsal_id), current
+        )
+
     def test_plan_binds_copy_candidate_without_a_business_payload(self) -> None:
         self.assertEqual(self.request.intent(), self.fixture.request.intent())
         self.assertEqual(self.adapter.inputs()[0], self.record)
@@ -385,6 +468,35 @@ class BusinessValidationAdapterTests(unittest.TestCase):
             OdooUpgradeRehearsalRequest.model_validate(
                 {**self.request.model_dump(mode="json"), "business_validation": {"steps": []}}
             )
+
+    def test_original_attempt_publishes_timing_once_and_refuses_changed_times(self) -> None:
+        from datetime import timezone
+
+        stamp = datetime.now(timezone.utc).isoformat()
+        result: dict[str, Any] = {
+            "state": "switched",
+            "copies": [item.model_dump(mode="json") for item in self.record.copies],
+            "elapsed_seconds": {},
+            "business_validation": receipt(self.plan),
+            "phase_timing": {
+                "action": "validate-business",
+                "attempt_sha256": self.plan["attempt_sha256"],
+                "observed": {"product_started": stamp, "receipt_observed": stamp},
+            },
+        }
+        self.adapter.publish(self.record, result)
+        current = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+        assert current is not None
+        self.adapter.publish(current, result)
+        repeated = self.fixture.store.read_odoo_upgrade_rehearsal(self.record.rehearsal_id)
+        assert repeated is not None
+        self.assertEqual(repeated.phase_timings, current.phase_timings)
+        changed = {
+            **result,
+            "phase_timing": {**result["phase_timing"], "observed": {"product_started": stamp}},
+        }
+        with self.assertRaises(RehearsalRefused):
+            self.adapter.publish(repeated, changed)
 
     def test_apply_and_original_key_observation_retain_sanitized_evidence_and_snapshot_lineage(
         self,
@@ -550,7 +662,11 @@ class BusinessValidationHostTests(unittest.TestCase):
         }
         self.spec.update(action="validate-business", business_validation_identity=self.plan)
         self.spec["record"].update(
-            target_artifact={"source_commit": self.plan["source_commit"]}, source_odoo_version="1.0"
+            target_artifact={
+                "artifact_id": self.plan["artifact_id"],
+                "source_commit": self.plan["source_commit"],
+            },
+            source_odoo_version="1.0",
         )
         self.host["inspection"] = lambda *args: self.containers
         self.host["private_health"] = Mock()
@@ -586,15 +702,44 @@ class BusinessValidationHostTests(unittest.TestCase):
         self.assertTrue(result["business_validation"]["passed"])
         self.assertEqual(result["business_validation"]["database"], self.plan["database"])
         self.assertEqual(self.executions, 1)
+        timing = result["phase_timing"]["observed"]
+        self.assertLessEqual(
+            datetime.fromisoformat(timing["product_started"]),
+            datetime.fromisoformat(timing["receipt_observed"]),
+        )
         with self.assertRaises(RuntimeError):
             self.fixture.run_host(self.spec)
         self.spec["mode"] = "observe"
         observed = self.fixture.run_host(self.spec)
         self.assertEqual(observed, result)
+        self.assertEqual(observed["phase_timing"], result["phase_timing"])
         self.assertEqual(self.executions, 1)
         self.spec["attempt_sha256"] = canonical_json_sha256({"operation_key": "different"})
         missing = self.fixture.run_host(self.spec)
         self.assertFalse(missing["completed"])
+        self.assertEqual(self.executions, 1)
+
+    def test_legacy_pending_outcome_is_recovered_without_backfilling_observation_time(self) -> None:
+        precheck = self.host["business_validation_precheck"]
+        calls = 0
+
+        def fail_after_write(*args: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise RuntimeError("postcheck interrupted")
+            precheck(*args)
+
+        with patch.dict(self.host, {"business_validation_precheck": fail_after_write}):
+            with self.assertRaises(RuntimeError):
+                self.fixture.run_host(self.spec)
+        outcome = next(self.root.glob("*.outcome.json"))
+        saved = json.loads(outcome.read_text())
+        saved["result"].pop("phase_timing")
+        outcome.write_text(json.dumps(saved))
+        observed = self.fixture.run_host({**self.spec, "mode": "observe"})
+        self.assertTrue(observed["business_validation"]["committed"])
+        self.assertNotIn("phase_timing", observed)
         self.assertEqual(self.executions, 1)
 
     def test_committed_pending_outcome_survives_failed_postcheck_and_recovers_without_replay(
@@ -637,9 +782,7 @@ class BusinessValidationHostTests(unittest.TestCase):
         self.spec["versions"] = {self.spec["target_image"]: "19.0"}
         self.host["sql"] = lambda *args: "19.0"
         (self.root / "capture.json").write_text("{}")
-        history = [
-            {"passed": True, "steps": [{"key": "order", "record_ids": [31], "passed": True}]}
-        ]
+        history = [receipt(self.plan)]
         self.spec["record"]["business_validations"] = history
 
         def capture(args: list[str], path: Any, bound: int) -> None:
@@ -651,9 +794,19 @@ class BusinessValidationHostTests(unittest.TestCase):
         import shutil
 
         shutil.rmtree(self.root / self.plan["database"])
-        history.append({"passed": False})
+        pre_switch = receipt({**self.plan, "attempt_sha256": "d" * 64})
+        self.spec["record"]["phase_timings"] = [
+            {"action": "simulate-final", "pre_switch_validation": receipt(self.plan)},
+            {"action": "rebuild-final", "pre_switch_validation": pre_switch},
+        ]
+        result = self.host["snapshot"](self.spec, self.root, self.containers, self.plan["database"])
+        self.assertEqual(
+            result["business_validation_sha256"], canonical_json_sha256([pre_switch, *history])
+        )
+        shutil.rmtree(self.root / self.plan["database"])
+        history.append({**receipt(self.plan), "passed": False})
         self.host["bounded_capture"].reset_mock()
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(ValueError):
             self.host["snapshot"](self.spec, self.root, self.containers, self.plan["database"])
         self.host["bounded_capture"].assert_not_called()
         self.assertFalse((self.root / self.plan["database"]).exists())
@@ -761,7 +914,84 @@ class BusinessValidationHostTests(unittest.TestCase):
             self.assertTrue(observed["custody"]["effect_started"])
             self.assertNotIn("copied customer", str(observed))
 
-    def test_failed_product_retains_redacted_stderr_under_original_custody(self) -> None:
+    def test_connection_and_health_failures_withhold_values_before_and_after_product(self) -> None:
+        import subprocess
+
+        copied = "COPIED_CLIENT_CUSTOMER_123_PRIVATE"
+        for source in ("connection", "health"):
+            for phase in (1, 2):
+                with self.subTest(source=source, phase=phase):
+                    scenario = BusinessValidationHostTests()
+                    scenario.setUp()
+                    self.addCleanup(scenario.doCleanups)
+                    scenario.spec["record"]["target_artifact"]["artifact_id"] = scenario.plan[
+                        "artifact_id"
+                    ]
+                    calls = {"connection": 0, "health": 0}
+
+                    def run_check(
+                        arguments: list[str], **kwargs: Any
+                    ) -> subprocess.CompletedProcess[bytes]:
+                        check = (
+                            "connection"
+                            if kwargs.get("input") == scenario.spec["readback_program"].encode()
+                            else "health"
+                        )
+                        calls[check] += 1
+                        failed = check == source and calls[check] >= phase
+                        return subprocess.CompletedProcess(
+                            arguments,
+                            7 if failed else 0,
+                            copied.encode() if failed else b"integration_readback_ok=true\n",
+                            copied.encode() if failed else b"",
+                        )
+
+                    with (
+                        patch.dict(
+                            scenario.host,
+                            {
+                                "docker": scenario.fixture.native_docker,
+                                "private_health": scenario.fixture.native_private_health,
+                            },
+                        ),
+                        patch.object(scenario.host["subprocess"], "run", side_effect=run_check),
+                    ):
+                        if phase == 1:
+                            observed = scenario.fixture.run_host(scenario.spec)
+                            self.assertIsNone(
+                                scenario.host["read_command_failure"](scenario.spec, scenario.root)
+                            )
+                        else:
+                            with self.assertRaises(
+                                scenario.host["RehearsalCommandFailure"]
+                            ) as failed:
+                                scenario.fixture.run_host(scenario.spec)
+                            failure = failed.exception.diagnostic
+                            self.assertNotIn(copied, str(failure))
+                            self.assertEqual(failure["exit_status"], 7)
+                            expected_step = scenario.host[
+                                "private_health"
+                                if source == "health"
+                                else "business_validation_precheck"
+                            ].__name__
+                            self.assertEqual(failure["step"], expected_step)
+                            observed = scenario.fixture.run_host(
+                                {**scenario.spec, "mode": "observe", "inspect_capture": True}
+                            )
+                            self.assertEqual(
+                                observed["pending_business_validation"]["attempt_sha256"],
+                                scenario.spec["attempt_sha256"],
+                            )
+                            self.assertNotIn("child_failure", observed)
+                            self.assertTrue(
+                                observed["pending_business_validation"]["receipt"]["committed"]
+                            )
+                            self.assertFalse(observed["business_validation_postcheck_verified"])
+                    self.assertNotIn(copied, str(observed))
+                    self.assertEqual(scenario.executions, phase - 1)
+                    self.assertFalse(observed["completed"])
+
+    def test_failed_product_withholds_stderr_under_original_custody(self) -> None:
         import sys
 
         self.spec["environment"] = {"ODOO_DB_PASSWORD": "fixture-private-password"}
@@ -780,7 +1010,7 @@ class BusinessValidationHostTests(unittest.TestCase):
                 self.fixture.run_host(self.spec)
         observed = self.fixture.run_host({**self.spec, "mode": "observe", "inspect_capture": True})
         diagnostic = observed["child_failure"]
-        self.assertIn("ValidationError: ODOO_FILESTORE_PATH is required", diagnostic["error_text"])
+        self.assertEqual(diagnostic["error_text"], "")
         self.assertEqual(diagnostic["exit_status"], 9)
         self.assertEqual(diagnostic["step"], "business_validation")
         self.assertEqual(diagnostic["attempt_sha256"], self.spec["attempt_sha256"])
@@ -827,27 +1057,31 @@ class BusinessValidationHostTests(unittest.TestCase):
             b"receipt\n",
         )
 
-    def test_product_stderr_does_not_hide_host_observation_failure(self) -> None:
-        import sys
-
-        cases: tuple[tuple[str, dict[str, int]], ...] = (
-            ("import time; time.sleep(60)", {"PRODUCT_COMMAND_TIMEOUT_SECONDS": 1}),
-            ("print('x' * 100000)", {}),
-        )
-        for command, limits in cases:
-            script = "import sys; print('startup notice', file=sys.stderr, flush=True); " + command
-            with (
-                self.subTest(command=command),
-                patch.dict(self.host, limits),
-                self.assertRaises(self.host["RehearsalCommandFailure"]) as failure,
-            ):
-                self.native_product_command([sys.executable, "-c", script])
-            lines = failure.exception.diagnostic["error_text"].splitlines()
-            self.assertIn("startup notice", lines)
-            self.assertNotEqual(lines[-1], "startup notice")
-
 
 class BusinessValidationClientTests(unittest.TestCase):
+    def test_failed_validation_receipt_exits_unsuccessfully(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal_client import RehearsalClientTests
+
+        fixture = RehearsalClientTests()
+        self.addCleanup(fixture.doCleanups)
+        for mode in ("apply", "readback"):
+            with self.subTest(mode=mode):
+                code, result, post = fixture.call(
+                    mode,
+                    action="validate-business",
+                    saved_review=True,
+                    response_result={
+                        "action": "validate-business",
+                        "completed": True,
+                        "public_route": False,
+                        "business_host_frozen": False,
+                        "business_validation": {"passed": False},
+                    },
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(result["status"], "failed")
+                post.assert_called_once()
+
     def test_a_prior_failed_scenario_cannot_make_an_inert_review_or_other_operation_fail(
         self,
     ) -> None:
