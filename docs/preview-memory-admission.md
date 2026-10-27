@@ -4,6 +4,51 @@ title: Preview Memory Admission
 
 # Preview memory admission
 
+## Idle previews
+
+The Odoo idle scheduler uses the preview gateway's last visit and active-request
+count to sleep healthy previews after 15 quiet minutes. The gateway remains
+running and a visit requests a wake. A directory-only `DATA_WORKFLOW_SSH_DIR`
+setting does not establish a source connection. Both binding and native runtime
+inspection use the same source-connection predicate; upstream settings and other
+SSH settings still refuse sleep. Native inspection continues to require exclusive
+volumes, private application resources and no credential bind mounts.
+
+Product Ops shows each provider-observed preview's last sleep observation from
+the existing inventory collector: awake, asleep, cannot sleep with a reason,
+or unknown when observation is unavailable.
+The collector includes previews without a successful lifecycle record and
+drivers without idle support. It reads gateway status without visiting the
+application or requesting a wake. The lock-free poll never takes the host's
+preview operation lock. Provider reads and polls use bounded timeouts and an
+aggregate per-product budget derived from the inventory cadence, with shutdown
+checked between previews. The existing scheduler slot rotates the first preview
+on consecutive scans so overflow does not always exclude the same tail; no
+cursor is stored. Read
+failures and exhausted budgets report unknown without provider exception text.
+Missing or expired evidence cannot establish a sleep state. Individual observations require the
+same `preview.read` authorization as individual preview identities.
+
+Older Odoo previews acquire the gateway on their next ordinary, identity-bound
+rebuild that preserves their data. Retained upstream settings still prevent
+sleep and are shown as a source-connection reason even with a gateway. A first upstream restore still needs its
+dedicated source mount and cannot use that gateway. No inventory scan retrofits
+or replaces an existing preview. People using a preview and unique working-copy
+custody remain protected; obtain their or the Director's word before a rebuild
+or retirement. Closed changes use the existing guarded lifecycle retirement.
+
+The coverage invariant is that every provider-observed preview has an explicit
+sleep observation or an explanation of missing coverage. Serving-generation
+health alone never proves idle coverage. The former scheduler silently skipped
+ineligible bindings and enumerated only successful preview records, while the
+inventory collector measured presence without reporting sleep capability.
+This extends that collector rather than adding a monitor. Observation failure
+does not block a deployment or trigger cleanup. Existing source-connection,
+custody, ownership, memory-floor and runtime-inspection refusals continue to
+block sleep or wake; rebuilds keep their normal deployment and health gates.
+
+## New preview admission
+
 The DB-backed runtime-environment record with `scope=context` and
 `context=launchplane` may set
 `LAUNCHPLANE_PREVIEW_HOST_MEMORY_FLOORS` to a JSON object mapping provider server

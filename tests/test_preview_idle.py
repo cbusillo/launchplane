@@ -301,6 +301,230 @@ class PreviewIdleOperationTests(unittest.TestCase):
             self.profile, self.preview.preview_id, "https://provider.invalid", "fixture"
         )
 
+    def test_directory_without_source_connection_does_not_prevent_sleep(self) -> None:
+        self.provider["env"] += "\nDATA_WORKFLOW_SSH_DIR=/var/lib/unused-reader"
+        self.run_preview()
+        self.assertEqual(self.value["gateway"]["mode"], "asleep")
+
+    def test_source_connections_still_prevent_sleep(self) -> None:
+        original = self.provider["env"]
+        for key in ("ODOO_UPSTREAM_HOST", "DATA_WORKFLOW_SSH_KEY", "DATA_WORKFLOW_SSH_USER"):
+            with self.subTest(key=key):
+                self.provider["env"] = original + f"\n{key}=fixture"
+                self.run_preview()
+                self.assertFalse(self.effects)
+
+    def test_inventory_observes_sleep_and_reports_coverage_gaps_without_effects(self) -> None:
+        from control_plane.preview_sleep_evidence import collect_preview_sleep_observations
+
+        self.enterContext(
+            patch("control_plane.preview_sleep_evidence._read_remote", side_effect=self.transport)
+        )
+        self.enterContext(
+            patch(
+                "control_plane.preview_sleep_evidence.api.dokploy_request",
+                side_effect=lambda **_: deepcopy(self.provider),
+            )
+        )
+
+        def read() -> Any:
+            return collect_preview_sleep_observations(
+                store=self.store,
+                profile=self.profile,
+                host="fixture",
+                token="fixture",
+                inventory=(("env", "compose-fixture", self.identity.instance),),
+                prefix="fixture",
+            )[0]
+
+        self.assertEqual(read().state, "awake")
+        self.store.write_preview_record(
+            self.preview.model_copy(
+                update={"preview_id": "ended-preview", "state": "teardown_pending"}
+            )
+        )
+        self.assertEqual(read().state, "awake")
+        with patch.object(
+            self.store, "list_held_provider_target_reservations", return_value=(Mock(),)
+        ):
+            self.assertEqual(read().state, "cannot_sleep")
+        with patch(
+            "control_plane.preview_sleep_evidence._read_remote",
+            side_effect=RuntimeError("fixture secret"),
+        ):
+            unavailable = read()
+        self.assertEqual(unavailable.state, "unknown")
+        self.assertNotIn("fixture secret", unavailable.reason)
+        self.value = observation(mode="asleep", running=False)
+        self.assertEqual(read().state, "asleep")
+        self.provider["env"] += "\nODOO_UPSTREAM_HOST=private-source"
+        blocked = read()
+        self.assertEqual(blocked.state, "cannot_sleep")
+        self.assertTrue(blocked.reason)
+        self.assertNotIn("private-source", blocked.reason)
+        self.provider["composeFile"] = "services: {web: {}}"
+        self.assertEqual(read().state, "cannot_sleep")
+        self.provider["composeFile"] = "services: {preview-router: {}}"
+        self.store.write_preview_record(self.preview.model_copy(update={"state": "destroyed"}))
+        self.assertEqual(read().state, "cannot_sleep")
+        self.assertFalse(self.effects)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    def test_inventory_polls_without_host_lock_and_stops_at_its_read_budget(self) -> None:
+        from control_plane.preview_sleep_evidence import (
+            collect_preview_sleep_observations,
+            PREVIEW_SLEEP_READ_BUDGET_SECONDS,
+        )
+        from control_plane.preview_lifecycle_cleanup_routes import PreviewLifecycleSweepCancelled
+
+        clock = [0.0]
+        cancelled = [False]
+
+        def native_poll(**kwargs: Any) -> None:
+            namespace: dict[str, Any] = {}
+            tree = ast.parse(kwargs["program"])
+            entry = tree.body[-2:]
+            tree.body = tree.body[:-2]
+            exec(compile(tree, "<sleep-poll>", "exec"), namespace)
+            namespace["runtime"] = lambda: ({}, "router")
+            namespace["control"] = lambda *_: self.value["gateway"]
+            namespace["application_state"] = lambda *_: self.value["services"]
+            encoded = base64.b64encode(json.dumps(kwargs["payload"]).encode()).decode()
+            output = io.StringIO()
+            with (
+                patch("sys.argv", ["poll", encoded, "frame:"]),
+                patch("fcntl.flock", side_effect=AssertionError("deploy owns host lock")),
+                redirect_stdout(output),
+            ):
+                with self.assertRaises(SystemExit):
+                    exec(
+                        compile(
+                            ast.Module(body=entry, type_ignores=[]), "<sleep-poll-entry>", "exec"
+                        ),
+                        namespace,
+                    )
+            kwargs["receive"](json.loads(output.getvalue().removeprefix("frame:")))
+            clock[0] = PREVIEW_SLEEP_READ_BUDGET_SECONDS + 1
+
+        with (
+            patch("control_plane.preview_sleep_evidence.monotonic", side_effect=lambda: clock[0]),
+            patch(
+                "control_plane.preview_sleep_evidence._read_remote", side_effect=native_poll
+            ) as remote,
+            patch(
+                "control_plane.preview_sleep_evidence.api.dokploy_request",
+                return_value=self.provider,
+            ) as provider,
+            patch.object(
+                self.store, "list_preview_records", wraps=self.store.list_preview_records
+            ) as records,
+        ):
+            arguments: dict[str, Any] = dict(
+                store=self.store,
+                profile=self.profile,
+                host="fixture",
+                token="fixture",
+                inventory=(
+                    ("env", "compose-fixture", self.identity.instance),
+                    ("env", "second", "fixture-pr-2"),
+                ),
+                prefix="fixture",
+            )
+            states = collect_preview_sleep_observations(**arguments)
+            self.assertEqual([item.state for item in states], ["awake", "unknown"])
+            self.assertEqual(remote.call_count, 1)
+            self.assertEqual(provider.call_count, 1)
+            records.assert_called_once()
+            cancelled[0] = True
+            with self.assertRaises(PreviewLifecycleSweepCancelled):
+                collect_preview_sleep_observations(**arguments, should_stop=lambda: cancelled[0])
+        self.assertFalse(self.effects)
+
+    def test_inventory_budget_covers_slower_polls_and_rotates_overflow_after_restart(self) -> None:
+        from control_plane.preview_lifecycle_scheduler import PreviewInventoryScheduler
+        from control_plane.preview_sleep_evidence import PREVIEW_SLEEP_READ_BUDGET_SECONDS
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        inventory = tuple(
+            ("env", f"compose-{number}", f"fixture-pr-{number}") for number in range(1, 4)
+        )
+        for number in range(2, 4):
+            self.store.write_preview_record(
+                self.preview.model_copy(
+                    update={"preview_id": f"preview-{number}", "anchor_pr_number": number}
+                )
+            )
+        clock = [0.0]
+        poll_seconds = 6.0
+        cost = [poll_seconds]
+        failed = [False]
+        attempted: list[str] = []
+
+        def binding(
+            _store: Any, _profile: Any, preview_id: str, *_args: Any, **kwargs: Any
+        ) -> dict[str, Any]:
+            return {
+                "server_id": "shared-host",
+                "spec": {"preview_id": preview_id},
+                "context": self.profile.preview.context,
+                "compose_name": kwargs["payload"]["name"],
+            }
+
+        def provider(**kwargs: Any) -> dict[str, Any]:
+            number = kwargs["query"]["composeId"].removeprefix("compose-")
+            return {"name": f"fixture-pr-{number}", "composeFile": "services: {preview-router: {}}"}
+
+        def remote(**kwargs: Any) -> None:
+            preview_id = kwargs["payload"]["preview_id"]
+            attempted.append(preview_id)
+            clock[0] += cost[0]
+            if (
+                failed[0]
+                and preview_id == self.preview.preview_id
+                or kwargs["timeout_seconds"] < min(cost[0], poll_seconds)
+            ):
+                raise NativeSourceUnavailable("fixture read failure")
+            kwargs["receive"]({"type": "complete", "result": observation()})
+
+        with (
+            patch(
+                "control_plane.preview_inventory_collection._complete_preview_compose_inventory",
+                return_value=inventory,
+            ),
+            patch("control_plane.preview_sleep_evidence.monotonic", side_effect=lambda: clock[0]),
+            patch(
+                "control_plane.preview_sleep_evidence.require_preview_idle_binding",
+                side_effect=binding,
+            ),
+            patch("control_plane.preview_sleep_evidence.api.dokploy_request", side_effect=provider),
+            patch("control_plane.preview_sleep_evidence._read_remote", side_effect=remote),
+        ):
+
+            def scan(slot: int) -> Any:
+                clock[0] = 0
+                scheduler = PreviewInventoryScheduler(
+                    self.store,
+                    control_plane_root=self.root,
+                    clock=lambda: slot * PreviewInventoryScheduler.interval,
+                )
+                scheduler._run_sweep()
+                return self.store.list_preview_inventory_scan_records()[0].sleep_observations
+
+            self.assertTrue(all(item.state == "awake" for item in scan(0)))
+            failed[0] = True
+            states = {item.slug: item.state for item in scan(0)}
+            self.assertEqual(states["pr-1"], "unknown")
+            self.assertEqual(states["pr-2"], "awake")
+            self.assertEqual(states["pr-3"], "awake")
+            failed[0] = False
+            cost[0] = PREVIEW_SLEEP_READ_BUDGET_SECONDS + 1
+            attempted.clear()
+            for slot in range(len(inventory)):
+                states = scan(slot)
+                self.assertEqual(sum(item.state == "awake" for item in states), 1)
+            self.assertEqual(set(attempted), {self.preview.preview_id, "preview-2", "preview-3"})
+        self.assertFalse(self.effects)
+
     def test_changed_generation_and_inactive_product_cannot_start_or_stop(self) -> None:
         self.store.write_preview_generation_record(
             self.generation.model_copy(update={"state": "deploying"})
@@ -644,6 +868,80 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
 
 class PreviewIdleRuntimeTests(unittest.TestCase):
+    def test_native_inspection_allows_only_an_unmounted_directory_without_connection(self) -> None:
+        spec = {
+            "generation": {"instance": "preview", "namespace": "fixture"},
+            "compose_project": "fixture",
+            "database_name": "fixture_db",
+            "preview_volumes": {
+                "data": "fixture-data",
+                "logs": "fixture-logs",
+                "database": "fixture-db",
+            },
+            "database_data_directory": "/database",
+            "image_reference": "fixture-image",
+            "usage_only": True,
+        }
+        containers: dict[str, Any] = {
+            name: {
+                "Id": name,
+                "Config": {
+                    "Image": "fixture-image",
+                    "Labels": {
+                        "com.docker.compose.project": "fixture",
+                        "com.docker.compose.service": name,
+                    },
+                    "Env": [
+                        "PLATFORM_INSTANCE=preview",
+                        "ODOO_DB_HOST=database",
+                        "ODOO_DB_NAME=fixture_db",
+                        "ODOO_MAX_CRON_THREADS=0",
+                        "DATA_WORKFLOW_SSH_DIR=/unused",
+                    ],
+                },
+                "Mounts": [
+                    {"Type": "volume", "Name": volume, "Destination": "/database"}
+                    for volume in (
+                        ["fixture-db"] if name == "database" else ["fixture-data", "fixture-logs"]
+                    )
+                ],
+                "NetworkSettings": {
+                    "Networks": {
+                        "fixture-net": {},
+                        **({"dokploy-network": {}} if name == "web" else {}),
+                    }
+                },
+            }
+            for name in ("web", "script-runner", "database")
+        }
+
+        def docker(*arguments: str) -> bytes:
+            if arguments[0] == "ps":
+                return "\n".join(containers).encode()
+            return json.dumps([{"Labels": {"com.docker.compose.project": "fixture"}}]).encode()
+
+        self.namespace["docker"] = docker
+        self.namespace["one_inspection"] = lambda name: (
+            containers[name]
+            if name in containers
+            else {
+                "Labels": {"com.docker.compose.project": "fixture"},
+                "Containers": {name: {} for name in containers},
+            }
+        )
+        self.namespace["inspect_volume_backings"] = Mock()
+        inspect_runtime = self.namespace["inspect_copy_runtime"]
+        self.assertEqual(set(inspect_runtime(spec, expected_instance="preview")), set(containers))
+        containers["web"]["Config"]["Env"].append("ODOO_UPSTREAM_HOST=fixture-source")
+        with self.assertRaises(self.namespace["CopyReadbackRefused"]):
+            inspect_runtime(spec, expected_instance="preview")
+        containers["web"]["Config"]["Env"].pop()
+        containers["web"]["Mounts"].append(
+            {"Type": "bind", "Source": "/unused", "Destination": "/root/.ssh"}
+        )
+        with self.assertRaises(self.namespace["CopyReadbackRefused"]):
+            inspect_runtime(spec, expected_instance="preview")
+
     def setUp(self) -> None:
         self.namespace: dict[str, Any] = {}
         module = ast.parse(PREVIEW_IDLE_RUNTIME_PROGRAM)

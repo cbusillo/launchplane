@@ -2764,6 +2764,18 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 endpoint_spec=_endpoint_spec(),
             )
         )
+        identity = RuntimeIdentity(
+            product=dry_run.product,
+            context="fixture-preview",
+            instance=dry_run.compose_name,
+            environment_kind="preview",
+            deployment_record_id="fixture-rebuild",
+            artifact_id="fixture-artifact",
+            source_git_ref="a" * 40,
+            image_reference="registry.invalid/odoo@sha256:" + "b" * 64,
+            preview_id="fixture-preview",
+            preview_generation_id="fixture-generation",
+        )
 
         with (
             patch(
@@ -2780,7 +2792,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_compose.sync_dokploy_compose_raw_source",
+            ) as sync,
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.memory_capacity.require_preview_host_memory_capacity"
             ),
+            patch("control_plane.odoo_preview_resources.require_existing_preview_resources"),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.update_dokploy_target_env",
             ) as update_env,
@@ -2813,9 +2829,11 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         ):
             result = execute_odoo_preview_dokploy_apply(
                 control_plane_root=ANY,
+                expected_runtime_identity=identity,
+                preserve_existing_data=True,
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
-                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+                    image_reference=identity.image_reference,
                     environment_values={**_environment_values(), "PLATFORM_INSTANCE": "testing"},
                 ),
             )
@@ -2824,6 +2842,12 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.compose_id, "compose-cm-pr-45")
         self.assertEqual(result.domain_id, "domain-cm-pr-45")
         self.assertFalse(result.created_compose)
+        from control_plane.preview_gateway import PREVIEW_GATEWAY_SERVICE
+        import yaml
+
+        services = yaml.safe_load(sync.call_args.kwargs["compose_file"])["services"]
+        self.assertIn(PREVIEW_GATEWAY_SERVICE, services)
+        self.assertFalse(services[PREVIEW_GATEWAY_SERVICE].get("volumes"))
         env_map = dokploy_api.parse_dokploy_env_text(update_env.call_args.kwargs["env_text"])
         self.assertEqual(env_map["PLATFORM_INSTANCE"], "preview")
         self.assertNotIn("smoke_check", [step.name for step in result.steps])
