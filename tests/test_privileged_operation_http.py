@@ -726,8 +726,8 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
             len(operation_events),
             1,
         )
-        self.assertEqual(review.json()["review"]["title"], "Review agent delivery administration")
-        self.assertIn("does not enroll", review.json()["review"]["change"]["summary"])
+        self.assertEqual(operation_records[0].status, "planned")
+        self.assertEqual(review.json()["review"]["operation_id"], operation_records[0].operation_id)
         self.assertEqual(policy_record, active_policy_record)
 
     async def test_terminal_enrollment_candidate_plans_without_active_policy_or_principal_write(
