@@ -222,11 +222,14 @@ class PreviewPreservationProgramTests(unittest.TestCase):
     def test_started_database_must_leave_the_memory_floor_available(self) -> None:
         self.containers["database"]["State"]["Running"] = False
         self.namespace["wait_database"] = Mock()
-        self.namespace["observe_memory_headroom"] = Mock(side_effect=[2048, 0])
+        self.namespace["observe_memory_headroom"] = lambda *args: (
+            0 if self.containers["database"]["State"]["Running"] else 2048
+        )
         with self.assertRaises(RuntimeError):
             self.preserve()
         self.assertFalse(self.containers["database"]["State"]["Running"])
         self.restored.assert_not_called()
+        self.assertIn(("start", "database"), self.calls)
 
     def test_additional_running_databases_refuse_before_application_stop(self) -> None:
         self.namespace["database_query"] = Mock(return_value='["foreign", "postgres"]')
@@ -1594,3 +1597,55 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                 effect_checkpoint=Mock(),
                 mutation_guard=guard,
             )
+
+    def test_verification_defers_unavailable_memory_policy_until_native_allocation(self) -> None:
+        from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
+        from control_plane.preview_preservation import run_preview_preservation
+
+        self.complete_original()
+        retained_source = {"provider_binding_sha256": "fixture-provider-binding"}
+        for source in (None, retained_source):
+            with self.subTest(source=source):
+
+                def remote(**kwargs: Any) -> None:
+                    if source is not None:
+                        self.assertTrue(kwargs["payload"]["memory_floor_unavailable"])
+                    kwargs["receive"](
+                        {
+                            "type": "complete",
+                            "preservation_id": self.authority().preservation_id,
+                            "source": retained_source,
+                            "volume_binding": {"fixture": True},
+                        }
+                    )
+
+                with (
+                    patch(
+                        "control_plane.preview_preservation.read_preview_preservation_source",
+                        return_value=source,
+                    ),
+                    patch(
+                        "control_plane.dokploy.source.read_dokploy_config",
+                        return_value=("https://fixture.invalid", "fixture"),
+                    ),
+                    patch(
+                        "control_plane.dokploy.memory_capacity.preview_host_memory_floor",
+                        side_effect=PreviewMemoryCapacityRefused("policy unavailable"),
+                    ) as floor,
+                    patch(
+                        "control_plane.dokploy.native_copy_stream._read_remote", side_effect=remote
+                    ),
+                ):
+                    run_preview_preservation(
+                        store=self.store,
+                        profile=self.profile,
+                        issued_plan=self.issued,
+                        original_reservation_id=self.original.record_id,
+                        operation_record_id="fixture-new-operation",
+                        control_plane_root=self.root,
+                        mode="verify",
+                        timeout_seconds=60,
+                        check=lambda: None,
+                    )
+                if source is None:
+                    floor.assert_not_called()

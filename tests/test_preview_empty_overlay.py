@@ -284,6 +284,54 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
         self.namespace["verify_preservation_source"](receipt, self.source)
         self.assertFalse(self.containers["database"]["State"]["Running"])
 
+    def test_published_receipt_inspection_never_starts_a_cold_database(self) -> None:
+        receipt = self.namespace["execute"]()
+        self.containers["database"]["State"]["Running"] = False
+        self.namespace["spec"].update(mode="inspect", memory_floor=None)
+        self.namespace["wait_database"] = Mock()
+        self.calls.clear()
+        self.assertEqual(self.namespace["execute"](), receipt)
+        self.assertFalse(any(call[0] in {"start", "stop"} for call in self.calls))
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+        self.namespace["spec"]["mode"] = "preserve"
+        self.database_facts["databases"].append(self.source["database_name"])
+        with self.assertRaises(RuntimeError):
+            self.namespace["execute"]()
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_running_empty_database_needs_no_start_capacity_but_cold_start_stays_guarded(
+        self,
+    ) -> None:
+        receipt = self.preserve()
+        capacity = Mock(side_effect=AssertionError("no allocation is needed"))
+        self.namespace.update(observe_memory_headroom=capacity)
+        self.namespace["spec"].update(
+            mode="verify", memory_floor=1024, memory_floor_unavailable=True
+        )
+        self.namespace["verify_preservation_source"](receipt, self.source)
+        capacity.assert_not_called()
+        self.containers["database"]["State"]["Running"] = False
+        self.calls.clear()
+        with self.assertRaises(RuntimeError):
+            self.namespace["verify_preservation_source"](receipt, self.source)
+        self.assertFalse(any(call[0] == "start" for call in self.calls))
+        self.assertFalse(self.containers["database"]["State"]["Running"])
+
+    def test_snapshot_model_growth_keeps_the_original_identity_and_rejects_changed_pins(
+        self,
+    ) -> None:
+        receipt = self.preserve()
+        self.namespace["spec"]["snapshot"] = {**self.snapshot, "new_metadata": "default"}
+        self.assertEqual(self.namespace["verify_preservation"](self.path), receipt)
+        for key in self.snapshot:
+            with self.subTest(key=key):
+                self.namespace["spec"]["snapshot"] = {
+                    **self.snapshot,
+                    key: hashlib.sha256(key.encode()).hexdigest(),
+                }
+                with self.assertRaises(RuntimeError):
+                    self.namespace["verify_preservation"](self.path)
+
     def test_plain_router_layout_keeps_the_existing_database_capture_path(self) -> None:
         for service in ("web", "script-runner"):
             self.containers[service]["Mounts"].pop()

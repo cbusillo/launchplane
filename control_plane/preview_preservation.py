@@ -359,7 +359,10 @@ def run_preview_preservation(
         PREVIEW_PRESERVATION_PROGRAM,
     )
     from control_plane.clean_testing_snapshot import snapshot_storage_budget
-    from control_plane.dokploy.memory_capacity import preview_host_memory_floor
+    from control_plane.dokploy.memory_capacity import (
+        PreviewMemoryCapacityRefused,
+        preview_host_memory_floor,
+    )
     from control_plane.dokploy.native_copy_stream import _read_remote
     from control_plane.odoo_preview_resources import require_existing_preview_resources
     from control_plane.preview_reservation_recovery import original_preview_intent
@@ -427,6 +430,15 @@ def run_preview_preservation(
             effect_checkpoint(PREVIEW_PRESERVATION_CAPTURE_PHASE)
             send()
 
+    memory_floor = None
+    memory_floor_unavailable = False
+    if current_source is not None and mode != "inspect":
+        try:
+            memory_floor = preview_host_memory_floor(
+                server_id=authority.server_id, record_store=store
+            )
+        except PreviewMemoryCapacityRefused:
+            memory_floor_unavailable = True
     frames: list[dict[str, object]] = []
     _read_remote(
         host=host,
@@ -440,11 +452,8 @@ def run_preview_preservation(
             "source": current_source,
             "snapshot": snapshot.model_dump(mode="json") if snapshot else None,
             "storage_budget": budget.model_dump(mode="json") if budget else {},
-            "memory_floor": preview_host_memory_floor(
-                server_id=authority.server_id, record_store=store
-            )
-            if mode != "inspect"
-            else None,
+            "memory_floor": memory_floor,
+            "memory_floor_unavailable": memory_floor_unavailable,
             "timeout_seconds": timeout_seconds,
         },
         receive=frames.append,

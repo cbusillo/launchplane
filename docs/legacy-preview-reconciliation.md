@@ -259,7 +259,12 @@ No runtime environment, license or credential file is exported.
 The same original-bound operation also handles an empty four-service overlay
 recipient. Its web must already be stopped; its idle runner is stopped through
 the existing leased preservation path. A stopped database uses that path's
-bounded startup, memory checks and cleanup. A read-only transaction must positively establish that
+bounded startup, memory checks and cleanup. Pending and published receipt
+inspection only reads custody; it never starts or stops a database. Full
+same-key continuation requalifies the database before destruction. Start
+capacity is required only when starting the database; an unavailable policy
+still refuses that start. Plain backup capture retains its capacity gate.
+A read-only transaction must positively establish that
 only the empty `postgres` database remains, with no other client connections
 or prepared transactions. Additional databases or private files in the data,
 addon, log, overlay upper or work directories refuse qualification. Exact
@@ -269,7 +274,7 @@ receipt remain in place. This case publishes an empty-recipient custody
 receipt rather than copying the shared lower or claiming a database restore.
 Every later destructive checkpoint rechecks that custody while the provider
 target exists; after provider absence the receipt verifies against the immutable
-original snapshot pin without requiring shared cache bytes to outlive normal
+original snapshot identity and hashes without requiring shared cache bytes to outlive normal
 snapshot retirement. Teardown never removes that shared lower. Interrupted receipt publication resumes only
 under its matching pending ownership and the existing same-key recovery path.
 It neither repairs historical restore-start evidence nor writes a disposable
