@@ -168,6 +168,14 @@ in force. See [testing retry](testing-deploy-retry.md).
 The [same-artifact testing service restart](lane-service-restart.md#supported-lane-and-identity)
 also has a bounded Director-agent path; that contract owns its safety and recovery rules.
 
+The [health alert drill](health-alert-drills.md) admits the authenticated Director
+`local_operator` under that standing permission without real monitor execution
+authority. Other callers retain the scoped environment-read and explicit
+monitor-execution checks; terminal credentials retain their mutation restriction.
+Only the drill route uses this admission. It changes no health, incident, outbox,
+notification policy or destination and retains the per-lane send window and
+ambiguous-delivery protection.
+
 Generic-web deploy recovery dry runs authorize the instance-scoped
 `generic_web_deploy_recovery.plan` action, with the existing execute grant as a
 compatibility alternative. The authenticated Director agent inherits this inert

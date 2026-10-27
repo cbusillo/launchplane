@@ -27,9 +27,13 @@ routing separately from that historical delivery: a delivered old receipt does
 not prove the destination is still enabled.
 
 The read and dry run require existing `product_environment.read` access for the
-exact product/lane. Sending also requires existing
-`public_ingress_monitor.run_once` access in the Launchplane service context,
-through normal mutation authentication. This capability installs no grants and
+exact product/lane. The authenticated Director agent may send through its existing
+`local_operator` mutation transport under the standing permission. The service's
+authentication marker establishes that identity; a principal name or scoped
+policy rule does not. Other callers still require existing
+`public_ingress_monitor.run_once` access in the Launchplane service context.
+Terminal-agent credentials retain their read-only mutation boundary. The drill
+does not authorize real monitor execution. This capability installs no grants and
 does not work around a denial. Use the supported authorization denial procedure
 when an existing identity cannot send.
 
