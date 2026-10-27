@@ -13,7 +13,8 @@ The service requires a published clean snapshot and its matching completed
 production-copy generation. Publication already requires successful restore,
 sanitization, independent integration readback and capture, before staff use.
 The result identifies the generation/source binding, original operation,
-snapshot database hash and capture time. Missing or mismatched provenance
+snapshot database hash and capture time. The snapshot ID is the source generation
+binding, rather than a second copy of that digest. Missing or mismatched provenance
 refuses before any provider read. A testing hold or an unknown occupancy
 observation does not prevent reading this independent immutable source.
 No policy change or access grant is needed.
@@ -21,7 +22,8 @@ No policy change or access grant is needed.
 The host reuses the clean snapshot receipt reader without creating directories
 or files. It opens the archive read-only, verifies its hash against both the
 receipt and service record, checks its size against the reviewed storage bound,
-and confirms application containers cannot mount that private snapshot path.
+and confirms inspected container mounts do not expose that private snapshot path.
+This is a direct-mount check, not a claim that an administrator cannot reach it.
 It passes that same open descriptor to `pg_restore --data-only --file=-` in the
 existing testing database container, solely as an archive decoder. The process
 receives an empty environment except PATH and no database argument. It never

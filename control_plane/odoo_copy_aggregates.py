@@ -47,7 +47,6 @@ class AggregateEvidence(BaseModel):
     product: str
     context: str
     instance: Literal["testing"] = "testing"
-    generation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     snapshot_id: str = Field(pattern=r"^[a-f0-9]{64}$")
     snapshot_database_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     snapshot_captured_at: str
@@ -206,11 +205,11 @@ try:
         raise ValueError()
     descriptor=os.open(path/'database.dump',os.O_RDONLY|os.O_NOFOLLOW)
     with os.fdopen(descriptor,'rb') as archive:
-        if not stat.S_ISREG(os.fstat(archive.fileno()).st_mode) or os.fstat(archive.fileno()).st_size>snapshot['storage_budget']['database_bytes']:
+        identity=os.fstat(archive.fileno())
+        if not stat.S_ISREG(identity.st_mode) or identity.st_size>snapshot['storage_budget']['database_bytes']:
             raise ValueError()
         if hashlib.file_digest(archive,'sha256').hexdigest()!=snapshot['database_sha256']:
             raise ValueError()
-        identity=os.fstat(archive.fileno())
         bindings=subprocess.check_output(['docker','ps','-aq'],timeout=10).decode().split()
         if len(bindings)>1024 or any(not re.fullmatch(r'[0-9a-f]{12,64}',item) for item in bindings):
             raise ValueError()
@@ -328,7 +327,6 @@ def read_aggregates(
     return AggregateEvidence(
         product=product,
         context=lane.context,
-        generation_sha256=snapshot.snapshot_id,
         snapshot_id=snapshot.snapshot_id,
         snapshot_database_sha256=snapshot.database_sha256,
         snapshot_captured_at=snapshot.captured_at,

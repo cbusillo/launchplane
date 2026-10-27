@@ -52,12 +52,35 @@ def main() -> int:
         try:
             raw = json.loads(error.read(4096))
             trace = transport["public_trace_id"](raw.get("trace_id"))
+            code = raw.get("error", {}).get("code", "aggregate_unavailable")
+            if code not in {
+                "snapshot_unavailable",
+                "archive_tool_unavailable",
+                "archive_unreadable",
+                "aggregate_unavailable",
+                "authorization_denied",
+                "invalid_request",
+                "invalid_odoo_environment",
+                "not_found",
+                "authz_policy_unavailable",
+                "odoo_runtime_read_unavailable",
+                "authentication_required",
+            }:
+                code = "aggregate_unavailable"
         except Exception:
             trace = ""
+            code = "aggregate_unavailable"
         finally:
             error.close()
         print(
-            json.dumps({"status": "unavailable", "http_status": error.code, "trace_id": trace}),
+            json.dumps(
+                {
+                    "status": "unavailable",
+                    "http_status": error.code,
+                    "trace_id": trace,
+                    "error_code": code,
+                }
+            ),
             file=sys.stderr,
         )
     except Exception:

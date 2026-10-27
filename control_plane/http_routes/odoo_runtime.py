@@ -545,9 +545,16 @@ def register_odoo_runtime_read_routes(
                 message="Aggregate reads require testing and accept only aggregate identifiers.",
             )
         with errors(trace_id):
-            profile = resolve_odoo_product_route(
-                record_store=record_store, product=product, instance="testing"
-            )
+            try:
+                profile = resolve_odoo_product_route(
+                    record_store=record_store, product=product, instance="testing"
+                )
+            except OdooProductMismatchError as error:
+                raise reads.OdooRuntimeReadError(
+                    "invalid_odoo_environment",
+                    "The product does not own an Odoo testing lane.",
+                    400,
+                ) from error
             lane = next(lane for lane in profile.lanes if lane.instance == "testing")
             if not common.authorization_allows(
                 identity=identity,

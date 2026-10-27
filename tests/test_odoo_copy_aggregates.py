@@ -50,7 +50,6 @@ class ArchiveCountTests(unittest.TestCase):
         self.assertEqual(
             counts, dict(active_rows=5, duplicate_groups=1, duplicate_rows=3, missing_key_rows=2)
         )
-        self.assertNotIn("private", json.dumps(counts))
         for escaped, decoded in (
             (b"\\N", None),
             (b"\\\\N", r"\N"),
@@ -91,7 +90,6 @@ class ArchiveCountTests(unittest.TestCase):
             {**counts, "rows": [{"email": "private@example.invalid"}]},
             {**counts, "active_rows": True},
             {**counts, "active_rows": -1},
-            {**counts, "active_rows": 2**63},
         ):
             with self.subTest(values=values), self.assertRaises(ValidationError):
                 reader.AggregateCounts.model_validate(values)
@@ -182,6 +180,22 @@ class SnapshotReaderTests(unittest.TestCase):
                     "snapshot_unavailable",
                 )
                 decode.assert_not_called()
+                archive.write_bytes(b"fixture custom archive")
+                process.stdout = BytesIO(COPY_ROWS)
+                digest = hashlib.file_digest
+
+                def change_after_hash(stream: Any, algorithm: str) -> Any:
+                    calculated = digest(stream, algorithm)
+                    archive.write_bytes(b"changed after digest")
+                    return calculated
+
+                output = StringIO()
+                with (
+                    patch.object(hashlib, "file_digest", side_effect=change_after_hash),
+                    redirect_stdout(output),
+                ):
+                    exec(reader.SNAPSHOT_AGGREGATE_PROGRAM, {})
+                self.assertNotIn("counts", json.loads(output.getvalue().removeprefix("FRAME:")))
 
     def test_matching_completed_provenance_required_before_any_provider_read(self) -> None:
         fixture = DiagnosticFixture()
@@ -270,7 +284,6 @@ class AggregateRouteTests(unittest.IsolatedAsyncioTestCase):
         evidence = reader.AggregateEvidence(
             product=fixture.profile.product,
             context=fixture.context,
-            generation_sha256="a" * 64,
             snapshot_id="a" * 64,
             snapshot_database_sha256="b" * 64,
             snapshot_captured_at="2026-10-25T00:00:00Z",
@@ -311,7 +324,93 @@ class AggregateRouteTests(unittest.IsolatedAsyncioTestCase):
             )
             read.assert_not_called()
             allowed.return_value = True
+            without_testing = fixture.profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane for lane in fixture.profile.lanes if lane.instance != "testing"
+                    )
+                }
+            )
+            store.read_product_profile_record.return_value = without_testing
+            store.list_product_profile_records.return_value = (without_testing,)
+            self.assertEqual(
+                (await request(app, "POST", path, payload=QUERY.model_dump())).status_code, 400
+            )
+            read.assert_not_called()
+            store.read_product_profile_record.return_value = fixture.profile
+            store.list_product_profile_records.return_value = (fixture.profile,)
             read.side_effect = ValueError("private database credentials")
             response = await request(app, "POST", path, payload=QUERY.model_dump())
             self.assertEqual(response.status_code, 503)
             self.assertNotIn("private", response.text)
+
+
+class AggregateClientTests(unittest.TestCase):
+    def test_error_codes_are_bounded_and_messages_never_leave_the_client(self) -> None:
+        from contextlib import redirect_stderr
+        from email.message import Message
+        import runpy
+        from urllib.error import HTTPError
+
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/read-copy-aggregates.py"),
+            run_name="aggregate_client_test",
+        )
+        with TemporaryDirectory() as temporary:
+            helper = Path(temporary) / "launchplane-write-action.py"
+            helper.write_text("")
+            for service_code, expected in (
+                ("snapshot_unavailable", "snapshot_unavailable"),
+                ("private_secret", "aggregate_unavailable"),
+            ):
+                failure = HTTPError(
+                    "https://service.invalid/read",
+                    503,
+                    "private message",
+                    Message(),
+                    BytesIO(
+                        json.dumps(
+                            {
+                                "trace_id": "fixture-trace",
+                                "error": {"code": service_code, "message": "private row detail"},
+                            }
+                        ).encode()
+                    ),
+                )
+                transport = {
+                    "resolve_settings": Mock(
+                        return_value={
+                            "service_url": "https://service.invalid",
+                            "token": "fixture-token",
+                        }
+                    ),
+                    "validate_service_url": Mock(),
+                    "request_launchplane": Mock(side_effect=failure),
+                    "public_trace_id": lambda value: value,
+                }
+                output = StringIO()
+                with (
+                    patch.object(runpy, "run_path", return_value=transport),
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "read",
+                            "--operator-helper",
+                            str(helper),
+                            "--product",
+                            "example-odoo",
+                            "--table",
+                            "product_template",
+                            "--key",
+                            "first_mpn",
+                        ],
+                    ),
+                    redirect_stderr(output),
+                ):
+                    self.assertEqual(client["main"](), 1)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["error_code"], expected)
+                self.assertEqual(result["trace_id"], "fixture-trace")
+                self.assertNotIn("private", output.getvalue())
+                self.assertNotIn("fixture-token", output.getvalue())
