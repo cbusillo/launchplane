@@ -1,4 +1,4 @@
-import { LaunchplaneApiError } from "./api";
+import { LaunchplaneApiError, LaunchplaneResponseError } from "./api";
 import type { BrowserOperationFailure, BrowserOperationState } from "./browser-operation";
 import { prepareBrowserOperation } from "./browser-operation";
 import type { ProductEnvironmentManagedSecretInput } from "./generated/openapi.ts";
@@ -120,6 +120,9 @@ export function productConfigDraftLocked(
 }
 
 export function productConfigOperationFailure(error: unknown): BrowserOperationFailure {
+  if (error instanceof LaunchplaneResponseError) {
+    return { code: "unreadable_response", message: error.message, statusCode: error.statusCode, traceId: "" };
+  }
   if (error instanceof LaunchplaneApiError) {
     return {
       code: error.code || "request_failed",
