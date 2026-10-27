@@ -436,11 +436,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         branch_refresh_store: MergeTrainBranchRefreshReadStore | None = None,
         wait: Callable[[float], None] = sleep,
         source_screening: bool = False,
+        product_profile_store: object | None = None,
     ) -> None:
         self.transport = transport
         self._effect_executor = effect_executor
         self._branch_refresh_recorder = branch_refresh_recorder
         self._branch_refresh_store = branch_refresh_store
+        self._product_profile_store = (
+            branch_refresh_store if product_profile_store is None else product_profile_store
+        )
         self._wait = wait
         self._source_screening = source_screening
         self._snapshot_policy: MergeTrainRepositoryPolicy | None = None
@@ -1856,6 +1860,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             required_checks=normalized_checks,
         )
         if self.requires_full_odoo_build(repository=repository):
+            if not evidence.required_checks:
+                return evidence
             payload = _list_check_runs(
                 transport=self.transport,
                 repository_path=_repository_path(repository),
@@ -1940,7 +1946,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
 
     def requires_full_odoo_build(self, *, repository: str) -> bool:
-        return requires_full_odoo_build(self._branch_refresh_store, repository=repository)
+        return requires_full_odoo_build(self._product_profile_store, repository=repository)
 
     def verify_unlanded_batch(
         self,
@@ -2451,16 +2457,24 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         effect_executor: MergeTrainSemanticEffectExecutor | None = None,
     ) -> bool:
         resolved_effect_executor = effect_executor or self.semantic_effect_executor
-        if landing_plan.candidate_pull_request_number is None and self.requires_full_odoo_build(
-            repository=landing_plan.repository
+        if (
+            landing_plan.candidate_pull_request_number is None
+            and is_canonical_candidate_ref(landing_plan)
+            and self.requires_full_odoo_build(repository=landing_plan.repository)
         ):
             from control_plane.merge_train_batch_pull_request import close_batch_pull_request
+            from control_plane.merge_admission import MergeAdmissionReconciliationRequiredError
 
-            close_batch_pull_request(
-                client=self,
-                candidate=landing_plan,
-                reason="its original pull requests landed through the train.",
-            )
+            try:
+                close_batch_pull_request(
+                    client=self,
+                    candidate=landing_plan,
+                    reason="its original pull requests landed through the train.",
+                )
+            except (MergeAdmissionDeniedError, MergeAdmissionReconciliationRequiredError) as error:
+                raise MergeTrainGitHubError(
+                    "Candidate validation PR cleanup could not be verified.", status_code=409
+                ) from error
         return resolved_effect_executor.delete_candidate_ref(
             CandidateRefDeleteEffect(
                 lineage=MergeTrainEffectLineage(
@@ -5590,6 +5604,16 @@ def requires_full_odoo_build(store: object, *, repository: str) -> bool:
         and profile.driver_id == "odoo"
         and repository_key(profile.repository) == repository_key(repository)
         for profile in store.list_product_profile_records()
+    )
+
+
+def is_canonical_candidate_ref(
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+) -> bool:
+    return candidate.candidate_ref == build_merge_train_batch_candidate_ref(
+        repository=candidate.repository,
+        base_branch=candidate.base_branch,
+        batch_id=candidate.batch_id,
     )
 
 

@@ -110,6 +110,7 @@ from control_plane.merge_train_github import (
     merge_train_conflict_probe_ref,
     merge_train_construction_ref,
     requires_full_odoo_build,
+    is_canonical_candidate_ref,
 )
 from control_plane.merge_train_original_review import (
     ORIGINAL_REVIEW_RECOVERY_CODE,
@@ -3337,6 +3338,8 @@ def _advance_active_candidate_record(
             if request.mutate and (
                 (
                     active_candidate_record.candidate.head_check_reuse is None
+                    and active_candidate_record.ordinary_job_binding is None
+                    and is_canonical_candidate_ref(active_candidate_record.candidate)
                     and requires_full_odoo_build(candidate_store, repository=request.repository)
                 )
                 or _uses_protected_candidate_pr(

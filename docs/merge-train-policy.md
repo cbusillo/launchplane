@@ -999,6 +999,13 @@ revalidation and fresh landing admission enforce this rule. The profile is
 read from runtime records; there is no checked-in repository list or additional
 gate for other drivers or repositories.
 
+Odoo landings use `POST /v1/work-graph/merge-train/controller/run-once`.
+The Level 1 ordered worker and direct tenant-admission controller do not
+construct candidates; for Odoo they return a wait or blocked result pointing
+to that supported controller, without merging. Other repositories retain
+their existing routes. Generated Odoo candidate PRs do not allocate product
+previews; source PR previews keep their existing behavior.
+
 Missing Build diagnostics use the existing candidate observation and PR feedback.
 Failed Builds participate in the existing failure classifier, base attribution
 and retry/isolation path. A candidate waiting for Build remains visible to the

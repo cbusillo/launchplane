@@ -2218,14 +2218,17 @@ def _plan_preview_target(
         ),
         director_standing=profile.release_on_acceptance == "director_standing",
     )
-    if not intent.explicit_override and recorded_train_candidate(
+    train_candidate = recorded_train_candidate(
         store=record_store,
         repository=profile.repository,
         head=pull_request.get("head"),
         base_branch=str(
             _object(pull_request.get("base", {}), "pull request base").get("ref") or ""
         ),
-    ):
+    )
+    if train_candidate and profile.driver_id == "odoo":
+        return without_preview("merge_train_candidate")
+    if train_candidate and not intent.explicit_override:
         intent = ClientTestNotes(False)
     plan["owner_review_requested"] = intent.review_required and (
         profile.owner.is_set

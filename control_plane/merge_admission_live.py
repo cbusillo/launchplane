@@ -449,6 +449,7 @@ class LiveMergeAdmissionEvaluator:
             check_client = GitHubMergeTrainClient(
                 transport=check_client.transport,
                 branch_refresh_store=optional_merge_train_branch_refresh_read_store(self.store),
+                product_profile_store=self.store,
             )
         check_head_sha = landing_plan.candidate_sha
         if candidate_record.candidate.head_check_reuse is not None:

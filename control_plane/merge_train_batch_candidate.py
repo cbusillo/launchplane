@@ -32,6 +32,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
     requires_full_odoo_build,
+    is_canonical_candidate_ref,
 )
 
 
@@ -192,8 +193,11 @@ def execute_merge_train_batch_candidate_run_once(
     else:
         if mutation_checkpoint is not None:
             mutation_checkpoint("observe_required_checks", None)
-        if candidate.head_check_reuse is None and requires_full_odoo_build(
-            review_store, repository=request.repository
+        if (
+            candidate.head_check_reuse is None
+            and existing_record.ordinary_job_binding is None
+            and is_canonical_candidate_ref(candidate)
+            and requires_full_odoo_build(review_store, repository=request.repository)
         ):
             github_client.ensure_batch_pull_request(candidate=candidate)
         candidate = github_client.observe_batch_candidate_checks(candidate=candidate)

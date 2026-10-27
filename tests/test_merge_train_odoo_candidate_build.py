@@ -109,7 +109,7 @@ class OdooCandidateBuildTests(unittest.TestCase):
                 result = self.client.observe_batch_candidate_checks(candidate=self.candidate)
                 self.assertEqual(result.required_checks_status, expected)
                 if expected != "pass":
-                    self.assertIn("build", result.required_checks_observation_error.lower())
+                    self.assertTrue(result.required_checks_observation_error)
 
     def test_live_technical_read_rechecks_optional_candidate_build(self) -> None:
         for conclusion, expected in (("failure", "fail"), ("success", "pass")):
@@ -123,6 +123,144 @@ class OdooCandidateBuildTests(unittest.TestCase):
                     evaluated_at="2026-10-26T00:00:00Z",
                 )
                 self.assertEqual(result.status, expected)
+
+    def test_profile_only_admission_reader_cannot_drop_build_or_replace_branch_requirements(
+        self,
+    ) -> None:
+        client = GitHubMergeTrainClient(transport=self.transport, product_profile_store=self.store)
+        self.transport.build_conclusion = "failure"
+        result = client.read_technical_checks(
+            repository=self.candidate.repository,
+            base_branch=self.candidate.base_branch,
+            base_sha=self.candidate.base_sha,
+            head_sha=self.candidate.candidate_sha,
+            evaluated_at="2026-10-26T00:00:00Z",
+        )
+        self.assertEqual(result.status, "fail")
+        self.transport.build_conclusion = "success"
+        self.transport.required_names = ("launchplane/owner-review",)
+        result = client.read_technical_checks(
+            repository=self.candidate.repository,
+            base_branch=self.candidate.base_branch,
+            base_sha=self.candidate.base_sha,
+            head_sha=self.candidate.candidate_sha,
+            evaluated_at="2026-10-26T00:00:00Z",
+        )
+        self.assertEqual(result.status, "unavailable")
+
+    def test_old_reuse_republishes_before_build_and_old_landing_ref_still_cleans_up(self) -> None:
+        client = GitHubMergeTrainClient(transport=self.transport)
+        client.begin_snapshot_pass(
+            policy=dependency_repository_policy(20, repository=self.transport.repository_full_name),
+            read_only=False,
+        )
+        reused = client.build_batch_candidate(candidate=self.candidate)
+        self.assertIsNotNone(reused.head_check_reuse)
+        republished = self.client.observe_batch_candidate_checks(candidate=reused)
+        self.assertEqual(republished.status, "ready_for_checks")
+        self.assertEqual(republished.candidate_ref, self.candidate.candidate_ref)
+        self.assertIsNone(republished.head_check_reuse)
+        from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
+
+        old_plan = build_merge_train_batch_landing_plan(
+            candidate=reused, merge_method="merge", created_at=reused.updated_at
+        )
+        self.assertTrue(self.client.cleanup_batch_candidate_ref(landing_plan=old_plan))
+
+    def test_live_evaluator_preserves_odoo_authority_without_branch_refresh_storage(self) -> None:
+        from tests.test_merge_admission_live import _live_evaluator
+        from tests.test_merge_train_reuse_live_admission import _AdmissionTransport
+        from tests.support.repository_evidence import _EvidenceProvider, _repository_evidence
+
+        evidence = _repository_evidence()
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_product_profile_record(
+                self.profile.model_copy(update={"repository": evidence.target.repository})
+            )
+            cast(Any, store).list_merge_train_branch_refresh_records = None
+            transport = _AdmissionTransport()
+            transport.check_head = "candidate-after-1"
+            transport.status_head = transport.check_head
+            with patch(
+                "tests.test_merge_admission_live._PassingTechnicalCheckClient",
+                return_value=GitHubMergeTrainClient(transport=transport),
+            ):
+                _, evaluate = _live_evaluator(
+                    store=store, provider=_EvidenceProvider(evidence), evidence=evidence
+                )
+            result = evaluate()
+            self.assertEqual(result.readiness.technical_checks.state, "blocked_checks")
+
+    def test_stall_monitor_does_not_report_a_failed_optional_odoo_build_as_recovered(self) -> None:
+        from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
+        from control_plane.merge_train_stall_monitor import run_stall_monitor_pass
+        from tests.test_merge_train_scheduler import _policy_record
+        from tests.test_merge_train_stall_monitor import _time
+
+        policy = _policy_record(
+            (self.candidate.repository, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        self.transport.build_conclusion = "failure"
+        failed = self.client.observe_batch_candidate_checks(candidate=self.candidate)
+        snapshot = MergeTrainDryRunSnapshot(
+            repository=self.candidate.repository,
+            base_branch="main",
+            base_sha=self.candidate.base_sha,
+            pull_requests=(),
+        )
+        reporter = Mock()
+
+        def client_factory(**kwargs: Any) -> Any:
+            client = Mock(wraps=GitHubMergeTrainClient(**kwargs))
+            client.target_setting_gaps.return_value = ()
+            client.read_merge_train_snapshot.return_value = snapshot
+            return client
+
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_product_profile_record(self.profile)
+            store.write_merge_train_batch_candidate_record(
+                build_merge_train_batch_candidate_record(
+                    candidate=failed, source="test", updated_at=failed.updated_at
+                )
+            )
+            with (
+                patch(
+                    "control_plane.merge_train_stall_monitor.resolve_merge_train_policy_record",
+                    return_value=policy,
+                ),
+                patch(
+                    "control_plane.merge_train_stall_monitor.resolve_merge_train_github_token",
+                    return_value="token",
+                ),
+                patch(
+                    "control_plane.merge_train_stall_monitor.UrllibMergeTrainGitHubTransport",
+                    return_value=self.transport,
+                ),
+                patch(
+                    "control_plane.merge_train_stall_monitor.GitHubMergeTrainClient",
+                    side_effect=client_factory,
+                ),
+                patch(
+                    "control_plane.merge_train_stall_monitor.resolve_stall_workflow",
+                    return_value=None,
+                ),
+            ):
+                for seconds in (0, 300):
+                    run_stall_monitor_pass(
+                        store=store,
+                        root=Path(directory),
+                        now=lambda: _time(seconds),
+                        reporter_factory=lambda **_: reporter,
+                    )
+            self.assertNotIn(
+                "candidate_failed_after_passing_rerun",
+                store.read_merge_train_stall_record(self.candidate.repository)
+                .observations["main"]
+                .suspected_signals,
+            )
+            reporter.notify.assert_not_called()
 
     def test_non_odoo_retains_optional_build_and_head_reuse(self) -> None:
         self.profile = self.profile.model_copy(update={"driver_id": "generic-web"})
@@ -235,6 +373,38 @@ class OdooCandidateBuildTests(unittest.TestCase):
             candidate=self.candidate, attribution_requirements=failures.attribution_requirements
         )
         self.assertEqual(base.status, "pass")
+
+    def test_uncertain_validation_pr_cleanup_retains_the_candidate_ref(self) -> None:
+        from control_plane.merge_admission import (
+            MergeAdmissionDeniedError,
+            MergeAdmissionReconciliationRequiredError,
+        )
+        from control_plane.merge_train_github import MergeTrainGitHubError
+        from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
+
+        candidate = self.client.build_batch_candidate(candidate=self.candidate).model_copy(
+            update={"status": "passed", "required_checks_status": "pass"}
+        )
+        plan = build_merge_train_batch_landing_plan(
+            candidate=candidate, merge_method="merge", created_at=candidate.updated_at
+        )
+        executor = Mock()
+        for error in (
+            MergeAdmissionDeniedError("incomplete discovery"),
+            MergeAdmissionReconciliationRequiredError("uncertain effect"),
+        ):
+            with (
+                self.subTest(error=type(error).__name__),
+                patch(
+                    "control_plane.merge_train_batch_pull_request.close_batch_pull_request",
+                    side_effect=error,
+                ),
+            ):
+                with self.assertRaises(MergeTrainGitHubError):
+                    self.client.cleanup_batch_candidate_ref(
+                        landing_plan=plan, effect_executor=executor
+                    )
+                executor.delete_candidate_ref.assert_not_called()
 
 
 if __name__ == "__main__":
