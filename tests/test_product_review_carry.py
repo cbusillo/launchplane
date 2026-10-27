@@ -685,7 +685,15 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(carry.batch_record_ids, (record.record_id,))
 
     def test_base_integration_cannot_hide_visible_side_work_or_foreign_parents(self) -> None:
-        for mutation in ("visible", "missing", "foreign", "truncated", "wrong-base", "unmerged"):
+        for mutation in (
+            "visible",
+            "missing",
+            "no-new-import",
+            "foreign",
+            "truncated",
+            "wrong-base",
+            "unmerged",
+        ):
             with self.subTest(mutation=mutation):
                 self.setUp()
                 self._integrate_accepted_billing_change()
@@ -699,6 +707,11 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                         if mutation == "visible"
                         else "Merge main"
                     )
+                elif mutation == "no-new-import":
+                    commits.pop(0)
+                    merge["parents"][1]["sha"] = _NEWER_BASE_COMMIT
+                    merge["commit"]["message"] = "New billing behavior\n\nClient-impact: visible"
+                    comparison.update(total_commits=len(commits), ahead_by=len(commits))
                 elif mutation == "foreign":
                     merge["parents"][1]["sha"] = _OTHER_MERGE_HEAD
                     self.github.responses[
