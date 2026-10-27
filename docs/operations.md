@@ -5762,6 +5762,8 @@ branch, `b2c4e6a8f0d3` for an already-applied hostname-only branch, and
 `f87c72d690ab` for their already-applied compatibility joins. These empty joins
 retain each branch's existing approval boundary. They never activate the
 prepared delivery drop or hostname transition on an unapproved database.
+An explicit approved delivery-drop request from `b0a2c4e6f8d1` joins at
+`b1b3d5f7a9e2`; hostname-only histories continue to refuse that request.
 Downgrade cannot reconstruct deleted idle intents. An image rollback to code
 that still requires them cannot recover a sleeping preview from its gateway
 receipt alone; use this image or a later one.
@@ -5775,12 +5777,12 @@ the old profile values atomically. Existing testing and production records stay
 unchanged. See [shared preview settings](preview-settings.md) for
 configuration and conflict handling.
 
-The held delivery-table drop remains held. Release migration joins only branches
-already applied: `b9a3d5e7f1b8` for retirement, `c0b4e6f8a2c9` for hostnames,
-and `c1c5f7a9b3d0` for their compatibility join. The default route from the archive
-revision never applies either unrelated branch. Explicitly requesting the held
-drop from the preview-settings revision still uses its separately approved path,
-joining at `b9a3d5e7f1b8`; a hostname-only source still refuses that request.
+An explicit `b8f2c4d6e0a7` migration target retains its historical joins:
+`b9a3d5e7f1b8` for retirement, `c0b4e6f8a2c9` for hostnames, and
+`c1c5f7a9b3d0` for their compatibility join. Its route from the archive never
+applies either unrelated branch. An approved delivery-drop request from this
+revision joins at `b9a3d5e7f1b8`; hostname-only histories still refuse it.
+Current release routing continues through idle retirement as described above.
 
 Downgrade retains the migrated values. An older image that does not recognize
 these revisions or still renders profile overrides is not a rollback target for

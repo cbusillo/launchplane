@@ -34,14 +34,7 @@ from control_plane.storage.migrations.versions import (
     f1b5d9a3c7e0_join_public_host_fences as hostname_join,
     f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
     f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
-    a4c8e0f2b6d3_archive_nonruntime_product_profiles as profile_archive,
-    a5d9f1b3c7e4_join_archive_topics_retirement as archive_retirement_join,
-    a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames_join,
-    a7f1b3d5e9a6_join_archive_compatibility as archive_compatibility_join,
     b8f2c4d6e0a7_managed_preview_settings as preview_settings,
-    b9a3d5e7f1b8_join_preview_retirement as preview_retirement_join,
-    c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
-    c1c5f7a9b3d0_join_preview_compatibility as preview_compatibility_join,
 )
 from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_host_fences import (
     PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,
@@ -56,6 +49,7 @@ from control_plane.storage.schema_migration import (
     migrate_schema,
     schema_migration_target,
     SCHEMA_MIGRATION_TARGET_REVISION,
+    _RECOGNIZED_SOURCE_REVISIONS,
 )
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
@@ -74,28 +68,7 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
     def test_compatibility_startup_and_image_rollback_preserve_old_and_future_schemas(
         self,
     ) -> None:
-        for revision in (
-            "",
-            AUTHZ_COMPATIBILITY_FLOOR_REVISION,
-            PRE_RETIREMENT_ALEMBIC_REVISION,
-            previous_release.revision,
-            topics.revision,
-            held.revision,
-            previous_join.revision,
-            topics_join.revision,
-            hostnames.revision,
-            hostname_join.revision,
-            topics_hostnames.revision,
-            compatibility_join.revision,
-            profile_archive.revision,
-            archive_retirement_join.revision,
-            archive_hostnames_join.revision,
-            archive_compatibility_join.revision,
-            preview_settings.revision,
-            preview_retirement_join.revision,
-            preview_hostnames_join.revision,
-            preview_compatibility_join.revision,
-        ):
+        for revision in ("", *_RECOGNIZED_SOURCE_REVISIONS):
             expected = schema_migration_target(
                 current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
             )
@@ -235,15 +208,24 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
         return store.close_discussion_topic(topic.product, topic.topic_id)
 
     def test_explicit_delivery_request_keeps_its_historical_join(self) -> None:
-        with _isolated_postgres_database() as url:
-            current = migrate_schema(database_url=url)
-            self.assertEqual(
-                migrate_schema(database_url=url, target_revision=held.revision),
-                schema_migration_target(current_revision=current, target_revision=held.revision),
-            )
-            store = PostgresRecordStore(database_url=url)
-            self.addCleanup(store.close)
-            store.verify_schema()
+        for initial in (preview_settings.revision, SCHEMA_MIGRATION_TARGET_REVISION):
+            with self.subTest(initial=initial), _isolated_postgres_database() as url:
+                current = migrate_schema(database_url=url, target_revision=initial)
+                store = PostgresRecordStore(database_url=url)
+                self.addCleanup(store.close)
+                self.assertTrue(
+                    set(held.RETIRED_TABLES).issubset(inspect(store._engine).get_table_names())
+                )
+                self.assertEqual(
+                    migrate_schema(database_url=url, target_revision=held.revision),
+                    schema_migration_target(
+                        current_revision=current, target_revision=held.revision
+                    ),
+                )
+                self.assertTrue(
+                    set(held.RETIRED_TABLES).isdisjoint(inspect(store._engine).get_table_names())
+                )
+                store.verify_schema()
 
     def test_explicit_approved_targets_preserve_historical_and_future_boundaries(self) -> None:
         for current, target, expected in (
