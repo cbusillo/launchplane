@@ -18,7 +18,7 @@ async function setupScenario(page: Page, outcome: SetupOutcome, declarationsOnly
     expected_config: { runtime_environment_keys: [], managed_secret_bindings: [] as unknown[] } };
   if (declarationsOnly) profile.lanes.push({ context: "atlas-commerce", instance: "testing", base_url: "https://testing.example.com" });
   let refuseReadback = false;
-  const state = { incompleteProfile: false };
+  const state = { incompleteProfile: false, profileReadGate: null as Promise<void> | null };
   const applies: Array<{ body: Record<string, unknown>; key: string }> = [];
   await page.route("**/v1/**", async route => {
     const path = new URL(route.request().url()).pathname;
@@ -41,6 +41,7 @@ async function setupScenario(page: Page, outcome: SetupOutcome, declarationsOnly
         ...(environment ? { context: body.context, instance: body.instance, base_url: body.base_url, plan_sha256: "a".repeat(64), preserved_lane_instances: ["prod"], applied: body.mode === "apply" }
           : { managed_secret_bindings: { added: body.managed_secret_bindings, unchanged: [] } }) } } }); return;
     }
+    if (path.endsWith("/product-profiles/atlas-commerce") && state.profileReadGate) await state.profileReadGate;
     if (path.endsWith("/product-profiles/atlas-commerce") && refuseReadback) { refuseReadback = false; await route.fulfill({ status: 401, json: { trace_id: "readback", error: { code: "authentication_required", message: "Read-back session expired." } } }); return; }
     const response = path.endsWith("/auth/session") ? { csrf_token: "csrf", identity: data.identity }
       : path.endsWith("/product-profiles/atlas-commerce") ? { profile: state.incompleteProfile ? { ...profile, lanes: undefined } : profile }
@@ -88,11 +89,18 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "p
     }
     if (["uncertain", "uncertain-profile", "readback", "uncertain-stale"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
-      if (outcome === "uncertain-profile") state.incompleteProfile = true;
+      let releaseProfileRead = () => {};
+      if (outcome === "uncertain-profile") {
+        state.incompleteProfile = true;
+        state.profileReadGate = new Promise<void>(resolve => { releaseProfileRead = resolve; });
+      }
       await page.reload();
       panel = page.getByRole("region", { name: "Set up a non-production environment" });
       if (outcome === "uncertain-profile") {
         await expect(panel.getByRole("status", { name: "Pending setup operation" })).toBeVisible();
+        await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
+        releaseProfileRead();
+        await expect(panel.getByRole("button", { name: "Retry setup read" })).toBeVisible();
         await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
         state.incompleteProfile = false;
         await panel.getByRole("button", { name: "Retry setup read" }).click();
