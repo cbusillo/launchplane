@@ -48,9 +48,11 @@ def idle_action(observation: dict[str, Any]) -> str:
     if set(services) != {"web", "database", "script-runner"}:
         raise ValueError("Preview idle service evidence is incomplete.")
     if gateway["mode"] == "asleep":
-        if not gateway["wake_record_id"] and any(item["running"] for item in services.values()):
-            return "sleep"
-        return "awake" if gateway["requested"] or gateway["wake_record_id"] else ""
+        running = any(item["running"] for item in services.values())
+        wanted = gateway["requested"] and gateway["idle_seconds"] < PREVIEW_IDLE_SECONDS
+        if wanted and (gateway["wake_record_id"] or not running):
+            return "awake"
+        return "sleep" if running else ""
     if (
         gateway["mode"] == "awake"
         and gateway["active"] == 0
@@ -74,16 +76,19 @@ class PreviewIdleClient:
     ) -> None:
         self.host, self.token, self.target = host, token, target
         self.check, self.admit = check, admit
+        self.dispatched = False
 
     def read(
         self, action: str = "observe", control: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        self.dispatched = False
         self.check()
         frames: list[dict[str, object]] = []
 
         def dispatch(effect: Callable[[], None]) -> None:
             with self.admit() if action in {"sleep", "awake"} else nullcontext():
                 self.check()
+                self.dispatched = True
                 effect()
 
         _read_remote(
@@ -379,7 +384,8 @@ class PreviewIdleScheduler:
                 try:
                     client.read(action, {**control, "action": action})
                 except Exception:
-                    self._retry_after[preview_id] = (
-                        monotonic() + PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS
-                    )
+                    if client.dispatched:
+                        self._retry_after[preview_id] = (
+                            monotonic() + PREVIEW_IDLE_FAILURE_BACKOFF_SECONDS
+                        )
                     raise

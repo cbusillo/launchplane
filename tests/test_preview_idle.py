@@ -96,7 +96,7 @@ class PreviewIdleTests(unittest.TestCase):
         self.assertEqual(idle_action(value), "")
         value = observation(mode="asleep", running=False)
         self.assertEqual(idle_action(value), "")
-        value["gateway"]["requested"] = True
+        value["gateway"].update(requested=True, idle_seconds=0)
         self.assertEqual(idle_action(value), "awake")
 
     def test_preview_routing_moves_to_router_without_app_data_or_secrets(self) -> None:
@@ -418,7 +418,7 @@ class PreviewIdleOperationTests(unittest.TestCase):
         ):
             self.run_preview()
             sleep_id = self.effects[-1]["record_id"]
-            self.value["gateway"]["requested"] = True
+            self.value["gateway"].update(requested=True, idle_seconds=0)
             self.run_preview()
         self.assertEqual([effect["action"] for effect in self.effects], ["sleep", "awake"])
         self.assertEqual(self.effects[-1]["sleep_record_id"], sleep_id)
@@ -428,7 +428,7 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
     def test_capacity_refusal_can_wake_on_a_later_pass(self) -> None:
         self.run_preview()
-        self.value["gateway"]["requested"] = True
+        self.value["gateway"].update(requested=True, idle_seconds=0)
         self.capacity = False
         self.run_preview()
         self.assertEqual(self.value["gateway"]["mode"], "asleep")
@@ -456,7 +456,7 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
     def test_visit_during_partial_stop_finishes_stop_before_capacity_admission(self) -> None:
         sleep_id = self.interrupt_sleep()
-        self.value["gateway"]["requested"] = True
+        self.value["gateway"].update(requested=True, idle_seconds=0)
         self.capacity = False
         self.run_preview()
         self.assertEqual(self.effects[-1]["action"], "sleep")
@@ -485,7 +485,8 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
         def fail_effect(**kwargs: Any) -> None:
             if kwargs["payload"]["action"] == "sleep":
-                raise RuntimeError("Persistent sleep failure")
+                kwargs["dispatch_guard"](Mock(side_effect=RuntimeError("Persistent sleep failure")))
+                return
             self.transport(**kwargs)
 
         with (
@@ -505,7 +506,7 @@ class PreviewIdleOperationTests(unittest.TestCase):
             self.assertCountEqual(visited, [self.preview.preview_id, other.preview_id])
 
     def test_transient_observation_failure_retries_on_the_next_pass(self) -> None:
-        for action in ("poll", "observe"):
+        for action in ("poll", "observe", "sleep"):
             with self.subTest(action=action):
                 self.scheduler = PreviewIdleScheduler(self.store, control_plane_root=self.root)
                 self.value = observation()
@@ -532,7 +533,7 @@ class PreviewIdleOperationTests(unittest.TestCase):
                 self.value = observation()
                 if action == "awake":
                     self.run_preview()
-                    self.value["gateway"]["requested"] = True
+                    self.value["gateway"].update(requested=True, idle_seconds=0)
                 busy = True
 
                 def transport(**kwargs: Any) -> None:
@@ -552,7 +553,7 @@ class PreviewIdleOperationTests(unittest.TestCase):
 
     def test_partial_wake_resumes_gateway_receipt_after_scheduler_and_router_restart(self) -> None:
         self.run_preview()
-        self.value["gateway"]["requested"] = True
+        self.value["gateway"].update(requested=True, idle_seconds=0)
         self.interrupt = True
         with self.assertRaises(RuntimeError):
             self.run_preview()
@@ -561,12 +562,15 @@ class PreviewIdleOperationTests(unittest.TestCase):
         self.value["gateway"]["requested"] = False
         self.scheduler = PreviewIdleScheduler(self.store, control_plane_root=self.root)
         self.run_preview()
+        self.assertTrue(all(not item["running"] for item in self.value["services"].values()))
+        self.value["gateway"].update(requested=True, idle_seconds=0)
+        self.run_preview()
         self.assertEqual(self.effects[-1]["record_id"], wake_id)
         self.assertEqual(self.value["gateway"]["mode"], "awake")
 
     def test_lost_completion_response_needs_no_retained_intent(self) -> None:
         self.run_preview()
-        self.value["gateway"]["requested"] = True
+        self.value["gateway"].update(requested=True, idle_seconds=0)
 
         def lose_response(**kwargs: Any) -> None:
             if kwargs["payload"]["action"] == "awake":
@@ -580,7 +584,20 @@ class PreviewIdleOperationTests(unittest.TestCase):
         effects = len(self.effects)
         self.scheduler.run_once()
         self.assertEqual(len(self.effects), effects)
+        self.assertTrue(all(item["running"] for item in self.value["services"].values()))
         self.assertFalse(self.store.list_held_provider_target_reservations())
+
+    def test_abandoned_partial_wake_sleeps_after_the_last_visit_expires(self) -> None:
+        self.run_preview()
+        self.value["gateway"].update(requested=True, idle_seconds=0)
+        self.interrupt = True
+        with self.assertRaises(RuntimeError):
+            self.run_preview()
+        self.interrupt = False
+        self.value["gateway"]["idle_seconds"] = PREVIEW_IDLE_SECONDS
+        self.run_preview()
+        self.assertEqual(self.value["gateway"]["mode"], "asleep")
+        self.assertTrue(all(not item["running"] for item in self.value["services"].values()))
 
     def test_executor_lock_excludes_idle_and_idle_holds_it_through_dispatch(self) -> None:
         key = odoo_preview_target_key(
@@ -730,7 +747,8 @@ class PreviewIdleRuntimeTests(unittest.TestCase):
         self.wake()
         self.namespace["observe_memory_headroom"] = lambda *_: 99
         self.assertFalse(self.namespace["execute"]()["capacity"])
-        self.assertFalse(self.calls)
+        self.assertFalse(any(call[0] == "start" for call in self.calls))
+        self.assertNotIn(("control", "waking"), self.calls)
         self.namespace["observe_memory_headroom"] = lambda *_: 100
         self.namespace["spec"]["disk_reserve"] = 101
         self.assertFalse(self.namespace["execute"]()["capacity"])

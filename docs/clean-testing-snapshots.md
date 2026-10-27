@@ -183,8 +183,10 @@ provider reservations or retained intents. Each pass observes the current ready
 generation, gateway receipt and service state. A partial stop finishes on a later
 pass, after any failure backoff, before admitting a requested wake. This lets
 the next wake measure headroom after the stop completes. An admitted partial
-wake resumes from the gateway's persisted receipt, even after a router or
-scheduler restart. A lost completion response needs only another observation.
+wake uses the gateway's persisted receipt as its idempotency key while a recent
+visitor is asking. When visits stop for the idle interval, an unfinished wake
+returns to sleep. A router or scheduler restart needs only another observation;
+a lost successful completion response preserves the running services.
 A failed stop/start backs off that preview for five minutes in memory, allowing
 other previews and ordinary refresh/destroy operations to proceed; no retry
 intent or budget is stored. Busy host locks and failed observations retry on the

@@ -93,9 +93,8 @@ def wait_healthy(identifier, deadline):
 
 
 def refuse_capacity(containers, status):
-    if status['wake_record_id']:
-        for service in ('web', 'script-runner', 'database'):
-            docker('stop', '-t', '30', containers[service][0])
+    for service in ('web', 'script-runner', 'database'):
+        docker('stop', '-t', '30', containers[service][0])
     return {'gateway': status, 'services': application_state(runtime()[0]),
         'capacity': False, 'accepted': False}
 
