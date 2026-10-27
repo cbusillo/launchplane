@@ -147,7 +147,6 @@
     },
     "inspection": {
       "tool": "jetbrains",
-      "ide": "PyCharm",
       "prepare": {
         "python": {
           "version": "3.14",
@@ -169,6 +168,35 @@
         "changed_files",
         "directory",
         "whole_project"
+      ],
+      "profile": ".idea/inspectionProfiles/Project_Default.xml",
+      "lanes": [
+        {
+          "id": "frontend",
+          "ide": "WebStorm",
+          "required": true,
+          "projectPath": "frontend",
+          "include": [
+            "frontend/**/*.ts",
+            "frontend/**/*.tsx",
+            "frontend/**/*.mts",
+            "frontend/**/*.cts",
+            "frontend/**/*.js",
+            "frontend/**/*.jsx",
+            "frontend/**/*.mjs",
+            "frontend/**/*.cjs"
+          ]
+        },
+        {
+          "id": "python",
+          "ide": "PyCharm",
+          "required": true,
+          "include": [
+            "**/*.py",
+            "**/*.yaml",
+            "**/*.yml"
+          ]
+        }
       ]
     },
     "docsRequiredWhen": [
