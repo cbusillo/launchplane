@@ -161,8 +161,22 @@ class CiCommentRangeTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(self._assert_range(history, history.base), {"first.py"})
-            internal = self._exercise(history, EVENT_NAME="workflow_dispatch")
+            internal = self._exercise(
+                history,
+                EVENT_NAME="workflow_dispatch",
+                EVENT_REF="refs/heads/launchplane/construct/example/product/trunk/fixture",
+            )
             self.assertNotEqual(internal.returncode, 0)
+
+    def test_manual_train_full_run_checks_the_same_contribution_as_its_push(self) -> None:
+        for movement in ("", "advanced", "landed", "landed_then_advanced"):
+            with self.subTest(movement=movement), TemporaryDirectory() as directory:
+                history = self._history(Path(directory), movement=movement)
+                result = self._exercise(history, EVENT_NAME="workflow_dispatch")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    self._assert_range(history, history.base), {"first.py", "second.py"}
+                )
 
     def test_first_member_remains_in_range_before_and_after_landing(self) -> None:
         for movement in ("", "advanced", "landed", "landed_then_advanced"):
@@ -274,6 +288,14 @@ class CiCommentRangeTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(history.capture.exists())
 
+    def test_manual_train_full_run_refuses_unprovable_history(self) -> None:
+        for movement in ("deleted", "unrelated", "shallow"):
+            with self.subTest(movement=movement), TemporaryDirectory() as directory:
+                history = self._history(Path(directory), movement=movement)
+                result = self._exercise(history, EVENT_NAME="workflow_dispatch")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(history.capture.exists())
+
     def test_invalid_event_metadata_refuses_before_scanning(self) -> None:
         for overrides in (
             {"DEFAULT_BRANCH": ""},
@@ -285,7 +307,10 @@ class CiCommentRangeTests(unittest.TestCase):
             {"EVENT_NAME": "push", "EVENT_REF": "refs/heads/trunk", "BASE_SHA": "0" * 40},
             {"EVENT_NAME": "push", "EVENT_REF": "refs/heads/trunk", "BASE_SHA": "f" * 40},
             {"EVENT_NAME": "pull_request", "BASE_SHA": ""},
-            {"EVENT_NAME": "workflow_dispatch"},
+            {
+                "EVENT_NAME": "workflow_dispatch",
+                "EVENT_REF": "refs/heads/launchplane/train/foreign/product/trunk/fixture",
+            },
         ):
             with self.subTest(overrides=overrides), TemporaryDirectory() as directory:
                 history = self._history(Path(directory))

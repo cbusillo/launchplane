@@ -1084,14 +1084,24 @@ Launchplane's own CI runs its full validation on that candidate push once. A
 same-repository PR headed by `launchplane/train/**`, when routing succeeds, skips the validation jobs
 and reports only `candidate-ci-delegated`, identifying its head SHA and branch.
 That routing check supplies no validation evidence and never publishes a
-`ci-gate`, even when the push is missing, pending or failed. The push remains
-the only producer of the candidate's required `ci-gate`; an informational PR
-check cannot satisfy or supersede it. Observation and protected landing still
-require the actual candidate's required checks. A new candidate SHA requires
-its own push validation. Ordinary PRs, including forks using the same branch
+`ci-gate`, even when the push is missing, pending or failed. The full workflow
+produces the candidate's required `ci-gate`; an informational PR check cannot
+satisfy or supersede it. Observation and protected landing require a successful
+full gate, never a skipped or neutral one. A new candidate SHA requires its own
+full validation. Ordinary PRs, including forks using the same branch
 spelling, keep their full CI path. Security, CodeQL and the required-check policy
-are unchanged. Actions still records two workflow events for a batch candidate,
-but only the push executes the full CI suite.
+are unchanged. Normally Actions records two workflow events for a batch
+candidate, and only the push executes the full CI suite.
+
+If a complete execution inventory and verified canonical ref show that the push
+execution is missing, use the existing manual full CI route in
+[testing style](style/testing.md#local-test-loop). It runs the same gates and
+verified first-parent contribution on that exact candidate. It grants no merge
+authority; the controller still checks the result and current lineage. A
+candidate must contain the supported workflow; a later repair on main cannot
+change an older candidate's file. Let the controller replace a stale candidate
+before running its new ref. Reconcile an uncertain dispatch through the original
+run, not a new dispatch. Missing-event recovery adds no credential or access.
 
 Shared check readers load the target branch's live requirements as the union of
 enforced classic protection and effective active branch rules, preserving each
