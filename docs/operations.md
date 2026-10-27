@@ -5759,3 +5759,9 @@ An explicit approved delivery-drop request from the additive revision joins at
 `c9e3f5a7b0c2`; hostname-only databases still refuse that request. The held
 destructive application procedure and its separate approval are unchanged.
 Image rollback retains this additive table and its immutable evidence.
+Before activating this target, deploy the compatibility slice containing these
+same migration files and recognized revision paths while startup still targets
+the profile archive. It creates no attestation table and does not require it.
+Retain that deployed compatibility image as activation's previous-image rollback
+target. Source delivery alone does not qualify it. Older images cannot recognize
+the additive revision and are below the new rollback floor.

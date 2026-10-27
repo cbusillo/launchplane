@@ -387,12 +387,33 @@ def _accepted_base_integration(
             return None
     integrated_changes = tuple(evidence.changes[number] for number in sorted(evidence.changes))
     batch_record_ids = tuple(sorted(evidence.batch_record_ids))
-    if any(
-        record.evidence.integrated_changes != integrated_changes
-        or record.evidence.batch_record_ids != batch_record_ids
-        for record in attestations
-    ):
-        return None
+    for record in attestations:
+        attested = _IntegrationEvidence()
+        comparison = _object(
+            read(f"{prefix}/compare/{accepted_head}...{record.evidence.merge_sha}")
+        )
+        attested_commits = _complete_commits(comparison, accepted_head)
+        if not attested_commits:
+            return None
+        for commit in attested_commits:
+            sha = str(commit["sha"])
+            if sha != record.evidence.merge_sha and not _integrated_change_reviewed(
+                sha=sha,
+                base_branch=base_branch,
+                store=store,
+                profile=profile,
+                read=read,
+                evidence=attested,
+            ):
+                return None
+        if {
+            entry.pull_request_number: entry.model_dump(exclude={"engineering_basis"})
+            for entry in record.evidence.integrated_changes
+        } != {
+            number: entry.model_dump(exclude={"engineering_basis"})
+            for number, entry in attested.changes.items()
+        } or set(record.evidence.batch_record_ids) != attested.batch_record_ids:
+            return None
     return ProductReviewCarry(
         record_id=accepted_record_id,
         head_sha=accepted_head,
@@ -448,10 +469,10 @@ def _integrated_change_reviewed(
     changes = read(f"{prefix}/commits/{sha}/pulls?per_page=100")
     if not isinstance(changes, list) or not changes or len(changes) >= 100:
         return False
-    for value in changes:
-        number = _object(value).get("number")
-        if type(number) is not int or number <= 0:
-            return False
+    numbers = [_object(value).get("number") for value in changes]
+    if any(type(number) is not int or number <= 0 for number in numbers):
+        return False
+    for number in sorted(set(cast(list[int], numbers))):
         if _merged_change_reviewed(
             number=number,
             base_branch=base_branch,

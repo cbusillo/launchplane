@@ -20,7 +20,7 @@ from control_plane.service_auth import LocalOperatorIdentity, LaunchplaneAuthzPo
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import request
 from tests.support.stores import sqlite_database_url
-from tests.test_product_review import _profile
+from tests.test_product_review import _profile, _decision
 
 
 class IntegrationAttestationHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -46,6 +46,12 @@ class IntegrationAttestationHttpTests(unittest.IsolatedAsyncioTestCase):
             parent_shas=("c" * 40, "d" * 40),
             integrated_changes=(),
         )
+        accepted = _decision(
+            record_id=evidence.source_decision_id, decided_at="2026-10-27T00:00:00Z"
+        ).model_copy(
+            update={"head_sha": evidence.parent_shas[0], "base_branch": evidence.base_branch}
+        )
+        store.write_product_review_decision_record(accepted)
         actor = LocalOperatorIdentity("director", "bootstrap", director_agent=True)
         policy = LaunchplaneAuthzPolicy(schema_version=3)
         app = FastAPI()
@@ -122,7 +128,7 @@ class IntegrationAttestationHttpTests(unittest.IsolatedAsyncioTestCase):
                 store.list_product_review_decision_records(
                     repository=profile.repository, pull_request_number=42
                 ),
-                (),
+                (accepted,),
             )
             plan.reset_mock()
             replay = await request(app, "POST", INTEGRATION_ATTESTATION_ROUTE, payload=apply)

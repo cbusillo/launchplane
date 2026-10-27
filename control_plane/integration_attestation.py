@@ -123,18 +123,34 @@ def record_integration_attestation(
     evidence: IntegrationAttestationEvidence,
     store: IntegrationAttestationStore,
     actor: str,
+    profile: LaunchplaneProductProfileRecord,
 ) -> IntegrationAttestationRecord:
     if request.reviewed_evidence_sha256 != evidence.digest() or request.review is None:
         raise ValueError("Apply requires the exact reviewed evidence and confirming model review.")
-    return store.write_integration_attestation_record_if_absent(
-        IntegrationAttestationRecord(
-            evidence=evidence,
-            review=request.review,
-            statement=request.statement,
-            recorded_by=actor,
-            recorded_at=datetime.now(timezone.utc).isoformat(),
-        )
+    record = IntegrationAttestationRecord(
+        evidence=evidence,
+        review=request.review,
+        statement=request.statement,
+        recorded_by=actor,
+        recorded_at=datetime.now(timezone.utc).isoformat(),
     )
+    with store.product_review_lock(
+        repository=evidence.repository, pull_request_number=evidence.pull_request_number
+    ):
+        decisions = applicable_product_review_decisions(
+            decisions=store.list_product_review_decision_records(
+                repository=evidence.repository, pull_request_number=evidence.pull_request_number
+            ),
+            profile=profile,
+            pull_request_number=evidence.pull_request_number,
+        )
+        if (
+            not decisions
+            or decisions[0].record_id != evidence.source_decision_id
+            or not _carryable(decisions[0])
+        ):
+            raise ValueError("The source acceptance changed during planning.")
+        return store.write_integration_attestation_record_if_absent(record)
 
 
 def integration_attestation_store(store: object) -> IntegrationAttestationStore:

@@ -78,67 +78,65 @@ def register_integration_attestation_route(
             if profile.repository != body.repository:
                 raise ValueError("The product does not own this repository.")
             attestation_store = integration_attestation_store(store)
-            with store.product_review_lock(
-                repository=body.repository, pull_request_number=body.pull_request_number
-            ):
-                saved = next(
-                    (
-                        record
-                        for record in attestation_store.list_integration_attestation_records(
-                            repository=body.repository, pull_request_number=body.pull_request_number
-                        )
-                        if record.evidence.product == body.product
-                        and record.evidence.source_decision_id == body.source_decision_id
-                        and record.evidence.merge_sha == body.merge_sha
-                        and record.evidence.digest() == body.reviewed_evidence_sha256
-                    ),
-                    None,
-                )
-                if body.mode == "readback" or saved is not None:
-                    if saved is None:
-                        raise FileNotFoundError("The exact attestation was not found.")
-                    if body.mode == "apply" and (
-                        saved.review != body.review or saved.statement != body.statement
-                    ):
-                        raise ValueError(
-                            "Integration attestation is immutable; read back the original."
-                        )
-                    return IntegrationAttestationResponse(
-                        trace_id=trace,
-                        evidence=saved.evidence,
-                        evidence_sha256=saved.evidence.digest(),
-                        record=saved,
+            saved = next(
+                (
+                    record
+                    for record in attestation_store.list_integration_attestation_records(
+                        repository=body.repository, pull_request_number=body.pull_request_number
                     )
-                with launchplane_github_token(
-                    control_plane_root=control_plane_root,
-                    context_name=profile.preview.context,
-                    repository=profile.repository,
-                    purpose="pull_request_feedback",
-                ) as token:
-                    if not token:
-                        raise OSError("Existing source-control read credential is unavailable.")
-                    evidence = plan_integration_attestation(
-                        request=body,
-                        profile=profile,
-                        store=store,
-                        read=lambda path: github_api_request(path=path, token=token),
+                    if record.evidence.product == body.product
+                    and record.evidence.source_decision_id == body.source_decision_id
+                    and record.evidence.merge_sha == body.merge_sha
+                    and record.evidence.digest() == body.reviewed_evidence_sha256
+                ),
+                None,
+            )
+            if body.mode == "readback" or saved is not None:
+                if saved is None:
+                    raise FileNotFoundError("The exact attestation was not found.")
+                if body.mode == "apply" and (
+                    saved.review != body.review or saved.statement != body.statement
+                ):
+                    raise ValueError(
+                        "Integration attestation is immutable; read back the original."
                     )
-                record = (
-                    record_integration_attestation(
-                        request=body,
-                        evidence=evidence,
-                        store=attestation_store,
-                        actor=idempotency_scope(identity),
-                    )
-                    if body.mode == "apply"
-                    else None
-                )
                 return IntegrationAttestationResponse(
                     trace_id=trace,
-                    evidence=evidence,
-                    evidence_sha256=evidence.digest(),
-                    record=record,
+                    evidence=saved.evidence,
+                    evidence_sha256=saved.evidence.digest(),
+                    record=saved,
                 )
+            with launchplane_github_token(
+                control_plane_root=control_plane_root,
+                context_name=profile.preview.context,
+                repository=profile.repository,
+                purpose="pull_request_feedback",
+            ) as token:
+                if not token:
+                    raise OSError("Existing source-control read credential is unavailable.")
+                evidence = plan_integration_attestation(
+                    request=body,
+                    profile=profile,
+                    store=store,
+                    read=lambda path: github_api_request(path=path, token=token),
+                )
+            record = (
+                record_integration_attestation(
+                    request=body,
+                    evidence=evidence,
+                    store=attestation_store,
+                    actor=idempotency_scope(identity),
+                    profile=store.read_product_profile_record(body.product),
+                )
+                if body.mode == "apply"
+                else None
+            )
+            return IntegrationAttestationResponse(
+                trace_id=trace,
+                evidence=evidence,
+                evidence_sha256=evidence.digest(),
+                record=record,
+            )
 
         try:
             return await run_in_worker_thread(execute)

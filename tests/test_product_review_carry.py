@@ -438,12 +438,20 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self._restore_billing_integration()
         self.assert_waits_for_the_client(self._publish())
 
-    def _billing_attestation(self) -> IntegrationAttestationRecord:
+    def _billing_attestation(
+        self, *, engineering_import: bool = False
+    ) -> IntegrationAttestationRecord:
         comparison = self._restore_billing_integration()
         commits = comparison["commits"]
         assert isinstance(commits, list)
         merge = commits[-4]
         prefix = f"/repos/{_REPOSITORY}"
+        if engineering_import:
+            change = self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST + 1}"]
+            assert isinstance(change, dict)
+            change["body"] = (
+                "## Client test notes\nNothing for the Client to test: Engineering cleanup."
+            )
         self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST}"] = {
             "state": "open",
             "body": "## Client test notes\nCheck the accepted billing fix.",
@@ -575,6 +583,57 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                     assert isinstance(comparison, dict)
                     comparison["commits"][-1]["commit"]["tree"]["sha"] = "f" * 40
                 self.assertNotEqual(self._publish()["state"], "success")
+
+    def test_attestation_survives_later_qualified_imports_and_engineering_prose_edits(self) -> None:
+        record = self._billing_attestation(engineering_import=True)
+        self.store.write_integration_attestation_record_if_absent(record)
+        prefix = f"/repos/{_REPOSITORY}"
+        imported = self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST + 1}"]
+        assert isinstance(imported, dict)
+        imported["body"] = (
+            "## Client test notes\nNothing for the Client to test: Clarified engineering explanation."
+        )
+        comparison = self.github.responses[
+            f"{prefix}/compare/{self.accepted.head_sha}...{self.github.head_sha}"
+        ]
+        assert isinstance(comparison, dict)
+        new_base, new_merge = "d" * 40, "e" * 40
+        commits = comparison["commits"]
+        assert isinstance(commits, list)
+        commits.extend(
+            [
+                {
+                    "sha": new_base,
+                    "parents": [{"sha": self.github.base_sha}],
+                    "commit": {"message": "Engineering import"},
+                },
+                {
+                    "sha": new_merge,
+                    "parents": [{"sha": self.github.head_sha}, {"sha": new_base}],
+                    "commit": {"message": "Integrate engineering work\n\nClient-impact: none"},
+                },
+            ]
+        )
+        comparison.update(ahead_by=len(commits), total_commits=len(commits))
+        self.github.responses[f"{prefix}/compare/{self.accepted.head_sha}...{new_merge}"] = (
+            comparison
+        )
+        self.github.responses[f"{prefix}/commits/{new_base}/pulls?per_page=100"] = [
+            {"number": _PULL_REQUEST + 2}
+        ]
+        self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST + 2}"] = {
+            "merged": True,
+            "head": {"sha": new_base},
+            "base": {"ref": "main", "repo": {"full_name": _REPOSITORY}},
+            "body": "## Client test notes\nNothing for the Client to test: More engineering cleanup.",
+            "labels": [],
+        }
+        change = self.github.responses[f"{prefix}/pulls/{_PULL_REQUEST}"]
+        assert isinstance(change, dict)
+        change["head"] = {"sha": new_merge}
+        self.github.head_sha, self.github.base_sha = new_merge, new_base
+        self.github.on_base.add(new_base)
+        self.assertEqual(self._publish()["state"], "success")
 
     def test_attestation_storage_replays_and_refuses_evidence_replacement(self) -> None:
         from pydantic import ValidationError
