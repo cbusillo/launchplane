@@ -172,12 +172,14 @@ class PreviewInventoryEvidenceTests(unittest.TestCase):
             self.assertEqual(overview.preview.inventory.observed_count, scan.preview_count)
             self.assertEqual(overview.preview.unobserved_record_slugs, ("pr-1",))
             self.assertEqual(overview.preview.untracked_observed_slugs, ("pr-2",))
+            self.assertTrue(overview.warnings)
             denied = build_product_site_overview(
                 record_store=store, product=profile.product, action_allowed=lambda *_: False
             )
             assert denied.preview.inventory is not None
             self.assertEqual(denied.preview.inventory.observed_slugs, ())
             self.assertEqual(denied.preview.untracked_observed_slugs, ())
+            self.assertFalse(denied.warnings)
 
     def test_new_payloads_remain_readable_by_the_immutable_v1_reader(self) -> None:
         # This is the original persisted-reader contract, intentionally frozen for

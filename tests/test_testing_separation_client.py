@@ -91,9 +91,21 @@ class TestingSeparationClientTests(unittest.TestCase):
             call = Mock(
                 side_effect=[
                     {"status": "accepted", "trace_id": "fixture", "result": plan},
-                    {"status": "accepted", "trace_id": "fixture", "result": completed},
-                    {"status": "accepted", "trace_id": "fixture", "result": completed},
-                    {"status": "accepted", "trace_id": "fixture", "result": completed},
+                    {
+                        "status": "accepted",
+                        "trace_id": "fixture",
+                        "result": {**completed, "future_receipt_field": True},
+                    },
+                    {
+                        "status": "accepted",
+                        "trace_id": "fixture",
+                        "result": {**completed, "future_receipt_field": True},
+                    },
+                    {
+                        "status": "accepted",
+                        "trace_id": "fixture",
+                        "result": {**completed, "future_receipt_field": True},
+                    },
                     {
                         "status": "accepted",
                         "trace_id": "fixture",

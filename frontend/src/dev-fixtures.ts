@@ -2495,7 +2495,7 @@ export function productReviewForFixture(
   assertEngineeringFixtureAvailable(fixture);
   const params = new URLSearchParams(window.location.search);
   const scenario = params.get("scenario") ?? "ready";
-  const carriedDecision = ["carried-decision", "carried-invisible-decision", "former-client-carried-decision", "earlier-carried-decision", "carried-without-preview"].includes(scenario);
+  const carriedDecision = ["carried-decision", "carried-base-integration", "carried-invisible-decision", "former-client-carried-decision", "earlier-carried-decision", "carried-without-preview"].includes(scenario);
   const invisibleCarry = scenario !== "carried-decision";
   const ownerSet = scenario !== "no-owner";
   const viewerIsOwner = ownerSet && params.get("viewer") !== "non-owner";
@@ -2557,10 +2557,14 @@ export function productReviewForFixture(
             carried_from: {
               record_id: "fixture-original-acceptance",
               head_sha: ["earlier-carried-decision", "carried-without-preview"].includes(scenario) ? "c".repeat(40) : "b".repeat(40),
-              reason: invisibleCarry ? "client_impact_none" : "unchanged_patch_base_update",
+              reason: scenario === "carried-base-integration" ? "accepted_base_integration" : invisibleCarry ? "client_impact_none" : "unchanged_patch_base_update",
               commits: invisibleCarry ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
               refresh_record_ids: [],
-              comparison_base_sha: invisibleCarry ? "" : "c".repeat(40),
+              comparison_base_sha: scenario === "carried-base-integration" || !invisibleCarry ? "c".repeat(40) : "",
+              integrated_changes: scenario === "carried-base-integration"
+                ? [{ pull_request_number: 307, head_sha: "d".repeat(40), decision_record_id: "fixture-imported-acceptance", engineering_basis: "" }]
+                : [],
+              batch_record_ids: [],
             },
           }
         : scenario === "decided"

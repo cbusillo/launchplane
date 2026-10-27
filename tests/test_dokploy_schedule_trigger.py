@@ -546,6 +546,27 @@ class DataWorkflowExecutionBudgetTests(unittest.TestCase):
 
 
 class GuardedScheduleDispatchTests(unittest.TestCase):
+    def test_caller_refusal_before_dispatch_surfaces_unchanged(self) -> None:
+        refused = click.ClickException("caller refused before dispatch")
+        provider = FakeProvider(trigger=_timed_out, listings=[])
+
+        def refuse() -> None:
+            raise refused
+
+        with (
+            patch.object(dokploy_api, "dokploy_request", side_effect=provider.request),
+            self.assertRaises(click.ClickException) as caught,
+        ):
+            dokploy_api.run_dokploy_schedule(
+                host="https://provider.invalid",
+                token="fixture",
+                schedule_id=SCHEDULE_ID,
+                timeout_seconds=60,
+                before_trigger=refuse,
+            )
+        self.assertIs(caught.exception, refused)
+        self.assertEqual(provider.trigger_calls, [])
+
     def test_dispatch_is_fenced_but_exact_job_observation_holds_no_guard(self) -> None:
         guarded = False
         before_calls = []

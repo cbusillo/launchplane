@@ -6017,6 +6017,15 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def test_recorded_train_candidate_does_not_allocate_a_preview(self) -> None:
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        with patch("control_plane.product_reconcile.recorded_train_candidate", return_value=True):
+            plan = self.reconcile()
+        self.assertEqual(plan["action"], "none")
+        self.assertEqual(self.provider.applied, [])
+        self.assertFalse(self.store.list_preview_records())
+
     def test_memory_refusal_reports_headroom_and_retries_without_a_new_build(self) -> None:
         from control_plane.dokploy.memory_capacity import PreviewMemoryCapacityRefused
 

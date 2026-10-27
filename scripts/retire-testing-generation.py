@@ -63,7 +63,7 @@ def main() -> int:
             saved = json.loads(evidence.read_text())
             if saved["request"] != review_request:
                 raise ValueError("Review belongs to another request.")
-            expected = TestingGenerationRetirementPlan.model_validate(saved["plan"])
+            expected = TestingGenerationRetirementPlan.model_validate(saved["plan"], extra="ignore")
             if expected.applied:
                 raise ValueError("Apply requires an unapplied review.")
             body = draft.model_copy(
@@ -85,7 +85,9 @@ def main() -> int:
         if response["status"] != "accepted":
             raise ValueError("Retirement was not accepted.")
         if args.mode == "inspect":
-            inspection = TestingGenerationCustodyInspection.model_validate(response["result"])
+            inspection = TestingGenerationCustodyInspection.model_validate(
+                response["result"], extra="ignore"
+            )
             if (
                 inspection.plan.product,
                 inspection.plan.context,
@@ -106,7 +108,7 @@ def main() -> int:
                 )
             )
             return 0
-        plan = TestingGenerationRetirementPlan.model_validate(response["result"])
+        plan = TestingGenerationRetirementPlan.model_validate(response["result"], extra="ignore")
         if (plan.product, plan.context, plan.operation_id, plan.applied) != (
             args.product,
             draft.context,
@@ -132,7 +134,10 @@ def main() -> int:
             )
             if (
                 readback["status"] != "accepted"
-                or TestingGenerationRetirementPlan.model_validate(readback["result"]) != plan
+                or TestingGenerationRetirementPlan.model_validate(
+                    readback["result"], extra="ignore"
+                )
+                != plan
             ):
                 raise ValueError("Retirement readback differs from its receipt.")
         print(

@@ -83,6 +83,7 @@ class TestingOverridePointerRetirementTests(unittest.TestCase):
             "wrong_product",
             "production",
             "ambiguous_owner",
+            "ambiguous_named_owner",
             "inferred_owner",
             "missing_owner",
         )
@@ -116,7 +117,7 @@ class TestingOverridePointerRetirementTests(unittest.TestCase):
                     store.write_product_profile_record(
                         LaunchplaneProductProfileRecord.model_validate(profile)
                     )
-                if case == "ambiguous_owner":
+                if case in {"ambiguous_owner", "ambiguous_named_owner"}:
                     store.write_product_profile_record(
                         _profile().model_copy(update={"product": "other-product"})
                     )
@@ -586,6 +587,8 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
             "application_changed",
             "declaration_changed",
             "override_changed",
+            "protected_context_changed",
+            "retained_password_changed",
             "provider_retained_key",
         ):
             with self.subTest(failure=failure), TemporaryDirectory() as temporary_directory:
@@ -597,10 +600,15 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                 store.write_product_profile_record(_profile())
                 retired_key = (
                     addon_setting_secret_env_key(addon_name="fixture", setting_name="token")
-                    if failure == "override_changed"
+                    if failure in {"override_changed", "protected_context_changed"}
                     else "LEGACY_PASSWORD"
                 )
-                store.write_runtime_environment_record(_runtime_record(retired=(retired_key,)))
+                runtime = _runtime_record(retired=(retired_key,))
+                if failure == "retained_password_changed":
+                    runtime = runtime.model_copy(
+                        update={"env": {**runtime.env, "ODOO_DB_PASSWORD": "first-password"}}
+                    )
+                store.write_runtime_environment_record(runtime)
                 _seed_tracked_target_records(
                     database_url=database_url,
                     context="example-site",
@@ -653,6 +661,16 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                                     ),
                                 )
                             )
+                        elif failure == "protected_context_changed":
+                            store.write_runtime_environment_record(
+                                RuntimeEnvironmentRecord(
+                                    scope="context",
+                                    context="example-site",
+                                    env={retired_key: "newly-required"},
+                                    updated_at=_runtime_record().updated_at,
+                                    source_label="test",
+                                )
+                            )
                         elif failure == "declaration_changed":
                             profile = _profile().model_dump(mode="json")
                             profile["expected_config"]["runtime_environment_keys"].append(
@@ -667,7 +685,14 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                             )
                     return {
                         "name": "test-app",
-                        "env": f"APP_MODE=private-mode-value\n{retired_key}=private-old-secret",
+                        "env": f"APP_MODE=private-mode-value\n{retired_key}=private-old-secret"
+                        + (
+                            "\nODOO_DB_PASSWORD=first-password"
+                            if failure == "retained_password_changed" and fetches == 1
+                            else "\nODOO_DB_PASSWORD=changed-password"
+                            if failure == "retained_password_changed"
+                            else ""
+                        ),
                     }
 
                 deploy = Mock()
@@ -689,7 +714,9 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                     apply_live_target_runtime_environment(
                         control_plane_root=root,
                         database_url=database_url,
-                        product_name="example-site",
+                        product_name=""
+                        if failure == "protected_context_changed"
+                        else "example-site",
                         context_name="example-site",
                         instance_name="testing",
                         apply_changes=True,
@@ -703,6 +730,8 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                     "application_changed": "runtime_retirement_conflict",
                     "declaration_changed": "runtime_retirement_conflict",
                     "override_changed": "runtime_retirement_conflict",
+                    "protected_context_changed": "runtime_retirement_conflict",
+                    "retained_password_changed": "retained_database_credential_changed",
                     "provider_retained_key": "dokploy_target_verification_failed",
                 }[failure]
                 self.assertEqual(refusal.exception.code, expected_code)

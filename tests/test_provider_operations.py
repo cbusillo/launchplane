@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from control_plane.contracts.record_failures import record_failure_summary
 
 from datetime import timedelta
@@ -154,6 +156,32 @@ class _StoreFixture:
 
 
 class DurableProviderOperationRunnerTests(unittest.TestCase):
+    def test_exit_receipt_failure_preserves_success_unknown_outcome_and_original_exception(
+        self,
+    ) -> None:
+        for error in (None, ProviderMutationUnknownError("unknown"), KeyboardInterrupt("original")):
+            with self.subTest(error=type(error).__name__), TemporaryDirectory() as directory:
+                fixture = _StoreFixture(directory)
+                self.addCleanup(fixture.store.close)
+                adapter = _FakeAdapter(apply_error=error)
+                with (
+                    patch.object(
+                        fixture.store,
+                        "record_mutation_executor_exit",
+                        side_effect=OSError("receipt unavailable"),
+                    ),
+                    self.assertLogs("control_plane.provider_operations", level="WARNING"),
+                ):
+                    if isinstance(error, KeyboardInterrupt):
+                        with self.assertRaises(KeyboardInterrupt) as raised:
+                            fixture.run(adapter)
+                        self.assertIs(raised.exception, error)
+                    else:
+                        result = fixture.run(adapter)
+                        self.assertEqual(
+                            result.status, "completed" if error is None else "reconcile_required"
+                        )
+
     def test_atomic_admission_refusal_preserves_cause_and_releases_target_without_effects(
         self,
     ) -> None:
@@ -1025,7 +1053,7 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             cause = ValueError("synthetic-private-provider-payload")
             error = ProviderMutationUnknownError("synthetic-private-wrapper")
             error.__cause__ = cause
-            with self.assertLogs("control_plane.provider_operations", level="WARNING") as logs:
+            with self.assertLogs("control_plane", level="WARNING") as logs:
                 result = fixture.run(_FakeAdapter(apply_error=error))
             assert result.record is not None
             recorded = "\n".join(logs.output)
@@ -1034,6 +1062,19 @@ class DurableProviderOperationRunnerTests(unittest.TestCase):
             self.assertNotIn(str(cause), recorded)
             self.assertNotIn(str(error), recorded)
             self.assertEqual(result.record.state, "reconcile_required")
+            events = [
+                json.loads(entry.getMessage())
+                for entry in logs.records
+                if entry.name == "control_plane.http_error_evidence"
+            ]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["operation_id"], result.record.record_id)
+            self.assertTrue(
+                any(
+                    site["module"] == run_durable_provider_operation.__module__ and site["line"] > 0
+                    for site in events[0]["sites"]
+                )
+            )
 
     def test_cancellation_leaves_running_reservation_intact(self) -> None:
         with TemporaryDirectory() as directory:

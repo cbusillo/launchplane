@@ -67,6 +67,67 @@ FAKE_VALUE = "fictional-testing-bridge-credential"
 
 
 class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_added_delivery_metadata_preserves_exact_package_and_verification(self) -> None:
+        import copy
+        from control_plane.local_consumer import deliver_consumer, _verify_service
+
+        package = self.issue()
+        payload = ConsumerDeliveryResponse(
+            trace_id="fixture",
+            request_fingerprint=digest(self.request),
+            ready_to_deliver=True,
+            plan_digest=digest(package.plan),
+            version_id=package.plan.version_id,
+            package=package,
+        ).model_dump(mode="json")
+        payload["future_metadata"] = {"added": True}
+        with (
+            patch.dict(os.environ, {"FIXTURE_AUTH": "fixture-token"}),
+            patch("requests.Session.post", return_value=Response(200, json=payload)),
+        ):
+            deliver_consumer(
+                self.directory,
+                service_url=self.request.service_origin,
+                bearer_token_env="FIXTURE_AUTH",
+                reviewed_plan_digest=digest(package.plan),
+            )
+        saved = (self.directory / "package.json").read_bytes()
+        self.assertEqual(saved, canonical(package))
+        for field in ("package", "plan", "request"):
+            changed = copy.deepcopy(payload)
+            target = changed["package"] if field == "package" else changed["package"][field]
+            target["future_signed_field"] = True
+            with (
+                self.subTest(field=field),
+                patch.dict(os.environ, {"FIXTURE_AUTH": "fixture-token"}),
+                patch("requests.Session.post", return_value=Response(200, json=changed)),
+                self.assertRaises(ValueError),
+            ):
+                deliver_consumer(
+                    self.directory,
+                    service_url=self.request.service_origin,
+                    bearer_token_env="FIXTURE_AUTH",
+                    reviewed_plan_digest=digest(package.plan),
+                )
+            self.assertEqual((self.directory / "package.json").read_bytes(), saved)
+        for package_digest in (digest(package), digest({"unrelated": True})):
+            with patch(
+                "requests.Session.post",
+                return_value=Response(
+                    200,
+                    json={
+                        "status": "current",
+                        "package_digest": package_digest,
+                        "future_metadata": True,
+                    },
+                ),
+            ):
+                if package_digest == digest(package):
+                    _verify_service(package)
+                else:
+                    with self.assertRaises(ValueError):
+                        _verify_service(package)
+
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

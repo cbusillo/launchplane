@@ -60,14 +60,54 @@ permissions are unchanged.
 Missing qualification returns `409 testing_deploy_safety_unknown`, rather than
 an authorization denial. Use the existing disposable-lane observations `inspect`
 and `collect` routes below to review its current binding and authoritative facts.
-The generic collector currently supplies protective holds and target-alias facts;
-positive custody and resource qualification comes from the supported Odoo
-generation inspector. A conventional application without those facts needs the
+The generic collector supplies protective holds and target-alias facts. Positive
+custody and resource qualification comes from the supported Odoo generation
+inspector or the retained Compose inspection below. A conventional application
+without those facts needs the
 authoritative application custody/isolation collector prerequisite
 [#4372](https://github.com/cbusillo/launchplane/issues/4372), related to the broader
 [#3611](https://github.com/cbusillo/launchplane/issues/3611). Caller assertions,
 saved environment inputs and a failed health check cannot fill that gap. Native
 deployment has no service dry-run mode; preparation is not execution proof.
+
+Retained generic-web Compose testing lanes use the same `inspect` and reviewed
+`collect` path. Collection requires the current recipient's published, qualified
+activation and its original completed allocation. It reuses the activation's
+configuration, retained-reservation, safe-input and provider-render checks, with
+the artifact from current deployment inventory. The provider's pending runtime
+identity must agree with the completed inventory apart from its completion time;
+provider image inputs retain the Compose deploy writer's artifact value.
+It then reads the registered host through the existing private transport. The
+fixed program checks every extant container, including stopped containers, and
+current/previous Swarm service declarations even without tasks. Read-only
+administrative parents remain permitted; exact allocations, children, writable
+parents and uncertain live backing remain protected. It checks actual
+mounts and bound ports, current image/environment inputs and allocation-labeled
+local volume backing. Testing credential values are compared with production's
+provider inputs and other containers' actual environments. The complete inspected
+inventory and service authority must remain unchanged across the read. The proof
+binds the provider configuration and owned resources; an unrelated restart
+between qualifications does not invalidate it when the fresh complete read
+still proves no shared resource or credential.
+
+Populated allocated volumes remain in place. The original qualified empty
+allocation and unchanged source/input custody establish reproducibility; the
+read neither empties storage nor restarts a process. It publishes only current
+resource facts with the existing expiration and binding. It leaves occupancy
+UNKNOWN and preserves recorded use, needed-copy and shared-resource protections.
+Missing custody, unsupported mounts, changed inputs or incomplete physical reads
+supply no positive resource fact. Collection propagates provider authorization
+refusals as denials. A first-effect preflight denial preserves the existing
+deploy/recovery response mapping: direct deploy returns `400 invalid_request`;
+recovery retains its original-operation reconciliation fence. Neither creates
+a failed deployment or permits a provider write.
+Immediately before its first provider-effect checkpoint, a standing Compose
+testing deployment repeats the same read outside the heartbeat mutex and global
+authority lock. The existing locked checkpoint then compares the captured
+record authority and qualification and rechecks use, needed-copy protection and
+expiry. It performs no provider or host read under that lock. Recovery executes
+this synchronous path in the worker pool. Drift refuses forward work. Existing original-operation fences and release qualification remain
+independent; collection does not retry a failed key or start a release.
 
 The Odoo generation collector can qualify current resources and copy custody
 while an `isolation_staging` hold remains set. It uses the same generation
@@ -1373,12 +1413,28 @@ entry so its certificate order and renewal remain independent; see
 [Traefik ACME domain definition](https://doc.traefik.io/traefik/reference/install-configuration/tls/certificate-resolvers/acme/#domain-definition).
 Original-attempt receipts settle an uncertain writer before another
 dispatch. Both HTTPS origins must return the current testing runtime identity
-before one transaction updates the lane base URL, binding provenance and canonical
-Odoo override intent. The original publication, candidate, restore generation,
+before one transaction updates the lane base URL, its same-host health fallback,
+binding provenance and canonical Odoo override intent. The health fallback keeps
+its path and query; an empty fallback or a separately declared health host stays
+unchanged. The original publication, candidate, restore generation,
 retirement and resources remain unchanged. A lost metadata reply resolves from
 the committed address receipt. Preserve the original request and key on any
 unknown outcome; do not clear old operation fences or edit publication history.
 The metadata transaction checks the original lease again immediately before commit.
+
+An already-completed address operation replays its original receipt and does not
+repair a previously stored health fallback. To correct only that fallback, read
+the current product profile and its ETag, replace one Odoo testing lane's HTTPS
+health origin with its existing base origin while preserving the path and query,
+and submit the otherwise unchanged profile to `POST /v1/product-profiles?dry_run=true`.
+Send its exact `If-Match` and an `Idempotency-Key`. Review the returned source and
+replacement profile digests, then submit the same profile and headers to
+`POST /v1/product-profiles`. Read the profile back and wait for the ordinary
+monitor's TLS and runtime observations. The Director-agent conditional write
+allows this exact metadata correction; scoped Client callers and production
+URL changes keep their existing authorization. This updates no route, runtime,
+credential, monitoring policy, accepted release or data, and concurrent profile
+changes refuse rather than being overwritten.
 
 If the unpublished amendment cannot finish, send `mode: apply` with
 `operation: cancel`, the original reviewed hash, reason and `Idempotency-Key`.
@@ -3475,6 +3531,26 @@ disposal. It is initial input evidence, never a final-source, upgraded or
 post-write recovery tuple. The web writer must be stopped. Verified, actively running,
 unbound or production-aliased operations refuse. Ordinary `retire` still requires both
 verified final recovery tuples; incomplete retirement produces neither tuple.
+
+The same `retire-incomplete` action also disposes a prepared rehearsal whose
+execute never started. Use the completed prepare key if execute was never
+submitted or was refused before dispatch, or the original execute key for a
+completed capacity or read-only precheck refusal. Keep the original intent.
+Any running or held operation on the rehearsal refuses, even with an expired
+lease. Under the host lock, no execute marker, capture, snapshot or other
+started effect may exist, and the idle runtime must still select the source
+database. The existing storage ownership, consumer and absence proofs apply.
+Publication checks executor exclusion again and preserves the completed
+prepare or refusal journal. Readback reconstructs disposal from its persisted
+checkpoint and placement absence.
+
+Every original-key rehearsal readback requires the original saved review
+through `--evidence-file`. It sends the original reviewed binding, including
+after publication changes the rehearsal record; readback never replays effects.
+The command-line clients ignore response fields their checkout does not know while
+retaining the existing identity, action, completion and custody validation.
+Request validation remains strict. A keyless status read does not require
+saved review evidence and does not bind or reconcile an original operation.
 
 A completed later phase that cannot reach `verified`, for example a superseded
 `switched` rehearsal whose candidate cannot run business validation, uses the

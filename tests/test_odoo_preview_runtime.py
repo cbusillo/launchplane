@@ -51,7 +51,6 @@ from control_plane.workflows.odoo_preview_runtime import (
     odoo_preview_target_is_quiescent,
     _preview_runtime_bindings,
     _preview_refresh_environment_values,
-    _rollback_created_runtime,
     _wait_for_smoke_check,
 )
 from tests.support.artifact_manifests import artifact_manifest_v2
@@ -431,35 +430,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 environment_values=_environment_values(),
                 timeout_seconds=601,
             )
-
-    def test_rollback_rechecks_fence_before_each_delete(self) -> None:
-        phases: list[str] = []
-
-        def checkpoint(phase: str) -> None:
-            phases.append(phase)
-            if phase == "rollback_compose_delete":
-                raise RuntimeError("reservation recovered")
-
-        with (
-            patch("control_plane.workflows.odoo_preview_runtime._delete_domain") as delete_domain,
-            patch("control_plane.workflows.odoo_preview_runtime._delete_compose") as delete_compose,
-            self.assertRaisesRegex(RuntimeError, "reservation recovered"),
-        ):
-            _rollback_created_runtime(
-                host="https://dokploy.example",
-                token="token",
-                domain_id="domain-one",
-                compose_id="compose-one",
-                delete_volumes=True,
-                provider_effect_checkpoint=checkpoint,
-            )
-
-        self.assertEqual(
-            phases,
-            ["rollback_domain_delete", "rollback_compose_delete"],
-        )
-        delete_domain.assert_called_once()
-        delete_compose.assert_not_called()
 
     def test_runtime_binding_evidence_keeps_preview_identity_keys_generated(self) -> None:
         bindings = _preview_runtime_bindings(
@@ -1428,13 +1398,6 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(domain_operation.path, "/api/domain.create")
         self.assertEqual(domain_operation.alternate_paths, ("/api/domain.update",))
         self.assertIn("certificateType", domain_operation.payload_keys)
-        self.assertEqual(
-            [operation.name for operation in plan.rollback_operations],
-            ["domain_delete", "compose_delete"],
-        )
-        compose_delete = plan.rollback_operations[-1]
-        self.assertEqual(compose_delete.path, "/api/compose.delete")
-        self.assertIn("deleteVolumes", compose_delete.payload_keys)
         self.assertTrue(
             any(
                 operation.secret_payload
@@ -2845,11 +2808,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 side_effect=click.ClickException("smoke failed"),
             ),
             patch(
-                "control_plane.workflows.odoo_preview_runtime._delete_domain",
-            ) as delete_domain,
-            patch(
-                "control_plane.workflows.odoo_preview_runtime._delete_compose",
-            ) as delete_compose,
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+            ) as provider,
         ):
             result = execute_odoo_preview_dokploy_apply(
                 control_plane_root=ANY,
@@ -2867,8 +2827,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         env_map = dokploy_api.parse_dokploy_env_text(update_env.call_args.kwargs["env_text"])
         self.assertEqual(env_map["PLATFORM_INSTANCE"], "preview")
         self.assertNotIn("smoke_check", [step.name for step in result.steps])
-        delete_domain.assert_not_called()
-        delete_compose.assert_not_called()
+        paths = {call.kwargs.get("path") for call in provider.call_args_list}
+        self.assertFalse(paths & {"/api/domain.delete", "/api/compose.delete"})
 
     def test_apply_preserves_failed_maintenance_evidence_without_running_smoke(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(

@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
+from pydantic import ConfigDict
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -32,6 +33,14 @@ from control_plane.local_consumer_contract import (
     digest,
     https_origin,
 )
+
+
+class LocalConsumerDeliveryResponse(ConsumerDeliveryResponse):
+    model_config = ConfigDict(extra="ignore")
+
+
+class LocalConsumerVerificationResponse(ConsumerVerificationResponse):
+    model_config = ConfigDict(extra="ignore")
 
 
 def _private_file(path: Path) -> bytes:
@@ -172,7 +181,7 @@ def deliver_consumer(
         )
         if response.status_code != 200 or len(response.content) > 65536:
             raise ValueError("The service could not deliver this testing credential.")
-        result = ConsumerDeliveryResponse.model_validate(response.json())
+        result = LocalConsumerDeliveryResponse.model_validate(response.json())
     if result.request_fingerprint != digest(request) or not result.ready_to_deliver:
         raise ValueError("The original testing destination or credential is not ready.")
     if not reviewed_plan_digest:
@@ -212,7 +221,7 @@ def _verify_service(package: ConsumerPackage) -> None:
         )
         if response.status_code != 200 or len(response.content) > 4096:
             raise ValueError("The original service could not verify the delivery.")
-        result = ConsumerVerificationResponse.model_validate(response.json())
+        result = LocalConsumerVerificationResponse.model_validate(response.json())
         if result.package_digest != digest(package):
             raise ValueError("The service receipt does not match the original package.")
 

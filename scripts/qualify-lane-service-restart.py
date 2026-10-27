@@ -260,7 +260,7 @@ HTTPServer(("0.0.0.0",8000),Handler).serve_forever()
                 )
             )
             reviewed = LaneServiceRestartResponse.model_validate_json(
-                (root / "review.json").read_text()
+                (root / "review.json").read_text(), extra="ignore"
             )
             recovery = LaneServiceRestartRecovery(
                 request=LaneServiceRestartRecoveryRequest(

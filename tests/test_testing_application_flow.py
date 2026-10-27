@@ -489,7 +489,8 @@ class ApplicationFlowTests(unittest.TestCase):
             },
             "serverId": "server",
             "env": "",
-            "sourceType": None,
+            "sourceType": "github",
+            "autoDeploy": True,
             "mounts": [],
             "domains": [],
             "replicas": 1,
@@ -2229,6 +2230,11 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(
             restored.model_dump(exclude={"custody"}), expected.model_dump(exclude={"custody"})
         )
+        from control_plane.testing_activation_inspection import inspect_application_route_receipts
+
+        inspected = inspect_application_route_receipts(self.store, refused)
+        self.assertEqual(inspected[1].status, "bound")
+        self.assertEqual(inspected[1].state, inverse.state)
         self.assertEqual(self.activate().status, "replayed")
         self.assertEqual(routing.effect_count, changed[0])
         self.assertEqual(self.canonical_password(), "retained-only-password")
@@ -3258,6 +3264,270 @@ class ApplicationFlowTests(unittest.TestCase):
             instance_name="testing",
             target_environment={},
         ).values["DB_PASSWORD"]
+
+    def interrupt_unanswered_mount(self) -> dict[str, Any]:
+        self.prepare()
+        pending: dict[str, Any] = {}
+        provider = self.provider
+
+        def interrupted(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/mounts.create":
+                pending.update(deepcopy(kwargs))
+                raise OSError("Fixture mount reply unavailable")
+            return provider(**kwargs)
+
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=interrupted):
+            self.assertEqual(self.activate().status, "reconcile_required")
+        self.assertTrue(pending)
+        self.assertEqual(self.adapter.current().phase, "create_application_mount")
+        return pending
+
+    def test_explicit_unanswered_mount_refusal_retains_custody_and_allows_new_generation(
+        self,
+    ) -> None:
+        pending = self.interrupt_unanswered_mount()
+        before = self.adapter.current()
+        password = self.canonical_password()
+        self.assertEqual(self.activate().status, "reconcile_required")
+        writes = deepcopy(self.writes)
+        self.request.mode = "refuse"
+        refused = self.activate()
+        self.assertEqual(refused.status, "completed", refused)
+        self.assertEqual(refused.response_payload["result"]["outcome"], "refused")
+        self.assertFalse(refused.response_payload["result"]["deployment_requested"])
+        self.assertEqual(self.writes, writes)
+        self.assertEqual(self.canonical_password(), password)
+        after = self.adapter.current()
+        self.assertEqual(after.state_recipient, before.state_recipient)
+        self.assertEqual(after.target_id, before.target_id)
+        self.assertEqual(after.preparation_record_id, before.preparation_record_id)
+        self.provider(**pending)
+        self.request.mode = "apply"
+        writes = deepcopy(self.writes)
+        self.assertEqual(self.activate().status, "replayed")
+        self.assertEqual(self.writes, writes)
+        self.assertFalse(self.deployments.get(before.target_id))
+        self.prepare("after-unanswered-refusal")
+        self.activation_key = "after-unanswered-refusal"
+        self.assertEqual(self.activate().status, "completed")
+        self.assertNotEqual(self.adapter.current().target_id, before.target_id)
+        self.assertNotEqual(self.adapter.current().namespace, before.namespace)
+        self.assertIn(before.target_id, self.payloads)
+
+    def test_late_mount_after_durable_refusal_cannot_resume_forward_apply(self) -> None:
+        pending = self.interrupt_unanswered_mount()
+        original = self.adapter.save
+        decision_saved = False
+
+        def crash_after_decision(record: Any, **updates: Any) -> Any:
+            nonlocal decision_saved
+            saved = original(record, **updates)
+            if updates.get("phase") == "refusing_private_candidate":
+                decision_saved = True
+                self.provider(**pending)
+                raise OSError("Fixture process ended after durable decision")
+            return saved
+
+        self.request.mode = "refuse"
+        with patch.object(self.adapter, "save", side_effect=crash_after_decision):
+            self.assertEqual(self.activate().status, "reconcile_required")
+        self.assertTrue(decision_saved)
+        self.request.mode = "apply"
+        writes = deepcopy(self.writes)
+        completed = self.activate()
+        self.assertIn(completed.status, {"completed", "adopted"}, completed)
+        self.assertEqual(completed.response_payload["result"]["outcome"], "refused")
+        self.assertEqual(self.writes, writes)
+        self.assertFalse(self.deployments.get(self.adapter.current().target_id))
+
+    def test_foreign_mount_after_refusal_decision_retains_the_reservation(self) -> None:
+        pending = self.interrupt_unanswered_mount()
+        self.provider(**pending)
+        candidate = self.adapter.current()
+        mount = deepcopy(self.payloads[candidate.target_id]["mounts"][0])
+        self.payloads[candidate.target_id]["mounts"][0]["applicationId"] = "foreign"
+        self.request.mode = "refuse"
+        self.assertEqual(self.activate().status, "reconcile_required")
+        self.assertIsNone(self.adapter.current().failure)
+        self.assertEqual(self.adapter.current().phase, "refusing_private_candidate")
+        self.payloads[candidate.target_id]["mounts"] = [mount]
+        self.request.mode = "apply"
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed", completed)
+        self.assertEqual(completed.response_payload["result"]["outcome"], "refused")
+
+    def test_unanswered_refusal_rejects_stale_forward_progress_in_storage(self) -> None:
+        self.interrupt_unanswered_mount()
+        self.request.mode = "refuse"
+        original = self.adapter.save
+        fenced = False
+
+        def attempt_forward(record: Any, **updates: Any) -> Any:
+            nonlocal fenced
+            saved = original(record, **updates)
+            if updates.get("phase") == "refusing_private_candidate":
+                with self.assertRaises(ValueError):
+                    original(saved, phase="configure_application")
+                fenced = True
+            return saved
+
+        with patch.object(self.adapter, "save", side_effect=attempt_forward):
+            self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(fenced)
+
+    def test_unanswered_refusal_cannot_replace_a_live_original_lease(self) -> None:
+        self.interrupt_unanswered_mount()
+        parent = self.store.read_testing_application_activation_operation(
+            self.product, self.context, self.scope, self.request.preparation_key
+        )
+        assert parent is not None
+        acquired = self.store.retry_reconciled_mutation(
+            reservation=parent,
+            lease_owner="still-running-original",
+            lease_seconds=300,
+            preserve_effect_checkpoint=True,
+        )
+        self.assertEqual(acquired.status, "acquired")
+        before = deepcopy((self.writes, self.adapter.current()))
+        self.request.mode = "refuse"
+        self.assertEqual(self.activate().status, "in_progress")
+        self.assertEqual((self.writes, self.adapter.current()), before)
+
+    def test_plain_authority_changed_apply_cannot_abandon_an_unanswered_mount(self) -> None:
+        self.interrupt_unanswered_mount()
+        record = self.adapter.current()
+        self.correct_runtime()
+        for status in ("idle", "running"):
+            with self.subTest(status=status):
+                self.payloads[record.target_id]["applicationStatus"] = status
+                writes = deepcopy(self.writes)
+                self.assertEqual(self.activate().status, "reconcile_required")
+                self.assertEqual(self.adapter.current().phase, "create_application_mount")
+                self.assertIsNone(self.adapter.current().failure)
+                self.assertEqual(self.writes, writes)
+
+    def test_lost_negative_completion_adopts_the_refusal_without_forward_work(self) -> None:
+        self.interrupt_unanswered_mount()
+        self.request.mode = "refuse"
+        with (
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=self.old.now(-600)
+            ),
+            patch.object(
+                self.store,
+                "complete_mutation_reservation",
+                side_effect=OSError("Fixture completion save unavailable"),
+            ),
+            self.assertRaises(OSError),
+        ):
+            self.activate()
+        self.assertIsNotNone(self.adapter.current().failure)
+        self.request.mode = "apply"
+        writes = deepcopy(self.writes)
+        adopted = self.activate()
+        self.assertEqual(adopted.status, "adopted", adopted)
+        self.assertEqual(adopted.response_payload["result"]["outcome"], "refused")
+        self.assertEqual(self.writes, writes)
+
+    def test_unanswered_refusal_keeps_unknown_or_automatic_candidate_execution_fenced(self) -> None:
+        self.interrupt_unanswered_mount()
+        record = self.adapter.current()
+        live = self.payloads[record.target_id]
+        original = deepcopy(live)
+        self.request.mode = "refuse"
+        for changes in (
+            {"sourceType": "docker", "dockerImage": record.image_reference, "autoDeploy": False},
+            {"sourceType": None, "autoDeploy": True},
+            {"branch": "main"},
+            {"domains": [{"host": "foreign.invalid"}]},
+            {"applicationStatus": "running"},
+        ):
+            with self.subTest(changes=changes):
+                live.clear()
+                live.update(deepcopy(original) | changes)
+                writes = deepcopy(self.writes)
+                self.assertEqual(self.activate().status, "reconcile_required")
+                self.assertEqual(self.writes, writes)
+                self.assertIsNone(self.adapter.current().failure)
+        live.clear()
+        live.update(original)
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed", completed)
+
+    def assert_http_unanswered_refusal(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        self.prepare()
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+
+        def post(mode: str, key: str = "activation", **changes: Any) -> Any:
+            return asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": key,
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": mode} | changes,
+                )
+            )
+
+        writes = deepcopy(self.writes)
+        self.assertEqual(post("refuse").status_code, 409)
+        self.assertEqual(self.writes, writes)
+        provider = self.provider
+
+        def interrupted(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/mounts.create":
+                raise OSError("Fixture unanswered mount")
+            return provider(**kwargs)
+
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=interrupted):
+            self.assertEqual(post("apply").status_code, 409)
+        before = self.adapter.current()
+        writes = deepcopy(self.writes)
+        for key, changes in (
+            ("foreign-key", {}),
+            ("activation", {"reason": "Changed original intent"}),
+            ("activation", {"reviewed_plan_sha256": "f" * 64}),
+            ("activation", {"application": None}),
+        ):
+            with self.subTest(key=key, changes=changes):
+                self.assertEqual(post("refuse", key, **changes).status_code, 409)
+                self.assertEqual(self.adapter.current(), before)
+                self.assertEqual(self.writes, writes)
+        from threading import get_ident
+
+        handler_thread = get_ident()
+        lookup = self.store.read_testing_application_activation_operation
+
+        def worker_lookup(*args: Any, **kwargs: Any) -> Any:
+            self.assertNotEqual(get_ident(), handler_thread)
+            return lookup(*args, **kwargs)
+
+        with patch.object(
+            self.store, "read_testing_application_activation_operation", side_effect=worker_lookup
+        ):
+            refused = post("refuse")
+        self.assertEqual(refused.status_code, 202, refused.text)
+        self.assertEqual(refused.json()["result"]["outcome"], "refused")
+        self.assertEqual(self.writes, writes)
+        for mode in ("refuse", "apply", "receipt", "readback"):
+            replayed = post(mode)
+            self.assertEqual(replayed.status_code, 202, replayed.text)
+            self.assertEqual(replayed.json()["result"], refused.json()["result"])
+            self.assertEqual(self.writes, writes)
 
     def test_lost_mount_reply_adopts_provider_row_once_and_fences_conflicts(self) -> None:
         import asyncio
@@ -4427,6 +4697,296 @@ class ApplicationFlowTests(unittest.TestCase):
     def test_supported_http_dry_run_and_original_receipt(self) -> None:
         self.assert_supported_http_activation(native_apply=False)
 
+    def test_original_candidate_inspection_identifies_terminal_predicates_without_values_or_writes(
+        self,
+    ) -> None:
+        from control_plane.testing_application_inspection import inspect_application_candidate
+        from control_plane.provider_operations import build_provider_operation_key
+
+        self.prepare()
+        completed = self.activate()
+        self.assertEqual(completed.status, "completed")
+        assert completed.record is not None
+        row = completed.record
+        record = self.adapter.current()
+        operation_key = build_provider_operation_key(
+            scope=row.scope,
+            route_path=row.route_path,
+            idempotency_key=row.idempotency_key,
+            request_fingerprint=row.request_fingerprint,
+            reconciliation_key=row.reconciliation_key,
+        )
+        before = deepcopy((self.writes, self.schedules, self.schedule_history))
+        observed = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(observed.placement, "matched")
+        self.assertEqual(observed.domains, "empty")
+        self.assertEqual(observed.history, "complete")
+        self.assertEqual(observed.deployment_count, len(self.deployments[record.target_id]))
+        self.assertTrue(observed.stored_deployment_recorded)
+        self.assertTrue(observed.sole_deployment_id_matches)
+        self.assertTrue(observed.sole_deployment_title_matches)
+        self.assertEqual(observed.sole_deployment_status, "terminal_success")
+        self.assertEqual(observed.current_runtime_status, "available")
+        self.assertEqual(observed.current_http_status, 200)
+        self.assertEqual(observed.current_identity_status, "match")
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=legacy.activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with (
+            patch(
+                "control_plane.testing_activation_inspection.activation_record",
+                return_value=record.model_copy(update={"phase": "restoring_application_route"}),
+            ),
+            patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=[],
+            ),
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={
+                        "Authorization": "Bearer local-operator-token",
+                        "Idempotency-Key": "activation",
+                    },
+                    payload=self.request.model_dump(mode="json") | {"mode": "inspect"},
+                )
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertTrue(response.json()["result"]["candidate"]["sole_deployment_id_matches"])
+        self.assertEqual(response.json()["result"]["candidate"]["current_http_status"], 200)
+        for private in (
+            record.target_id,
+            record.app_name,
+            "retained-only-password",
+            self.deployments[record.target_id][0]["title"],
+        ):
+            self.assertNotIn(private, observed.model_dump_json())
+        original = deepcopy(self.payloads[record.target_id])
+        for changes, expected in (
+            ({}, "missing"),
+            ({"domains": None}, "malformed"),
+            ({"domains": [{"host": "private.example"}]}, "nonempty"),
+        ):
+            self.payloads[record.target_id] = {
+                key: value for key, value in original.items() if key != "domains"
+            } | changes
+            self.assertEqual(
+                inspect_application_candidate(self.adapter, record, operation_key).domains, expected
+            )
+        self.payloads[record.target_id] = original
+        with (
+            patch.object(
+                api,
+                "list_deployments_for_target",
+                side_effect=ValueError("private provider detail"),
+            ),
+            self.assertLogs("control_plane.http_error_evidence", level="WARNING") as diagnostic,
+        ):
+            unknown = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(unknown.history, "unknown")
+        self.assertIsNone(unknown.deployment_count)
+        self.assertIsNone(unknown.sole_deployment_id_matches)
+        self.assertNotIn("private provider detail", unknown.model_dump_json())
+        self.assertNotIn("private provider detail", "\n".join(diagnostic.output))
+        self.deployments[record.target_id].append(
+            {"deploymentId": "foreign-job", "title": "private foreign title", "status": "running"}
+        )
+        multiple = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(multiple.deployment_count, len(self.deployments[record.target_id]))
+        self.assertIsNone(multiple.sole_deployment_status)
+        from control_plane.testing_application_runtime import VerifiedApplicationRuntimeFailure
+
+        with patch(
+            "control_plane.testing_application_inspection.inspect_application_runtime",
+            side_effect=VerifiedApplicationRuntimeFailure(
+                {
+                    "http_status": 503,
+                    "identity_status": "missing",
+                    "health_payload": {"private": "unreported"},
+                }
+            ),
+        ):
+            failed = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(failed.current_http_status, 503)
+        self.assertEqual(failed.current_identity_status, "missing")
+        self.assertNotIn("unreported", failed.model_dump_json())
+        self.payloads[record.target_id]["appName"] = "foreign-private-application"
+        with patch(
+            "control_plane.testing_application_inspection.inspect_application_runtime",
+            side_effect=AssertionError("Changed placement must not be probed"),
+        ):
+            changed = inspect_application_candidate(self.adapter, record, operation_key)
+        self.assertEqual(changed.placement, "changed")
+        self.assertEqual(changed.current_runtime_status, "not_read")
+        self.assertEqual((self.writes, self.schedules, self.schedule_history), before)
+        self.assertEqual(self.adapter.current(), record)
+
+    def test_original_route_inspection_reads_bound_receipts_without_provider_or_writes(
+        self,
+    ) -> None:
+        from control_plane.testing_activation_inspection import (
+            inspect_application_activation,
+            inspect_application_route_receipts,
+        )
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+        from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT
+
+        routing, _, _ = self.private_addressed()
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        record = self.adapter.current()
+        readiness = record.application_readiness
+        assert readiness is not None and readiness.route_execution is not None
+        assert readiness.private_health is not None and readiness.public_health is not None
+        forward = self.store.read_idempotency_record(
+            scope=record.scope,
+            route_path=ROUTE.format(product=self.product) + ":route",
+            idempotency_key=record.plan_sha256 + ":route",
+        )
+        assert forward is not None
+        writer = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=ROUTE_WRITER_RECEIPT,
+            idempotency_key=readiness.route_execution.key(attempt=forward.attempt),
+        )
+        assert writer is not None
+        before = deepcopy(
+            (self.writes, self.schedules, self.schedule_history, routing.effect_count)
+        )
+        read = self.store.read_idempotency_record
+        with (
+            patch(
+                "control_plane.dokploy.api.dokploy_request", side_effect=AssertionError
+            ) as provider_reads,
+            patch(
+                "control_plane.secrets._decrypt_secret_value", side_effect=AssertionError
+            ) as secret_reads,
+        ):
+            observed = inspect_application_route_receipts(self.store, record)
+            self.assertEqual(observed[0].state, forward.state)
+            self.assertEqual(observed[0].attempt, forward.attempt)
+            self.assertEqual(observed[0].status, "bound")
+            self.assertEqual(observed[0].writer_status, "bound")
+            self.assertEqual(observed[0].writer_state, writer.state)
+            self.assertEqual(observed[0].writer_outcome, writer.response_payload["writer_outcome"])
+            self.assertEqual(observed[1].status, "not_found")
+            with patch(
+                "control_plane.testing_activation_inspection.inspect_preparation_programs",
+                return_value=[],
+            ):
+                integrated = inspect_application_activation(
+                    root=self.root,
+                    store=self.store,
+                    product=self.product,
+                    request=self.request,
+                    actor=self.actor,
+                    scope=self.scope,
+                    idempotency_key="activation",
+                    trace_id="original-route-inspection",
+                    observe_original=self.adapter.observe,
+                )
+            self.assertEqual(integrated.routes, observed)
+            self.assertEqual(integrated.private_health_status, readiness.private_health.status)
+            self.assertEqual(integrated.public_health_status, readiness.public_health.status)
+            intent = self.store.read_original_mutation_intent
+            for original in (forward, writer):
+                with (
+                    self.subTest(missing_intent=original.record_id),
+                    patch.object(
+                        self.store,
+                        "read_original_mutation_intent",
+                        side_effect=lambda row, selected=original: (
+                            {} if row == selected else intent(row)
+                        ),
+                    ),
+                ):
+                    missing = inspect_application_route_receipts(self.store, record)[0]
+                    if original == forward:
+                        self.assertEqual(missing.status, "unbound")
+                        self.assertEqual(missing.writer_status, "not_read")
+                    else:
+                        self.assertEqual(missing.writer_status, "unbound")
+            for original, changes in (
+                (forward, {"request_fingerprint": "foreign-private-fingerprint"}),
+                (writer, {"request_fingerprint": "foreign-private-fingerprint"}),
+                (writer, {"response_payload": {"writer_outcome": "private-provider-message"}}),
+                (writer, {"state": "reconcile_required"}),
+                (
+                    forward,
+                    {
+                        "state": "reconcile_required",
+                        "response_payload": {"route_write_not_started": True},
+                    },
+                ),
+            ):
+                with self.subTest(changes=changes, record=original.record_id):
+                    replacement = original.model_copy(update=changes)
+
+                    def changed_read(**kwargs: Any) -> Any:
+                        found = read(**kwargs)
+                        return replacement if found == original else found
+
+                    with patch.object(
+                        self.store, "read_idempotency_record", side_effect=changed_read
+                    ):
+                        changed = inspect_application_route_receipts(self.store, record)[0]
+                    if "state" in changes:
+                        self.assertEqual(changed.status, "bound")
+                        if original == forward:
+                            self.assertIsNone(changed.route_write_not_started)
+                        else:
+                            self.assertIsNone(changed.writer_outcome)
+                    elif original == forward:
+                        self.assertEqual(changed.status, "unbound")
+                        self.assertIsNone(changed.state)
+                        self.assertEqual(changed.writer_status, "not_read")
+                    elif "request_fingerprint" in changes:
+                        self.assertEqual(changed.writer_status, "unbound")
+                        self.assertIsNone(changed.writer_state)
+                        self.assertIsNone(changed.writer_outcome)
+                    else:
+                        self.assertEqual(changed.writer_outcome, "unrecognized")
+                    serialized = changed.model_dump_json()
+                    self.assertNotIn("private-provider-message", serialized)
+                    self.assertNotIn("foreign-private-fingerprint", serialized)
+            serialized = "".join(item.model_dump_json() for item in observed)
+            self.assertNotIn(readiness.backend, serialized)
+            self.assertNotIn("retained-only-password", serialized)
+            provider_reads.assert_not_called()
+            secret_reads.assert_not_called()
+        self.assertEqual(
+            (self.writes, self.schedules, self.schedule_history, routing.effect_count), before
+        )
+        self.assertEqual(self.adapter.current(), record)
+        self.assertEqual(
+            read(
+                scope=forward.scope,
+                route_path=forward.route_path,
+                idempotency_key=forward.idempotency_key,
+            ),
+            forward,
+        )
+        self.assertEqual(
+            read(
+                scope=writer.scope,
+                route_path=writer.route_path,
+                idempotency_key=writer.idempotency_key,
+            ),
+            writer,
+        )
+
     def test_original_activation_inspection_retains_negative_program_evidence_without_writes(
         self,
     ) -> None:
@@ -4893,6 +5453,89 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(result.status, "completed", result)
         self.assertTrue(self.adapter.current().published)
 
+    def test_publication_refuses_stale_route_readiness_without_changing_custody(self) -> None:
+        from datetime import datetime, timedelta
+
+        self.addressed()
+        self.prepare()
+        write = self.store.write_testing_activation
+        attempted: list[str] = []
+
+        def publish(**kwargs: Any) -> None:
+            if kwargs["replacement"]["published"]:
+                before = self.adapter.current()
+                stale = deepcopy(kwargs["replacement"])
+                readiness = stale["application_readiness"]
+                observed = datetime.fromisoformat(readiness["observed_at"].replace("Z", "+00:00"))
+                readiness["observed_at"] = (observed - timedelta(hours=1)).isoformat()
+                attempted.append(readiness["observed_at"])
+                with self.assertRaises(ValueError):
+                    write(**{**kwargs, "replacement": stale})
+                self.assertEqual(self.adapter.current(), before)
+            write(**kwargs)
+
+        with patch.object(self.store, "write_testing_activation", side_effect=publish):
+            result = self.activate()
+        self.assertTrue(attempted)
+        self.assertEqual(result.status, "completed", result)
+        self.assertTrue(self.adapter.current().published)
+
+    def test_retained_fence_is_not_separated_when_binding_changes_between_reads(self) -> None:
+        from control_plane.testing_activation import retained_fence_is_separated
+        from control_plane.generic_web_testing_exclusion import bind_testing_recipient
+
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(retained_fence_is_separated(self.store, self.original))
+        identifier = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        provider = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        rebound: list[str] = []
+
+        def return_to_original(*args: Any, **kwargs: Any) -> Any:
+            self.store.write_dokploy_target_record(self.retained)
+            self.store.write_dokploy_target_id_record(
+                identifier.model_copy(update={"target_id": self.old_id})
+            )
+            self.store.write_provider_target_record(
+                provider.model_copy(update={"target_id": self.old_id})
+            )
+            for alias in self.store.list_dokploy_target_id_records():
+                if alias.target_id == self.old_id and (alias.context, alias.instance) != (
+                    self.context,
+                    "testing",
+                ):
+                    self.store.delete_dokploy_target_id_record(expected_record=alias)
+            for registration in self.store.list_provider_target_records():
+                if registration.target_id == self.old_id and (
+                    registration.context,
+                    registration.instance,
+                ) != (self.context, "testing"):
+                    self.store.delete_provider_target_record(expected_record=registration)
+            bound = bind_testing_recipient(*args, **kwargs)
+            rebound.append(bound[2].target_id)
+            return bound
+
+        with patch(
+            "control_plane.testing_activation.bind_testing_recipient",
+            side_effect=return_to_original,
+        ):
+            self.assertFalse(retained_fence_is_separated(self.store, self.original))
+        self.assertEqual(rebound, [self.old_id])
+
+    def test_private_ingress_refuses_a_serving_application_moved_to_another_server(self) -> None:
+        _, ingress, _ = self.private_addressed()
+        self.prepare()
+        self.assertEqual(self.activate().status, "completed")
+        self.assertTrue(self.adapter.current().published)
+        ingress.plan()
+        self.payloads[self.adapter.current().target_id]["serverId"] = "another-server"
+        with self.assertRaises(ValueError):
+            ingress.plan()
+
     def test_addressed_publication_correction_restores_route_and_allows_fresh_generation(
         self,
     ) -> None:
@@ -5038,6 +5681,11 @@ class ApplicationFlowTests(unittest.TestCase):
         self.assertEqual(self.canonical_password(), "retained-only-password")
 
     def test_proxy_restart_before_inverse_retains_distinct_inverse_custody(self) -> None:
+        from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
+        from control_plane.dokploy.testing_route_execution import TestingRouteExecutionIntent
+        from control_plane.testing_activation_inspection import inspect_application_route_receipts
+        from control_plane.testing_route_effects import ROUTE_WRITER_RECEIPT
+
         routing = self.addressed()
         self.prepare()
 
@@ -5052,6 +5700,26 @@ class ApplicationFlowTests(unittest.TestCase):
         completed = self.adapter.current()
         assert completed.failure is not None
         self.assertEqual(completed.failure.kind, "publication_refused")
+        inverse = self.store.read_idempotency_record(
+            scope=completed.scope,
+            route_path=ROUTE.format(product=self.product) + ":route-inverse",
+            idempotency_key=completed.plan_sha256 + ":route-inverse",
+        )
+        assert inverse is not None
+        execution = TestingRouteExecutionIntent.model_validate(
+            self.store.read_original_mutation_intent(inverse)["route_execution"]
+        )
+        writer = self.store.read_idempotency_record(
+            scope=REBUILD_SCOPE,
+            route_path=ROUTE_WRITER_RECEIPT,
+            idempotency_key=execution.key(attempt=inverse.attempt),
+        )
+        assert writer is not None
+        inspected = inspect_application_route_receipts(self.store, completed)[1]
+        self.assertEqual(inspected.status, "bound")
+        self.assertEqual(inspected.writer_status, "bound")
+        self.assertEqual(inspected.writer_state, writer.state)
+        self.assertEqual(inspected.writer_outcome, writer.response_payload["writer_outcome"])
 
     def test_persisted_inverse_pauses_for_staff_use_then_restores_original(self) -> None:
         routing, _, _ = self.private_addressed()

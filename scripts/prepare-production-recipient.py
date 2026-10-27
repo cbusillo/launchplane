@@ -226,14 +226,14 @@ def main() -> int:
             evidence = json.loads(args.evidence_file.read_text())
             if args.release_recovery and not args.idempotency_key.strip():
                 args.idempotency_key = RecipientReleaseRecoveryPlan.model_validate(
-                    evidence["result"]
+                    evidence["result"], extra="ignore"
                 ).original_key
             if not args.idempotency_key.strip() or not args.reviewed_dry_run:
                 raise ValueError("Apply requires saved review and the original stable key.")
             if evidence["request"] != body or evidence["path"] != path:
                 raise ValueError("The review belongs to another preparation.")
             body["reviewed_plan_sha256"] = result_type.model_validate(
-                evidence["result"]
+                evidence["result"], extra="ignore"
             ).plan_sha256
         if args.mode == "receipt" and not args.idempotency_key.strip():
             raise ValueError("Receipt read requires the original preparation key.")
@@ -259,7 +259,9 @@ def main() -> int:
         )
         if response["status"] != "accepted":
             raise ValueError("Preparation was not accepted.")
-        result = result_type.model_validate(response["result"]).model_dump(mode="json")
+        result = result_type.model_validate(response["result"], extra="ignore").model_dump(
+            mode="json"
+        )
         output = (
             args.evidence_file
             if args.mode == "dry-run"

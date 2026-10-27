@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 import hashlib
 import os
-import re
 from pathlib import Path
 from typing import Any, cast
 from collections.abc import Callable
@@ -36,16 +35,6 @@ from control_plane.testing_local_credentials import prepare_rehearsal_local_cred
 from tests import test_testing_replacement_resources as resources
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
-
-
-def python_heredoc(script: str) -> str:
-    match = re.search(r"python3\s+-\s*<<'(?P<delimiter>\w+)'\s*\n", script)
-    if match is None:
-        raise AssertionError("Host delivery must put its Python program on stdin")
-    body, delimiter, _ = script[match.end() :].partition("\n" + match["delimiter"] + "\n")
-    if not delimiter:
-        raise AssertionError("Host Python heredoc is unterminated")
-    return body
 
 
 class RehearsalScenario(unittest.TestCase):
@@ -283,6 +272,59 @@ class RehearsalScenario(unittest.TestCase):
         )
         self.assertEqual(recovered.status, "adopted")
         self.assertEqual(read_status(self.store)["rehearsal_checkpoints"], ())
+
+    def test_checkpoint_admission_rechecks_original_owner_and_lease(self) -> None:
+        from control_plane.rehearsal_deploy_resume import persist_checkpoint
+        from control_plane.service_deploy_drain import read_status
+        from tests.test_client_release_redeploy import _prepare
+
+        for change in ("owner", "expired"):
+            with self.subTest(change=change):
+                fixture = RehearsalScenario()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                prepared = fixture.record.model_copy(
+                    update={"state": "prepared", "compose_id": "own-compose"}
+                )
+                fixture.store.compare_and_write_odoo_upgrade_rehearsal(fixture.record, prepared)
+                adapter = fixture.adapter("execute")
+
+                def remote_apply(operation_key: str, lease: Any) -> Any:
+                    lease.checkpoint_effect("execute")
+                    _prepare(fixture.store)
+                    adapter.checkpoint_remote_job("original-schedule", "original-job")
+
+                def race(adapter: Any, reservation: Any, schedule: str, deployment: str) -> Any:
+                    if change == "owner":
+                        fixture.store.write_idempotency_record(
+                            reservation.model_copy(update={"lease_owner": "replacement-owner"})
+                        )
+                        with self.assertRaises(ValueError):
+                            persist_checkpoint(adapter, reservation, schedule, deployment)
+                    else:
+                        with (
+                            patch.object(
+                                fixture.store,
+                                "_database_mutation_timestamp",
+                                return_value=reservation.lease_expires_at,
+                            ),
+                            self.assertRaises(ValueError),
+                        ):
+                            persist_checkpoint(adapter, reservation, schedule, deployment)
+                    raise RuntimeError("checkpoint admission refused")
+
+                with (
+                    patch.object(adapter, "apply", side_effect=remote_apply),
+                    patch(
+                        "control_plane.rehearsal_deploy_resume.persist_checkpoint", side_effect=race
+                    ),
+                ):
+                    held = fixture.run_operation(adapter, "checkpoint-race")
+                self.assertEqual(held.status, "reconcile_required")
+                self.assertEqual(read_status(fixture.store)["rehearsal_checkpoints"], ())
+                self.assertEqual(
+                    fixture.store.read_odoo_upgrade_rehearsal(fixture.identifier), prepared
+                )
 
     def test_failed_checkpoint_storage_keeps_original_journal_recoverable(self) -> None:
         from control_plane.service_deploy_drain import read_status
@@ -569,6 +611,23 @@ class RehearsalScenario(unittest.TestCase):
             self.assertEqual(read["retained_upgrade_logs"]["runtime"], [])
             self.assertNotIn(text, str(read))
             self.assertIn(text, json.dumps(result))
+            if with_child:
+                child["attempt_sha256"] = canonical_json_sha256({"operation_key": "other"})
+                with (
+                    patch.object(
+                        adapter,
+                        "run_script",
+                        return_value={"rehearsal_result": json.dumps(result).encode().hex()},
+                    ),
+                    self.assertRaises(RehearsalRefused),
+                ):
+                    adapter.host(
+                        record,
+                        "observe",
+                        lambda: None,
+                        operation_key=operation,
+                        inspect_capture=True,
+                    )
 
     def test_host_accepts_only_content_free_mismatch_evidence_for_its_exact_operation(self) -> None:
         import json
@@ -1043,7 +1102,6 @@ class RehearsalScenario(unittest.TestCase):
         def scheduler(
             record: OdooUpgradeRehearsalRecord, script: str, check: Callable[[], None]
         ) -> dict[str, str]:
-            program = python_heredoc(script)
             output = io.StringIO()
             with (
                 patch.object(sys, "argv", ["host"]),
@@ -1057,7 +1115,9 @@ class RehearsalScenario(unittest.TestCase):
                 ),
                 redirect_stdout(output),
             ):
-                exec(compile(program, "<actual-host>", "exec"), {})
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(script)
             # This is the parser used by run_manual_data_schedule, including
             # its value lowercasing and allowlist.
             return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
@@ -1128,7 +1188,6 @@ class RehearsalScenario(unittest.TestCase):
             validate_dokploy_schedule_script({"script": script, "appName": record.rehearsal_id})
             encoded = base64.b64encode(script.encode()).decode()
             materialized = base64.b64decode(encoded, validate=True).decode()
-            body = python_heredoc(materialized)
             output = io.StringIO()
             with (
                 patch.object(sys, "argv", ["host"]),
@@ -1140,7 +1199,9 @@ class RehearsalScenario(unittest.TestCase):
                 ),
                 redirect_stdout(output),
             ):
-                exec(compile(body, "<provider-host>", "exec"), {})
+                from tests.support.host_package import execute_host_schedule
+
+                execute_host_schedule(materialized)
             return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
 
         with patch.object(adapter, "run_script", side_effect=scheduler):
@@ -1151,7 +1212,6 @@ class RehearsalScenario(unittest.TestCase):
         prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
         apply_script = adapter.host_script(record, "apply", operation_key="fixture-operation")
         validate_dokploy_schedule_script({"script": apply_script, "appName": record.rehearsal_id})
-        compile(python_heredoc(apply_script), "<apply-transport>", "exec")
 
     def test_oversize_host_script_is_refused_before_dispatch_checks(self) -> None:
         import click
@@ -1438,10 +1498,122 @@ class RehearsalScenario(unittest.TestCase):
             changed.operation_readback(prepared, "original-execute")
         with self.assertRaises(RehearsalRefused):
             adapter.operation_readback(
-                prepared.model_copy(update={"state": "upgraded"}), "original-execute"
+                prepared.model_copy(update={"rehearsal_id": "lp-rehearsal-" + "f" * 32}),
+                "original-execute",
             )
         self.assertEqual(self.store.list_held_provider_target_reservations(), before)
         self.assertEqual(self.store.read_odoo_upgrade_rehearsal(self.identifier), prepared)
+
+    def test_capture_inspection_preserves_the_reviewed_action(self) -> None:
+        from control_plane.host_package import host_invocation
+
+        adapter = self.adapter("validate-business")
+        script = adapter.host_script(
+            self.record.model_copy(update={"compose_id": "own-compose"}),
+            "observe",
+            inspect_capture=True,
+        )
+        invocation = host_invocation(script)
+        assert invocation is not None
+        self.assertEqual(invocation.spec["action"], adapter.request.action)
+        self.assertTrue(invocation.spec["inspect_capture"])
+
+    def test_failure_events_include_nested_host_frames(self) -> None:
+        from control_plane.dokploy import api
+        from control_plane.odoo_upgrade_rehearsal import REHEARSAL_HOST_FILENAME
+
+        record = self.record.model_copy(update={"compose_id": "own-compose"})
+        checkpoint = datetime.now(timezone.utc).isoformat()
+        log = [f'  File "{REHEARSAL_HOST_FILENAME}", line 3, in inner', "RuntimeError: failed"]
+        with (
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={"serverId": record.server_id, "appName": record.rehearsal_id},
+            ),
+            patch(
+                "control_plane.dokploy.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", record.server_id, "", record.server_id),
+            ),
+            patch.object(
+                api, "find_matching_dokploy_schedule", return_value={"scheduleId": "owned"}
+            ),
+            patch.object(
+                api,
+                "dokploy_request",
+                return_value=[
+                    {"deploymentId": "nested-failure", "createdAt": checkpoint, "status": "error"}
+                ],
+            ),
+            patch.object(api, "fetch_dokploy_deployment_logs", return_value=log),
+            patch(
+                "control_plane.odoo_upgrade_rehearsal.rehearsal_host_program",
+                return_value="def outer():\n    def inner():\n        raise RuntimeError('failed')\n    inner()\n",
+            ),
+        ):
+            events, complete = self.adapter("execute").failure_events(record, checkpoint)
+        self.assertTrue(complete)
+        self.assertEqual(events[0]["failure_locations"], [{"function": "inner", "line": 3}])
+        self.assertEqual(events[0]["failure_frames"], ["inner"])
+
+    def test_published_actions_read_the_original_request_without_replaying_effects(self) -> None:
+        from dataclasses import replace
+
+        prepare_rehearsal_local_credentials(self.store, self.identifier, actor=self.principal)
+        previous = self.record
+        for action, initial, final in (
+            ("execute", "prepared", "upgraded"),
+            ("simulate-final", "upgraded", "switched"),
+            ("verify", "switched", "verified"),
+            ("retire", "verified", "retired"),
+        ):
+            with self.subTest(action=action):
+                record = previous.model_copy(update={"state": initial, "compose_id": "own-compose"})
+                self.store.compare_and_write_odoo_upgrade_rehearsal(previous, record)
+                adapter = self.adapter(action)
+
+                def apply(key: str, lease: Any) -> Any:
+                    from control_plane.provider_operations import ProviderMutationOutcome
+                    from control_plane.provider_operations import (
+                        provider_operation_response_payload,
+                    )
+
+                    lease.checkpoint_effect(action)
+                    public = adapter.publish(
+                        record,
+                        {
+                            "completed": True,
+                            "state": final,
+                            "copies": [],
+                            "elapsed_seconds": {action: 1.0},
+                        },
+                    )
+                    return ProviderMutationOutcome(
+                        202,
+                        provider_operation_response_payload(
+                            trace_id=adapter.trace,
+                            records={"rehearsal": self.identifier},
+                            result=public,
+                        ),
+                    )
+
+                with patch.object(adapter, "apply", side_effect=apply) as effect:
+                    outcome = self.run_operation(adapter, "original-" + action)
+                    self.assertEqual(outcome.status, "completed")
+                    published = self.store.read_odoo_upgrade_rehearsal(self.identifier)
+                    assert published is not None
+                    self.assertNotEqual(published.binding_sha256, record.binding_sha256)
+                    observed = adapter.operation_readback(published, "original-" + action)
+                    self.assertEqual(observed["operation_state"], "completed")
+                    with self.assertRaises(RehearsalRefused):
+                        adapter.operation_readback(published, "unrelated-key")
+                    changed = replace(
+                        adapter, request=adapter.request.model_copy(update={"reason": "changed"})
+                    )
+                    with self.assertRaises(RehearsalRefused):
+                        changed.operation_readback(published, "original-" + action)
+                    effect.assert_called_once()
+                previous = published
 
     def test_failure_events_keep_process_deaths_and_project_actual_host_tracebacks(
         self,
@@ -4327,6 +4499,35 @@ class RehearsalHostSafetyTests(unittest.TestCase):
 
 
 class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_keyed_readback_requires_the_original_review_before_observation(self) -> None:
+        from control_plane.contracts.odoo_upgrade_rehearsal import ODOO_UPGRADE_REHEARSAL_ROUTE
+        from tests.support.http import request
+
+        app = self.read_only_app()
+        with patch.object(OdooRehearsalAdapter, "host") as host:
+            for action in (
+                "prepare",
+                "execute",
+                "simulate-final",
+                "verify",
+                "retire",
+                "retire-incomplete",
+            ):
+                response = await request(
+                    app,
+                    "POST",
+                    ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
+                    payload=self.fixture.request.model_copy(
+                        update={"mode": "readback", "action": action}
+                    ).model_dump(mode="json"),
+                    headers={"Idempotency-Key": "original-key"},
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.json()["detail"]["error"]["code"], "original_review_required"
+                )
+            host.assert_not_called()
+
     def setUp(self) -> None:
         self.fixture = RehearsalScenario()
         self.fixture.setUp()
@@ -4781,7 +4982,11 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
             "attachment": RehearsalHostSafetyTests.attachment_mismatch_fixture(),
         }
         payload = fixture.request.model_copy(
-            update={"mode": "readback", "action": "execute"}
+            update={
+                "mode": "readback",
+                "action": "execute",
+                "reviewed_plan_sha256": prepared.binding_sha256,
+            }
         ).model_dump(mode="json")
         for status, attachment_reason in (
             (None, "verified"),
@@ -5016,9 +5221,9 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     self.read_only_app(),
                     "POST",
                     ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                    payload=self.fixture.request.model_copy(update={"mode": mode}).model_dump(
-                        mode="json"
-                    ),
+                    payload=self.fixture.adapter("prepare")
+                    .request.model_copy(update={"mode": mode})
+                    .model_dump(mode="json"),
                     headers={"Idempotency-Key": "fixture-key"},
                 )
                 self.assertEqual(response.status_code, 202, response.text)
@@ -5085,9 +5290,12 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                 app,
                 "POST",
                 ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
-                    mode="json"
-                ),
+                payload=self.fixture.request.model_copy(
+                    update={
+                        "mode": "readback",
+                        "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                    }
+                ).model_dump(mode="json"),
                 headers={"Idempotency-Key": "original-prepare"},
             )
             self.assertEqual(read.status_code, 202)
@@ -5145,9 +5353,12 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     app,
                     "POST",
                     ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                    payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
-                        mode="json"
-                    ),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "readback",
+                            "reviewed_plan_sha256": self.fixture.record.binding_sha256,
+                        }
+                    ).model_dump(mode="json"),
                     headers={"Idempotency-Key": "original-prepare"},
                 )
             self.assertEqual(read.status_code, 202)
@@ -5175,9 +5386,14 @@ class RehearsalHttpTests(unittest.IsolatedAsyncioTestCase):
                     app,
                     "POST",
                     ODOO_UPGRADE_REHEARSAL_ROUTE.format(product=self.fixture.product),
-                    payload=self.fixture.request.model_copy(update={"mode": "readback"}).model_dump(
-                        mode="json"
-                    ),
+                    payload=self.fixture.request.model_copy(
+                        update={
+                            "mode": "readback",
+                            "reviewed_plan_sha256": OdooRehearsalAdapter.initial_prepare_binding(
+                                placed
+                            ),
+                        }
+                    ).model_dump(mode="json"),
                     headers={"Idempotency-Key": key} if key else {},
                 )
             self.assertEqual(read.status_code, 202)

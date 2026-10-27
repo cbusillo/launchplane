@@ -6,6 +6,12 @@ title: Launchplane UI Experience
 
 Launchplane admin work is API-first. The Client's browser path is the release
 review page described in [release-review.md](release-review.md).
+Product overview pages link to **Release review** after the existing review
+access read confirms access, for admins and the product's recorded Client. A Client
+session gets a focused product page with that link, without operational data
+or controls. Other viewers see no link; release-page permissions are unchanged.
+`GET /v1/release-review/access` reuses the release page's profile-access check
+without compiling a checklist or calling the source-control provider.
 The current React context picker and product-config layout remain transitional.
 Do not refine those transitional layouts except to correct secret-safety
 regressions.

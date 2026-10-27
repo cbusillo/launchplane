@@ -148,7 +148,7 @@ def main() -> int:
                 query={"product": args.product, "context": args.context, "instance": "testing"},
                 timeout=30,
             )
-            held = TestingHoldReadResult.model_validate(response["result"])
+            held = TestingHoldReadResult.model_validate(response["result"], extra="ignore")
             print(
                 json.dumps(
                     {
@@ -226,9 +226,9 @@ def main() -> int:
         if resources:
             if resource_read and "state" in result:
                 observed = (
-                    SeparationResourcesInspection.model_validate(result)
+                    SeparationResourcesInspection.model_validate(result, extra="ignore")
                     if "programs" in result
-                    else SeparationResourcesStatus.model_validate(result)
+                    else SeparationResourcesStatus.model_validate(result, extra="ignore")
                 )
                 if (observed.product, observed.context) != (args.product, args.context):
                     raise ValueError("Preparation status belongs to another lane.")
@@ -245,9 +245,9 @@ def main() -> int:
                 )
                 return 0
             result = (
-                parse_preparation_receipt(result)
+                parse_preparation_receipt(result, extra="ignore")
                 if applying or resource_read
-                else SeparationResourcesPlan.model_validate(result)
+                else SeparationResourcesPlan.model_validate(result, extra="ignore")
             ).model_dump(mode="json")
         if not applying and not resource_read:
             with os.fdopen(

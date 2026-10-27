@@ -1717,42 +1717,28 @@ the original opening effect completed before its attempt record committed.
 Delivery attempts are the idempotency boundary for notifications, while incident
 records remain the source of truth for active public-ingress state.
 
-Discord pages only new critical incidents and material critical changes. Warnings
-and unchanged reminders use a plain-text, mention-free summary grouped by product,
-lane, check kind and failure code. Summaries reuse the notification outbox with
-aggregate type `public_ingress_discord_summary`, one record per policy,
-destination and fixed five-minute send window. A burst queues for its next
-boundary using its database enqueue time, so a slow probe cannot join an already
-sent batch; later observations cannot move that deadline. Overdue windows fold
-into one current window before a send attempt; retries retain their original
-identity, backoff and attempt budget. A new critical condition still pages at once.
+Discord pages only critical openings, material critical changes, and their
+resolutions after a delivered failure notice, even if the incident later downgraded
+to a warning. Warning openings, material warning changes, and unchanged reminders
+remain in Product Ops with their incident events and reminder state; they create
+no Discord delivery work. Discord warning/reminder summaries, batching windows,
+snapshot coverage, and summary-specific secret scope checks are removed.
 
-Before delivery, both paths re-read current state. Obsolete failure and material
-alerts are superseded. Discord uses the event-bound material state and
-final admission check instead of the old startup-backlog message rewrite. Email
-retains its existing backlog compaction. Summaries render current conditions and compare
-them with the latest posted or provider-started snapshot, ordered by send window.
-An older window cannot post after a newer one starts. Changing the destination
-secret identity starts coverage for that destination; rotating a version under
-the same secret identity does not replay unknown effects.
-An empty, unchanged or subset snapshot sends nothing; clearing a condition alone
-does not re-post those that remain. A returning material state and an expired
-silence can appear in a later window. Silenced and acknowledged
-conditions are excluded. Lane-scoped destinations summarize only the conditions
-their managed secret covers. Routing revisions can retry previously unavailable
-destinations in a later window. The rendered snapshot is persisted atomically
-with its provider marker. Final coverage and current open/active incident-state
-checks run under the existing database write lock and incident row locks to prevent adjacent-window workers duplicating one state. Summary
-receipts live in the outbox independently of per-incident attempt records. Global
-outbox inspection gives active work and newest failures separate bounded slots,
-including their error codes; critical
-delivery failures also remain visible in the owning incident detail.
-An interrupted Discord summary retains its send
-marker and cannot replay an unknown provider effect. DNS and connection failures
-before any request bytes, and explicit rate-limit refusals, may retry. Discord
-reminder cadence no longer repeats the same material state after it was summarized.
-Notification routing never changes measured health, incident
-severity, acknowledgement, resolution or provider-operation fences.
+Before delivery, current state is re-read and obsolete failure and material alerts
+are superseded. Discord retains event-bound material state and the final atomic
+open/active incident-state admission check. Silenced and acknowledged failure
+conditions do not page; a recovery still closes their previously delivered failure
+notice. Email retains its existing backlog compaction.
+
+Retained `public_ingress_discord_summary` outbox rows complete without a send.
+Rows with an existing provider marker retain their unknown-effect evidence and
+fail without replay. Already queued warning/reminder incident notices are skipped.
+DNS and connection failures before any request bytes, and explicit rate-limit
+refusals, may retry critical notices. Unknown provider effects never replay.
+Outbox inspection retains active work and newest failures in separate bounded
+slots; critical delivery failures also remain visible in the owning incident.
+Notification routing never changes measured health, severity, acknowledgement,
+resolution, access authority, or provider-operation fences.
 
 ## Every Code Feedback Resume Evidence
 
@@ -1795,23 +1781,16 @@ decision (`accepted` or `changes_requested` with its reason), the Client's GitHu
 id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
-A record with `carried_from` was not decided again: it carries an acceptance to
-a new head after an unchanged-feature base update, rebase, or declared invisible
-follow-up commits (see
-[carried acceptance](owner-acceptance.md#carried-acceptance)). `carried_from`
-names the decision record and head it came from, the reason
-(`merge_train_base_refresh`, `unchanged_patch_base_update`, or
-`client_impact_none`), the immutable
-`comparison_base_sha`, and any merge train branch refresh records that produced
-the new head. Older train carries remain readable without a comparison base;
-their refresh records supply it. An unchanged-patch rebase carry requires a full
-comparison base revision and needs no train refresh record. A `client_impact_none`
-carry instead names every intervening commit SHA and its `client_impact: none`
-trailer value in `commits`, oldest first, ending at the carried head. It leaves
-`comparison_base_sha` empty because no patch comparison was used. Its `decided_at` is
-when Launchplane carried it.
-`base_branch` is the pull request's base branch when the decision was first shown
-on it; an acceptance carries, and a carried acceptance applies, only on that base.
+A record with `carried_from` preserves an earlier acceptance. The authoritative
+rules are in [carried acceptance](owner-acceptance.md#carried-acceptance).
+The evidence names the source `record_id` and `head_sha`, carry `reason`,
+`comparison_base_sha`, PR-side `commits`, and `refresh_record_ids` where used.
+`integrated_changes` holds imported change numbers and exact heads with their
+acceptance record IDs or bounded engineering bases. `batch_record_ids` identifies
+the checked train batches. Older records default the added evidence lists to
+empty. Older train records may omit `comparison_base_sha`; their refresh records
+supply the merged base. `decided_at` records when the carry was saved; `base_branch` preserves
+the base first recorded for the decision.
 
 ## Product Reconcile Request Records
 

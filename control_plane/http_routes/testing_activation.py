@@ -2,7 +2,7 @@
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import click
 from control_plane.dokploy.network_capacity import BridgeNetworkCapacityRefused
@@ -79,9 +79,16 @@ def register_testing_activation_routes(
                 dependencies, record_store, identity
             )
         try:
+            if body.mode == "refuse" and body.application is None:
+                raise TestingActivationRefusal(
+                    "Refusal requires an original application operation."
+                )
             if body.mode == "inspect":
                 from control_plane.testing_activation_inspection import (
                     inspect_application_activation,
+                )
+                from control_plane.testing_application_inspection import (
+                    inspect_application_candidate,
                 )
 
                 observed = await run_in_worker_thread(
@@ -95,6 +102,9 @@ def register_testing_activation_routes(
                         idempotency_key=idempotency_key.strip(),
                         trace_id=trace,
                         observe_original=adapter.observe,
+                        inspect_candidate=lambda record, key: inspect_application_candidate(
+                            cast("ApplicationActivationAdapter", adapter), record, key
+                        ),
                     )
                 )
                 return accepted_evidence_response(
@@ -174,12 +184,24 @@ def register_testing_activation_routes(
                         message="Apply requires the original key and reviewed plan.",
                     )
                 original_intent = None
+                fingerprint_body = body
+                if body.mode == "refuse":
+                    fingerprint_body = body.model_copy(update={"mode": "apply"})
                 if body.application is not None:
 
                     def captured_intent() -> dict[str, object]:
                         original = record_store.read_testing_application_activation_operation(
                             product, body.context, scope, body.preparation_key
                         )
+                        if body.mode == "refuse":
+                            if original is None:
+                                raise TestingActivationRefusal(
+                                    "Refusal requires the original application operation."
+                                )
+                            if adapter.current().published:
+                                raise TestingActivationRefusal(
+                                    "A published activation cannot be refused."
+                                )
                         fresh = None
                         if original is None:
                             fresh = adapter.current().model_dump(mode="json")
@@ -208,7 +230,7 @@ def register_testing_activation_routes(
                     route_path=ROUTE.format(product=product),
                     idempotency_key=idempotency_key.strip(),
                     request_fingerprint=request_fingerprint(
-                        {"product": product, **body.model_dump(mode="json")}
+                        {"product": product, **fingerprint_body.model_dump(mode="json")}
                     ),
                     trace_id=trace,
                     adapter=adapter,

@@ -113,6 +113,16 @@ class DiscussionReminderTests(unittest.TestCase):
                 discussion_reminder_clock=lambda: self.now.timestamp(),
             ).status
 
+    def test_override_cancelling_queued_slot_skips_send(self) -> None:
+        self.configure()
+        self.scheduler.run_once()
+        date = self.now.date().isoformat()
+        schedule = self.settings.schedules[0].model_copy(update={"overrides": {date: None}})
+        self.settings = self.settings.model_copy(update={"schedules": (schedule,)})
+        self.configure()
+        self.assertEqual(self.work(sender=self.sender), "delivered")
+        self.sender.assert_not_called()
+
     def test_no_configuration_or_uncleared_gate_sends_nothing(self) -> None:
         self.scheduler._run_sweep()
         self.assertEqual(self.work(sender=self.sender), "idle")

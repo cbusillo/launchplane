@@ -4637,6 +4637,10 @@ Successful empty scans say no previews observed; disabled previews are not
 applicable. Missing or unsuccessful scans cannot establish absence. Do not edit
 records to renew freshness. Service logs and the separate
 `launchplane:preview-inventory-scheduler:v1` slot receipts retain collection outcomes.
+The product overview warns when observed previews have no active lifecycle
+record, using the existing inventory mismatch. A fresh successful scan proves
+inventory freshness, not cleanup convergence. Retained failed preview operations
+remain covered by the existing provider-fence incidents and notifications.
 Rollback is the normal previous-service-image rollback: scans retain the strict v1 payload shape with versioned scope metadata in the
 existing source field, the prior daily job remains supported, and evidence naturally
 expires if collection stops. No grants, workflow settings or credentials are added
@@ -4657,6 +4661,8 @@ results, which Product Ops shows per product. Destructive provider cleanup
 still requires an explicit `apply=true` request to
 `POST /v1/previews/lifecycle-sweep` from a separately authorized caller; the
 manual `Preview Lifecycle` workflow dispatch remains that route.
+An authenticated Director agent may run the report-only sweep without cleanup
+mutation authority. Apply requests keep their existing authorization checks.
 Preview-disabled products are excluded from the sweep. PR feedback goes through
 `POST /v1/previews/pr-feedback`; Launchplane renders and upserts the anchored PR
 comment when runtime GitHub credentials are available, then records delivery
@@ -5150,7 +5156,12 @@ current plans and provider idleness cannot reconstruct the original proof.
 A typed `self_deploy_drain_timeout` uses the existing deploy-failure Discord
 reporter once in the failed deploy run. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
-pre-effect. The absolute ten-minute drain budget survives polls and service
+pre-effect, including when an earlier poll lost its response. The request action
+retains authoritative timeout and definite pre-effect refusal responses so the
+alert keeps its blocker references and no unnecessary rollback starts. The
+action and deploy reporter share the error-code contract in the action's
+`dist/self-deploy-pre-effect-errors.json`; authentication refusal after a lost
+reply still preserves dispatch uncertainty. The absolute ten-minute drain budget survives polls and service
 restarts. For a legacy drain without a saved budget, its first updated poll anchors
 the budget to the prior stored observation. This budget is independent of the
 worker stop, provider deployment and health-verification budgets after dispatch.

@@ -122,14 +122,6 @@ def canonical_openapi_document() -> dict[str, Any]:
     app = build_deterministic_export_app()
     openapi_payload: dict[str, Any] = app.openapi()
     scrubbed_payload: dict[str, Any] = _scrub_openapi_payload(openapi_payload)
-    info = scrubbed_payload.get("info", {})
-    if not isinstance(info, dict):
-        info = {}
-    scrubbed_payload["info"] = {
-        **info,
-        "title": "Launchplane API",
-        "version": "0.1.0",
-    }
     scrubbed_payload["x-launchplane-ui-read-operations"] = UI_OPENAPI_READ_OPERATIONS
     scrubbed_payload["x-launchplane-ui-write-operations"] = UI_OPENAPI_WRITE_OPERATIONS
     return scrubbed_payload
@@ -200,6 +192,7 @@ UI_OPENAPI_READ_OPERATIONS: dict[str, str] = {
     "/v1/product-review": "read_product_review",
     "/v1/owner-secret-inputs": "read_owner_secret_inputs",
     "/v1/release-review": "read_release_review",
+    "/v1/release-review/access": "read_release_review_access",
     "/v1/production-backup-gates/operations/{operation_id}": (
         "read_production_backup_gate_operation"
     ),

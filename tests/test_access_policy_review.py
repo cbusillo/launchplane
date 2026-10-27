@@ -74,6 +74,43 @@ class AccessPolicyReviewTests(unittest.TestCase):
             login_for_id=lambda _: "fixture-person",
         )
 
+    def test_stale_policy_review_withholds_rules_and_admin_is_a_role_gain(self) -> None:
+        before_rule = GitHubHumanPolicyRule(
+            managed_set_id="review.subjects",
+            managed_rule_id="subject",
+            github_ids=(789,),
+            roles=("read_only",),
+            actions=("operations.read",),
+        )
+        before = LaunchplaneAuthzPolicy(
+            schema_version=_policy().schema_version, github_humans=(before_rule,)
+        )
+        after = before.model_copy(
+            update={"github_humans": (before_rule.model_copy(update={"roles": ("admin",)}),)}
+        )
+        effect = _role_effects(after.github_humans[0], before, after, lambda _: "fixture-person")[0]
+        self.assertEqual(
+            (effect.before, effect.after, effect.state), ("read_only", "admin", "gained")
+        )
+        request = ManagedAuthzPolicySetProposalInput(
+            managed_set_id="review.subjects",
+            desired_policy=LaunchplaneAuthzPolicy(schema_version=before.schema_version),
+            reason="fixture",
+        )
+        store = Mock()
+        store.list_authz_policy_records.return_value = (_policy_record(before),)
+        evidence = plan_managed_authz_policy_set(store, request)
+        self.assertEqual(
+            build_access_policy_review(
+                record_store=store, request=request, evidence=evidence
+            ).state,
+            "available",
+        )
+        store.list_authz_policy_records.return_value = (_policy_record(after),)
+        review = build_access_policy_review(record_store=store, request=request, evidence=evidence)
+        self.assertEqual(review.state, "unavailable")
+        self.assertEqual(review.rules, ())
+
     def test_removing_only_role_names_principal_and_loss(self) -> None:
         review = self.review()
         self.assertEqual(review.state, "available")

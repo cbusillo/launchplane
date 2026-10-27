@@ -1,55 +1,66 @@
-import { waitForState, expect, test } from "./state";
+import { waitForState, expect, test, type Page } from "./state";
 
-for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "declaration-uncertain", "declaration-uncertain-stale", "private", "uncertain-profile"] as const) {
-  test(`signed-in setup: ${outcome}, exact diff, declaration apply and secret navigation`, async ({ page }, testInfo) => {
-    const consoleErrors: string[] = [];
-    page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
-    await page.goto("/ui/products/atlas-commerce?fixture=products");
-    const data = await page.evaluate(async () => {
-      const f = await import("/ui/src/dev-fixtures.ts");
-      return { products: f.productsForFixture("products"), identity: f.fixtureIdentity,
-        environment: f.environmentForFixture("products", "atlas-commerce", "testing"),
-        config: f.configStatusForFixture("products", "atlas-commerce", "testing") };
-    });
-    const profile = { product: "atlas-commerce", owner: { github_login: "example-owner", github_id: "9001" }, public_website: outcome === "private" ? "none" : "required", image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "live", release_on_acceptance: "held",
-      lanes: [{ context: "atlas-commerce", instance: "prod", base_url: "https://example.com" }],
-      expected_config: { runtime_environment_keys: [], managed_secret_bindings: [] as unknown[] } };
-    let refuseReadback = false;
-    let incompleteProfile = false;
-    const applies: Array<{ body: Record<string, unknown>; key: string }> = [];
-    await page.route("**/v1/**", async route => {
-      const path = new URL(route.request().url()).pathname;
-      if (route.request().method() === "POST") {
-        const body = route.request().postDataJSON();
-        const environment = path.includes("stable-lane-repair");
-        if (body.mode === "apply") {
-          applies.push({ body, key: route.request().headers()["idempotency-key"] });
-          if (outcome === "uncertain-stale" && applies.length === 1) { await route.abort("failed"); return; }
-          if (outcome === "uncertain-stale" && applies.length === 2) { await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "Reviewed plan changed." } } }); return; }
-          if (!environment && outcome === "declaration-uncertain-stale" && applies.length === 2) { await route.abort("failed"); return; }
-          if (!environment && outcome === "declaration-uncertain-stale" && applies.length === 3) { await route.fulfill({ status: 409, json: { trace_id: "stale-declaration", error: { code: "stale", message: "Product profile changed while declaring configuration. Review again." } } }); return; }
-          if (outcome === "readback" && applies.length === 1) refuseReadback = true;
-          if (environment && !profile.lanes.some(lane => lane.instance === "testing")) profile.lanes.push({ context: body.context, instance: body.instance, base_url: body.base_url });
-          if (!environment) profile.expected_config.managed_secret_bindings = body.managed_secret_bindings;
-          if (!environment && outcome === "declaration-uncertain" && applies.length === 2) { await route.abort("failed"); return; }
-          if (["uncertain", "uncertain-profile"].includes(outcome) && applies.length === 1) { await route.abort("failed"); return; }
-        }
-        await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "setup", records: {}, result: { status: "ok", mode: body.mode, changed: true, product: body.product,
-          ...(environment ? { context: body.context, instance: body.instance, base_url: body.base_url, plan_sha256: "a".repeat(64), preserved_lane_instances: ["prod"], applied: body.mode === "apply" }
-            : { managed_secret_bindings: { added: body.managed_secret_bindings, unchanged: [] } }) } } }); return;
+type SetupOutcome = "success" | "uncertain" | "readback" | "uncertain-stale" | "declaration-uncertain" | "declaration-uncertain-stale" | "private" | "uncertain-profile";
+
+async function setupScenario(page: Page, outcome: SetupOutcome, declarationsOnly = false) {
+  const consoleErrors: string[] = [];
+  page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
+  await page.route("**/ui/products/atlas-commerce?fixture=products", route => route.fulfill({ contentType: "text/html", body: "" }), { times: 1 });
+  await page.goto("/ui/products/atlas-commerce?fixture=products");
+  const data = await page.evaluate(async () => {
+    const f = await import("/ui/src/dev-fixtures.ts");
+    return { products: f.productsForFixture("products"), identity: f.fixtureIdentity,
+      environment: f.environmentForFixture("products", "atlas-commerce", "testing"),
+      config: f.configStatusForFixture("products", "atlas-commerce", "testing") };
+  });
+  const profile = { product: "atlas-commerce", owner: { github_login: "example-owner", github_id: "9001" }, public_website: outcome === "private" ? "none" : "required", image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "live", release_on_acceptance: "held",
+    lanes: [{ context: "atlas-commerce", instance: "prod", base_url: "https://example.com" }],
+    expected_config: { runtime_environment_keys: [], managed_secret_bindings: [] as unknown[] } };
+  if (declarationsOnly) profile.lanes.push({ context: "atlas-commerce", instance: "testing", base_url: "https://testing.example.com" });
+  let refuseReadback = false;
+  const state = { incompleteProfile: false };
+  const applies: Array<{ body: Record<string, unknown>; key: string }> = [];
+  await page.route("**/v1/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON();
+      const environment = path.includes("stable-lane-repair");
+      if (body.mode === "apply") {
+        applies.push({ body, key: route.request().headers()["idempotency-key"] });
+        if (outcome === "uncertain-stale" && applies.length === 1) { await route.abort("failed"); return; }
+        if (outcome === "uncertain-stale" && applies.length === 2) { await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "Reviewed plan changed." } } }); return; }
+        if (!environment && outcome === "declaration-uncertain-stale" && applies.length === 1) { await route.abort("failed"); return; }
+        if (!environment && outcome === "declaration-uncertain-stale" && applies.length === 2) { await route.fulfill({ status: 409, json: { trace_id: "stale-declaration", error: { code: "stale", message: "Product profile changed while declaring configuration. Review again." } } }); return; }
+        if (outcome === "readback" && applies.length === 1) refuseReadback = true;
+        if (environment && !profile.lanes.some(lane => lane.instance === "testing")) profile.lanes.push({ context: body.context, instance: body.instance, base_url: body.base_url });
+        if (!environment) profile.expected_config.managed_secret_bindings = body.managed_secret_bindings;
+        if (!environment && outcome === "declaration-uncertain" && applies.length === 1) { await route.abort("failed"); return; }
+        if (["uncertain", "uncertain-profile"].includes(outcome) && applies.length === 1) { await route.abort("failed"); return; }
       }
-      if (path.endsWith("/product-profiles/atlas-commerce") && refuseReadback) { refuseReadback = false; await route.fulfill({ status: 401, json: { trace_id: "readback", error: { code: "authentication_required", message: "Read-back session expired." } } }); return; }
-      const response = path.endsWith("/auth/session") ? { csrf_token: "csrf", identity: data.identity }
-        : path.endsWith("/product-profiles/atlas-commerce") ? { profile: incompleteProfile ? { ...profile, lanes: undefined } : profile }
-        : path.endsWith("/config-status") ? { config_status: data.config }
-        : path.endsWith("/environments/testing") ? { environment: data.environment }
-        : path.endsWith("/owner-secret-inputs") ? { fields: [] }
-        : path.endsWith("/products") ? { products: data.products }
-        : { product: data.products[0] };
-      await route.fulfill({ json: { status: "ok", trace_id: "read", ...response } });
-    });
-    await page.goto("/ui/products/atlas-commerce");
-    let panel = page.getByRole("region", { name: "Set up a non-production environment" });
+      await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "setup", records: {}, result: { status: "ok", mode: body.mode, changed: true, product: body.product,
+        ...(environment ? { context: body.context, instance: body.instance, base_url: body.base_url, plan_sha256: "a".repeat(64), preserved_lane_instances: ["prod"], applied: body.mode === "apply" }
+          : { managed_secret_bindings: { added: body.managed_secret_bindings, unchanged: [] } }) } } }); return;
+    }
+    if (path.endsWith("/product-profiles/atlas-commerce") && refuseReadback) { refuseReadback = false; await route.fulfill({ status: 401, json: { trace_id: "readback", error: { code: "authentication_required", message: "Read-back session expired." } } }); return; }
+    const response = path.endsWith("/auth/session") ? { csrf_token: "csrf", identity: data.identity }
+      : path.endsWith("/product-profiles/atlas-commerce") ? { profile: state.incompleteProfile ? { ...profile, lanes: undefined } : profile }
+      : path.endsWith("/config-status") ? { config_status: data.config }
+      : path.endsWith("/environments/testing") ? { environment: data.environment }
+      : path.endsWith("/owner-secret-inputs") ? { fields: [] }
+      : path.endsWith("/products") ? { products: data.products }
+      : { product: data.products[0] };
+    await route.fulfill({ json: { status: "ok", trace_id: "read", ...response } });
+  });
+  await page.goto("/ui/products/atlas-commerce");
+  const panel = page.getByRole("region", { name: "Set up a non-production environment" });
+  return { panel, applies, consoleErrors, state };
+}
+
+for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "private", "uncertain-profile"] as const) {
+  test(`signed-in environment setup: ${outcome}, exact diff and secret navigation`, async ({ page }) => {
+    const scenario = await setupScenario(page, outcome);
+    const { applies, consoleErrors, state } = scenario;
+    let { panel } = scenario;
     await panel.getByText("Add environment", { exact: true }).click();
     if (outcome === "private") await expect(panel.getByLabel("Prepared target HTTPS origin")).toHaveCount(0);
     else await panel.getByLabel("Prepared target HTTPS origin").fill("https://testing.example.com");
@@ -72,22 +83,20 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
       }));
       await signIn.click();
       panel = page.getByRole("region", { name: "Set up a non-production environment" });
-      // Signing in must restore the pending request without sending it again.
       await expect(panel).toBeVisible();
       expect(applies).toHaveLength(1);
     }
     if (["uncertain", "uncertain-profile", "readback", "uncertain-stale"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
-      if (outcome === "uncertain-profile") incompleteProfile = true;
+      if (outcome === "uncertain-profile") state.incompleteProfile = true;
       await page.reload();
       panel = page.getByRole("region", { name: "Set up a non-production environment" });
       if (outcome === "uncertain-profile") {
         await expect(panel.getByRole("status", { name: "Pending setup operation" })).toBeVisible();
         await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
-        incompleteProfile = false;
+        state.incompleteProfile = false;
         await panel.getByRole("button", { name: "Retry setup read" }).click();
       }
-      // Recovery must be visible after reload, without expanding a disclosure.
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
       await panel.getByRole("button", { name: "Retry original apply" }).click();
       await waitForState(() => applies.length).toBe(2);
@@ -104,7 +113,22 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
       }
     }
     await expect(panel.getByRole("link", { name: "Open testing managed secrets" })).toBeVisible();
+    const declarations = panel.locator("details").filter({ has: page.locator("summary", { hasText: "Declare managed-secret fields" }) });
+    await expect(declarations.locator("select")).toBeVisible();
     if (outcome === "private") expect(applies[0].body.base_url).toBe("");
+    await panel.getByRole("link", { name: "Open testing managed secrets" }).click();
+    await expect(page).toHaveURL(/environments\/testing\/managed-secrets$/);
+    await expect(page.locator('input[type="password"]').first()).toBeVisible();
+    if (["success", "private"].includes(outcome)) expect(consoleErrors).toEqual([]);
+  });
+}
+
+for (const outcome of ["success", "declaration-uncertain", "declaration-uncertain-stale"] as const) {
+  test(`signed-in declarations: ${outcome}, exact diff, apply and secret navigation`, async ({ page }, testInfo) => {
+    const scenario = await setupScenario(page, outcome, true);
+    const { applies, consoleErrors } = scenario;
+    let { panel } = scenario;
+    await panel.getByText("Declare managed-secret fields", { exact: true }).click();
     const declarations = panel.locator("details").filter({ has: page.locator("summary", { hasText: "Declare managed-secret fields" }) });
     await expect(declarations.locator("select")).toBeVisible();
     await declarations.getByRole("combobox", { name: "Environment", exact: true }).selectOption("testing");
@@ -135,8 +159,8 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
       panel = page.getByRole("region", { name: "Set up a non-production environment" });
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
       await panel.getByRole("button", { name: "Retry original apply" }).click();
-      await waitForState(() => applies.length).toBe(3);
-      expect(applies[2]).toEqual(applies[1]);
+      await waitForState(() => applies.length).toBe(2);
+      expect(applies[1]).toEqual(applies[0]);
       if (outcome === "declaration-uncertain-stale") {
         await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
         const recoveredDeclarations = panel.locator("details").filter({ has: page.locator("summary", { hasText: "Declare managed-secret fields" }) });
@@ -146,14 +170,14 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
         await recoveredDeclarations.getByRole("button", { name: "Run dry-run", exact: true }).click();
         await recoveredDeclarations.getByRole("checkbox").check();
         await recoveredDeclarations.getByRole("button", { name: "Apply reviewed change" }).click();
-        await waitForState(() => applies.length).toBe(4);
-        expect(applies[3].key).not.toBe(applies[1].key);
+        await waitForState(() => applies.length).toBe(3);
+        expect(applies[2].key).not.toBe(applies[0].key);
       }
     }
     await panel.getByRole("link", { name: "Open testing managed secrets" }).click();
     await expect(page).toHaveURL(/environments\/testing\/managed-secrets$/);
     await expect(page.locator('input[type="password"]').first()).toBeVisible();
-    if (["success", "private"].includes(outcome)) expect(consoleErrors).toEqual([]);
+    if (outcome === "success") expect(consoleErrors).toEqual([]);
   });
 }
 

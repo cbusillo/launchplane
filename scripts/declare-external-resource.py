@@ -80,7 +80,7 @@ def main() -> int:
                 query={},
                 timeout=120,
             )
-            record = ProductProfileResponse.model_validate(result).profile
+            record = ProductProfileResponse.model_validate(result, extra="ignore").profile
             if record.product != args.product or not any(
                 (lane.context, lane.instance) == (args.context, args.instance)
                 for lane in record.lanes
@@ -101,7 +101,7 @@ def main() -> int:
             saved = json.loads(evidence.read_text())
             if saved["request"] != payload:
                 raise ValueError("The reviewed external binding intent changed.")
-            planned = AcceptedEvidenceResponse.model_validate(saved["response"])
+            planned = AcceptedEvidenceResponse.model_validate(saved["response"], extra="ignore")
             if (
                 not planned.result
                 or planned.result.get("mode") != "dry-run"
@@ -115,7 +115,7 @@ def main() -> int:
                 "testing_local_credential": False,
             }
             if before not in (
-                ProductSecretConfigRequirement.model_validate(reviewed),
+                ProductSecretConfigRequirement.model_validate(reviewed, extra="ignore"),
                 ProductSecretConfigRequirement.model_validate(expected),
             ):
                 raise ValueError("The reviewed binding metadata changed.")
@@ -129,7 +129,7 @@ def main() -> int:
             timeout=120,
             idempotency_key=args.idempotency_key if submitted else "",
         )
-        receipt = AcceptedEvidenceResponse.model_validate(result)
+        receipt = AcceptedEvidenceResponse.model_validate(result, extra="ignore")
         trace = transport["public_trace_id"](receipt.trace_id)
         if not receipt.result or (receipt.result.get("product"), receipt.result.get("mode")) != (
             args.product,
