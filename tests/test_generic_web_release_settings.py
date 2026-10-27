@@ -19,6 +19,21 @@ from tests.test_generic_web_promotion import _ProductionProvider, _profile
 
 
 class GenericWebReleaseSettingsTests(unittest.TestCase):
+    def test_rejected_setting_values_stay_out_of_direct_and_nested_errors(self) -> None:
+        from control_plane.contracts.generic_web_release_settings import GenericWebReleaseBaseline
+
+        canary = "host=db password=canary"
+        settings = {"values": {"APP_VALUE": canary}}
+        for model, payload in (
+            (GenericWebReleaseSettings, settings),
+            (GenericWebReleaseBaseline, {"deployment_record_id": "previous", "settings": settings}),
+        ):
+            with self.subTest(model=model.__name__):
+                with self.assertRaises(ValueError) as raised:
+                    model.model_validate(payload)
+                self.assertNotIn("canary", str(raised.exception))
+                self.assertNotIn("canary", repr(raised.exception))
+
     def test_existing_malformed_production_snapshot_is_unavailable(self) -> None:
         from control_plane.generic_web_release_settings import RELEASE_SETTINGS_KEY
         from control_plane.release_review import (
@@ -401,6 +416,14 @@ class GenericWebReleaseSettingsTests(unittest.TestCase):
                             effect_started=lambda: None,
                         )
                     self.assertEqual(trigger.call_count, before)
+                    payload["env"] = "APP_VALUE=host=db password=canary@@\n"
+                    with self.assertRaises(ValueError) as refused:
+                        provider.read_release_settings(
+                            control_plane_root=Path("."),
+                            target=target,
+                            keys=frozenset({"APP_VALUE"}),
+                        )
+                    self.assertNotIn("@@", str(refused.exception))
 
     def test_production_snapshot_excludes_global_and_other_lane_settings(self) -> None:
         with TemporaryDirectory() as directory:

@@ -34,6 +34,7 @@ unchanged; this settings path neither reads secret versions nor activates them.
 Legacy production inventories can still identify their artifact without a linked
 deployment record. Their settings remain unrecorded; a settings-bearing forward
 deployment still requires its exact predecessor and rollback evidence before effects.
+Rejected snapshot values are omitted from validation and deployment error messages.
 Two-slot lanes keep their separate qualified slot-settings contract and do not
 enter this conventional-target settings path.
 

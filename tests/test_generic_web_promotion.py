@@ -1290,6 +1290,24 @@ def _store_with_production(
 
 
 class GenericWebProdPromotionRollbackTests(unittest.TestCase):
+    def test_refused_provider_setting_stays_out_of_the_deployment_error(self) -> None:
+        store = _store_with_production()
+        store.runtime_records = (
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=store.profile.lanes[1].context,
+                instance="prod",
+                env={"APP_CHANNEL": "new"},
+                updated_at=store.profile.updated_at,
+            ),
+        )
+        provider = _ProductionProvider()
+        provider.settings = {"APP_CHANNEL": "host=db password=canary@@"}
+        with self.assertRaises(ValueError) as refused:
+            self._promote(store, provider)
+        self.assertNotIn("@@", str(refused.exception))
+        self.assertEqual(provider.deployed_artifacts, [])
+
     def setUp(self) -> None:
         stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
         from tests.support.lane_builds import LaneBuildGitHub

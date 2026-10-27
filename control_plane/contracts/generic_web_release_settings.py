@@ -9,7 +9,7 @@ from control_plane.contracts.runtime_environment_record import normalize_retired
 
 
 class GenericWebReleaseSettings(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     values: dict[str, str] = Field(default_factory=dict)
     absent_keys: tuple[str, ...] = ()
@@ -29,7 +29,7 @@ class GenericWebReleaseSettings(BaseModel):
 
 
 class GenericWebReleaseBaseline(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     deployment_record_id: str = Field(min_length=1)
     settings: GenericWebReleaseSettings
