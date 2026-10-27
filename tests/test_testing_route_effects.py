@@ -2,7 +2,6 @@
 
 import unittest
 from unittest.mock import Mock, patch
-import time
 
 from control_plane.contracts.testing_rebuild import REBUILD_SCOPE
 from control_plane.dokploy.native_copy_stream import (
@@ -172,7 +171,10 @@ class TestingRouteFenceControllerTests(unittest.TestCase):
         self,
     ) -> None:
         self.fixture.apply_immediately = False
-        with patch.object(time, "sleep", side_effect=lambda _: self.fixture.apply_document()):
+        with patch(
+            "control_plane.testing_route_effects.sleep",
+            side_effect=lambda _: self.fixture.apply_document(),
+        ):
             self.assertEqual(self.run_switch().status, "completed")
             self.assertEqual(self.run_switch(inverse=True).status, "completed")
         self.assertEqual(self.fixture.remote_modes.count("publish_v2"), 2)
@@ -202,8 +204,28 @@ class TestingRouteFenceControllerTests(unittest.TestCase):
             self.fixture.raw["routers"]["foreign@file"] = dict(router)
 
         with (
-            patch.object(time, "sleep", side_effect=replace_route),
+            patch("control_plane.testing_route_effects.sleep", side_effect=replace_route),
             self.assertRaises(TestingRouteAuthorityChanged),
+        ):
+            self.run_switch()
+        self.assertEqual(self.fixture.remote_modes.count("publish_v2"), 1)
+
+    def test_settled_reverted_route_refuses_without_waiting_or_another_writer(self) -> None:
+        apply_document = self.fixture.apply_document
+
+        def revert() -> None:
+            self.fixture.route_file.write_text(
+                json.dumps(route_document(self.fixture.plan, self.fixture.plan.old_backend))
+            )
+            apply_document()
+
+        with (
+            patch.object(self.fixture, "apply_document", side_effect=revert),
+            patch(
+                "control_plane.testing_route_effects.sleep",
+                side_effect=AssertionError("A settled reversion must not be polled"),
+            ),
+            self.assertRaises(NativeSourceUnavailable),
         ):
             self.run_switch()
         self.assertEqual(self.fixture.remote_modes.count("publish_v2"), 1)

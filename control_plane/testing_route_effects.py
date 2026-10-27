@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
-import time
+from time import monotonic, sleep
 from typing import Any
 from uuid import uuid4
 
@@ -518,17 +518,19 @@ class TestingRouteEffects:
         return ProviderMutationOutcome(200)
 
     def wait_for_applied_route(self, lease: ProviderOperationLease) -> None:
-        deadline = time.monotonic() + ROUTE_RELOAD_TIMEOUT_SECONDS
+        deadline = monotonic() + ROUTE_RELOAD_TIMEOUT_SECONDS
         while True:
             self.recovery_guard()
             lease.assert_current()
             try:
-                present = self.present()
+                if not self.present():
+                    raise NativeSourceUnavailable("The original route writer requires observation.")
             except TestingRoutePending:
-                present = False
-            if present:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise NativeSourceUnavailable(
+                        "The original route writer requires observation."
+                    ) from None
+                sleep(min(1.0, remaining))
+            else:
                 return
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise NativeSourceUnavailable("The original route writer requires observation.")
-            time.sleep(min(1.0, remaining))
