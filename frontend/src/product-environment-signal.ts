@@ -193,6 +193,8 @@ function operationalSignal(environment: ProductEnvironmentSummary | null, now: n
     return !recovery;
   });
   const releaseHealthy = reasons.size === 0 && runtimeGap === null &&
+    (!publicTopologyApplicable(environment.topology) || environment.health_monitoring.checks.some(check =>
+      check.probe_effective && !check.advisory && check.kind === "public_http")) &&
     environment.topology.observed.trust_state === "verified" &&
     blockingIncidents.every(incident => productionDeliveryWarning(environment, incident));
   const deliveryOnly = blockingIncidents.length > 0 && releaseHealthy;

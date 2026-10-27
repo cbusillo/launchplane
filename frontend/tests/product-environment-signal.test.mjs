@@ -87,6 +87,10 @@ test("recovery and delivery warnings stay yellow together", () => {
     assert.deepEqual(operationalAttentionReasons(lane), []);
     assert.equal(environmentReleaseHealthy(lane), true);
   }
+  const noPublicCheck = structuredClone(lane);
+  noPublicCheck.health_monitoring.checks[0].kind = "private_http";
+  noPublicCheck.topology.warnings.push({ code: "public_website_check_missing", severity: "warning", scope: "observation", domain_name: "", detail: "Public probe missing" });
+  assert.equal(environmentReleaseHealthy(noPublicCheck), false);
   const businessTls = lane.topology.observed.tls_domains[0];
   businessTls.provenance.stale_after = new Date(0).toISOString();
   assert.equal(environmentReleaseHealthy(lane), false);
