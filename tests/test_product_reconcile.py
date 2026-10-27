@@ -4,7 +4,7 @@ from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.dokploy.api import DokployRequestFailed, DokployScheduleExecutionFailed
 from control_plane.contracts.record_failures import record_failure_summary
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone, tzinfo
 from dataclasses import replace
 from control_plane.dokploy.application_runtime import (
@@ -6017,6 +6017,117 @@ class _MinuteClock(datetime):
 
 
 class ProductReconcilePreviewTests(ProductReconcileTestCase):
+    def test_changed_preview_binding_keeps_its_original_plan_until_guarded_renewal(self) -> None:
+        from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_PLAN_TTL_SECONDS
+        from control_plane.workflows.odoo_preview_runtime import (
+            ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
+        )
+
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        build = self.provider.build_inputs
+        execute = self.provider.execute_apply
+        changed = False
+        finished = False
+        dispatches = 0
+
+        def inputs(**kwargs: Any) -> dict[str, object]:
+            result = build(**kwargs)
+            if changed:
+                cast(dict[str, object], result["dry_run_plan"])["no_cache"] = True
+            return result
+
+        def apply(**kwargs: Any) -> dict[str, object]:
+            nonlocal dispatches
+            dispatches += 1
+            if finished:
+                return execute(**kwargs)
+            return {"status": "fail", "provider_effect_attempted": True}
+
+        def expire(plan: Mapping[str, object]) -> None:
+            from sqlalchemy import select
+            from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+            from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+            plan_id = plan["preview_plan_id"]
+            assert isinstance(plan_id, str)
+            record = self.store.read_idempotency_record(
+                scope=reconcile_reservation_scope("site"),
+                route_path=ODOO_PREVIEW_APPLY_ROUTE,
+                idempotency_key=plan_id,
+            )
+            assert record is not None
+            expired = LaunchplaneIdempotencyRecord.model_validate(
+                {
+                    **record.model_dump(),
+                    "lease_expires_at": (
+                        datetime.now(timezone.utc)
+                        - timedelta(seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS + 1)
+                    ).isoformat(),
+                }
+            )
+            with self.store._session_factory.begin() as session:
+                row = session.scalar(
+                    select(LaunchplaneIdempotencyRow).where(
+                        LaunchplaneIdempotencyRow.record_id == record.record_id
+                    )
+                )
+                assert row is not None
+                self.store._sync_idempotency_row(row, expired)
+
+        with (
+            patch.object(self.provider, "build_inputs", side_effect=inputs),
+            patch.object(self.provider, "execute_apply", side_effect=apply),
+            patch.object(self.provider, "observe_apply", return_value=("unknown", None, False)),
+        ):
+            self.request("preview", 5)
+            first = self.run_once().last_plan
+            original = self.store.list_held_odoo_preview_reservations(product="site")[0]
+            original_intent = self.store.read_original_mutation_intent(original)
+            expire(first)
+            changed = True
+            self.request("preview", 5)
+            successor = self.run_once().last_plan
+            self.assertEqual(successor["preview_operation_status"], "reconcile_required")
+            self.assertNotEqual(successor["preview_plan_id"], first["preview_plan_id"], successor)
+            expire(successor)
+            successor_dispatches = dispatches
+            self.request("preview", 5)
+            observed = self.run_once().last_plan
+            self.assertEqual(observed["preview_operation_status"], "reconcile_required")
+            self.assertEqual(observed["preview_plan_id"], successor["preview_plan_id"])
+            self.assertEqual(dispatches, successor_dispatches)
+            _MinuteClock.ticks += ODOO_PREVIEW_PLAN_TTL_SECONDS // 60 + 1
+            self.request("preview", 5)
+            renewed = self.run_once().last_plan
+            self.assertEqual(renewed["preview_operation_status"], "reconcile_required")
+            self.assertNotEqual(renewed["preview_plan_id"], successor["preview_plan_id"])
+            expire(renewed)
+            renewal_dispatches = dispatches
+            self.request("preview", 5)
+            observed_renewal = self.run_once().last_plan
+            self.assertEqual(observed_renewal["preview_operation_status"], "reconcile_required")
+            self.assertEqual(observed_renewal["preview_plan_id"], renewed["preview_plan_id"])
+            self.assertEqual(dispatches, renewal_dispatches)
+            changed = False
+            self.request("preview", 5)
+            restored_binding = self.run_once().last_plan
+            self.assertEqual(restored_binding["preview_operation_status"], "reconcile_required")
+            self.assertNotEqual(restored_binding["preview_plan_id"], first["preview_plan_id"])
+            expire(restored_binding)
+            changed = True
+            self.request("preview", 5)
+            changed_again = self.run_once().last_plan
+            self.assertEqual(changed_again["preview_operation_status"], "reconcile_required")
+            expire(changed_again)
+            _MinuteClock.ticks += ODOO_PREVIEW_PLAN_TTL_SECONDS // 60 + 1
+            finished = True
+            self.request("preview", 5)
+            completed = self.run_once().last_plan
+            self.assertEqual(completed["preview_result_status"], "pass")
+            self.assertEqual(self.store.list_preview_records()[0].state, "active")
+            self.assertEqual(self.provider.applied, [("refresh", 5)])
+            self.assertEqual(self.store.read_original_mutation_intent(original), original_intent)
+
     def test_recorded_train_candidate_does_not_allocate_a_preview(self) -> None:
         self.github.add_run(50, PR_HEAD, event="pull_request")
         self.request("preview", 5)
