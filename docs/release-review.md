@@ -2,6 +2,32 @@
 title: Client release review
 ---
 
+## Generic-web production settings
+
+The reviewed generic-web candidate includes the production lane's non-secret
+runtime settings and removal intent, alongside its artifact and source commit.
+Changing only those settings requires a new exact-checklist acceptance. Global
+platform configuration, other lanes and managed secret values are excluded.
+The release page and release record identify the settings being shipped.
+
+The existing promotion delivers the accepted snapshot through the verified
+backup and deployment gates, then checks production health and runtime identity.
+Settings changes during the backup wait refuse the first forward effect. No
+product build input, workflow, grant or direct production runtime sync is added.
+
+Deployment records retain the reviewed snapshot in `runtime_source`. Before
+changing a setting for the first time, promotion captures its previous provider
+value or absence in the predecessor's rollback baseline. That observation does
+not rewrite the predecessor's accepted release identity. Recovery restores that
+baseline with its artifact, including removed values and newly added keys that
+must disappear. A rollback without retained settings for the current release's
+keys refuses before deployment. The release drill uses the promotion's pinned
+predecessor and reapplies the same accepted snapshot after its second backup.
+
+The Dokploy application and Compose adapter supplies this delivery/readback
+capability. Two-slot lanes keep their separate qualified slot-settings contract;
+a settings-aware release refuses there before effects rather than bypassing it.
+
 An Odoo testing copy published by a native rebuild must match its ordinary
 testing release tuple before candidate review, website-settings preparation or
 promotion source selection. A different served artifact or unavailable native
@@ -172,7 +198,7 @@ are omitted. If the second read fails, the checklist remains unavailable with
 approval, and no decision, promotion, or other write is retried by this path.
 
 When production and testing have the same complete recorded release identity
-(artifact, source commit and shared inputs), the review returns
+(artifact, source commit, shared inputs and production settings), the review returns
 `no_new_release: true`, `required: false` and `approved: false`, with an empty
 checklist and no approval blocker. This is not a new acceptance. The Client page
 says there is no new release to accept, keeps the previous release-run evidence,

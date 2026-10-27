@@ -46,6 +46,13 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
+from control_plane.generic_web_release_settings import (
+    RELEASE_SETTINGS_KEY,
+    ROLLBACK_SETTINGS_KEY,
+    recorded_release_settings,
+    prepare_release_settings,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.integration_key_readback import (
@@ -528,6 +535,7 @@ def execute_generic_web_deploy(
     established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
+    release_settings: GenericWebReleaseSettings | None = None,
 ) -> GenericWebDeployResult:
     from control_plane.workflows.generic_web_preview import serialize_generic_web_product_operation
 
@@ -573,6 +581,10 @@ def execute_generic_web_deploy(
             if current.driver_id != "generic-web" or current_lane.generic_web_cutover is None:
                 raise ValueError(
                     "recorded traffic authority cannot fall back to in-place deployment"
+                )
+            if release_settings is not None:
+                raise ValueError(
+                    "Two-slot settings delivery requires its qualified slot settings authority."
                 )
             if post_deploy_executor is not None:
                 raise ValueError(
@@ -653,6 +665,7 @@ def execute_generic_web_deploy(
             established_testing_predecessor=established_testing_predecessor,
             rollback_source_deployment_record_id=rollback_source_deployment_record_id,
             rollback_target_deployment_record_id=rollback_target_deployment_record_id,
+            release_settings=release_settings,
         )
 
 
@@ -682,6 +695,7 @@ def _execute_generic_web_deploy_unserialized(
     established_testing_predecessor: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
+    release_settings: GenericWebReleaseSettings | None = None,
 ) -> GenericWebDeployResult:
     """Deploy ``request``; ``recorded_artifact`` marks its artifact as Launchplane's own record."""
     normalized_provider_operation_title = provider_operation_title.strip()
@@ -821,6 +835,25 @@ def _execute_generic_web_deploy_unserialized(
         nonlocal post_deploy_update, last_provider_phase, dispatch_refused
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(phase)
+        if (
+            RELEASE_SETTINGS_KEY in verified_build_evidence
+            or ROLLBACK_SETTINGS_KEY in verified_build_evidence
+        ):
+            write_pending(
+                build_deployment_record(
+                    request=ship_request,
+                    record_id=record_id,
+                    deployment_id=GENERIC_WEB_UNOBSERVED_DEPLOYMENT_ID,
+                    deployment_status="pending",
+                    started_at=started_at,
+                    finished_at="",
+                    resolved_target=resolved_target,
+                    deployed_target=prepared_deploy_target.deployed_target,
+                    delegated_executor=resolved_deploy_provider.delegated_executor,
+                    post_deploy_update=post_deploy_update,
+                    runtime_source=verified_build_evidence,
+                )
+            )
         last_provider_phase = phase
         from control_plane.generic_web_testing_inputs import TESTING_DISPATCH_REFUSED_PHASE
 
@@ -899,6 +932,29 @@ def _execute_generic_web_deploy_unserialized(
             prepare_generic_web_testing_runtime,
         )
 
+        if resolved_lane.instance == "prod":
+            applied_settings = prepare_release_settings(
+                store=record_store,
+                provider=resolved_deploy_provider,
+                control_plane_root=control_plane_root,
+                target=prepared_deploy_target,
+                context=resolved_lane.context,
+                settings=release_settings,
+                rollback_target=rollback_target_deployment_record_id if rollback else "",
+            )
+            if applied_settings is not None:
+                encoded_settings = applied_settings.model_dump_json()
+                delivery_key = ROLLBACK_SETTINGS_KEY if rollback else RELEASE_SETTINGS_KEY
+                previous_settings = verified_build_evidence.get(delivery_key)
+                if previous_settings is not None and previous_settings != encoded_settings:
+                    raise ValueError("Deployment retry must retain its original release settings.")
+                verified_build_evidence[delivery_key] = encoded_settings
+                if rollback:
+                    reviewed = recorded_release_settings(
+                        record_store.read_deployment_record(rollback_target_deployment_record_id)
+                    )
+                    if reviewed is not None:
+                        verified_build_evidence[RELEASE_SETTINGS_KEY] = reviewed.model_dump_json()
         # Recovered targets carry captured authority, never serialized values.
         # Legacy snapshots deliberately have no authority to backfill.
         prepare_generic_web_testing_runtime(

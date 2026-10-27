@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.artifact_release_compatibility import ReleaseDatabaseCompatibility
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
+from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
 
 
 class ReleaseVersion(BaseModel):
@@ -13,6 +14,11 @@ class ReleaseVersion(BaseModel):
     artifact_id: str = Field(min_length=1)
     source_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     shared_addons_digest: str = ""
+    runtime_settings: GenericWebReleaseSettings | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     website_settings_sha256: str = Field(
         default="",
         exclude_if=lambda value: not value,

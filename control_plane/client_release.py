@@ -28,6 +28,8 @@ Client-accepted release with a passing production deployment, under the Client's
 
 from __future__ import annotations
 
+from control_plane.generic_web_release_settings import recorded_release_settings
+
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -412,7 +414,15 @@ def rejection_rollback_target(
                 and deployment.artifact_identity.artifact_id == version.artifact_id
                 and (
                     profile.driver_id != "generic-web"
-                    or deployment.source_git_ref == version.source_commit
+                    or (
+                        deployment.source_git_ref == version.source_commit
+                        and recorded_release_settings(deployment) == version.runtime_settings
+                        and (
+                            before_decision is None
+                            or before_decision.checklist.candidate.runtime_settings is None
+                            or recorded_release_settings(deployment, rollback=True) is not None
+                        )
+                    )
                 )
                 and deployment_record_passed(deployment)
             ):
@@ -2008,6 +2018,35 @@ def _generic_web_drill_target(
             ):
                 return retained
         raise ClientReleaseNotReady("rollback_target_missing")
+    if decision.checklist.candidate.runtime_settings is not None:
+        reservation = store.read_idempotency_record(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=_step_key(decision, ClientReleaseStep("promote", 1)),
+        )
+        promotion_id = (
+            reservation.response_payload.get("result", {}).get("promotion_record_id")
+            if reservation
+            else None
+        )
+        if isinstance(promotion_id, str) and promotion_id:
+            promotion = store.read_promotion_record(promotion_id)
+            target_id = promotion.rollback.target_deployment_record_id
+        else:
+            target_id = store.read_environment_inventory(
+                context_name=_prod_context(profile),
+                instance_name="prod",
+            ).deployment_record_id
+        retained = store.read_deployment_record(target_id)
+        if (
+            retained.artifact_identity is None
+            or retained.artifact_identity.artifact_id != decision.checklist.production.artifact_id
+            or retained.source_git_ref != decision.checklist.production.source_commit
+            or recorded_release_settings(retained) != decision.checklist.production.runtime_settings
+            or not deployment_record_passed(retained)
+        ):
+            raise ClientReleaseNotReady("rollback_target_missing")
+        return retained
     for deployment in store.list_deployment_records(
         context_name=_prod_context(profile), instance_name="prod"
     ):

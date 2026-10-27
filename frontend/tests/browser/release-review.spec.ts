@@ -3,6 +3,31 @@ import type { Request } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
+test("A settings-only release shows its saved settings and allows the release request", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?product=example-site&fixture=operator");
+  const response = await page.evaluate(async () => {
+    const fixtures = await import("/ui/src/dev-fixtures.ts");
+    return fixtures.releaseReviewForFixture("operator");
+  });
+  const checklist = response.review.checklist!;
+  checklist.candidate = { ...checklist.production, runtime_settings: { values: { APP_CHANNEL: "second channel" }, absent_keys: ["OLD_SETTING"] } };
+  checklist.items = [];
+  checklist.shared_sources = [];
+  response.review.no_new_release = false;
+  response.review.checklist_complete = true;
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-operator", github_id: 9003, role: "admin", organizations: [], teams: [] } } }));
+  await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));
+  await page.goto("/ui/owner-review?product=example-site");
+  await expect(page.getByRole("region", { name: "Ask the Client now", exact: true })).toBeVisible();
+  await page.getByText("Production settings", { exact: true }).click();
+  const settings = page.locator("details").filter({ has: page.getByText("Production settings", { exact: true }) });
+  await expect(settings).toContainText("second channel");
+  await expect(settings).toContainText("OLD_SETTING");
+  await expect(settings).toContainText("Removed");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("production-release-settings.png"), fullPage: true });
+});
+
 test("The Director request button submits its reason through the shared request route", { tag: "@layout" }, async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=operator");
   await expect(page.getByRole("heading", { name: "Review this release", exact: true })).toBeVisible();

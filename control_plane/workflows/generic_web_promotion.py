@@ -307,14 +307,22 @@ def _execute_generic_web_prod_promotion_unserialized(
         request=request,
         source_lane=source_lane,
     )
+    release_decision = None
     if not request.dry_run:
-        require_release_approval(
+        release_decision = require_release_approval(
             control_plane_root=control_plane_root,
             record_store=record_store,
             product=profile.product,
             artifact_id=request.artifact_id,
             source_commit=request.source_git_ref,
         )
+    from control_plane.generic_web_release_settings import desired_release_settings
+
+    release_settings = (
+        release_decision.checklist.candidate.runtime_settings
+        if not request.dry_run and release_decision is not None
+        else desired_release_settings(record_store, profile)
+    )
     if request.release_tag:
         _preflight_github_release(
             control_plane_root=control_plane_root,
@@ -456,6 +464,10 @@ def _execute_generic_web_prod_promotion_unserialized(
             # Admit this accepted artifact after health/backup waits. Once its
             # production attempt starts, testing may advance to another build.
             if not source_admitted:
+                if desired_release_settings(record_store, profile) != release_settings:
+                    raise click.ClickException(
+                        "Production settings changed after release acceptance."
+                    )
                 try:
                     _resolve_source_inventory_inputs(
                         record_store=record_store,
@@ -495,6 +507,7 @@ def _execute_generic_web_prod_promotion_unserialized(
                 deployment_record_id=deployment_record_id,
                 provider_effect_checkpoint=promotion_checkpoint,
                 before_deployment_records=admit_source,
+                release_settings=release_settings,
             )
         except (ValueError, TimeoutError, click.ClickException) as error:
             if destination_lane.generic_web_cutover is None or not deployment_record_id:

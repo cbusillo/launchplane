@@ -1,3 +1,9 @@
+from control_plane.contracts.generic_web_release_settings import GenericWebReleaseSettings
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.generic_web_release_settings import (
+    recorded_release_settings,
+    RELEASE_SETTINGS_KEY,
+)
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.generic_web_source_qualification import GenericWebSourceSnapshot
@@ -63,11 +69,17 @@ from control_plane.workflows.ship import build_deployment_record
 class _GenericWebPromotionStore:
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
+        self.runtime_records: tuple[RuntimeEnvironmentRecord, ...] = ()
         self.provider_targets: dict[tuple[str, str], ProviderTargetRecord] = {}
         self.held_reservations: tuple[LaunchplaneIdempotencyRecord, ...] = ()
         self.deployments: dict[str, DeploymentRecord] = {}
         self.promotions: dict[str, PromotionRecord] = {}
         self.inventories: dict[tuple[str, str], EnvironmentInventory] = {}
+
+    def list_runtime_environment_records(
+        self, **_kwargs: object
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return self.runtime_records
 
     def read_generic_web_source_snapshot(
         self, *, product: str, context_name: str, instance_name: str
@@ -1149,6 +1161,8 @@ class _ProductionProvider:
         self.healthy_artifact = healthy_artifact
         self.running: RuntimeIdentity | None = None
         self.deployed_artifacts: list[str] = []
+        self.settings: dict[str, str] = {}
+        self.delivered_settings: list[dict[str, str]] = []
 
     def resolve_deploy_target(
         self,
@@ -1182,6 +1196,17 @@ class _ProductionProvider:
             deploy_timeout_seconds=request_timeout_seconds or 600,
         )
 
+    def read_release_settings(
+        self,
+        *,
+        keys: frozenset[str],
+        **_kwargs: object,
+    ) -> GenericWebReleaseSettings:
+        return GenericWebReleaseSettings(
+            values={key: self.settings[key] for key in keys if key in self.settings},
+            absent_keys=tuple(sorted(keys - self.settings.keys())),
+        )
+
     def execute_artifact_deploy(
         self,
         *,
@@ -1192,6 +1217,16 @@ class _ProductionProvider:
     ) -> None:
         before_provider_mutation("deploy_trigger")
         effect_started()
+        target = cast(GenericWebResolvedDeployTarget | None, _kwargs.get("resolved_deploy_target"))
+        settings = target.release_settings if target is not None else None
+        if settings is not None:
+            self.settings = {
+                key: value
+                for key, value in self.settings.items()
+                if key not in settings.absent_keys
+            }
+            self.settings.update(settings.values)
+        self.delivered_settings.append(dict(self.settings))
         self.deployed_artifacts.append(runtime_identity.artifact_id)
         self.running = runtime_identity
         if runtime_identity.artifact_id == self.fail_artifact:
@@ -1314,6 +1349,172 @@ class GenericWebProdPromotionRollbackTests(unittest.TestCase):
                 deployment_record_id=deployment_record_id,
                 provider_effect_checkpoint=provider_effect_checkpoint,
             )
+
+    def test_failed_release_restores_previous_settings_and_artifact_together(self) -> None:
+        store = _store_with_production()
+        store.runtime_records = (
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=store.profile.lanes[1].context,
+                instance="prod",
+                env={"APP_CHANNEL": "new", "ADDED_SETTING": "enabled"},
+                schema_version=2,
+                retired_provider_keys=("OLD_SETTING",),
+                updated_at="2026-10-27T00:00:00Z",
+            ),
+        )
+        provider = _ProductionProvider()
+        provider.settings = {
+            "APP_CHANNEL": "old",
+            "OLD_SETTING": "retained",
+            "PROVIDER_ONLY": "keep",
+        }
+        result = self._promote(store, provider)
+        self.assertEqual(result.rollback_status, "pass")
+        self.assertEqual(provider.deployed_artifacts[-1], _PREVIOUS_ARTIFACT)
+        self.assertEqual(
+            provider.delivered_settings,
+            [
+                {"APP_CHANNEL": "new", "ADDED_SETTING": "enabled", "PROVIDER_ONLY": "keep"},
+                {"APP_CHANNEL": "old", "OLD_SETTING": "retained", "PROVIDER_ONLY": "keep"},
+            ],
+        )
+        self.assertIsNone(
+            recorded_release_settings(store.read_deployment_record(_PREVIOUS_DEPLOYMENT))
+        )
+        self.assertIsNone(
+            recorded_release_settings(
+                store.read_deployment_record(result.rollback_deployment_record_id)
+            )
+        )
+        forward = store.read_deployment_record(result.deployment_record_id)
+        rollback = store.read_deployment_record(result.rollback_deployment_record_id)
+        self.assertEqual(
+            recorded_release_settings(forward),
+            GenericWebReleaseSettings(
+                values={"APP_CHANNEL": "new", "ADDED_SETTING": "enabled"},
+                absent_keys=("OLD_SETTING",),
+            ),
+        )
+        self.assertEqual(
+            recorded_release_settings(rollback, rollback=True),
+            recorded_release_settings(
+                store.read_deployment_record(_PREVIOUS_DEPLOYMENT), rollback=True
+            ),
+        )
+        self.assertNotIn("PROVIDER_ONLY", str(forward.runtime_source[RELEASE_SETTINGS_KEY]))
+
+    def test_rollback_missing_settings_refuses_before_restoring_only_the_artifact(self) -> None:
+        store = _store_with_production()
+        current = store.read_deployment_record(_PREVIOUS_DEPLOYMENT)
+        store.write_deployment_record(
+            current.model_copy(update={"record_id": "legacy-without-settings"})
+        )
+        store.write_deployment_record(
+            current.model_copy(
+                update={
+                    "runtime_source": {
+                        **current.runtime_source,
+                        RELEASE_SETTINGS_KEY: GenericWebReleaseSettings(
+                            values={"APP_CHANNEL": "current"}
+                        ).model_dump_json(),
+                    }
+                }
+            )
+        )
+        provider = _ProductionProvider()
+        with self.assertRaisesRegex(ValueError, "Rollback lacks retained settings"):
+            execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                deploy_provider=provider,
+                request=GenericWebDeployRequest(
+                    product=store.profile.product,
+                    instance="prod",
+                    artifact_id=_PREVIOUS_ARTIFACT,
+                    source_git_ref="1" * 40,
+                ),
+                rollback=True,
+                recorded_artifact=True,
+                rollback_target_deployment_record_id="legacy-without-settings",
+            )
+        self.assertEqual(provider.deployed_artifacts, [])
+
+    def test_settings_only_change_has_a_distinct_reviewed_release_identity(self) -> None:
+        from control_plane.release_review import (
+            ReleaseReviewStore,
+            release_version,
+            recorded_generic_web_testing_version,
+        )
+        from control_plane.contracts.release_review import ReleaseChecklist
+        from control_plane.release_review import checklist_digest
+
+        store = _store_with_production()
+        record = RuntimeEnvironmentRecord(
+            scope="instance",
+            context=store.profile.lanes[1].context,
+            instance="prod",
+            env={"APP_CHANNEL": "accepted"},
+            updated_at="2026-10-27T00:00:00Z",
+        )
+        store.runtime_records = (record,)
+        candidate_artifact = store.read_environment_inventory(
+            context_name=store.profile.lanes[0].context, instance_name="testing"
+        ).artifact_identity
+        assert candidate_artifact is not None
+        provider = _ProductionProvider(
+            healthy_artifact="ghcr.io/cbusillo/sellyouroutboard@sha256:" + "b" * 64
+        )
+        result = self._promote(store, provider)
+        self.assertEqual(result.promotion_status, "pass")
+        review_store = cast(ReleaseReviewStore, store)
+        production = release_version(store=review_store, profile=store.profile, instance="prod")
+        candidate = recorded_generic_web_testing_version(store=review_store, profile=store.profile)
+        self.assertEqual(production, candidate)
+        checklist = ReleaseChecklist(
+            product=store.profile.product,
+            repository=store.profile.repository,
+            owner_github_id="9001",
+            testing_url="",
+            items=(),
+            production=production,
+            candidate=candidate,
+        )
+        store.runtime_records = (record.model_copy(update={"env": {"APP_CHANNEL": "changed"}}),)
+        changed = recorded_generic_web_testing_version(store=review_store, profile=store.profile)
+        self.assertEqual(changed.artifact_id, production.artifact_id)
+        self.assertEqual(changed.source_commit, production.source_commit)
+        self.assertNotEqual(changed, production)
+        self.assertNotEqual(
+            checklist_digest(checklist),
+            checklist_digest(checklist.model_copy(update={"candidate": changed})),
+        )
+
+    def test_settings_change_during_backup_refuses_before_provider_effect(self) -> None:
+        store = _store_with_production()
+        record = RuntimeEnvironmentRecord(
+            scope="instance",
+            context=store.profile.lanes[1].context,
+            instance="prod",
+            env={"APP_CHANNEL": "accepted"},
+            updated_at="2026-10-27T00:00:00Z",
+        )
+        store.runtime_records = (record,)
+        provider = _ProductionProvider()
+        original_guard = ProductionPromotionBackupGuard
+
+        @contextmanager
+        def changing_backup(**_kwargs: object) -> Iterator[ProductionPromotionBackupGuard]:
+            store.runtime_records = (record.model_copy(update={"env": {"APP_CHANNEL": "changed"}}),)
+            yield original_guard(lambda _phase: None, {})
+
+        with patch(
+            "control_plane.workflows.generic_web_promotion.production_promotion_backup_guard",
+            side_effect=changing_backup,
+        ):
+            result = self._promote(store, provider)
+        self.assertEqual(result.promotion_status, "fail")
+        self.assertEqual(provider.deployed_artifacts, [])
 
     def test_failed_maintenance_rolls_back_without_running_new_commands_on_old_image(self) -> None:
         self._check_maintenance_failure("command")

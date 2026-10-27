@@ -108,6 +108,20 @@ def release_decision_issue_body(
         "",
         "## Client checklist",
     ]
+    if checklist.candidate.runtime_settings is not None:
+        settings = checklist.candidate.runtime_settings
+        lines.extend(
+            [
+                "## Production settings",
+                "This release applies its saved non-secret production settings. Rollback restores the previous settings with the previous artifact.",
+                _literal(
+                    "Set: "
+                    + ", ".join(sorted(settings.values))
+                    + "\nRemove: "
+                    + ", ".join(settings.absent_keys)
+                ),
+            ]
+        )
     for item in checklist.items:
         lines.extend(
             [
