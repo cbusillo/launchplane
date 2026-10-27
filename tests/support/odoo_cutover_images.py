@@ -210,12 +210,10 @@ def build_fixture_images(
         shutil.copytree(inputs / "docker/scripts", build / "scripts")
         shutil.copytree(libraries, build / "runtime-libraries")
         shutil.copytree(inputs / "launchplane/addons", build / "health")
-        shutil.copy(inputs / "scripts/launchplane-readiness.py", build / "readiness.py")
         (build / "Dockerfile").write_text(
             f"FROM {base_alias}\nUSER root\nCOPY scripts /volumes/scripts\n"
             "COPY runtime-libraries /venv/lib/python3.13/site-packages\n"
             "COPY health /opt/launchplane/addons\nCOPY addon /opt/fixture-addons\n"
-            "COPY readiness.py /opt/launchplane-readiness.py\n"
             "COPY declaration.json /opt/launchplane/evidence/release-compatibility.json\n"
         )
         docker(

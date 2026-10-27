@@ -71,6 +71,10 @@ See [Traefik's file-provider documentation](https://doc.traefik.io/traefik/v3.3/
 
 ## Compatible and database-changing paths
 
+Private readiness executes the selected image's `/usr/local/bin/launchplane-readiness`.
+Synthetic cutover images inherit that helper from their immutable base without
+installing a separate readiness implementation.
+
 A compatible release runs the full planned credential/settings/readback
 sequence with no install or update, warms the candidate, and obtains fresh
 private database/Host/render/asset/browser/identity evidence. The old slot keeps
