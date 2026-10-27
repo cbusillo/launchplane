@@ -1013,13 +1013,11 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.admit()
 
-    def test_custody_hash_survives_original_completion_and_mutable_capacity_policy(self) -> None:
+    def test_custody_hash_survives_original_completion(self) -> None:
         before = self.authority()
         self.complete_original()
         self.assertEqual(self.authority(), before)
         self.assertEqual(self.admit(), before)
-        self.profile.preview.override_env["FIXTURE_CAPACITY_NOTE"] = "changed"
-        self.assertEqual(self.authority(), before)
 
     def test_changed_target_cannot_use_original_bytes(self) -> None:
         self.issued.dry_run_plan.compose_name += "-other"

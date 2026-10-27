@@ -31,6 +31,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductContextOwnershipError,
+    ProductProfileConflictError,
     ProductAuthorityBundle,
     ProviderTargetWrite,
     RuntimeEnvironmentConflictError,
@@ -421,6 +422,56 @@ def _assert_write_bundle_absent(
 
 
 class ProductAuthorityBundleTransactionTests(unittest.TestCase):
+    def test_preview_context_bundle_requires_the_exact_preview_instance(self) -> None:
+        for backend in ("sqlite", "filesystem"):
+            with self.subTest(backend=backend), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = (
+                    PostgresRecordStore(database_url=_sqlite_database_url(root / "records.sqlite3"))
+                    if backend == "sqlite"
+                    else FilesystemRecordStore(root / "state")
+                )
+                try:
+                    if isinstance(store, PostgresRecordStore):
+                        store.ensure_schema()
+                    profile = _product_profile()
+                    profile.preview.context = "preview-only"
+                    store.write_product_profile_record(profile)
+                    runtime = RuntimeEnvironmentRecord(
+                        scope="context",
+                        context=profile.preview.context,
+                        env={"EXAMPLE_MODE": "enabled"},
+                        updated_at=profile.updated_at,
+                    )
+                    bundle = ProductAuthorityBundle(
+                        runtime_environments=(runtime,),
+                        required_product_config_target=(profile.product, runtime.context, ""),
+                    )
+                    with self.assertRaises(ProductProfileConflictError):
+                        store.write_product_authority_bundle(bundle)
+                    self.assertFalse(
+                        store.list_runtime_environment_records(context_name=runtime.context)
+                    )
+                    exact = runtime.model_copy(update={"scope": "instance", "instance": "preview"})
+                    store.write_product_authority_bundle(
+                        bundle.model_copy(
+                            update={
+                                "runtime_environments": (exact,),
+                                "required_product_config_target": (
+                                    profile.product,
+                                    exact.context,
+                                    exact.instance,
+                                ),
+                            }
+                        )
+                    )
+                    self.assertEqual(
+                        store.list_runtime_environment_records(context_name=exact.context), (exact,)
+                    )
+                finally:
+                    if isinstance(store, PostgresRecordStore):
+                        store.close()
+
     def test_adopted_target_snapshot_fences_the_entire_bundle(self) -> None:
         from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
 

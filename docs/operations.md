@@ -5568,7 +5568,8 @@ health-alert policies and historical delivery evidence intact.
 
 Issue #2437's migration `e7c1d5e9a3b6` removes only the 22 tables named by
 `RETIRED_TABLES` in that revision. Normal service startup targets the
-non-runtime profile archive `a4c8e0f2b6d3` (see below), which follows
+[managed preview settings migration](#managed-preview-settings-migration), after
+the non-runtime profile archive `a4c8e0f2b6d3`, which follows
 discussion-topic revision `b81ca763d924` and the separately approved Q533
 preview-enablement drop, `e8d2f6a0b4c7`. That preview branch starts at
 `e6b0c4d8f2a5` alongside the held migration. This is an explicit expand/contract hold: source delivery
@@ -5744,3 +5745,31 @@ Hostname activation must target a join that includes this revision.
 Downgrade refuses. Images from before this revision reject it, so an image
 rollback across it needs this image or a later one; the hostname compatibility
 image above is no longer a rollback target once the archive has run.
+
+### Managed preview settings migration
+
+The release migration target is now `b8f2c4d6e0a7`, immediately after the
+non-runtime profile archive. It moves profile preview overrides into each
+product's existing runtime-environment records at instance `preview`, and removes
+the old profile values atomically. Existing testing and production records stay
+unchanged. See [shared preview settings](preview-settings.md) for
+configuration and conflict handling.
+
+The held delivery-table drop remains held. Release migration joins only branches
+already applied: `b9a3d5e7f1b8` for retirement, `c0b4e6f8a2c9` for hostnames,
+and `c1c5f7a9b3d0` for their compatibility join. The default route from the archive
+revision never applies either unrelated branch. Explicitly requesting the held
+drop from the preview-settings revision still uses its separately approved path,
+joining at `b9a3d5e7f1b8`; a hostname-only source still refuses that request.
+
+Downgrade retains the migrated values. An older image that does not recognize
+these revisions or still renders profile overrides is not a rollback target for
+this change; retain a compatible image or the pre-migration backup and matching
+image. Schema initialization's head fence now names the preview compatibility
+join and continues rejecting unreviewed successors.
+
+This data migration uses the shared preview validator. A restored database from
+before this revision must pass the validator in the selected image; later
+validation changes may therefore refuse older values transactionally at startup.
+Preflight that backup's preview settings against the selected image before
+release rather than weakening validation to admit them.

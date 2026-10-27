@@ -74,7 +74,9 @@ def _assert_direct_db_mutation_rejected(test_case: unittest.TestCase, result: Re
 
 class OdooInstanceOverrideTests(unittest.TestCase):
     def test_preview_payload_passes_through_when_no_payload_was_generated(self) -> None:
-        payload = base64.b64encode(b'{"addon_settings": [], "future-field": true}').decode()
+        payload = base64.b64encode(
+            b'{"context": "cm", "instance": "preview", "addon_settings": []}'
+        ).decode()
         profile = LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
         profile = profile.model_copy(
             update={
@@ -84,10 +86,34 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             }
         )
         environment = dict(profile.preview.override_env)
-        _merge_preview_addon_settings(environment, profile=profile, record_store=object())
+        _merge_preview_addon_settings(
+            environment,
+            profile=profile,
+            record_store=object(),
+            encoded_preview=profile.preview.override_env.get(
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+            ),
+        )
         self.assertEqual(environment, profile.preview.override_env)
 
     def test_generated_preview_payload_preserves_addon_safety_checks(self) -> None:
+        def shopify_value(setting: str, value: str) -> dict[str, str]:
+            if setting in {"api_token", "webhook_key"}:
+                return {
+                    "source": "secret_binding",
+                    "secret_binding_id": f"fixture-{setting}",
+                    "environment_variable": addon_setting_secret_env_key(
+                        addon_name="shopify", setting_name=setting
+                    ),
+                }
+            return {"source": "literal", "value": value}
+
+        secret_environment = {
+            addon_setting_secret_env_key(
+                addon_name="shopify", setting_name=setting
+            ): "fixture-value"
+            for setting in ("api_token", "webhook_key")
+        }
         profile = LaunchplaneProductProfileRecord.model_validate(
             _odoo_profile_payload_with_prod_lane()
         )
@@ -132,7 +158,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 {
                     "addon": "shopify",
                     "setting": setting,
-                    "value": {"source": "literal", "value": value},
+                    "value": shopify_value(setting, value),
                 }
                 for setting, value in {
                     "shop_url_key": handle,
@@ -182,6 +208,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 }
             )
             environment = {
+                **secret_environment,
                 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: generated,
                 "OTHER_KEY": "fixture-value",
             }
@@ -190,10 +217,11 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     environment,
                     profile=preview_profile,
                     record_store=store,
+                    encoded_preview=payload,
                 )
             self.assertEqual(environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY], generated)
         allowed = [
-            {"addon": "shopify", "setting": setting, "value": {"source": "literal", "value": value}}
+            {"addon": "shopify", "setting": setting, "value": shopify_value(setting, value)}
             for setting, value in {
                 "shop_url_key": "dev-fixture-shop",
                 "api_token": "fixture-token",
@@ -212,8 +240,15 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 )
             }
         )
-        environment = {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: generated}
-        _merge_preview_addon_settings(environment, profile=profile, record_store=store)
+        environment = {**secret_environment, ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: generated}
+        _merge_preview_addon_settings(
+            environment,
+            profile=profile,
+            record_store=store,
+            encoded_preview=profile.preview.override_env.get(
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+            ),
+        )
         self.assertEqual(
             json.loads(base64.b64decode(environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]))[
                 "addon_settings"
@@ -228,6 +263,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: generated},
                 profile=production_template,
                 record_store=store,
+                encoded_preview=profile.preview.override_env.get(
+                    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+                ),
             )
 
     def test_preview_addon_settings_reject_malformed_payload_without_echoing_values(self) -> None:
@@ -268,6 +306,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     },
                     profile=profile,
                     record_store=object(),
+                    encoded_preview=profile.preview.override_env.get(
+                        ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+                    ),
                 )
             self.assertNotIn(payload, str(refusal.exception))
             self.assertNotIn("private-input", str(refusal.exception))

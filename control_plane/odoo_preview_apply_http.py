@@ -22,6 +22,7 @@ from control_plane.contracts.odoo_import_parameters import config_parameter_runt
 from control_plane.product_secret_copy import ProductSecretCopyFrom
 from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.preview_settings import validate_preview_scope
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from control_plane.odoo_addon_settings_override import (
     OdooAddonSettingsStore,
@@ -1290,13 +1291,22 @@ def _odoo_preview_service_environment(
             database_url=database_url,
         ).values
     )
-    environment_values = dict(template_values)
-    runtime_platform_credentials.refuse_platform_credentials(
-        preview_profile.override_env,
-        target=f"{profile.product} preview {plan.compose_name}",
-        source="the product profile preview override_env",
+    preview_environment = (
+        control_plane_runtime_environments.resolve_preview_runtime_environment_from_store(
+            record_store=cast(
+                control_plane_runtime_environments.SiteRuntimeEnvironmentStore, record_store
+            ),
+            context_name=preview_profile.context,
+            template_values=template_values,
+        )
     )
-    environment_values.update(preview_profile.override_env)
+    environment_values = dict(preview_environment.values)
+    payload_key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+    encoded_preview = (
+        environment_values.get(payload_key, "")
+        if payload_key in preview_environment.setting_keys
+        else ""
+    )
     try:
         template_override_record = cast(Any, record_store).read_odoo_instance_override_record(
             context_name=preview_profile.context,
@@ -1380,6 +1390,7 @@ def _odoo_preview_service_environment(
             key: value
             for key, value in template_values.items()
             if environment_values.get(key) == value
+            and key not in preview_environment.setting_keys | preview_environment.secret_keys
         },
     )
     for key in omitted_keys:
@@ -1417,7 +1428,12 @@ def _odoo_preview_service_environment(
         environment_values.update(import_source.environment)
         environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "true"
         omitted_keys = tuple(key for key in omitted_keys if key not in import_source.environment)
-    _merge_preview_addon_settings(environment_values, profile=profile, record_store=record_store)
+    _merge_preview_addon_settings(
+        environment_values,
+        profile=profile,
+        record_store=record_store,
+        encoded_preview=encoded_preview,
+    )
     if preview_profile.clean_testing_snapshot:
         environment_values.update(
             {
@@ -1445,24 +1461,21 @@ def _odoo_preview_service_environment(
 
 
 def _merge_preview_addon_settings(
-    environment: dict[str, str], *, profile: LaunchplaneProductProfileRecord, record_store: object
+    environment: dict[str, str],
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    record_store: object,
+    encoded_preview: str,
 ) -> None:
     key = control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
-    encoded_preview = profile.preview.override_env.get(key, "")
-    if not encoded_preview.strip() or environment.get(key) == encoded_preview:
+    if not encoded_preview.strip():
         return
     try:
-        preview = OdooPostDeployPayload.model_validate_json(
-            base64.b64decode(encoded_preview, validate=True)
-        )
+        preview = validate_preview_scope({key: encoded_preview}, context=profile.preview.context)
+        if preview is None:
+            return
         if not preview.addon_settings:
             return
-        generated = OdooPostDeployPayload.model_validate_json(
-            base64.b64decode(environment[key], validate=True)
-        )
-        pairs = [(item.addon, item.setting) for item in preview.addon_settings]
-        if len(pairs) != len(set(pairs)):
-            raise ValueError("Conflicting preview addon settings")
         if any(item.addon == "shopify" for item in preview.addon_settings):
             if control_plane_odoo_instance_overrides.odoo_instance_is_production(
                 profile.preview.template_instance
@@ -1485,20 +1498,16 @@ def _merge_preview_addon_settings(
                         shop_url_key=item.value.value.strip().lower(),
                         protected_store_keys=protected,
                     )
-        for item in preview.addon_settings:
-            if (
-                item.value.source == "secret_binding"
-                and item.value.environment_variable
-                != control_plane_odoo_instance_overrides.addon_setting_secret_env_key(
-                    addon_name=item.addon, setting_name=item.setting
-                )
-            ):
-                raise ValueError("Preview addon secret requires canonical transport")
         if any(
             not environment.get(name, "").strip()
             for name in preview.required_container_environment_keys
         ):
             raise ValueError("Preview addon secret is not delivered")
+        if environment.get(key) == encoded_preview:
+            return
+        generated = OdooPostDeployPayload.model_validate_json(
+            base64.b64decode(environment[key], validate=True)
+        )
     except (ValueError, binascii.Error):
         raise click.ClickException("Invalid preview addon settings payload.") from None
     merged = generated.model_copy(update={"addon_settings": preview.addon_settings})
