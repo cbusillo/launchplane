@@ -479,29 +479,37 @@ replaced, and an already enrolled guest must reuse its pinned pair. There is no
 private-key input, file, download, application delivery or plaintext readback.
 The key uses cryptography's [OpenSSH serialization](https://cryptography.io/en/stable/hazmat/primitives/asymmetric/serialization/).
 
-The supported terminal caller uses the deployed HTTPS service, never a local
-record store:
+Use the catalog's installed bounded `launchplane-write-action.py` helper with
+the existing private admin configuration. It calls the deployed service and
+owns configuration, transport, saved review and uncertainty handling:
 
 ```sh
-uv run launchplane backup-capture-key --product example-product --mode dry-run \
-  --request-file /private/public-capture-request.json
-uv run launchplane backup-capture-key --product example-product --mode apply \
-  --request-file /private/public-capture-request.json \
-  --reviewed-plan-sha256 REVIEWED_DIGEST --idempotency-key ORIGINAL_KEY
-uv run launchplane backup-capture-key --product example-product --mode readback
+uv run /installed/catalog/skills/launchplane/scripts/launchplane-write-action.py \
+  backup-worker-bindings-dry-run --product example-product --context example --instance prod \
+  --generate-capture-key --known-hosts-file /private/capture-host.known_hosts \
+  --promotion-action PROMOTION_ACTION --reason REASON --idempotency-key ORIGINAL_KEY \
+  > /private/capture-review.json
+uv run /installed/catalog/skills/launchplane/scripts/launchplane-write-action.py \
+  backup-worker-bindings-apply --product example-product --context example --instance prod \
+  --generate-capture-key --known-hosts-file /private/capture-host.known_hosts \
+  --promotion-action PROMOTION_ACTION --reason REASON --idempotency-key ORIGINAL_KEY \
+  --reviewed-dry-run --dry-run-evidence-file /private/capture-review.json \
+  --expected-plan-digest REVIEWED_DIGEST
+uv run /installed/catalog/skills/launchplane/scripts/launchplane-write-action.py \
+  backup-worker-bindings-read --product example-product --context example --instance prod \
+  --include-public-key
 ```
 
-The public request file contains only `generate_capture_key`, `known_hosts`,
-`promotion_action` and `reason`. The CLI supplies an empty `bindings` map for
-generation, preserving rebinding's required reference-map contract.
-Load the existing `LAUNCHPLANE_OPERATOR_URL`
-and `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` into the caller's environment through the
-private admin configuration; neither is a CLI token argument. The caller refuses
-HTTP origins and redirects. Apply returns only the public key, its OpenSSH
-SHA256 fingerprint, boundary and binding identifiers, and plan metadata. The
-metadata GET supplies `generated_capture_keys` for the currently configured key
-version without decrypting it. A lost response is recovered by readback and
-replay of the unchanged request/digest/key, never by generating another pair.
+The pin file contains only the independently verified public known-hosts entry.
+Generation refuses private-key files and mixed binding-reference inputs. The
+helper supplies an empty `bindings` map and returns the public key, its OpenSSH
+SHA256 fingerprint, boundary and binding identifiers, and plan metadata.
+Successful apply also independently reads the canonical references back.
+The explicit metadata read supplies `generated_capture_keys` for the currently
+configured key version without decrypting it. A lost response is recovered by
+readback and replay of the unchanged request, pin file, digest and original key,
+never by generating another pair. See the
+[bounded caller contract](https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/write-action-helper-contract.md#backup-worker-references-and-capture-free-preflight).
 Existing rebinding receipts retain their pre-generation request fingerprint, so
 an original-key retry across this service upgrade still replays without writes.
 
