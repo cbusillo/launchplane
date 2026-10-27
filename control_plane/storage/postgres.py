@@ -4755,6 +4755,11 @@ class LaunchplaneMergeTrainStackCollapsePlanRow(Base):
 class LaunchplaneIdempotencyRow(Base):
     __tablename__ = "launchplane_idempotency_records"
     __table_args__ = (
+        CheckConstraint(
+            "NOT (scope = 'launchplane:preview-idle:v1' AND route_path IN "
+            "('service:preview-idle', '/internal/provider-original-intent'))",
+            name="launchplane_idempotency_no_preview_idle_ck",
+        ),
         Index(
             "launchplane_idempotency_scope_route_key_idx",
             "scope",
@@ -9530,7 +9535,6 @@ class PostgresRecordStore(HumanSessionStore):
         include_failed: bool = False,
     ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
         from control_plane.odoo_preview_apply_http import ODOO_PREVIEW_APPLY_ROUTE
-        from control_plane.contracts.preview_execution import PREVIEW_IDLE_ROUTE
         from control_plane.product_reconcile import reconcile_reservation_scope
 
         original = aliased(LaunchplaneIdempotencyRow)
@@ -9583,9 +9587,7 @@ class PostgresRecordStore(HumanSessionStore):
             model_type=LaunchplaneIdempotencyRecord,
             orm_model=LaunchplaneIdempotencyRow,
             filters=(
-                LaunchplaneIdempotencyRow.route_path.in_(
-                    (ODOO_PREVIEW_APPLY_ROUTE, PREVIEW_IDLE_ROUTE)
-                ),
+                LaunchplaneIdempotencyRow.route_path == ODOO_PREVIEW_APPLY_ROUTE,
                 states,
                 product_scope,
             ),

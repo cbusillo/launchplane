@@ -148,6 +148,7 @@ def inspect_candidate_runtime(
                 volume_binding=resources.binding_sha256,
                 mount_path=specification.state.container_path,
                 health_path=specification.health_path,
+                qualify_backend=False,
             )
         except VerifiedApplicationRuntimeFailure as failure:
             frame = failure.evidence

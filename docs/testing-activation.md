@@ -417,13 +417,38 @@ do not change any capability predicate, custody, retry or qualification rule.
 Public readiness observation and
 publication freshness use the same database clock.
 
-Private HTTP checks send one bounded request through the existing proxy's numeric
-TCP client and parse the complete response without following redirects. The
+New undeployed recipients use the existing testing application's DNSRR endpoint
+setting, with exact persistence checked before the first deployment. Configured
+runtime verification permits only that controlled setting; initial allocation
+and other Swarm options remain strict. Historical null/default records remain
+readable for recovery. An original configured-but-undeployed null endpoint may
+receive only this endpoint update at the existing configuration checkpoint after
+complete empty deployment history is verified. A saved deployment receipt or
+started deploy phase prevents that update. Existing deployed recipients are never
+retuned by this step. Recovery inspection still probes the owned task IP for
+current health diagnostics; it does not qualify the service backend or authorize
+publication. A deployed historical recipient that cannot qualify retains the
+existing explicit-refusal exit.
+
+Private HTTP checks resolve the published service name from the existing proxy
+with an absolute IPv4 DNS query and require its complete unique address set to
+identify the single owned task,
+before and after the request. They connect through that same name, preserve the numeric task-IP HTTP Host
+header, and verify
+full runtime identity, then recheck service, task and container continuity.
+A healthy task-IP probe cannot substitute for a failed service backend.
+Unavailable samples return the existing terminal failed frame with bounded
+source-line evidence, allowing the unchanged observation window to retry without
+waiting out a transport timeout. Private error text is never returned.
+The complete HTTP response is parsed without following redirects. The
 selected-image rehearsal in `qualityGate.test.testingRouteReaderRehearsal` runs
-the emitted program against that actual binary for healthy, redirect, HTTP
+the emitted program against real DNS and name-based HTTP in an isolated internal
+Docker network. With a DNS search suffix configured, assigning the canonical alias to two
+containers must be rejected before HTTP; removing the address-ownership check makes this case
+incorrectly reach a healthy response. It checks healthy, redirect, HTTP
 failure, malformed, truncated and wrong-identity responses. Set the existing
 `LAUNCHPLANE_TEST_TRAEFIK_IMAGE` to an already-local immutable image to run it
-locally. Its Swarm topology remains a finite fixture; it is no live-lane proof.
+locally. Its Swarm ownership remains a finite fixture; it is no live-lane proof.
 
 The exact completed activation permits an ordinary forward deployment to start
 with a fresh lifecycle baseline on the new application. It skips only the

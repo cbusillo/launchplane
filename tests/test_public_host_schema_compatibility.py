@@ -35,9 +35,6 @@ from control_plane.storage.migrations.versions import (
     f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
     f3d7a1b5c9e2_join_topics_hostname_retirement as compatibility_join,
     b8f2c4d6e0a7_managed_preview_settings as preview_settings,
-    b9a3d5e7f1b8_join_preview_retirement as preview_retirement_join,
-    c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
-    c1c5f7a9b3d0_join_preview_compatibility as preview_compatibility_join,
 )
 from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_host_fences import (
     PUBLIC_HOST_SCHEMA_TRANSITION_LOCK_KEY,
@@ -50,6 +47,10 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.storage.schema_migration import (
     alembic_config,
     migrate_schema,
+    schema_migration_target,
+    schema_migration_action,
+    SCHEMA_MIGRATION_TARGET_REVISION,
+    _RECOGNIZED_SOURCE_REVISIONS,
 )
 from control_plane.storage.schema_invariants import (
     AUTHZ_COMPATIBILITY_FLOOR_REVISION,
@@ -68,25 +69,26 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
     def test_compatibility_startup_and_image_rollback_preserve_old_and_future_schemas(
         self,
     ) -> None:
-        for revision, expected in (
-            ("", preview_settings.revision),
-            (AUTHZ_COMPATIBILITY_FLOOR_REVISION, preview_settings.revision),
-            (PRE_RETIREMENT_ALEMBIC_REVISION, preview_settings.revision),
-            (previous_release.revision, preview_settings.revision),
-            (topics.revision, preview_settings.revision),
-            (held.revision, preview_retirement_join.revision),
-            (previous_join.revision, preview_retirement_join.revision),
-            (topics_join.revision, preview_retirement_join.revision),
-            (hostnames.revision, preview_hostnames_join.revision),
-            (hostname_join.revision, preview_compatibility_join.revision),
-            (topics_hostnames.revision, preview_hostnames_join.revision),
-            (compatibility_join.revision, preview_compatibility_join.revision),
-        ):
+        for revision in ("", *_RECOGNIZED_SOURCE_REVISIONS):
+            expected = (
+                revision
+                if revision
+                and schema_migration_action(current_revision=revision) == "compatible_ahead"
+                else schema_migration_target(
+                    current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+                )
+            )
             with self.subTest(revision=revision), _isolated_postgres_database() as url:
                 if revision:
                     command.upgrade(alembic_config(url), revision)
                 engine = create_engine(url)
                 self.addCleanup(engine.dispose)
+                hostname_fence = text(
+                    "SELECT to_regprocedure('launchplane_retained_hostname_identity(text)') "
+                    "IS NOT NULL"
+                )
+                with engine.connect() as connection:
+                    before_hostname_fence = connection.scalar(hostname_fence)
                 before_tables = set(inspect(engine).get_table_names())
                 retains_history = set(held.RETIRED_TABLES).issubset(before_tables)
                 retained_history = ""
@@ -106,10 +108,7 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                             select(LaunchplaneDokployTargetRow.payload)
                         )
 
-                self.assertEqual(
-                    migrate_schema(database_url=url, target_revision=preview_settings.revision),
-                    expected,
-                )
+                self.assertEqual(migrate_schema(database_url=url), expected)
                 store.verify_schema()
                 self.assertEqual(
                     store.list_discussion_topics("public-site", include_closed=True),
@@ -118,6 +117,7 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                 if not retained_topics:
                     retained_topics = (self._seed_topic(store),)
                 with engine.connect() as connection:
+                    self.assertEqual(connection.scalar(hostname_fence), before_hostname_fence)
                     self.assertEqual(
                         connection.scalar(text("SELECT version_num FROM alembic_version")),
                         expected,
@@ -214,15 +214,24 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
         return store.close_discussion_topic(topic.product, topic.topic_id)
 
     def test_explicit_delivery_request_keeps_its_historical_join(self) -> None:
-        with _isolated_postgres_database() as url:
-            migrate_schema(database_url=url, target_revision=preview_settings.revision)
-            self.assertEqual(
-                migrate_schema(database_url=url, target_revision=held.revision),
-                preview_retirement_join.revision,
-            )
-            store = PostgresRecordStore(database_url=url)
-            self.addCleanup(store.close)
-            store.verify_schema()
+        for initial in (preview_settings.revision, SCHEMA_MIGRATION_TARGET_REVISION):
+            with self.subTest(initial=initial), _isolated_postgres_database() as url:
+                current = migrate_schema(database_url=url, target_revision=initial)
+                store = PostgresRecordStore(database_url=url)
+                self.addCleanup(store.close)
+                self.assertTrue(
+                    set(held.RETIRED_TABLES).issubset(inspect(store._engine).get_table_names())
+                )
+                self.assertEqual(
+                    migrate_schema(database_url=url, target_revision=held.revision),
+                    schema_migration_target(
+                        current_revision=current, target_revision=held.revision
+                    ),
+                )
+                self.assertTrue(
+                    set(held.RETIRED_TABLES).isdisjoint(inspect(store._engine).get_table_names())
+                )
+                store.verify_schema()
 
     def test_explicit_approved_targets_preserve_historical_and_future_boundaries(self) -> None:
         for current, target, expected in (

@@ -30,6 +30,10 @@ from control_plane.storage.migrations.versions import (
     b9a3d5e7f1b8_join_preview_retirement as preview_retirement_join,
     c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames_join,
     c1c5f7a9b3d0_join_preview_compatibility as preview_compatibility_join,
+    b0a2c4e6f8d1_retire_preview_idle_reservations as idle_retirement,
+    b1b3d5f7a9e2_join_idle_retirement as idle_retirement_join,
+    b2c4e6a8f0d3_join_idle_hostnames as idle_hostnames_join,
+    f87c72d690ab_join_idle_compatibility as idle_compatibility_join,
 )
 
 AUTHZ_COMPATIBILITY_FLOOR_REVISION = "f3b5d7e9a1c2"
@@ -39,7 +43,7 @@ def _migration_head() -> str:
     head = ScriptDirectory(str(Path(__file__).parent / "migrations")).get_current_head()
     if head is None:
         raise ValueError("Launchplane migration graph has no head.")
-    if head != preview_compatibility_join.revision:
+    if head != idle_compatibility_join.revision:
         raise ValueError(
             "The prepared retired-delivery migration hold must be reconciled before "
             "advancing the migration head. See docs/operations.md#prepared-retired-"
@@ -69,6 +73,10 @@ RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS = (
     preview_settings.revision,
     preview_retirement_join.revision,
     preview_hostnames_join.revision,
+    preview_compatibility_join.revision,
+    idle_retirement.revision,
+    idle_retirement_join.revision,
+    idle_hostnames_join.revision,
     EXPECTED_ALEMBIC_HEAD_REVISION,
 )
 ORDINARY_AGENT_DELIVERY_ACTIVATION_TABLE = "launchplane_ordinary_agent_delivery_activations"
