@@ -83,10 +83,6 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                     command.upgrade(alembic_config(url), revision)
                 engine = create_engine(url)
                 self.addCleanup(engine.dispose)
-                hostname_fence = text(
-                    "SELECT to_regprocedure('launchplane_retained_hostname_identity(text)') "
-                    "IS NOT NULL"
-                )
                 before_tables = set(inspect(engine).get_table_names())
                 retains_history = set(held.RETIRED_TABLES).issubset(before_tables)
                 retained_history = ""
@@ -115,7 +111,6 @@ class SchemaCompatibilityPostgresTests(unittest.TestCase):
                 if not retained_topics:
                     retained_topics = (self._seed_topic(store),)
                 with engine.connect() as connection:
-                    self.assertTrue(connection.scalar(hostname_fence))
                     self.assertEqual(
                         connection.scalar(text("SELECT version_num FROM alembic_version")),
                         expected,

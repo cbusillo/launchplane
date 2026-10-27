@@ -5835,7 +5835,7 @@ class PostgresRecordStore(HumanSessionStore):
                 self._begin_serialized_write(session)
                 self._lock_product_authority_bundle_write(session)
                 if isinstance(row, LaunchplaneDokployTargetRow):
-                    self._assert_unreserved_disposable_hosts(
+                    self._assert_available_target_hosts(
                         session, DokployTargetRecord.model_validate(row.payload)
                     )
                     self._protect_testing_hold_non_use(
@@ -5853,7 +5853,7 @@ class PostgresRecordStore(HumanSessionStore):
                         LaunchplaneDokployTargetRow, (row.context, row.instance)
                     )
                     if previous_target is not None:
-                        self._assert_unreserved_disposable_hosts(
+                        self._assert_available_target_hosts(
                             session,
                             DokployTargetRecord.model_validate(previous_target.payload),
                             target_id=row.target_id,
@@ -6477,43 +6477,22 @@ class PostgresRecordStore(HumanSessionStore):
         """Checkpoint owned effects before the atomic config/success-receipt commit."""
 
         def guard(session: Any) -> None:
-            requested_hosts = {
-                retained_hostname_identity(host)
-                for host in (
-                    *bundle.dokploy_targets[0].public_hosts,
-                    *bundle.dokploy_targets[0].domains,
-                    *(
-                        effect.host
-                        for effect in bundle.dokploy_targets[0].pending_public_host_effects
-                    ),
-                    *(effect.host for effect in pending_effects),
-                )
-            }
-            for row in session.scalars(select(LaunchplanePrivateHealthEndpointRow)).all():
-                endpoint = PrivateHealthEndpointRecord.model_validate(row.payload)
-                if (
-                    endpoint.status == "active"
-                    and (endpoint.context, endpoint.instance)
-                    != (expected_target.context, expected_target.instance)
-                    and retained_hostname_identity(endpoint.url) in requested_hosts
-                ):
-                    raise DokployTargetRecordChanged(
-                        "A host is already owned by another lane's private endpoint."
-                    )
+            requested_hosts = bundle.dokploy_targets[0].hostname_claims | frozenset(
+                retained_hostname_identity(effect.host) for effect in pending_effects
+            )
+            self._assert_private_endpoint_host_ownership(
+                session,
+                requested_hosts,
+                context=expected_target.context,
+                instance=expected_target.instance,
+            )
             for row in session.scalars(select(LaunchplaneDokployTargetRow)).all():
                 if (row.context, row.instance) != (
                     expected_target.context,
                     expected_target.instance,
                 ):
                     other = DokployTargetRecord.model_validate(row.payload)
-                    if requested_hosts.intersection(
-                        retained_hostname_identity(host)
-                        for host in (
-                            *other.domains,
-                            *other.public_hosts,
-                            *(effect.host for effect in other.pending_public_host_effects),
-                        )
-                    ):
+                    if requested_hosts.intersection(other.hostname_claims):
                         raise DokployTargetRecordChanged(
                             "A public host is already owned by another target."
                         )
@@ -6712,7 +6691,7 @@ class PostgresRecordStore(HumanSessionStore):
                     if (item.context, item.instance) == (target.context, target.instance)
                 ]
                 for next_id in next_identities or [None]:
-                    self._assert_unreserved_disposable_hosts(session, target, target_id=next_id)
+                    self._assert_available_target_hosts(session, target, target_id=next_id)
             for identity in bundle.dokploy_target_ids:
                 if any(
                     (item.context, item.instance) == (identity.context, identity.instance)
@@ -6723,7 +6702,7 @@ class PostgresRecordStore(HumanSessionStore):
                     LaunchplaneDokployTargetRow, (identity.context, identity.instance)
                 )
                 if previous_target is not None:
-                    self._assert_unreserved_disposable_hosts(
+                    self._assert_available_target_hosts(
                         session,
                         DokployTargetRecord.model_validate(previous_target.payload),
                         target_id=identity.target_id,
@@ -15649,21 +15628,32 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             return self._retained_disposable_hostnames(session)
 
-    def _assert_unreserved_disposable_hosts(
+    @staticmethod
+    def _assert_private_endpoint_host_ownership(
+        session: Session, hosts: frozenset[str], *, context: str, instance: str
+    ) -> None:
+        for row in session.scalars(select(LaunchplanePrivateHealthEndpointRow)).all():
+            endpoint = PrivateHealthEndpointRecord.model_validate(row.payload)
+            if (
+                endpoint.status == "active"
+                and (endpoint.context, endpoint.instance) != (context, instance)
+                and retained_hostname_identity(endpoint.url) in hosts
+            ):
+                raise DokployTargetRecordChanged(
+                    "A host is already owned by another lane's private endpoint."
+                )
+
+    def _assert_available_target_hosts(
         self,
         session: Session,
         target: DokployTargetRecord,
         *,
         target_id: str | None = None,
     ) -> None:
-        requested = {
-            retained_hostname_identity(host)
-            for host in (
-                *target.domains,
-                *target.public_hosts,
-                *(effect.host for effect in target.pending_public_host_effects),
-            )
-        }
+        requested = target.hostname_claims
+        self._assert_private_endpoint_host_ownership(
+            session, requested, context=target.context, instance=target.instance
+        )
         if requested.intersection(
             retained_hostname_identity(host)
             for host in self._retained_disposable_hostnames(
@@ -30554,14 +30544,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if (row.context, row.instance) == (record.context, record.instance):
                     continue
                 target = DokployTargetRecord.model_validate(row.payload)
-                if hostname in {
-                    retained_hostname_identity(host)
-                    for host in (
-                        *target.domains,
-                        *target.public_hosts,
-                        *(effect.host for effect in target.pending_public_host_effects),
-                    )
-                }:
+                if hostname in target.hostname_claims:
                     raise DokployTargetRecordChanged(
                         "A private endpoint host is already owned by another lane's target."
                     )
@@ -31680,6 +31663,7 @@ class PostgresRecordStore(HumanSessionStore):
                 raise DokployTargetRecordChanged(
                     "Dokploy target record changed since it was reviewed."
                 )
+            self._assert_available_target_hosts(session, replacement_record)
             self._protect_testing_hold_non_use(session, replacement_record)
             row.updated_at = replacement_record.updated_at
             row.payload = self._payload_dict(replacement_record)
@@ -31697,6 +31681,8 @@ class PostgresRecordStore(HumanSessionStore):
         source_label: str,
     ) -> tuple[DokployTargetRecord, ProviderTargetRecord]:
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             result = self._compare_and_write_dokploy_target_domains_in_session(
                 session=session,
                 expected_record=expected_record,
@@ -31855,6 +31841,9 @@ class PostgresRecordStore(HumanSessionStore):
             raise DokployTargetRecordChanged(
                 "Provider-target record changed during domain authority repair."
             )
+        self._assert_available_target_hosts(
+            session, replacement_record, target_id=expected_target_id_record.target_id
+        )
         self._protect_testing_hold_non_use(session, replacement_record)
         row.updated_at = replacement_record.updated_at
         row.payload = self._payload_dict(replacement_record)

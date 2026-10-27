@@ -164,15 +164,7 @@ class TestingPublicIngressAdapter:
             raise ValueError("Testing hostname authority changed.")
         for other in self.store.list_dokploy_target_records():
             if (other.context, other.instance) != (target.context, target.instance) and (
-                retained_hostname_identity(generation.domain_host)
-                in {
-                    retained_hostname_identity(host)
-                    for host in (
-                        *other.domains,
-                        *other.public_hosts,
-                        *(effect.host for effect in other.pending_public_host_effects),
-                    )
-                }
+                retained_hostname_identity(generation.domain_host) in other.hostname_claims
             ):
                 raise ValueError("The testing hostname belongs to another target.")
         binding = self.store.read_route_binding_record(

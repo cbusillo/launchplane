@@ -5734,7 +5734,9 @@ recipient checks remain exact.
 
 Every supported active private-endpoint write, including recipient publication
 and its scoped inverse, takes the existing hostname transaction fence before
-rechecking foreign target domains, public hosts and pending effects. A competing
+rechecking foreign target domains, public hosts and pending effects. Target writes,
+including compare-and-write domain repair, also refuse a foreign active endpoint
+claim under the same short authority transaction. A competing
 provider operation returns `public_hosts_authority_busy` (HTTP 409). A settled
 foreign target claim returns `private_health_endpoint_host_owned` (HTTP 409);
 review ownership before retrying. Failed endpoint applies save no success

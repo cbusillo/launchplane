@@ -184,14 +184,7 @@ def plan_public_hosts(
             if (other.context, other.instance) != (
                 context,
                 instance,
-            ) and requested_identities.intersection(
-                retained_hostname_identity(host)
-                for host in (
-                    *other.domains,
-                    *other.public_hosts,
-                    *(effect.host for effect in other.pending_public_host_effects),
-                )
-            ):
+            ) and requested_identities.intersection(other.hostname_claims):
                 raise ValueError("A public host is already owned by another target.")
         host, token = source.read_dokploy_config(control_plane_root=control_plane_root)
         routes = fetch_dokploy_compose_domains_for_target_setup(

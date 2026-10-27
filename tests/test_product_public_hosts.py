@@ -9,7 +9,7 @@ from typing import ClassVar, cast
 from fastapi import FastAPI
 from httpx2 import Response
 from unittest.mock import Mock, patch
-from sqlalchemy import event, select
+from sqlalchemy import event, select, update
 from sqlalchemy.orm import Session
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -25,7 +25,11 @@ from control_plane.dokploy import api
 from control_plane.dokploy import source
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
-from control_plane.storage.postgres import PostgresRecordStore, LaunchplaneIdempotencyRow
+from control_plane.storage.postgres import (
+    PostgresRecordStore,
+    LaunchplaneIdempotencyRow,
+    LaunchplaneDokployTargetRow,
+)
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     PublicHostAuthorityBusy,
@@ -205,6 +209,44 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
         )
         return provider
 
+    async def test_target_writers_preserve_an_existing_private_endpoint_owner(self) -> None:
+        endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="foreign-owner",
+            product="foreign",
+            context="foreign",
+            instance="testing",
+            url=f"https://{HOSTS[0]}/health",
+            updated_at=self.target.updated_at,
+        )
+        self.store.write_private_health_endpoint_record(endpoint)
+        target = self.target.model_copy(update={"domains": (f" \t{HOSTS[0].upper()}.\n",)})
+        writers: tuple[Callable[[], object], ...] = (
+            lambda: self.store.write_dokploy_target_record(target),
+            lambda: self.store.compare_and_write_dokploy_target_record(
+                expected_record=self.target, replacement_record=target
+            ),
+            lambda: self.store.write_product_authority_bundle(
+                ProductAuthorityBundle(dokploy_targets=(target,))
+            ),
+            lambda: self.store.compare_and_write_dokploy_target_domains(
+                expected_record=self.target,
+                expected_target_id_record=self.target_id,
+                expected_provider_target_record=self.store.read_provider_target_record(
+                    context_name=CONTEXT, instance_name="prod"
+                ),
+                domains=target.domains,
+                updated_at=target.updated_at,
+                source_label="hostname-owner-fixture",
+            ),
+        )
+        for index, writer in enumerate(writers):
+            with self.subTest(writer=index), self.assertRaises(DokployTargetRecordChanged):
+                writer()
+        self.assertEqual(self.recorded(), self.target)
+        self.assertEqual(
+            self.store.read_private_health_endpoint_record(endpoint.endpoint_key), endpoint
+        )
+
     async def test_requested_alias_cannot_take_foreign_private_endpoint(self) -> None:
         self.store.write_private_health_endpoint_record(
             PrivateHealthEndpointRecord(
@@ -242,7 +284,15 @@ class ProductPublicHostsTests(unittest.IsolatedAsyncioTestCase):
                     )
                     if claim_field == "pending_public_host_effects":
                         target = target.model_copy(update={"pending_public_host_effects": pending})
-                    self.store.write_dokploy_target_record(target)
+                    with self.store._engine.begin() as connection:
+                        connection.execute(
+                            update(LaunchplaneDokployTargetRow)
+                            .where(
+                                LaunchplaneDokployTargetRow.context == target.context,
+                                LaunchplaneDokployTargetRow.instance == target.instance,
+                            )
+                            .values(payload=target.model_dump(mode="json"))
+                        )
                     provider = Mock()
                     with self.assertRaises(DokployTargetRecordChanged):
                         self.write_host_bundle(

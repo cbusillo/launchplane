@@ -536,6 +536,11 @@ class BrowserRouteRepairTests(_BrowserRouteRepairFixture):
         self.assertEqual(current["current_domains"], review["proposed_domains"])
 
     async def test_domain_respects_retained_hostname_and_testing_custody(self) -> None:
+        with patch.object(
+            self.store, "retained_disposable_hostnames", return_value=("other.example.test",)
+        ):
+            allowed = await self.post("/v1/dokploy-targets/setup", self.domain_payload)
+        self.assertEqual(allowed.status_code, 202, allowed.text)
         for retained in (
             "app.example.test",
             "APP.EXAMPLE.TEST.",

@@ -24,6 +24,9 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as held,
     e8d2f6a0b4c7_drop_preview_enablement as previous_release,
     e9e3a7b1c5d8_join_retirement_paths as previous_join,
+    f2c6e0a4b8d1_join_topics_public_host_fences as topics_hostnames,
+    a6e0a2c4d8f5_join_archive_topics_hostnames as archive_hostnames,
+    c0b4e6f8a2c9_join_preview_hostnames as preview_hostnames,
 )
 from control_plane.storage.postgres import LaunchplaneDokployTargetRow, PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
@@ -236,7 +239,14 @@ class PublicHostAuthorityPostgresTests(unittest.TestCase):
             self._check_explicit_retirement_target(target_revision)
 
     def _check_explicit_retirement_target(self, target_revision: str) -> None:
-        for initial_revision in ("", SCHEMA_MIGRATION_TARGET_REVISION):
+        for initial_revision in (
+            "",
+            hostnames.revision,
+            topics_hostnames.revision,
+            archive_hostnames.revision,
+            preview_hostnames.revision,
+            SCHEMA_MIGRATION_TARGET_REVISION,
+        ):
             with (
                 self.subTest(initial_revision=initial_revision),
                 _isolated_postgres_database() as url,
@@ -382,9 +392,12 @@ class PublicHostAuthorityPostgresTests(unittest.TestCase):
                 )
                 try:
                     self.assertTrue(entered.wait(10))
-                    for key in ("foreign", "new-endpoint"):
+                    for key, url in (
+                        ("foreign", disabled.url),
+                        ("new-endpoint", f"https://{target.public_hosts[0].upper()}.:8443/health"),
+                    ):
                         active = disabled.model_copy(
-                            update={"endpoint_key": key, "status": "active"}
+                            update={"endpoint_key": key, "status": "active", "url": url}
                         )
                         with self.subTest(key=key), self.assertRaises(PublicHostAuthorityBusy):
                             workers.submit(

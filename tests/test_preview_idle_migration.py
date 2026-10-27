@@ -14,6 +14,7 @@ from control_plane.storage.migrations.versions import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.schema_migration import (
     alembic_config,
+    migrate_schema,
     schema_migration_target,
     _IDLE_JOIN_BY_SOURCE,
 )
@@ -70,6 +71,8 @@ def assert_idle_retirement(test: unittest.TestCase, database_url: str, target: s
         original_intent={"refresh": True},
     )
     test.assertEqual(acquired.status, "acquired")
+    if store.database_dialect_name == "postgresql":
+        migrate_schema(database_url=database_url)
     store.verify_schema()
 
 

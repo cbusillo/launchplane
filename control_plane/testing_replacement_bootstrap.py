@@ -353,15 +353,7 @@ def bootstrap_plan(
         in {retained_hostname_identity(host) for host in store.retained_disposable_hostnames()}
         or (generation is None and requested_host in old_hosts)
         or any(
-            requested_host
-            in {
-                retained_hostname_identity(host)
-                for host in (
-                    *other.domains,
-                    *other.public_hosts,
-                    *(effect.host for effect in other.pending_public_host_effects),
-                )
-            }
+            requested_host in other.hostname_claims
             and (
                 generation is None
                 or (other.context, other.instance) != (request.context, "testing")
