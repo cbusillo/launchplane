@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from control_plane._preview_preservation_program import PREVIEW_PRESERVATION_PROGRAM
+from control_plane.preview_preservation import PREVIEW_PRESERVATION_CAPTURE_PHASE
 from tests.test_filestore_capture import capture_namespace
 
 
@@ -49,6 +50,7 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
                 "preservation_id": self.identifier,
                 "source": self.source,
                 "mode": "preserve",
+                "provider_effect_phase": PREVIEW_PRESERVATION_CAPTURE_PHASE,
                 "snapshot": self.snapshot,
             },
             deadline=time.monotonic() + 60,
@@ -212,6 +214,7 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
                     self.preserve()
                 self.database_facts[key] = previous
                 self.assertFalse(self.path.exists())
+
         for path in (
             self.private / "upper/attachment",
             self.private / "work/private",
@@ -227,6 +230,15 @@ class EmptyOverlayPreservationTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), b"only copy")
                 path.unlink()
                 self.assertFalse(self.path.exists())
+
+    def test_running_database_custody_is_checked_before_stopping_idle_runner(self) -> None:
+        self.containers["script-runner"]["State"]["Running"] = True
+        self.database_facts["databases"].append(self.source["database_name"])
+        with self.assertRaises(RuntimeError):
+            self.preserve()
+        self.assertTrue(self.containers["script-runner"]["State"]["Running"])
+        self.assertFalse(any(call[0] == "stop" for call in self.calls))
+        self.assertFalse(self.path.exists())
 
     def test_reopened_source_storage_drift_and_changed_pin_refuse_each_checkpoint(self) -> None:
         receipt = self.preserve()

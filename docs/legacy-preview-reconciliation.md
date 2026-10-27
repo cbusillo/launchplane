@@ -264,9 +264,15 @@ inspection only reads custody; it never starts or stops a database. Full
 same-key continuation requalifies the database before destruction. Start
 capacity is required only when starting the database; an unavailable policy
 still refuses that start. Plain backup capture retains its capacity gate.
+A verification that may start a database uses the current lease's unchanged
+effect checkpoint under the short mutation dispatch guard. Later teardown
+retries keep their advanced phase; they do not restart capture. Unguarded
+verification can read a running database but cannot start a stopped one.
 A read-only transaction must positively establish that
 only the empty `postgres` database remains, with no other client connections
-or prepared transactions. Additional databases or private files in the data,
+or prepared transactions. The running database's custody is checked before
+stopping an idle runner, then connections and use are checked again after
+quiescence. Additional databases or private files in the data,
 addon, log, overlay upper or work directories refuse qualification. Exact
 mounts, exclusive consumers, volume creation/backing identities and the
 original snapshot pin must agree. The shared lower and its matching snapshot

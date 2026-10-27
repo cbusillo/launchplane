@@ -592,6 +592,8 @@ def execute_odoo_preview_apply_result(
                 mode="verify",
                 timeout_seconds=current_request.apply.timeout_seconds,
                 check=provider_lease_check,
+                effect_checkpoint=provider_effect_checkpoint,
+                mutation_guard=provider_mutation_guard,
             )
 
         @contextmanager

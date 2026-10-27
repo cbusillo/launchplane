@@ -419,15 +419,34 @@ def run_preview_preservation(
                 if binding != current_source["provider_binding_sha256"]:
                     raise ValueError("Original preview changed during preservation qualification.")
 
+    dispatch_phase = PREVIEW_PRESERVATION_CAPTURE_PHASE if mode == "preserve" else ""
+    if mode == "verify" and current_source is not None and effect_checkpoint is not None:
+        current = store.read_idempotency_record_by_id(operation_record_id)
+        if current is None or current.state != "running" or not current.provider_effect_phase:
+            raise ValueError("Preview verification requires its current provider checkpoint.")
+        dispatch_phase = current.provider_effect_phase
+    if dispatch_phase and current_source is not None and mutation_guard is None:
+        raise ValueError("Preview preservation effects require the current mutation guard.")
+
     def dispatch(send: Callable[[], None]) -> None:
         check()
-        if mode != "preserve":
+        if not dispatch_phase:
             send()
             return
         assert effect_checkpoint is not None
         with mutation_guard() if mutation_guard else nullcontext():
             check()
-            effect_checkpoint(PREVIEW_PRESERVATION_CAPTURE_PHASE)
+            if mode == "verify":
+                current = store.read_idempotency_record_by_id(operation_record_id)
+                if (
+                    current is None
+                    or current.state != "running"
+                    or current.provider_effect_phase != dispatch_phase
+                ):
+                    raise ValueError(
+                        "Preview verification provider checkpoint changed before dispatch."
+                    )
+            effect_checkpoint(dispatch_phase)
             send()
 
     memory_floor = None
@@ -447,6 +466,7 @@ def run_preview_preservation(
         program=PREVIEW_PRESERVATION_PROGRAM,
         payload={
             "mode": mode,
+            "provider_effect_phase": dispatch_phase,
             "authority": authority.model_dump(mode="json"),
             "preservation_id": authority.preservation_id,
             "source": current_source,

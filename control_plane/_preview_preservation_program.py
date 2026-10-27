@@ -244,15 +244,22 @@ def inspect_empty_overlay(source: dict, containers: dict, *, allow_running_runne
     return binding
 
 
-def qualify_empty_overlay_database(database: dict) -> None:
+def qualify_empty_overlay_database(database: dict, *, check_connections: bool = True) -> None:
     with preservation_database(database):
         facts = json.loads(database_query(database['Id'], 'postgres', b"BEGIN READ ONLY; SELECT json_build_object('databases', (SELECT json_agg(datname ORDER BY datname) FROM pg_database WHERE NOT datistemplate), 'connections', (SELECT count(*) FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND backend_type='client backend'), 'relations', (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'), 'prepared', (SELECT count(*) FROM pg_prepared_xacts)); COMMIT;\n"))
-        if facts != {'databases': ['postgres'], 'connections': 0, 'relations': 0, 'prepared': 0}:
+        if not check_connections:
+            facts.pop('connections', None)
+        expected = {'databases': ['postgres'], 'relations': 0, 'prepared': 0}
+        if check_connections:
+            expected['connections'] = 0
+        if facts != expected:
             raise RuntimeError('Preview preservation empty overlay has database custody or use')
 
 
 def preserve_empty_overlay(path: Path, source: dict, containers: dict) -> dict:
     binding = inspect_empty_overlay(source, containers, allow_running_runner=True)
+    if containers['database']['State']['Running']:
+        qualify_empty_overlay_database(containers['database'], check_connections=False)
     if containers['script-runner']['State']['Running']:
         docker('stop', '-t', '30', containers['script-runner']['Id'])
     current = preview_containers(source)
@@ -441,6 +448,8 @@ def require_preservation_memory() -> None:
 def preservation_database(database: dict):
     started = not database['State']['Running']
     if started:
+        if not spec.get('provider_effect_phase'):
+            raise RuntimeError('Preview preservation database start requires a guarded provider checkpoint')
         require_preservation_memory()
     try:
         if started:

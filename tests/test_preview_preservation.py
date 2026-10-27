@@ -3,7 +3,7 @@ import hashlib
 import io
 import json
 from datetime import datetime, timedelta, timezone
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from collections.abc import Iterator
 from pathlib import Path
 import subprocess
@@ -27,6 +27,7 @@ from control_plane.odoo_preview_apply_execution import (
 )
 from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope, ODOO_PREVIEW_APPLY_ROUTE
 from control_plane.preview_preservation import (
+    PREVIEW_PRESERVATION_CAPTURE_PHASE,
     read_preview_preservation_authority,
     require_preview_preservation_admission,
 )
@@ -58,6 +59,7 @@ class PreviewPreservationProgramTests(unittest.TestCase):
             "preservation_id": self.identifier,
             "source": self.source,
             "mode": "preserve",
+            "provider_effect_phase": PREVIEW_PRESERVATION_CAPTURE_PHASE,
             "storage_budget": {
                 "database_bytes": 1024,
                 "filestore_bytes": 1024,
@@ -199,7 +201,11 @@ class PreviewPreservationProgramTests(unittest.TestCase):
             with self.subTest(failed=failed):
                 namespace = capture_namespace(PREVIEW_PRESERVATION_PROGRAM)
                 clock = Mock(return_value=100.0)
-                namespace.update(deadline=90.0, spec={}, wait_database=Mock())
+                namespace.update(
+                    deadline=90.0,
+                    spec={"provider_effect_phase": PREVIEW_PRESERVATION_CAPTURE_PHASE},
+                    wait_database=Mock(),
+                )
                 database = {"Id": "fixture-db", "State": {"Running": False}}
                 complete = subprocess.CompletedProcess([], 0, b"", b"")
                 with (
@@ -1415,10 +1421,20 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
 
         def preservation(**kwargs: Any) -> None:
             modes.append(kwargs["mode"])
+            with kwargs["mutation_guard"]():
+                kwargs["check"]()
+                current = self.store.read_idempotency_record_by_id(
+                    self.first_retry_record.record_id
+                )
+                assert current is not None
+                kwargs["effect_checkpoint"](current.provider_effect_phase)
 
         self.retry_preservation.side_effect = preservation
         self.retry_provider.side_effect = reached_destroy
-        with self.assertRaises(RuntimeError) as raised:
+        with (
+            patch.object(self.store, "serialize_existing_preview_refresh", side_effect=nullcontext),
+            self.assertRaises(RuntimeError) as raised,
+        ):
             operation.run(self.store)
         self.assertIs(raised.exception, reached_destroy)
         self.assertEqual(modes, ["verify"])
@@ -1609,7 +1625,10 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
 
                 def remote(**kwargs: Any) -> None:
                     if source is not None:
-                        self.assertTrue(kwargs["payload"]["memory_floor_unavailable"])
+                        native = capture_namespace(kwargs["program"])
+                        native["spec"] = kwargs["payload"]
+                        with self.assertRaises(RuntimeError):
+                            native["require_preservation_memory"]()
                     kwargs["receive"](
                         {
                             "type": "complete",
@@ -1649,3 +1668,128 @@ class PreviewPreservationAuthorityTests(unittest.TestCase):
                     )
                 if source is None:
                     floor.assert_not_called()
+
+    def test_verification_start_uses_current_phase_inside_short_dispatch_guard(self) -> None:
+        from control_plane.preview_preservation import run_preview_preservation
+
+        self.complete_original()
+        adapter = self.adapter()
+        operation = self.store.reserve_mutation(
+            scope="guarded-verification",
+            route_path=ODOO_PREVIEW_APPLY_ROUTE,
+            idempotency_key="guarded-verification",
+            request_fingerprint="guarded-verification",
+            lease_owner="guarded-verification",
+            reconciliation_key=adapter.reconciliation_key(),
+            provider_target_key=adapter.target_key(),
+            original_intent=adapter.original_intent(),
+        ).record
+        assert operation is not None
+        checkpointed = self.store.checkpoint_mutation_provider_effect(
+            reservation=operation, effect_phase="domain_delete"
+        ).record
+        assert checkpointed is not None
+        operation = checkpointed
+        source = {"provider_binding_sha256": "fixture-provider-binding"}
+        for guarded, drift in ((True, False), (True, True), (False, False)):
+            with self.subTest(guarded=guarded, drift=drift):
+                current = self.store.read_idempotency_record_by_id(operation.record_id)
+                assert current is not None
+                inside = False
+                effects: list[tuple[str, ...]] = []
+
+                @contextmanager
+                def guard() -> Iterator[None]:
+                    nonlocal inside
+                    inside = True
+                    try:
+                        yield
+                    finally:
+                        inside = False
+
+                def checkpoint(phase: str) -> None:
+                    self.assertTrue(inside)
+                    self.assertEqual(phase, current.provider_effect_phase)
+                    result = self.store.checkpoint_mutation_provider_effect(
+                        reservation=current, effect_phase=phase
+                    )
+                    self.assertEqual(result.status, "updated")
+
+                def remote(**kwargs: Any) -> None:
+                    self.assertFalse(inside)
+                    native = capture_namespace(kwargs["program"])
+
+                    def docker(*arguments: str) -> bytes:
+                        self.assertTrue(inside)
+                        effects.append(arguments)
+                        return b""
+
+                    native.update(
+                        spec=kwargs["payload"],
+                        docker=docker,
+                        wait_database=Mock(),
+                        deadline=time.monotonic() + 60,
+                    )
+                    if drift:
+                        self.store.checkpoint_mutation_provider_effect(
+                            reservation=current, effect_phase="compose_delete"
+                        )
+
+                    def send() -> None:
+                        with native["preservation_database"](
+                            {"Id": "fixture-cold-db", "State": {"Running": False}}
+                        ):
+                            pass
+
+                    if guarded and not drift:
+                        kwargs["dispatch_guard"](send)
+                    else:
+                        with self.assertRaises((RuntimeError, ValueError)):
+                            kwargs["dispatch_guard"](send)
+                    self.assertFalse(inside)
+                    kwargs["receive"](
+                        {
+                            "type": "complete",
+                            "preservation_id": self.authority().preservation_id,
+                            "source": source,
+                            "volume_binding": {"fixture": True},
+                        }
+                    )
+
+                with (
+                    patch(
+                        "control_plane.preview_preservation.read_preview_preservation_source",
+                        return_value=source,
+                    ),
+                    patch(
+                        "control_plane.dokploy.source.read_dokploy_config",
+                        return_value=("https://fixture.invalid", "fixture"),
+                    ),
+                    patch(
+                        "control_plane.dokploy.memory_capacity.preview_host_memory_floor",
+                        return_value=None,
+                    ),
+                    patch(
+                        "control_plane.dokploy.native_copy_stream._read_remote", side_effect=remote
+                    ),
+                ):
+                    run_preview_preservation(
+                        store=self.store,
+                        profile=self.profile,
+                        issued_plan=self.issued,
+                        original_reservation_id=self.original.record_id,
+                        operation_record_id=operation.record_id,
+                        control_plane_root=self.root,
+                        mode="verify",
+                        timeout_seconds=60,
+                        check=lambda: None,
+                        effect_checkpoint=checkpoint if guarded else None,
+                        mutation_guard=guard if guarded else None,
+                    )
+                if guarded and not drift:
+                    self.assertTrue(any(call[0] == "start" for call in effects))
+                    after = self.store.read_idempotency_record_by_id(operation.record_id)
+                    assert after is not None
+                    self.assertEqual(after.provider_effect_phase, current.provider_effect_phase)
+                else:
+                    self.assertEqual(effects, [])
