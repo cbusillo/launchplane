@@ -265,16 +265,20 @@ def prepare_preview_filestore(
         dispatch_guard=dispatch_guard,
     )
     if len(frames) == 1 and frames[0] == {
-        "type": "failed",
-        "reason": PREVIEW_RESTORE_DISPOSAL_REQUIRED,
+        "type": "complete",
+        "restore_disposition": PREVIEW_RESTORE_DISPOSAL_REQUIRED,
     }:
         raise PreviewRestoreDisposalRequired()
     if len(frames) == 1 and frames[0] == {
-        "type": "failed",
-        "reason": PREVIEW_RESTORE_CUSTODY_UNKNOWN,
+        "type": "complete",
+        "restore_disposition": PREVIEW_RESTORE_CUSTODY_UNKNOWN,
     }:
         raise PreviewRestoreCustodyUnknown()
-    if len(frames) != 1 or frames[0].get("type") != "complete":
+    if (
+        len(frames) != 1
+        or frames[0].get("type") != "complete"
+        or set(frames[0]) != {"type", "declaration"}
+    ):
         raise click.ClickException("Preview filestore preparation is unavailable.")
     declaration = frames[0].get("declaration")
     if declaration is None:
@@ -465,9 +469,9 @@ try:
     declaration = prepare(json.loads(base64.b64decode(sys.argv[1], validate=True)))
     print(sys.argv[2] + json.dumps({'type': 'complete', 'declaration': declaration}), flush=True)
 except InterruptedPreviewRestore:
-    print(sys.argv[2] + json.dumps({'type': 'failed', 'reason': PREVIEW_RESTORE_DISPOSAL_REQUIRED}), flush=True)
+    print(sys.argv[2] + json.dumps({'type': 'complete', 'restore_disposition': PREVIEW_RESTORE_DISPOSAL_REQUIRED}), flush=True)
 except PreviewRestoreCustodyUnavailable:
-    print(sys.argv[2] + json.dumps({'type': 'failed', 'reason': PREVIEW_RESTORE_CUSTODY_UNKNOWN}), flush=True)
+    print(sys.argv[2] + json.dumps({'type': 'complete', 'restore_disposition': PREVIEW_RESTORE_CUSTODY_UNKNOWN}), flush=True)
 except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
     print(sys.argv[2] + json.dumps({'type': 'failed'}), flush=True)
 """

@@ -2,6 +2,51 @@
 title: Client release review
 ---
 
+## Generic-web production settings
+
+The reviewed generic-web candidate includes the production lane's non-secret
+runtime settings and removal intent, alongside its artifact and source commit.
+Changing only those settings requires a new exact-checklist acceptance. Global
+platform configuration, other lanes and managed secret values are excluded.
+The release page and release record identify the settings being shipped.
+
+The existing promotion delivers the accepted snapshot through the verified
+backup and deployment gates, then checks production health and runtime identity.
+Settings changes during the backup wait refuse the first forward effect. No
+product build input, workflow, grant or direct production runtime sync is added.
+
+Deployment records retain the reviewed snapshot in `runtime_source`. Each new
+release captures its predecessor's setting values or absences in that new record,
+without rewriting the predecessor. Known accepted settings take precedence over
+provider drift. Recovery reads that pinned baseline with its artifact, including
+removed values and newly added keys that must disappear. A rollback without
+retained settings for the current release's keys refuses before deployment. The release drill uses the promotion's pinned
+predecessor and reapplies the same accepted snapshot after its second backup.
+
+Dokploy application and Compose targets both save and read back the snapshot
+before deployment. Production retains existing provider substitutions; testing's
+stricter input checks remain unchanged. Ordinary production redeploys retain and
+redeliver their recorded release settings, rather than applying staged changes.
+That also returns drift from a direct runtime sync to the reviewed values.
+Keys now owned by effective managed secret bindings stay on the secret delivery
+path during deploy, rollback and recovery. Historical release evidence stays
+unchanged; this settings path neither reads secret versions nor activates them.
+Legacy production inventories can still identify their artifact without a linked
+deployment record. Their settings remain unrecorded; a settings-bearing forward
+deployment still requires its exact predecessor and rollback evidence before effects.
+Rejected snapshot values are omitted from validation and deployment error messages.
+Two-slot lanes keep their separate qualified slot-settings contract and do not
+enter this conventional-target settings path.
+
+Automatically starting the first settings release on a legacy
+Director-standing product needs an
+explicit existing release request (`POST /v1/release-review/requests`) bound to
+that exact checklist. Deploying this source capability alone therefore starts no
+legacy settings activation, including one bundled with new code. The product's owning session records that
+request, and existing standing acceptance starts the gated release. No extra
+profile switch or grant is needed. Client invitations remain disabled for
+Director-standing products.
+
 An Odoo testing copy published by a native rebuild must match its ordinary
 testing release tuple before candidate review, website-settings preparation or
 promotion source selection. A different served artifact or unavailable native
@@ -172,7 +217,7 @@ are omitted. If the second read fails, the checklist remains unavailable with
 approval, and no decision, promotion, or other write is retried by this path.
 
 When production and testing have the same complete recorded release identity
-(artifact, source commit and shared inputs), the review returns
+(artifact, source commit, shared inputs and production settings), the review returns
 `no_new_release: true`, `required: false` and `approved: false`, with an empty
 checklist and no approval blocker. This is not a new acceptance. The Client page
 says there is no new release to accept, keeps the previous release-run evidence,

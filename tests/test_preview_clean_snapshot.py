@@ -1,6 +1,7 @@
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from datetime import datetime, timezone
 import base64
+import click
 import hashlib
 import fcntl
 import io
@@ -32,8 +33,9 @@ from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY, render_o
 from control_plane.integration_readback import INTEGRATION_READBACK_PROGRAM
 from control_plane.preview_filestore import (
     PREPARE_PREVIEW_FILESTORE_PROGRAM,
-    PREVIEW_RESTORE_DISPOSAL_REQUIRED,
-    PREVIEW_RESTORE_CUSTODY_UNKNOWN,
+    PreviewRestoreCustodyUnknown,
+    PreviewRestoreDisposalRequired,
+    prepare_preview_filestore,
 )
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 
@@ -220,6 +222,31 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         result = json.loads(output.getvalue().removeprefix("frame:"))
         assert isinstance(result, dict)
         return result
+
+    def assert_native_refusal(self, frame: dict[str, Any], expected: type[Exception]) -> None:
+        from control_plane.dokploy import native_copy_stream
+        from tests.test_odoo_testing_native_source import Connection
+
+        with (
+            patch.object(
+                native_copy_stream, "connect", return_value=nullcontext(Connection(frame))
+            ),
+            self.assertRaises(expected) as caught,
+        ):
+            prepare_preview_filestore(
+                host="https://provider.invalid",
+                token="fixture",
+                server_id=self.snapshot.server_id,
+                project=self.project,
+                data_volume="preview-data",
+                database_volume="preview-db",
+                logs_volume="preview-logs",
+                database_name=self.database,
+                snapshot=self.snapshot,
+                apply=False,
+                dispatch_guard=lambda dispatch: dispatch(),
+            )
+        self.assertIs(type(caught.exception), expected)
 
     def execute_script(self, script: str) -> str:
         output = io.StringIO()
@@ -576,30 +603,66 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_script()
         self.killed_during_restore = False
-        self.assertEqual(
+        self.assert_native_refusal(
             self.prepare_filestore(snapshot=self.snapshot, apply=False),
-            {"type": "failed", "reason": PREVIEW_RESTORE_DISPOSAL_REQUIRED},
+            PreviewRestoreDisposalRequired,
         )
         newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
-        self.assertEqual(
+        self.assert_native_refusal(
             self.prepare_filestore(snapshot=newer, apply=False),
-            {"type": "failed", "reason": PREVIEW_RESTORE_DISPOSAL_REQUIRED},
+            PreviewRestoreDisposalRequired,
         )
         attempt = next((self.source.parent / "preview-attempts").glob("*.json"))
         legacy = json.loads(attempt.read_text())
         legacy.pop("started")
         attempt.write_text(json.dumps(legacy))
-        self.assertEqual(
+        self.assert_native_refusal(
             self.prepare_filestore(snapshot=self.snapshot, apply=False),
-            {"type": "failed", "reason": PREVIEW_RESTORE_CUSTODY_UNKNOWN},
+            PreviewRestoreCustodyUnknown,
         )
         self.calls.clear()
-        self.assertEqual(self.prepare_filestore(snapshot=newer, apply=False)["type"], "failed")
+        self.assert_native_refusal(
+            self.prepare_filestore(snapshot=newer, apply=False),
+            PreviewRestoreCustodyUnknown,
+        )
         with self.assertRaises(RuntimeError):
             self.run_script(snapshot=newer)
         self.assertTrue(self.present)
         self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
         self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
+
+    def test_native_transport_preserves_interrupted_restore_classification(self) -> None:
+        from control_plane.dokploy import native_copy_stream
+
+        self.killed_during_restore = True
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.killed_during_restore = False
+        receipt = next((self.source.parent / "preview-attempts").glob("*.json"))
+        for legacy, refusal in (
+            (False, PreviewRestoreDisposalRequired),
+            (True, PreviewRestoreCustodyUnknown),
+        ):
+            with self.subTest(legacy=legacy):
+                if legacy:
+                    retained = json.loads(receipt.read_text())
+                    retained.pop("started")
+                    receipt.write_text(json.dumps(retained))
+                frame = self.prepare_filestore(snapshot=self.snapshot, apply=False)
+                self.calls.clear()
+                for candidate, expected in (
+                    (frame, refusal),
+                    ({**frame, "unexpected": True}, click.ClickException),
+                    ({**frame, "declaration": None}, click.ClickException),
+                    ({"type": "complete"}, click.ClickException),
+                    (
+                        {"type": "complete", "restore_disposition": "unknown"},
+                        click.ClickException,
+                    ),
+                    ({"type": "failed"}, native_copy_stream.NativeProgramFailed),
+                ):
+                    with self.subTest(frame=candidate):
+                        self.assert_native_refusal(candidate, expected)
 
     def test_interrupted_receipt_never_qualifies_shared_or_hidden_data(self) -> None:
         self.killed_during_restore = True
@@ -748,10 +811,10 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         attachment.write_bytes(b"attachment created during module update")
         self.calls.clear()
         result = self.prepare_filestore(snapshot=self.snapshot)
-        self.assertEqual(result["type"], "failed")
-        self.assertEqual(
-            self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
-            "failed",
+        self.assert_native_refusal(result, PreviewRestoreDisposalRequired)
+        self.assert_native_refusal(
+            self.prepare_filestore(snapshot=self.snapshot, require_existing=True),
+            PreviewRestoreDisposalRequired,
         )
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
         with self.assertRaises(RuntimeError):
@@ -777,7 +840,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         for role in ("web", "script-runner"):
             self.containers[role]["Mounts"].pop()
         result = self.prepare_filestore(snapshot=self.snapshot)
-        self.assertEqual(result["type"], "failed")
+        self.assert_native_refusal(result, PreviewRestoreDisposalRequired)
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
 
     def test_foreign_overlay_or_aliased_upper_refuses_before_data_changes(self) -> None:

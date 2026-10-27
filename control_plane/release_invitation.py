@@ -59,12 +59,14 @@ class ReleaseInvitationBackoff:
     release_waits: dict[str, tuple[str, float]] = field(default_factory=dict)
 
 
-def _client_release_requests_enabled(profile: LaunchplaneProductProfileRecord) -> bool:
+def _client_release_requests_enabled(
+    profile: LaunchplaneProductProfileRecord, *, include_director_standing: bool = False
+) -> bool:
     return (
         profile.is_active
         and profile.production_use != "prelaunch"
-        and profile.release_on_acceptance != "director_standing"
         and profile.owner.is_set
+        and (include_director_standing or profile.release_on_acceptance != "director_standing")
     )
 
 
@@ -179,6 +181,12 @@ def _timestamp(value: object) -> datetime:
 
 
 def _settings_invitation_key(checklist: ReleaseChecklist) -> str:
+    settings = checklist.candidate.runtime_settings
+    if settings is not None:
+        if settings != checklist.production.runtime_settings:
+            return hashlib.sha256(
+                json.dumps(settings.model_dump(), sort_keys=True).encode()
+            ).hexdigest()
     if (
         checklist.website_settings is None
         or checklist.candidate.website_settings_sha256
@@ -188,6 +196,12 @@ def _settings_invitation_key(checklist: ReleaseChecklist) -> str:
     return hashlib.sha256(
         f"website-settings:{checklist.candidate.website_settings_sha256}".encode()
     ).hexdigest()
+
+
+def _settings_review_note(checklist: ReleaseChecklist) -> str:
+    if checklist.candidate.runtime_settings is not None:
+        return "Review the prepared production settings on the release page. Rollback restores the previous settings with the previous version."
+    return WEBSITE_SETTINGS_REVIEW_NOTE
 
 
 def _change_link(change: InvitationChange) -> str:
@@ -1022,7 +1036,7 @@ def publish_release_invitation(
         change_links = {key: _change_link(change) for key, change in client_changes.items()}
         notification_links = {key: change_links[key] for key in notification_changes}
         if settings_key:
-            change_links[settings_key] = WEBSITE_SETTINGS_REVIEW_NOTE
+            change_links[settings_key] = _settings_review_note(review.checklist)
             notification_links[settings_key] = change_links[settings_key]
         marker = release_invitation_marker(profile.product, review.checklist.candidate)
         issue_marker = release_request_issue_marker(profile.product)
@@ -1136,7 +1150,8 @@ def publish_release_invitation(
             # steps were displayed, or corrected notes on its source PR. Refresh
             # that content silently before trusting or reminding from the receipt.
             release_steps_changed = request is not None and (
-                (WEBSITE_SETTINGS_REVIEW_NOTE in _comment_lines(request)) != bool(settings_key)
+                (_settings_review_note(review.checklist) in _comment_lines(request))
+                != bool(settings_key)
                 or any(
                     link not in _comment_lines(request)
                     for key, link in change_links.items()
@@ -1226,7 +1241,11 @@ def publish_release_invitation(
             )
             if settings_key:
                 action = (
-                    "review the prepared website settings on the release page"
+                    (
+                        "review the prepared production settings on the release page"
+                        if review.checklist.candidate.runtime_settings is not None
+                        else "review the prepared website settings on the release page"
+                    )
                     + (" and check the changes on the testing site" if client_changes else "")
                     + ", then press **Accept** or **Request changes**."
                 )
