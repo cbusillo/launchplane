@@ -79,6 +79,8 @@ current managed configuration across inspection; the frozen activation
 configuration remains a guard on the original operation. The provider's pending
 runtime identity must agree with the completed inventory apart from its completion time;
 provider image inputs retain the Compose deploy writer's artifact value.
+Changed delivered inputs must match their supported runtime sync before collection;
+current qualification never delivers values itself.
 It then reads the registered host through the existing private transport. The
 fixed program checks every extant container, including stopped containers, and
 current/previous Swarm service declarations even without tasks. Read-only

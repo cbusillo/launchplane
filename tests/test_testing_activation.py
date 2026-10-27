@@ -757,7 +757,7 @@ class ActivationTests(unittest.TestCase):
         evidence = json.loads(logs.records[-1].getMessage())
         self.assertEqual(evidence["trace_id"], "collection-refusal-trace")
         self.assertTrue(evidence["sites"])
-        self.assertNotIn("private-source-error", logs.output[0])
+        self.assertNotIn("private-source-error", "\n".join(logs.output))
         with patch.object(
             native_copy_stream,
             "_read_remote",
@@ -795,6 +795,41 @@ class ActivationTests(unittest.TestCase):
             ),
             {},
         )
+
+    def test_key_policy_change_during_compose_collection_stays_unknown(self) -> None:
+        from datetime import datetime, timezone
+        from control_plane.disposable_lane_collection import collect_testing_resource_facts
+        from control_plane.dokploy import native_copy_stream
+
+        host = self.retained_collection_fixture()
+        policy = self.store.list_runtime_key_safety_policy_records(status="active", limit=1)[0]
+
+        def inspect_then_change_policy(**arguments: Any) -> None:
+            host.read(**arguments)
+            self.store.write_runtime_key_safety_policy_record(
+                policy.model_copy(
+                    update={
+                        "rules": tuple(
+                            rule.model_copy(update={"secret_class": "prod_only"})
+                            for rule in policy.rules
+                        )
+                    }
+                )
+            )
+
+        with patch.object(
+            native_copy_stream, "_read_remote", side_effect=inspect_then_change_policy
+        ):
+            self.assertEqual(
+                collect_testing_resource_facts(
+                    self.store,
+                    root=self.root,
+                    product=self.product,
+                    context=self.context,
+                    now=datetime.now(timezone.utc),
+                ),
+                {},
+            )
 
     def test_nested_source_sites_keep_each_exception_raise_location(self) -> None:
         from traceback import walk_tb
