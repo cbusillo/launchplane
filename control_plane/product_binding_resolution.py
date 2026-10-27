@@ -91,6 +91,7 @@ def product_binding_resolution(
             population="declared_product_lanes_for_requested_integration_and_scopes",
             authorization_complete=authorization_complete,
             exclusions=(
+                "managed_preview_configuration_scope",
                 "historical_and_undeclared_lanes",
                 "other_integrations",
                 "runtime_delivery",

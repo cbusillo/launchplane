@@ -762,6 +762,9 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.write_binding(
             name="REMOVED_LANE", key="OLD_KEY", scope="context_instance", instance="removed"
         )
+        self.write_binding(
+            name="PREVIEW_SOURCE", key="PREVIEW_KEY", scope="context_instance", instance="preview"
+        )
         with patch.object(
             self.store, "read_secret_version", side_effect=AssertionError("No ciphertext reads")
         ):
@@ -776,6 +779,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         resolution = payload["lane_binding_resolution"]
         self.assertEqual(resolution["coverage"]["status"], "complete")
         lanes = {lane["instance"]: lane for lane in resolution["lanes"]}
+        self.assertEqual(set(lanes), {lane.instance for lane in self.profile.lanes})
         self.assertEqual(
             {binding["name"] for binding in lanes["prod"]["bindings"]},
             {self.source.name, "GLOBAL_ONLY"},

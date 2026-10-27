@@ -904,8 +904,11 @@ integration names. Repeated `scopes` parameters select `global`, `context` and/o
 `context_instance`; omitting them selects all three. For example,
 `?include_resolution=true&integration=launchplane_worker&scopes=context_instance`
 asks the shared selector the same scope question as the exact-lane worker
-resolver. `lane_binding_resolution` states these inputs and reports each declared
-lane's selected binding metadata and coverage. It reads no versions or values.
+resolver. `lane_binding_resolution` states these inputs and reports each stable
+lane declared in the product profile, its selected binding metadata and coverage.
+The managed preview configuration scope is explicitly excluded from this
+selection population, even though copy metadata can include it. Selection reads
+no versions or values.
 
 Selection uses the existing secret resolver's precedence before authorization.
 Each lane's qualification view returns selected rows only when authority covers
