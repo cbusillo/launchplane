@@ -6,7 +6,7 @@ export function monitoringEvidenceTrust(
   checks: readonly ProductHealthMonitoringCheckSummary[],
   now = Date.now(),
 ): DataProvenance["freshness_status"] {
-  const states = checks.filter(check => check.probe_effective).map(check =>
+  const states = checks.filter(check => check.probe_effective && !check.advisory).map(check =>
     ["verified", "recorded"].includes(check.trust_state) && Date.parse(check.provenance.stale_after) < now
       ? "stale" : check.trust_state,
   );

@@ -380,6 +380,77 @@ class SplitIngressTests(unittest.TestCase):
                 )
             observe.assert_not_called()
 
+    def test_managed_business_hosts_remain_required(self) -> None:
+        profile = _strict_public_profile(domain_name="business.example.test")
+        binding = split_binding().model_copy(
+            update={
+                "product": profile.product,
+                "context": profile.lanes[0].context,
+                "instance": profile.lanes[0].instance,
+            }
+        )
+        for kind in ("primary", "base_url", "health_url"):
+            with self.subTest(kind=kind):
+                payload = binding.model_dump(mode="json")
+                lane = profile.lanes[0]
+                host = binding.domains[2].domain_name
+                if kind == "primary":
+                    payload["external_ingress"]["domains"] = [binding.domains[1].domain_name]
+                    host = binding.domains[0].domain_name
+                else:
+                    lane = lane.model_copy(update={kind: f"https://{host}/"})
+                current = EnvironmentRouteBindingRecord.model_validate(payload)
+                current_profile = profile.model_copy(update={"lanes": (lane,)})
+                store = _TopologyStore(route_binding=current)
+                store.observations = tuple(
+                    split_observation(
+                        current,
+                        current_profile,
+                        d.domain_name,
+                        status="mismatch" if d.domain_name == host else "match",
+                    )
+                    for d in current.domains
+                ) + tuple(split_tls_observation(current, d.domain_name) for d in current.domains)
+                verification = read_lane_runtime_verification(
+                    record_store=store,
+                    profile=current_profile,
+                    lane=lane,
+                    summary=_lane_summary(),
+                    now=_NOW,
+                )
+                self.assertNotEqual(verification.provenance.freshness_status, "verified")
+                topology = build_product_environment_topology(
+                    record_store=store,
+                    profile=current_profile,
+                    lane=lane,
+                    lane_summary=_lane_summary(),
+                    now=_NOW,
+                )
+                self.assertEqual(
+                    next(
+                        w.severity
+                        for w in topology.warnings
+                        if w.scope == "observation" and w.domain_name == host
+                    ),
+                    "error",
+                )
+                self.assertFalse(
+                    next(d.advisory for d in topology.observed.tls_domains if d.domain_name == host)
+                )
+                with patch.object(
+                    store, "list_route_binding_records", create=True, return_value=(current,)
+                ):
+                    targets = discover_public_ingress_monitor_targets(
+                        record_store=cast(Any, store), profiles=(current_profile,)
+                    )
+                required = tuple(
+                    t
+                    for t in targets
+                    if t.tls_domain_name == host or urlsplit(t.health_url).hostname == host
+                )
+                self.assertEqual({t.check_kind for t in required}, {"public_http", "tls"})
+                self.assertTrue(all(not t.advisory for t in required))
+
     def test_recovery_http_and_tls_failures_have_advisory_material_severity(self) -> None:
         binding = split_binding().model_copy(
             update={"product": "example-site", "context": "example-context", "instance": "prod"}

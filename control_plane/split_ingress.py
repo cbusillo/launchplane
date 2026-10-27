@@ -162,13 +162,17 @@ def split_ingress_check_name(domain_name: str) -> str:
 
 
 def split_ingress_recovery_domain(
-    binding: EnvironmentRouteBindingRecord | None, domain_name: str
+    binding: EnvironmentRouteBindingRecord | None, domain_name: str, lane: ProductLaneProfile
 ) -> bool:
     return bool(
         binding
         and binding.external_ingress
         and domain_name not in binding.external_ingress.domains
-        and any(domain.domain_name == domain_name for domain in binding.domains)
+        and domain_name not in {urlsplit(url).hostname for url in (lane.base_url, lane.health_url)}
+        and any(
+            domain.domain_name == domain_name and domain.role != "primary"
+            for domain in binding.domains
+        )
     )
 
 
@@ -182,7 +186,7 @@ def split_ingress_advisory_check(
     return (
         check.kind == "public_http"
         and check.name == split_ingress_check_name(host)
-        and split_ingress_recovery_domain(binding, host)
+        and split_ingress_recovery_domain(binding, host, lane)
         and binding is not None
         and not split_ingress_monitoring_policy(
             profile, lane, tuple(d.domain_name for d in binding.domains), host

@@ -550,10 +550,13 @@ function EnvironmentOverview({
   const currentIncidentId =
     openIncident?.incident_id || "";
   const actionableMonitoringFailure = effectiveChecks.some(
-    (check) => check.incident_eligible && check.status === "fail",
+    (check) => !check.advisory && check.incident_eligible && check.status === "fail",
   );
   const readinessMonitoringFailure = effectiveChecks.some(
-    (check) => check.status === "fail",
+    (check) => check.status === "fail" || check.advisory && (
+      check.status !== "pass" || !["verified", "recorded"].includes(check.trust_state) ||
+      Date.parse(check.provenance.stale_after) < Date.now()
+    ),
   );
   const primaryTls =
     tlsDomains.find((domain) => domain.role === "primary") ?? tlsDomains[0] ?? null;
@@ -581,7 +584,7 @@ function EnvironmentOverview({
               : readinessMonitoringFailure
                 ? "warning"
                 : conditionTone(
-                    effectiveChecks.length && effectiveChecks.every(check => check.status === "pass") ? "pass" : "unknown",
+                    effectiveChecks.length && effectiveChecks.filter(check => !check.advisory).every(check => check.status === "pass") ? "pass" : "unknown",
                     monitoringEvidenceTrust(detail.health_monitoring.checks),
                   )
           }

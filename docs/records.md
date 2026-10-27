@@ -966,8 +966,9 @@ an ORM column/table or remains only in the evidence payload.
   Monitoring records warning incidents for failed recovery HTTP/TLS checks, and
   check summaries expose derived `advisory` status. The sidebar stays yellow while
   the business paths are healthy, and turns red when a business path fails.
-  Custody, source-authority and DNS-policy conflicts remain blocking, including
-  on recovery hosts.
+  Route-binding custody and source-authority divergence and DNS-policy conflicts
+  remain blocking, including on recovery hosts. A primary domain or lane URL
+  host is required evidence even when it is managed by Launchplane.
 
   Topology and runtime readers share observation applicability: current monitoring
   intent, URLs, deployment identity, profile and relevant authority dates must agree.

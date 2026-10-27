@@ -33,6 +33,10 @@ test("one absent observation prevents an otherwise complete set from hiding it",
   const missing = check();
   missing.trust_state = "missing";
   assert.equal(monitoringEvidenceTrust([check(), missing]), "missing");
+  missing.advisory = true;
+  assert.equal(monitoringEvidenceTrust([check(), missing]), "verified");
+  missing.trust_state = "stale";
+  assert.equal(monitoringEvidenceTrust([check(), missing]), "verified");
 });
 
 test("disabled and inapplicable probes do not create false incompleteness", () => {

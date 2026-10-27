@@ -808,7 +808,7 @@ def _observed_topology(
                     instance=lane.instance,
                     domain_name=domain_name,
                     role=role,
-                    advisory=split_ingress_recovery_domain(binding, domain_name),
+                    advisory=split_ingress_recovery_domain(binding, domain_name, lane),
                     now=now,
                 )
             )
@@ -830,7 +830,7 @@ def _observed_topology(
     }
     if lane.health_monitoring.monitoring_intent != "private":
         for domain_name in expected_tls_domains:
-            if split_ingress_recovery_domain(binding, domain_name):
+            if split_ingress_recovery_domain(binding, domain_name, lane):
                 continue
             observation = observed_tls_by_domain.get(domain_name)
             if observation is not None:
@@ -996,7 +996,7 @@ def select_public_probe_observations(
     recovery_names = {
         split_ingress_check_name(domain.domain_name)
         for domain in (binding.domains if binding else ())
-        if split_ingress_recovery_domain(binding, domain.domain_name)
+        if split_ingress_recovery_domain(binding, domain.domain_name, lane)
     }
     observations = tuple(
         record
@@ -1588,6 +1588,7 @@ def _topology_warnings(
         for evidence in tls_evidence:
             warnings.extend(
                 _tls_warnings(
+                    lane=lane,
                     route_binding=route_binding,
                     evidence=evidence,
                     now=now,
@@ -1669,6 +1670,7 @@ def _placement_warnings(
 
 def _tls_warnings(
     *,
+    lane: ProductLaneProfile,
     route_binding: EnvironmentRouteBindingRecord | None,
     evidence: _ObservedTlsEvidence,
     now: datetime,
@@ -1849,7 +1851,7 @@ def _tls_warnings(
                 detail="The TLS endpoint requires an unsupported protocol or capability.",
             )
         )
-    if split_ingress_recovery_domain(route_binding, projection.domain_name):
+    if split_ingress_recovery_domain(route_binding, projection.domain_name, lane):
         warnings = [
             warning.model_copy(update={"severity": "warning"})
             if warning.code in {"tls_mismatch", "tls_expired", "tls_untrusted", "tls_unavailable"}

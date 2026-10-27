@@ -3489,7 +3489,7 @@ def _tls_monitor_targets(
                 tls_domain_name=domain.domain_name,
                 tls_domain_role=domain.role,
                 tls_route_binding_status=route_binding.status,
-                advisory=split_ingress_recovery_domain(route_binding, domain.domain_name),
+                advisory=split_ingress_recovery_domain(route_binding, domain.domain_name, lane),
                 tls_owner=route_binding.tls_for_domain(domain.domain_name).owner,
                 tls_ingress_provider=route_binding.ingress_for_domain(domain.domain_name).provider,
                 tls_termination_kind=route_binding.ingress_for_domain(
