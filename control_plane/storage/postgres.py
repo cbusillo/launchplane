@@ -42,6 +42,7 @@ from control_plane.storage.migrations.versions.f0a4c8e2b6d9_canonical_public_hos
 from control_plane.route_binding_reconcile import (
     RouteBindingReviewSources,
     RouteBindingSourceChanged,
+    route_binding_monitoring_projection,
 )
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 from control_plane.contracts.discussion_topic import DiscussionTopicInput, DiscussionTopicRecord
@@ -30291,6 +30292,25 @@ class PostgresRecordStore(HumanSessionStore):
         replacement_record: EnvironmentRouteBindingRecord,
         sources: RouteBindingReviewSources,
     ) -> None:
+        if sources.product_profile is not None:
+            profile_statement = (
+                select(LaunchplaneProductProfileRow)
+                .where(LaunchplaneProductProfileRow.product == product)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                profile_statement = profile_statement.with_for_update()
+            profile_row = session.scalar(profile_statement)
+            if profile_row is None or route_binding_monitoring_projection(
+                self._read_product_profile_payload(profile_row.payload),
+                replacement_record.context,
+                replacement_record.instance,
+            ) != route_binding_monitoring_projection(
+                sources.product_profile,
+                replacement_record.context,
+                replacement_record.instance,
+            ):
+                raise RouteBindingSourceChanged("Reviewed product profile changed before commit.")
         # Fence the five planned rows and lane ownership through commit. This is
         # not an assertion about external provider truth or all historical audits.
         require_bundle_context_owner(

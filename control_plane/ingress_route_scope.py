@@ -7,6 +7,8 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.route_binding_record import RouteBindingDomain
 
 
 class IngressRouteInstanceScopeError(ValueError):
@@ -24,6 +26,7 @@ def validate_ingress_route_instance_scope(
     requested_domains: tuple[str, ...],
     private_endpoints: tuple[PrivateHealthEndpointRecord, ...] = (),
     access_list_id: int = 0,
+    tracked_targets: tuple[DokployTargetRecord, ...] = (),
 ) -> None:
     normalized_context = context.strip()
     normalized_instance = instance.strip()
@@ -52,7 +55,11 @@ def validate_ingress_route_instance_scope(
         and endpoint.context == normalized_context
         and endpoint.instance == normalized_instance == "testing"
     )
-    public_domains = _lane_public_domains(lane, require_domains=not private_domains)
+    tracked_domains = _tracked_domains(tracked_targets, normalized_context, normalized_instance)
+    public_domains = (
+        _lane_public_domains(lane, require_domains=not private_domains and not tracked_domains)
+        | tracked_domains
+    )
     authorized_domains = public_domains | private_domains
     if not requested.issubset(authorized_domains):
         raise IngressRouteInstanceScopeError(
@@ -69,7 +76,10 @@ def validate_ingress_route_instance_scope(
     for other_lane in profile.lanes:
         if other_lane is lane:
             continue
-        if requested & _lane_public_domains(other_lane, require_domains=False):
+        if requested & (
+            _lane_public_domains(other_lane, require_domains=False)
+            | _tracked_domains(tracked_targets, other_lane.context, other_lane.instance)
+        ):
             raise IngressRouteInstanceScopeError(
                 code="ingress_route_domain_scope_ambiguous",
                 message="Ingress route domains are shared with another product lane.",
@@ -85,6 +95,43 @@ def validate_ingress_route_instance_scope(
                     code="ingress_route_domain_scope_ambiguous",
                     message="Ingress route domains are shared with another product lane.",
                 )
+
+
+def tracked_ingress_targets(
+    record_store: object, profile: LaunchplaneProductProfileRecord
+) -> tuple[DokployTargetRecord, ...]:
+    reader = getattr(record_store, "read_dokploy_target_record", None)
+    if not callable(reader):
+        return ()
+    targets = []
+    for lane in profile.lanes:
+        try:
+            target = reader(context_name=lane.context, instance_name=lane.instance)
+        except FileNotFoundError:
+            continue
+        if isinstance(target, DokployTargetRecord) and (target.context, target.instance) == (
+            lane.context,
+            lane.instance,
+        ):
+            targets.append(target)
+    return tuple(targets)
+
+
+def _tracked_domains(
+    targets: tuple[DokployTargetRecord, ...], context: str, instance: str
+) -> frozenset[str]:
+    try:
+        return frozenset(
+            RouteBindingDomain(domain_name=domain).domain_name
+            for target in targets
+            if (target.context, target.instance) == (context, instance)
+            for domain in target.domains
+        )
+    except ValueError as error:
+        raise IngressRouteInstanceScopeError(
+            code="ingress_route_domain_scope_mismatch",
+            message="Tracked ingress hosts must be bare DNS names.",
+        ) from error
 
 
 def _lane_public_domains(
