@@ -502,6 +502,31 @@ plan, current preview history or a missing tracked target. Executor exclusion,
 expired grace and original data-schedule quiescence remain separate recovery
 requirements.
 
+An interrupted clean-snapshot restore is replaced through those same service-issued
+destroy and refresh operations. Its host retry does not drop the database, clear
+private overlay writes, or reconstruct a missing overlay. First verify current
+usage, needed-data custody, target ownership and the original operation. Dispose
+only when the preview is unused and its data is reproducible. In-use previews,
+needed working copies, unknown custody and unavailable original intent remain
+held; a failed restore receipt alone never qualifies disposal.
+
+Request `operation="destroy"` through `POST /v1/drivers/odoo/preview-apply-inputs`
+and apply that exact issued plan through `POST /v1/drivers/odoo/preview-apply`,
+using its returned plan id as the key. The existing executor exclusion, expired
+lease, original schedule quiescence, resource inspection and first-effect guards
+still apply. Observe the original destroy until provider absence and the destroyed
+lifecycle are verified before requesting the new refresh. The ordinary reconciler
+then rebuilds the open PR on new storage from the qualified clean snapshot.
+An unknown destroy outcome retains its original key; it does not permit a new
+refresh. This sequence adds no grant or provider-direct cleanup path.
+
+Preparation pins the source before first restore and records that restore has
+not started. Restore records its start before dispatching database work. Only
+an unstarted allocation may continue preparation; an interrupted started restore
+requires disposal. Historical incomplete receipts without start evidence remain
+held. Completed receipts and their physical database witness continue to preserve
+preview edits after a lost service completion reply.
+
 Held-reservation classification distinguishes the original plan's
 `pull_request_number` from `target_pull_request_number`, attributed only by an
 exact recorded reconciliation-key and provider-key match against the current

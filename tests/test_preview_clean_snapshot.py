@@ -415,28 +415,13 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertEqual(reused, created)
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
         self.volumes.pop("preview-data-filestore")
-        reconstructed = self.prepare_filestore(snapshot=newer, require_existing=True)
-        self.assertEqual(reconstructed, created)
         self.assertEqual(
-            self.volume_labels["preview-data-filestore"]["io.launchplane.preview-snapshot"],
-            self.snapshot.snapshot_id,
+            self.prepare_filestore(snapshot=newer, require_existing=True)["type"], "failed"
         )
+        self.assertNotIn("preview-data-filestore", self.volumes)
         library: dict[str, Any] = {"docker": lambda *args: self.command(["docker", *args]).stdout}
         exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
-        attempts = self.source.parent / "preview-attempts"
-        for attempt in attempts.glob("*.json"):
-            payload = json.loads(attempt.read_text())
-            payload["completed"] = True
-            attempt.write_text(json.dumps(payload))
         with patch("pathlib.Path.home", return_value=self.root):
-            library["retire_clean_snapshots"](
-                {
-                    "copy_binding_sha256": "c" * 64,
-                    "clean_snapshot_retirements": [self.snapshot.model_dump(mode="json")],
-                }
-            )
-            self.assertTrue(self.source.is_dir())
-            self.volumes.pop("preview-data-filestore")
             library["retire_clean_snapshots"](
                 {
                     "copy_binding_sha256": "c" * 64,
@@ -506,6 +491,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         result = self.prepare_filestore(snapshot=self.snapshot, require_existing=True)
         self.assertEqual(result["type"], "complete")
         self.assertIsNotNone(result["declaration"])
+        self.remount_filestore()
+        self.run_script()
+        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_fresh_generation_preserves_surviving_upper_before_any_data_changes(self) -> None:
         attachment = self.private / "upper" / "staff-attachment"
@@ -565,18 +553,19 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
         self.assertFalse(any(call[:2] == ["docker", "cp"] for call in self.calls))
 
-    def test_owned_unfinished_restore_admits_and_resumes_its_pinned_source(self) -> None:
+    def test_interrupted_restore_requires_disposal_before_rebuilding(self) -> None:
         self.killed_during_restore = True
         with self.assertRaises(RuntimeError):
             self.run_script()
         self.killed_during_restore = False
         newer = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
         self.calls.clear()
-        self.assertEqual(self.prepare_filestore(snapshot=newer, apply=False)["type"], "complete")
+        self.assertEqual(self.prepare_filestore(snapshot=newer, apply=False)["type"], "failed")
+        with self.assertRaises(RuntimeError):
+            self.run_script(snapshot=newer)
+        self.assertTrue(self.present)
         self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
-        self.run_script(snapshot=newer)
-        self.assertIn(["docker", "start", "web"], self.calls)
-        self.assertTrue(any("dropdb " in " ".join(call) for call in self.calls))
+        self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
 
     def test_receipt_alone_never_admits_changed_or_missing_native_data(self) -> None:
         self.run_script()
@@ -689,7 +678,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
                 result = self.prepare_filestore(snapshot=self.snapshot, apply=False)
                 self.assertEqual(result["type"], "complete" if b"No such" in error else "failed")
 
-    def test_owned_legacy_resume_preserves_attempt_writes_without_an_overlay(self) -> None:
+    def test_interrupted_legacy_restore_preserves_writes_without_an_overlay(self) -> None:
         self.sanitized = False
         with self.assertRaises(RuntimeError):
             self.run_script()
@@ -701,16 +690,17 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         attachment.write_bytes(b"attachment created during module update")
         self.calls.clear()
         result = self.prepare_filestore(snapshot=self.snapshot)
-        self.assertEqual(result, {"type": "complete", "declaration": None})
+        self.assertEqual(result["type"], "failed")
         self.assertEqual(
             self.prepare_filestore(snapshot=self.snapshot, require_existing=True)["type"],
             "failed",
         )
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
-        self.run_script()
+        with self.assertRaises(RuntimeError):
+            self.run_script()
         self.assertEqual(attachment.read_bytes(), b"attachment created during module update")
         self.assertFalse(any("dropdb " in " ".join(call) for call in self.calls))
-        self.assertIn(["docker", "start", "web"], self.calls)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
 
     def test_overlay_plan_has_no_application_storage_effects(self) -> None:
         self.volumes.pop("preview-data-filestore")
@@ -720,22 +710,17 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
         self.assertFalse((self.source.parent / "preview-attempts").exists())
 
-    def test_owned_legacy_attempts_transition_without_another_filestore_copy(self) -> None:
+    def test_interrupted_attempt_never_reconstructs_missing_overlay(self) -> None:
         self.killed_during_restore = True
         with self.assertRaises(RuntimeError):
             self.run_script()
         self.killed_during_restore = False
         self.volumes.pop("preview-data-filestore")
-        mounts = {}
         for role in ("web", "script-runner"):
-            mounts[role] = self.containers[role]["Mounts"].pop()
+            self.containers[role]["Mounts"].pop()
         result = self.prepare_filestore(snapshot=self.snapshot)
-        self.assertEqual(result["type"], "complete")
-        for role, mount in mounts.items():
-            self.containers[role]["Mounts"].append(mount)
-        self.run_script()
-        self.assertIn(["docker", "start", "web"], self.calls)
-        self.assertFalse(any(call[0] == "cp" for call in self.calls))
+        self.assertEqual(result["type"], "failed")
+        self.assertFalse(any(call[:3] == ["docker", "volume", "create"] for call in self.calls))
 
     def test_foreign_overlay_or_aliased_upper_refuses_before_data_changes(self) -> None:
         self.overlay_options["o"] += ",upperdir=/another-preview"
@@ -890,10 +875,7 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertTrue(self.ready_before_web)
 
     def test_retry_records_actual_and_requested_snapshot_provenance(self) -> None:
-        self.runner_failure = True
-        with self.assertRaises(RuntimeError):
-            self.run_script()
-        self.runner_failure = False
+        self.run_script()
         requested = self.snapshot.model_copy(update={"snapshot_id": "b" * 64})
         evidence = self.service_schedule(requested)
         self.assertEqual(evidence["clean_preview_snapshot_id"], self.snapshot.snapshot_id)
@@ -1105,8 +1087,9 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             if child is not None:
                 child.communicate(timeout=10)
         self.runner_failure = False
-        self.run_script()
-        self.assertIn(["docker", "start", "web"], self.calls)
+        with self.assertRaises(RuntimeError):
+            self.run_script()
+        self.assertNotIn(["docker", "start", "web"], self.calls)
 
     def test_abandoned_attempt_releases_snapshot_only_after_every_backing_is_gone(self) -> None:
         self.runner_failure = True
@@ -1168,16 +1151,11 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
             self.run_script()
         self.assertNotIn(["docker", "start", "web"], self.calls)
 
-    def test_failed_copy_retries_only_redundant_frozen_filestore(self) -> None:
-        self.runner_failure = True
+    def test_destroyed_preview_can_start_again_on_new_storage(self) -> None:
+        self.killed_during_restore = True
         with self.assertRaises(RuntimeError):
             self.run_script()
-        self.runner_failure = False
-        self.run_script(snapshot=self.snapshot.model_copy(update={"snapshot_id": "b" * 64}))
-        self.assertIn(["docker", "start", "web"], self.calls)
-
-    def test_destroyed_preview_can_start_again_on_new_storage(self) -> None:
-        self.run_script()
+        self.killed_during_restore = False
         self.remount_filestore()
         self.present = False
         self.volume_created_at = datetime.now(timezone.utc).isoformat()
@@ -1185,47 +1163,21 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.run_script()
         self.assertIn(["docker", "start", "web"], self.calls)
 
-    def test_failed_unreleased_module_files_can_be_rebuilt_from_the_snapshot(self) -> None:
+    def test_interrupted_restore_preserves_upper_and_legacy_writes(self) -> None:
         self.runner_failure = True
         with self.assertRaises(RuntimeError):
             self.run_script()
-        extra = self.data / "filestore" / self.database / "failed-module-attachment"
-        extra.write_bytes(b"rebuild this from the PR module")
+        legacy = self.data / "filestore" / self.database / "failed-module-attachment"
+        upper = self.private / "upper" / "attempt-attachment"
+        for attachment in (legacy, upper):
+            attachment.write_bytes(b"preserve interrupted writes")
         self.runner_failure = False
-        self.run_script()
-        self.assertFalse(extra.exists())
-        self.assertIn(["docker", "start", "web"], self.calls)
-
-    def test_owned_cleanup_failure_restarts_runner_and_keeps_web_held(self) -> None:
-        self.runner_failure = True
+        self.calls.clear()
         with self.assertRaises(RuntimeError):
             self.run_script()
-        attachment = self.private / "upper" / "attempt-attachment"
-        attachment.write_bytes(b"preserve failed cleanup")
-        self.calls.clear()
-        remove = shutil.rmtree
-
-        def fail_upper_reset(path: Path, *args: Any, **kwargs: Any) -> None:
-            if path == self.private / "upper":
-                raise PermissionError("fixture cleanup failure")
-            remove(path, *args, **kwargs)
-
-        with patch.object(shutil, "rmtree", side_effect=fail_upper_reset):
-            with self.assertRaises(PermissionError):
-                self.run_script()
-        self.assertIn(["docker", "start", "script-runner"], self.calls)
-        self.assertLess(
-            self.calls.index(["docker", "stop", "script-runner"]),
-            self.calls.index(["docker", "start", "script-runner"]),
-        )
-        self.assertIn(["docker", "stop", "web"], self.calls)
-        self.assertNotIn(["docker", "start", "web"], self.calls)
-        self.assertFalse(self.present)
-        self.assertFalse(any(call[:2] == ["docker", "cp"] for call in self.calls))
-        self.assertEqual(attachment.read_bytes(), b"preserve failed cleanup")
-        self.assertEqual(
-            (self.source / "filestore/attachment").read_bytes(), b"clean snapshot attachment"
-        )
+        for attachment in (legacy, upper):
+            self.assertEqual(attachment.read_bytes(), b"preserve interrupted writes")
+        self.assertFalse(any(call[1] in {"stop", "start", "cp"} for call in self.calls))
 
     def test_qualified_copy_preserves_edits_after_api_completion_failure(self) -> None:
         self.run_script()
@@ -1238,22 +1190,6 @@ class PreviewCleanSnapshotTests(unittest.TestCase):
         self.assertFalse(
             any(call[0] == "cp" or call[:2] == ["docker", "cp"] for call in self.calls)
         )
-
-    def test_inherited_testing_witness_cannot_certify_an_interrupted_preview_restore(self) -> None:
-        self.killed_during_restore = True
-        with self.assertRaises(RuntimeError):
-            self.run_script()
-        self.killed_during_restore = False
-        self.calls.clear()
-        self.run_script()
-        phases = [
-            call[-3]
-            for call in self.calls
-            if call[:2] == ["docker", "exec"] and call[-1:] == ["clean-snapshot"]
-        ]
-        self.assertEqual(phases, ["fresh"])
-        self.assertTrue(any("dropdb " in " ".join(call) for call in self.calls))
-        self.assertIn(["docker", "start", "web"], self.calls)
 
     def test_shared_guard_refuses_privilege_and_snapshot_mount_exposure(self) -> None:
         self.containers["script-runner"]["HostConfig"] = {"Privileged": True}
