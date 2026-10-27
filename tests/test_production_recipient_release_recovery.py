@@ -98,11 +98,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self.key = releases._step_key(self.decision, releases.ClientReleaseStep("promote", 1))
 
     def continue_recipient(self, *, source_commit: str = "") -> ProductionRecipientRecord:
-        from control_plane.production_recipient_continuation import (
-            RecipientContinuationRequest,
-            continuation_plan,
-            supersede_recipient,
-        )
+        from control_plane.production_recipient_continuation import RecipientContinuationRequest
 
         f = self.fixture
         current = custody(f.store, f.record.product, f.record.context)
@@ -120,26 +116,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             ),
             reason="Continue the retained preparation before its accepted release starts.",
         )
-        draft = continuation_plan(
-            f.fixture.root, f.store, current.product, request, current.actor, current.scope
-        )[2]
-        with patch(
-            "control_plane.production_recipient_continuation.run_recipient_program",
-            return_value={"recipient_execution_fenced": current.plan_sha256},
-        ):
-            supersede_recipient(
-                f.fixture.root,
-                f.store,
-                current.product,
-                request.model_copy(
-                    update={"mode": "apply", "reviewed_plan_sha256": draft["plan_sha256"]}
-                ),
-                current.actor,
-                current.scope,
-                lambda _phase: None,
-            )
-        replacement = custody(f.store, current.product, current.context)
-        assert replacement is not None
+        replacement, _fence = f.continue_preparation(current, request)
         self.assertFalse(replacement.activation)
         self.assertNotEqual(replacement.plan_sha256, current.plan_sha256)
         return replacement
@@ -234,17 +211,8 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             f.capture(f.publication_case.policy, operation.backup_record_id)
         f.old_backup = operation.backup_record_id
 
-    def test_native_release_reports_the_same_unarmed_custody_refusal_as_worker(self) -> None:
+    def assert_release_waits_for_recipient(self, profile: LaunchplaneProductProfileRecord) -> None:
         f = self.fixture
-        profile, _testing = self.qualified_testing_source()
-        self.seed_retained_deployment()
-        self.capture_accepted_backup(profile)
-        before = releases.read_client_release_run(
-            store=f.store, profile=profile, decision=self.decision
-        )
-        assert before is not None
-        self.assertFalse(before.blocked_reason)
-        self.continue_recipient()
         run = releases.read_client_release_run(
             store=f.store, profile=profile, decision=self.decision
         )
@@ -264,29 +232,25 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         self.assertEqual(f.actions, [])
         self.assertEqual(f.store.list_held_provider_target_reservations(), ())
 
-    def test_unarmed_different_candidate_remains_on_recipient_path(self) -> None:
+    def test_native_release_reports_the_same_unarmed_custody_refusal_as_worker(self) -> None:
         f = self.fixture
         profile, _testing = self.qualified_testing_source()
         self.seed_retained_deployment()
         self.capture_accepted_backup(profile)
-        self.continue_recipient(source_commit="c" * 40)
-        run = releases.read_client_release_run(
+        before = releases.read_client_release_run(
             store=f.store, profile=profile, decision=self.decision
         )
-        assert run is not None
-        self.assertTrue(run.blocked_reason)
-        with self.assertRaises(releases.ClientReleaseNotReady) as held:
-            releases._run_generic_web_promotion(
-                f.store,
-                f.fixture.root,
-                profile,
-                self.decision,
-                releases.ClientReleaseStep("promote", 1),
-                f.old_backup,
-            )
-        self.assertEqual(str(held.exception), run.blocked_reason)
-        self.assertEqual(f.actions, [])
-        self.assertEqual(f.store.list_held_provider_target_reservations(), ())
+        assert before is not None
+        self.assertFalse(before.blocked_reason)
+        self.continue_recipient()
+        self.assert_release_waits_for_recipient(profile)
+
+    def test_unarmed_different_candidate_remains_on_recipient_path(self) -> None:
+        profile, _testing = self.qualified_testing_source()
+        self.seed_retained_deployment()
+        self.capture_accepted_backup(profile)
+        self.continue_recipient(source_commit="c" * 40)
+        self.assert_release_waits_for_recipient(profile)
 
     def test_published_other_version_and_retired_custody_allow_ordinary_selection(self) -> None:
         f = self.fixture
@@ -464,18 +428,24 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         )
         return adapter, provider
 
-    def ordinary_custody_after_effect(self, *, fail_candidate: bool) -> None:
-        from control_plane.production_recipient import authority_snapshot
+    def remove_recipient_custody(self) -> ProductionRecipientRecord:
         from control_plane.storage.postgres import LaunchplaneProductionRecipientRow
 
         f = self.fixture
-        adapter, provider = self.ordinary_adapter()
         saved = custody(f.store, f.record.product, f.record.context)
         assert saved is not None
         with f.store._session_factory() as session, session.begin():
             row = session.get(LaunchplaneProductionRecipientRow, (saved.product, saved.context))
             assert row is not None
             session.delete(row)
+        return saved
+
+    def ordinary_custody_after_effect(self, *, fail_candidate: bool) -> None:
+        from control_plane.production_recipient import authority_snapshot
+
+        f = self.fixture
+        adapter, provider = self.ordinary_adapter()
+        saved = self.remove_recipient_custody()
         candidate = self.decision.checklist.candidate.artifact_id
         provider.healthy_artifact = (
             self.decision.checklist.production.artifact_id if fail_candidate else candidate
@@ -560,19 +530,13 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
 
     def test_ordinary_promotion_rechecks_new_custody_at_its_atomic_first_effect(self) -> None:
         from control_plane.production_recipient import authority_snapshot
-        from control_plane.storage.postgres import LaunchplaneProductionRecipientRow
         from control_plane.generic_web_source_qualification import (
             GenericWebPromotionAdmissionRefused,
         )
 
         f = self.fixture
         adapter, provider = self.ordinary_adapter()
-        saved = custody(f.store, f.record.product, f.record.context)
-        assert saved is not None
-        with f.store._session_factory() as session, session.begin():
-            row = session.get(LaunchplaneProductionRecipientRow, (saved.product, saved.context))
-            assert row is not None
-            session.delete(row)
+        saved = self.remove_recipient_custody()
         checkpoint = f.store.checkpoint_mutation_provider_effect
         inserted = False
 
@@ -1307,23 +1271,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
     def test_native_inverse_is_owed_without_a_passing_historical_deployment(self) -> None:
         f = self.fixture
         profile, _testing = self.qualified_testing_source()
-        operation_id = releases._queue_backup(
-            f.store,
-            profile,
-            self.decision,
-            releases.ClientReleaseStep("backup", 1),
-            f.record.context,
-            self.decision.decided_at,
-        )
-        backup_operation = f.store.read_verireel_prod_backup_gate_operation_record(operation_id)
-        # Reuse the fixture's real backup worker for the already queued Client
-        # operation rather than enqueueing its separate fixture-capture key.
-        with patch(
-            "tests.test_production_recipient_cutover.enqueue_production_backup_gate",
-            return_value=backup_operation,
-        ):
-            f.capture(f.publication_case.policy, backup_operation.backup_record_id)
-        f.old_backup = backup_operation.backup_record_id
+        self.capture_accepted_backup(profile)
         self.started_recipient_with_new_testing(resume=False)
         baseline = f.publication_case.inventory
         current = f.store.read_environment_inventory(
