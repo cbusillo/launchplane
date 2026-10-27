@@ -14,6 +14,7 @@ from httpx2 import Response
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.route_binding_record import route_binding_record_sha256
 from control_plane.contracts.product_profile_record import ProductLaneProfile
+from control_plane.contracts.testing_route_refresh import testing_route_domains
 from control_plane.route_binding_reconcile import (
     _EVIDENCE_FRESHNESS_WINDOW,
     _EVIDENCE_REFRESH_THRESHOLD,
@@ -408,9 +409,12 @@ class NativeTestingRouteRefreshTests(unittest.IsolatedAsyncioTestCase):
             fixture.candidate.context,
             self.now,
             "refresh-retained-alias",
+            director=True,
         )
         self.assertEqual(response.json()["result"]["refreshed_count"], 1, response.text)
         current = fixture.current()
+        assert current.binding is not None
+        self.assertEqual(current.binding.domains, testing_route_domains(fixture.route))
         self.assertTrue(serving_snapshot_matches(current, expected, store=fixture.store))
         self.assertTrue(
             testing_binding_matches_retained_publication(

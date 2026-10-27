@@ -22474,13 +22474,7 @@ def create_launchplane_fastapi_app(
         controller_action = (
             f"{action_prefix}.apply" if refresh_request.mode == "apply" else f"{action_prefix}.plan"
         )
-        director_native_refresh = (
-            not remaining
-            and refresh_request.mode == "apply"
-            and isinstance(identity, LocalOperatorIdentity)
-            and director_agent_identity(identity)
-        )
-        if not director_native_refresh and not resolved_authz_policy_runtime.allows(
+        if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=controller_action,
             product="launchplane",
@@ -22590,7 +22584,8 @@ def create_launchplane_fastapi_app(
             outcome_action = binding_action
             current = outcome.reconcile_plan.current_record if outcome.reconcile_plan else None
             if (
-                director_native_refresh
+                not remaining
+                and director_agent_identity(identity)
                 and current is not None
                 and is_native_testing_binding(current)
             ):

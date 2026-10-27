@@ -1464,10 +1464,13 @@ requires attention. Production enrollment is a separate change and cannot be
 selected through this endpoint.
 
 The authenticated Director agent using the `local_operator` credential may also
-apply this testing-only controller without a controller grant. Each native published binding uses its
-existing scoped read authority for admission, then requires original publication
-custody and a fresh matching managed-route and running-backend observation before
-the atomic evidence write. Drift or missing custody stays blocked. This
+apply this testing-only controller through its declared standing action, without a
+controller grant. Each native published binding uses its existing scoped read
+authority for admission, then requires original publication custody and a fresh
+matching managed-route and running-backend observation before the atomic evidence
+write. Recorded host and alias roles follow that observed owned publication;
+immutable publication/address receipts and provider routes do not change. Drift
+or missing custody stays blocked. This
 alternative neither admits legacy bindings without their existing apply authority
 nor applies to the production-capable stable controller, scoped agents or terminal
 mutations. It changes no provider route or access policy and adds no renewal clock.
