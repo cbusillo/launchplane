@@ -109,6 +109,7 @@ from control_plane.merge_train_github import (
     is_missing_required_checks_evidence,
     merge_train_conflict_probe_ref,
     merge_train_construction_ref,
+    requires_full_odoo_build,
 )
 from control_plane.merge_train_original_review import (
     ORIGINAL_REVIEW_RECOVERY_CODE,
@@ -3333,10 +3334,16 @@ def _advance_active_candidate_record(
                 },
             )
         try:
-            if request.mutate and _uses_protected_candidate_pr(
-                candidate_record=active_candidate_record,
-                merge_method=repository_policy.merge_method,
-                dry_run_result=current_queue,
+            if request.mutate and (
+                (
+                    active_candidate_record.candidate.head_check_reuse is None
+                    and requires_full_odoo_build(candidate_store, repository=request.repository)
+                )
+                or _uses_protected_candidate_pr(
+                    candidate_record=active_candidate_record,
+                    merge_method=repository_policy.merge_method,
+                    dry_run_result=current_queue,
+                )
             ):
                 lease.checkpoint(active_phase="ensure_batch_pull_request")
                 github_client.ensure_batch_pull_request(candidate=active_candidate_record.candidate)
@@ -3737,7 +3744,9 @@ def _advance_passed_candidate_record(
         },
     )
     batch_pull_request_number = None
-    if passed_candidate_record.candidate.head_check_reuse is not None:
+    if passed_candidate_record.candidate.head_check_reuse is not None or (
+        requires_full_odoo_build(candidate_store, repository=request.repository)
+    ):
         lease.observe(
             candidate_checks_status="unknown",
             candidate_sha=passed_candidate_record.candidate.candidate_sha,

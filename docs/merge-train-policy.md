@@ -980,7 +980,33 @@ screening evidence, but they do not prove the combined tree is safe to land.
 Launchplane must fail closed when candidate check evidence is missing, pending,
 failed, stale, or attached to a different commit SHA.
 
-The single-entry tree-identity proof above is the only exception. Before planning
+Active products whose stored profile selects the Odoo driver always require
+full Build on the constructed candidate, including trusted equal-tree singletons.
+They cannot use the single-entry head-check shortcut. The controller creates the
+existing generated candidate PR before observing checks even when CODEOWNERS or
+the merge method requires landing through the original PR. This triggers the
+repository's existing trusted PR Build without changing its workflow, secrets,
+grants or branch settings. The generated PR remains a validation carrier on
+an original-PR route; it is closed during completed-landing cleanup before the
+candidate ref is deleted. Protected batch routes still merge the generated PR.
+
+For these Odoo candidates, a GitHub Actions `build` check must report `success`
+on the exact constructed SHA. Missing, pending, skipped, neutral or unbound
+checks cannot qualify it. A failed Build fails the candidate even when branch
+protection does not require Build. A source-head Build or a later main Build
+cannot substitute for this evidence. Candidate observation, passed-record
+revalidation and fresh landing admission enforce this rule. The profile is
+read from runtime records; there is no checked-in repository list or additional
+gate for other drivers or repositories.
+
+Missing Build diagnostics use the existing candidate observation and PR feedback.
+Failed Builds participate in the existing failure classifier, base attribution
+and retry/isolation path. A candidate waiting for Build remains visible to the
+existing stall monitor; the monitor still reports progress failures and never
+supplies missing validation or authorizes landing. An optional Build outside
+the candidate verdict cannot produce those wait/failure signals.
+
+Other repositories retain the single-entry tree-identity exception. Before planning
 its landing, the controller calls observation, which
 re-reads its head checks and live required-check policy rather than treating the
 recorded pass as current authority. If reuse stops being provable, it publishes
@@ -994,8 +1020,9 @@ and the protected expected-head merge; no
 checks are copied to a new SHA and no provider requirement is changed.
 
 Head screening, candidate observation, base verification, head-check reuse and
-native/tenant admission share one required-check evaluator. Only signals matching
-a live required name and its App binding determine the required-check verdict.
+native/tenant admission share one required-check evaluator. Signals matching
+a live required name and its App binding determine the branch-required verdict;
+Odoo candidate validation additionally requires full Build as described above.
 Same-name commit statuses and check runs both participate when they match that
 requirement; one source's pass cannot erase another matching failure or pending
 signal. A required check with no matching evidence remains pending. Optional

@@ -89,7 +89,9 @@ def _validate_batch_pull_request(
 
 
 def _candidate_pull_requests(
-    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+    *,
+    client: GitHubMergeTrainClient,
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
 ) -> list[dict[str, object]]:
     branch = _candidate_branch(
         repository=candidate.repository,
@@ -117,7 +119,7 @@ def has_batch_pull_request(
 
 
 def _owned_batch_pull_request(
-    payload: object, candidate: MergeTrainBatchCandidate
+    payload: object, candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan
 ) -> dict[str, object]:
     pull_request = _json_object(payload, "Managed batch PR")
     head = _json_object(pull_request.get("head"), "Managed batch PR head")
@@ -250,10 +252,15 @@ def _bound_batch_pull_request(
 
 
 def close_batch_pull_request(
-    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate, reason: str
+    *,
+    client: GitHubMergeTrainClient,
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+    reason: str,
 ) -> None:
     """Close PRs owned by this generated ref even when their mutable fields drift."""
-    if not candidate.candidate_sha or candidate.head_check_reuse is not None:
+    if not candidate.candidate_sha or (
+        isinstance(candidate, MergeTrainBatchCandidate) and candidate.head_check_reuse is not None
+    ):
         return
     for payload in _candidate_pull_requests(client=client, candidate=candidate):
         number = payload["number"]
@@ -285,7 +292,11 @@ def close_batch_pull_request(
 
 
 def _comment_close_reason_once(
-    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate, number: int, reason: str
+    *,
+    client: GitHubMergeTrainClient,
+    candidate: MergeTrainBatchCandidate | MergeTrainBatchLandingPlan,
+    number: int,
+    reason: str,
 ) -> None:
     marker = f"<!-- launchplane-batch-close:{candidate.batch_id}:{candidate.candidate_sha} -->"
     path = f"/repos/{_repository_path(candidate.repository)}/issues/{number}/comments?per_page=100"
@@ -314,8 +325,8 @@ def batch_pull_request_body(
         f"- #{entry.pull_request_number} at `{entry.head_sha}`" for entry in candidate.entries
     )
     return (
-        f"{marker}\n\nThis PR lands Launchplane's tested candidate `{candidate.candidate_sha}` "
-        f"through the protected merge endpoint. Constituent PRs and reviewed heads:\n\n{members}\n\n"
+        f"{marker}\n\nThis PR validates Launchplane's candidate `{candidate.candidate_sha}`. "
+        f"The train selects its protected landing route. Constituent PRs and reviewed heads:\n\n{members}\n\n"
         "Launchplane revalidates every constituent and records the shared landing effect. "
         "Keep source PRs and branches intact. Let the Launchplane controller merge this PR; "
         "do not merge it by hand or update its generated branch. An out-of-controller merge "

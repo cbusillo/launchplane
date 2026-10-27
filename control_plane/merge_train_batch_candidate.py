@@ -31,6 +31,7 @@ from control_plane.merge_train_github import (
     MergeTrainBranchRefreshReadStore,
     MergeTrainGitHubTransport,
     UrllibMergeTrainGitHubTransport,
+    requires_full_odoo_build,
 )
 
 
@@ -191,6 +192,10 @@ def execute_merge_train_batch_candidate_run_once(
     else:
         if mutation_checkpoint is not None:
             mutation_checkpoint("observe_required_checks", None)
+        if candidate.head_check_reuse is None and requires_full_odoo_build(
+            review_store, repository=request.repository
+        ):
+            github_client.ensure_batch_pull_request(candidate=candidate)
         candidate = github_client.observe_batch_candidate_checks(candidate=candidate)
     return _persist_candidate_result(
         candidate=candidate,
