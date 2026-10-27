@@ -1,5 +1,3 @@
-"""Shared backup credential references and a capture-free provider qualification."""
-
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Annotated
@@ -11,6 +9,7 @@ from control_plane.contracts.production_backup_gate import (
     ProductionBackupGateWorkerRequest,
 )
 from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.production_backup_authority import plan_production_backup_authority_write
 from control_plane.privileged_operation_registry import plan_backup_policy_proposal
 from control_plane.contracts.product_profile_record import (
@@ -30,6 +29,11 @@ from control_plane.production_backup_credentials import (
     credential_metadata,
     credential_options,
     plan_credential_bindings,
+)
+from control_plane.production_backup_key_generation import (
+    generated_capture_keys,
+    generate_capture_key_bundle,
+    plan_capture_key_generation,
 )
 from control_plane.service_auth import (
     AuthorizationTarget,
@@ -182,6 +186,7 @@ def register_production_backup_credential_routes(
                 "context": context,
                 "instance": instance,
                 "credentials": credential_options(records, bindings),
+                "generated_capture_keys": generated_capture_keys(store, records),
             },
         )
 
@@ -242,11 +247,19 @@ def register_production_backup_credential_routes(
                 )
         profile = store.read_product_profile_record(product)
         records, bindings = credential_metadata(store, context=context, instance=instance)
+        replacements: tuple[SecretBinding, ...]
         try:
             capture_state = store.guest_capture_enrollment_state(context, instance)
-            plan, replacements, enrollment = plan_credential_bindings(
-                profile, records, bindings, body, capture_state
-            )
+            creation = None
+            if body.generate_capture_key:
+                plan, boundary = plan_capture_key_generation(
+                    store, profile, context, instance, records, bindings, body, capture_state
+                )
+                replacements, enrollment = (), None
+            else:
+                plan, replacements, enrollment = plan_credential_bindings(
+                    profile, records, bindings, body, capture_state
+                )
         except ValueError as error:
             if body.mode == "apply":
                 replay = store.prepare_db_only_mutation(
@@ -292,6 +305,16 @@ def register_production_backup_credential_routes(
                 code="backup_credential_conflict",
                 message="Worker records changed; review a fresh dry run.",
             )
+        if body.generate_capture_key:
+            creation, enrollment, public_metadata = generate_capture_key_bundle(
+                store,
+                context=context,
+                instance=instance,
+                boundary=boundary,
+                known_hosts=body.known_hosts,
+                actor=scope,
+            )
+            response.result = {**plan, **public_metadata, "applied": True}
         try:
             status, receipt = store.compare_and_rebind_worker_credentials(
                 expected_profile=profile,
@@ -303,6 +326,7 @@ def register_production_backup_credential_routes(
                 guest_capture_credential=enrollment,
                 replacements=replacements,
                 reason=body.reason,
+                creation=creation,
                 mutation=DbOnlyMutationRequest(
                     scope=scope,
                     route_path=CREDENTIAL_APPLY_ROUTE,
