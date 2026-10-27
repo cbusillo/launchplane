@@ -443,8 +443,8 @@ waiting out a transport timeout. Private error text is never returned.
 The complete HTTP response is parsed without following redirects. The
 selected-image rehearsal in `qualityGate.test.testingRouteReaderRehearsal` runs
 the emitted program against real DNS and name-based HTTP in an isolated internal
-Docker network. With a DNS search suffix configured, two owners of the canonical alias must be
-rejected before HTTP; removing the address-ownership check makes this case
+Docker network. With a DNS search suffix configured, assigning the canonical alias to two
+containers must be rejected before HTTP; removing the address-ownership check makes this case
 incorrectly reach a healthy response. It checks healthy, redirect, HTTP
 failure, malformed, truncated and wrong-identity responses. Set the existing
 `LAUNCHPLANE_TEST_TRAEFIK_IMAGE` to an already-local immutable image to run it
