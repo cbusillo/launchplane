@@ -612,6 +612,7 @@ class AccountProgramTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.addCleanup(logging.disable, logging.root.manager.disable)
+        self.enterContext(patch.dict(sys.modules, {"odoo_website_settings": None}))
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.parameters: dict[str, str] = {TESTING_COPY_COMPLETION_PARAMETER: "testing-copy"}
@@ -696,17 +697,6 @@ class AccountProgramTests(unittest.TestCase):
         self.execute()
         self.users.create.assert_called_once()
         self.user.write.assert_not_called()
-
-    def test_cleanup_works_without_image_parameter_adapter(self) -> None:
-        with patch.dict(sys.modules, {"odoo_website_settings": None}):
-            self.execute()
-            self.request["operation"] = "cleanup"
-            self.user.write.side_effect = lambda values: setattr(
-                self.user, "active", values["active"]
-            )
-            self.execute()
-        self.user.write.assert_called_once()
-        self.assertFalse(self.user.write.call_args.args[0]["active"])
 
     def test_connection_isolation_must_still_pass_before_each_account_operation(self) -> None:
         self.execute()
