@@ -28,7 +28,7 @@ class DatabaseMaintenanceTests(unittest.IsolatedAsyncioTestCase):
             messages.append(message)
 
         with patch(
-            "control_plane.database_maintenance.operation_guard",
+            "control_plane.database_maintenance._acquire_scope",
             side_effect=DatabaseMaintenanceHeld,
         ):
             middleware = DatabaseMaintenanceMiddleware(app, get_store=object)

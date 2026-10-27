@@ -40,6 +40,18 @@ def release(engine: Engine, hold_id: str) -> None:
     from sqlalchemy.orm import Session
 
     with Session(engine) as session, session.begin():
+        controller_absent = bool(
+            session.scalar(
+                text("SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))"),
+                {"key": f"{MAINTENANCE_LOCK}:control"},
+            )
+        )
+        gate_available = bool(
+            session.scalar(
+                text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
+                {"key": MAINTENANCE_LOCK},
+            )
+        )
         row = session.scalar(
             select(LaunchplaneServiceDeployDrainRow)
             .where(LaunchplaneServiceDeployDrainRow.record_id == MAINTENANCE_RECORD)
@@ -48,7 +60,12 @@ def release(engine: Engine, hold_id: str) -> None:
         if row is None or row.payload.get("hold_id") != hold_id:
             raise DatabaseMaintenanceHeld("The requested maintenance hold does not match.")
         if row.payload["state"] != "released":
-            row.payload = {**row.payload, "state": "release_requested"}
+            row.payload = {
+                **row.payload,
+                "state": "released"
+                if controller_absent and gate_available
+                else "release_requested",
+            }
 
 
 def _wait_for_release(engine: Engine, receipt: dict[str, object], stop: Event) -> None:

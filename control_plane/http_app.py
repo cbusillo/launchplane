@@ -49,7 +49,7 @@ from control_plane.operation_authorization import (
 import fastapi.exceptions as fastapi_exceptions
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.datastructures import DefaultPlaceholder
-from control_plane.database_maintenance import maintenance_thread as run_in_threadpool
+from control_plane.database_maintenance import maintenance_threadpool as run_in_threadpool
 from control_plane.contracts.updater_proposal import (
     UPDATER_PROPOSAL_ROUTE,
     UPDATER_PROPOSAL_MAX_BODY_BYTES,
@@ -4306,10 +4306,6 @@ def create_launchplane_fastapi_app(
     app.add_middleware(BoundedRequestBodyMiddleware)
     from control_plane.database_maintenance import DatabaseMaintenanceMiddleware
 
-    app.add_middleware(
-        DatabaseMaintenanceMiddleware,
-        get_store=lambda: record_store_factory() if record_store_factory else shared_record_store,
-    )
     enforce_human_policy_revalidation = False
 
     def read_active_authz_policy_records() -> tuple[LaunchplaneAuthzPolicyRecord, ...] | None:
@@ -4461,6 +4457,11 @@ def create_launchplane_fastapi_app(
 
     def next_trace_id() -> str:
         return f"launchplane_req_{uuid4().hex}"
+
+    app.add_middleware(
+        DatabaseMaintenanceMiddleware,
+        get_store=lambda: record_store_factory() if record_store_factory else shared_record_store,
+    )
 
     def get_record_store() -> object:
         if record_store_factory is not None:

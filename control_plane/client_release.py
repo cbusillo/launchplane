@@ -28,6 +28,7 @@ Client-accepted release with a passing production deployment, under the Client's
 
 from __future__ import annotations
 
+from control_plane.database_maintenance import maintenance_operation
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -1446,6 +1447,7 @@ def _run_generic_web_promotion(
     )
 
 
+@maintenance_operation
 def advance_client_releases(
     *,
     store: object,

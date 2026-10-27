@@ -5393,10 +5393,13 @@ def _build_engine(
     postgres_connect_timeout_seconds: int | None = None,
     postgres_statement_timeout_milliseconds: int | None = None,
     unpooled: bool = False,
+    pool_timeout_seconds: int | None = None,
 ) -> Engine:
     engine_kwargs: dict[str, Any] = {}
     if unpooled:
         engine_kwargs["poolclass"] = NullPool
+    elif pool_timeout_seconds is not None:
+        engine_kwargs["pool_timeout"] = pool_timeout_seconds
     if connection_factory is not None:
         engine_kwargs["creator"] = connection_factory
     connect_args = _engine_connect_args(
@@ -5484,6 +5487,16 @@ class PostgresRecordStore(HumanSessionStore):
         self._preview_execution_context = local()
         self._disposable_authority_context = local()
         self._validated_history_payloads: set[tuple[str, str]] = set()
+        self._maintenance_engine: Engine | None = None
+        if self._engine.dialect.name == "postgresql":
+            self._maintenance_engine = _build_engine(
+                database_url,
+                connection_factory=connection_factory,
+                postgres_connect_timeout_seconds=postgres_connect_timeout_seconds or 5,
+                postgres_statement_timeout_milliseconds=postgres_statement_timeout_milliseconds
+                or 5000,
+                pool_timeout_seconds=5,
+            )
         from control_plane.database_maintenance import install_transaction_guard
 
         install_transaction_guard(self._engine)
@@ -5635,6 +5648,8 @@ class PostgresRecordStore(HumanSessionStore):
 
     def close(self) -> None:
         self._engine.dispose()
+        if self._maintenance_engine is not None:
+            self._maintenance_engine.dispose()
         if self._preview_lock_engine is not None:
             self._preview_lock_engine.dispose()
 

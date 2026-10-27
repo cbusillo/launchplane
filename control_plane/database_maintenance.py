@@ -1,11 +1,16 @@
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from functools import wraps
+from functools import partial, wraps
 from inspect import signature
 from typing import Any
+from threading import Lock
+import asyncio
+import anyio
+from anyio import CapacityLimiter
+from anyio.lowlevel import RunVar
 
 from sqlalchemy import event, text
 from sqlalchemy.engine import Connection, Engine
@@ -15,11 +20,12 @@ from typing import Literal
 
 
 class MaintenanceHold(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     hold_id: str
     state: Literal["draining", "held", "release_requested", "released"]
     expires_at: datetime
+    reason: str = ""
 
 
 MAINTENANCE_LOCK = "launchplane:database-maintenance"
@@ -31,13 +37,23 @@ class DatabaseMaintenanceHeld(RuntimeError):
 
 
 @dataclass
+class _Lease:
+    connection: Connection
+    references: int = 1
+    lock: Lock = field(default_factory=Lock)
+
+
+@dataclass
 class _Operation:
     database: str
     store: object
+    lease: _Lease
     active: bool = True
+    released: bool = False
 
 
 _operation: ContextVar[_Operation | None] = ContextVar("database_operation", default=None)
+_scope_limiter: RunVar[CapacityLimiter] = RunVar("maintenance_scope_limiter")
 
 
 def _hold(connection: Connection, *, for_update: bool = False) -> dict[str, Any] | None:
@@ -66,41 +82,121 @@ def _active(connection: Connection, hold: dict[str, Any] | None) -> bool:
     )
 
 
-@contextmanager
-def operation_guard(store: object) -> Iterator[None]:
+def _acquire_scope(store: object, parent: _Operation | None) -> _Operation | None:
     from control_plane.storage.postgres import PostgresRecordStore
 
     if not isinstance(store, PostgresRecordStore) or store.database_dialect_name != "postgresql":
-        yield
-        return
-    parent = _operation.get()
-    assert store._preview_lock_engine is not None
-    with store._preview_lock_engine.connect().execution_options(
-        isolation_level="AUTOCOMMIT"
-    ) as connection:
-        acquired = connection.scalar(
-            text("SELECT pg_try_advisory_lock_shared(hashtextextended(:key, 0))"),
-            {"key": MAINTENANCE_LOCK},
-        )
-        if not acquired:
-            raise DatabaseMaintenanceHeld("Launchplane database maintenance is holding operations.")
-        current = _Operation(store.database_url, store)
-        token = _operation.set(current)
-        try:
-            hold = _hold(connection)
-            continuing = (
-                parent is not None and parent.active and parent.database == store.database_url
-            )
-            if _active(connection, hold) and not continuing:
-                raise DatabaseMaintenanceHeld("Launchplane is draining for database maintenance.")
-            yield
-        finally:
-            current.active = False
-            _operation.reset(token)
-            connection.execute(
-                text("SELECT pg_advisory_unlock_shared(hashtextextended(:key, 0))"),
+        return None
+    if parent is not None and parent.database == store.database_url:
+        with parent.lease.lock:
+            if parent.active:
+                parent.lease.references += 1
+                return _Operation(store.database_url, store, parent.lease)
+    assert store._maintenance_engine is not None
+    connection = store._maintenance_engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    acquired = False
+    try:
+        acquired = bool(
+            connection.scalar(
+                text("SELECT pg_try_advisory_lock_shared(hashtextextended(:key, 0))"),
                 {"key": MAINTENANCE_LOCK},
             )
+        )
+        if not acquired or _active(connection, _hold(connection)):
+            raise DatabaseMaintenanceHeld(
+                "Launchplane is holding new operations for database maintenance."
+            )
+        return _Operation(store.database_url, store, _Lease(connection))
+    except BaseException:
+        try:
+            if acquired:
+                connection.execute(
+                    text("SELECT pg_advisory_unlock_shared(hashtextextended(:key, 0))"),
+                    {"key": MAINTENANCE_LOCK},
+                )
+        except DBAPIError:
+            connection.invalidate()
+        finally:
+            connection.close()
+        raise
+
+
+def _release_scope(scope: _Operation) -> None:
+    with scope.lease.lock:
+        if scope.released:
+            return
+        scope.active = False
+        scope.released = True
+        scope.lease.references -= 1
+        if scope.lease.references:
+            return
+    connection = scope.lease.connection
+    try:
+        connection.execute(
+            text("SELECT pg_advisory_unlock_shared(hashtextextended(:key, 0))"),
+            {"key": MAINTENANCE_LOCK},
+        )
+    except DBAPIError:
+        connection.invalidate()
+        raise
+    finally:
+        connection.close()
+
+
+@contextmanager
+def operation_guard(store: object) -> Iterator[None]:
+    scope = _acquire_scope(store, _operation.get())
+    if scope is None:
+        yield
+        return
+    token = _operation.set(scope)
+    try:
+        yield
+    finally:
+        _operation.reset(token)
+        _release_scope(scope)
+
+
+async def _scope_io[Result](operation: Callable[[], Result]) -> Result:
+    try:
+        limiter = _scope_limiter.get()
+    except LookupError:
+        limiter = CapacityLimiter(4)
+        _scope_limiter.set(limiter)
+    return await anyio.to_thread.run_sync(operation, limiter=limiter)
+
+
+async def _settle_task[Result](task: asyncio.Task[Result]) -> Result:
+    while True:
+        with anyio.CancelScope(shield=True):
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+
+
+@asynccontextmanager
+async def async_operation_guard(store: object) -> AsyncIterator[None]:
+    task = asyncio.create_task(_scope_io(partial(_acquire_scope, store, _operation.get())))
+    try:
+        scope = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        scope = await _settle_task(task)
+        if scope is not None:
+            await _settle_task(asyncio.create_task(_scope_io(partial(_release_scope, scope))))
+        raise
+    if scope is None:
+        yield
+        return
+    token = _operation.set(scope)
+    try:
+        yield
+    finally:
+        with scope.lease.lock:
+            scope.active = False
+        _operation.reset(token)
+        await _settle_task(asyncio.create_task(_scope_io(partial(_release_scope, scope))))
 
 
 def maintenance_operation[**Parameters, Result](
@@ -121,19 +217,37 @@ def maintenance_operation[**Parameters, Result](
 
 
 def install_transaction_guard(engine: Engine) -> None:
-    if engine.dialect.name == "postgresql":
-        event.listen(engine, "begin", _guard_transaction)
+    if engine.dialect.name != "postgresql":
+        return
+    relation_known = False
+
+    def guard(connection: Connection) -> None:
+        nonlocal relation_known
+        if not relation_known:
+            relation_known = (
+                connection.scalar(text("SELECT to_regclass('launchplane_service_deploy_drains')"))
+                is not None
+            )
+        _guard_transaction(connection, relation_known=relation_known)
+
+    event.listen(engine, "begin", guard)
+    engine.update_execution_options(launchplane_maintenance_guarded=True)
 
 
-def _guard_transaction(connection: Connection) -> None:
-    if not connection.scalar(
-        text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:key, 0))"),
-        {"key": MAINTENANCE_LOCK},
-    ):
+def _guard_transaction(connection: Connection, *, relation_known: bool) -> None:
+    hold_query = (
+        "coalesce((SELECT payload->>'state' = 'held' AND "
+        "(payload->>'expires_at')::timestamptz > clock_timestamp() "
+        "FROM launchplane_service_deploy_drains WHERE record_id = :record), false)"
+        if relation_known
+        else "false"
+    )
+    admitted, held = connection.execute(
+        text("SELECT pg_try_advisory_xact_lock_shared(hashtextextended(:key, 0)), " + hold_query),
+        {"key": MAINTENANCE_LOCK, "record": MAINTENANCE_RECORD},
+    ).one()
+    if not admitted or held:
         raise DatabaseMaintenanceHeld("Launchplane database maintenance is holding transactions.")
-    hold = _hold(connection)
-    if _active(connection, hold) and hold is not None and hold["state"] == "held":
-        raise DatabaseMaintenanceHeld("Launchplane database maintenance has not been released.")
 
 
 def maintenance_thread_operation[**Parameters, Result](
@@ -143,7 +257,7 @@ def maintenance_thread_operation[**Parameters, Result](
     **kwargs: Parameters.kwargs,
 ) -> Result:
     parent = _operation.get()
-    with operation_guard(parent.store if parent is not None and parent.active else None):
+    with operation_guard(parent.store if parent is not None else None):
         return operation(*args, **kwargs)
 
 
@@ -159,6 +273,19 @@ async def maintenance_thread[**Parameters, Result](
         return maintenance_thread_operation(operation, *args, **kwargs)
 
     return await asyncio.to_thread(execute)
+
+
+async def maintenance_threadpool[**Parameters, Result](
+    operation: Callable[Parameters, Result],
+    /,
+    *args: Parameters.args,
+    **kwargs: Parameters.kwargs,
+) -> Result:
+    from starlette.concurrency import run_in_threadpool
+
+    return await run_in_threadpool(
+        partial(maintenance_thread_operation, operation, *args, **kwargs)
+    )
 
 
 class DatabaseMaintenanceMiddleware:
@@ -181,7 +308,7 @@ class DatabaseMaintenanceMiddleware:
             await send(message)
 
         try:
-            with operation_guard(self.get_store()):
+            async with async_operation_guard(self.get_store()):
                 await self.app(scope, receive, track_send)
         except DatabaseMaintenanceHeld:
             if response_started:
@@ -227,6 +354,10 @@ def maintenance_window(
 
     if engine.dialect.name != "postgresql":
         raise ValueError("Database maintenance requires PostgreSQL.")
+    if engine.get_execution_options().get("launchplane_maintenance_guarded"):
+        raise ValueError(
+            "Maintenance needs a dedicated operator engine, not a guarded store engine."
+        )
     if not 1 <= drain_seconds < duration_seconds <= 3600 or not reason.strip():
         raise ValueError("Maintenance requires a reason and a bounded drain/window.")
     hold_id = str(uuid4())
@@ -244,6 +375,7 @@ def maintenance_window(
         hold = {
             "hold_id": hold_id,
             "state": "draining",
+            "reason": reason.strip(),
             "expires_at": (now + timedelta(seconds=duration_seconds)).isoformat(),
         }
         _write_hold(connection, hold)
@@ -252,12 +384,18 @@ def maintenance_window(
             - connection.scalar(text("SELECT clock_timestamp()"))
         ).total_seconds()
         connection.execute(text("BEGIN"))
+        connection.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
         connection.execute(
             text("SELECT set_config('transaction_timeout', :timeout, true)"),
             {"timeout": str(max(1, int(remaining * 1000)))},
         )
         deadline = monotonic() + drain_seconds
-        while not _try_lock(connection, MAINTENANCE_LOCK):
+        while True:
+            current = _hold(connection)
+            if current is not None and current["state"] == "release_requested":
+                raise DatabaseMaintenanceHeld("Maintenance was released while draining.")
+            if _try_lock(connection, MAINTENANCE_LOCK):
+                break
             if monotonic() >= deadline:
                 raise DatabaseMaintenanceHeld("Maintenance could not drain active operations.")
             sleep(0.05)
@@ -270,6 +408,9 @@ def maintenance_window(
             acquired.append(key)
         hold = {**hold, "state": "held"}
         with engine.begin() as receipt:
+            current = _hold(receipt, for_update=True)
+            if current is None or current["hold_id"] != hold_id or current["state"] != "draining":
+                raise DatabaseMaintenanceHeld("Maintenance custody changed during drain.")
             _write_hold(receipt, hold)
         backend_pid = connection.scalar(text("SELECT pg_backend_pid()"))
         yield {**hold, "backend_pid": backend_pid}
