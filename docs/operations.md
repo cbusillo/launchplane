@@ -425,7 +425,7 @@ notification-policy ownership alone does not settle those effects.
 Starting or replacing this composition immediately attempts due queued work;
 deploying it is activation, not a diagnostic read.
 
-Resolved-incident delivery follows the [notification record contract](records.md#public-ingress-notification-records).
+Resolved-incident delivery follows the [incident record contract](records.md#public-ingress-incident-records).
 The first dispatcher claim groups the existing pending email
 incident deliveries by incident, policy and destination in one transaction.
 It includes expired unmarked claims and excludes provider-start markers and
@@ -1902,7 +1902,7 @@ material change clears acknowledgement and is immediately eligible for delivery.
 A bounded silence preserves all observations/events but suppresses material
 updates and reminders until `silenced_until`; after expiry the next unresolved
 failure can emit the current reminder. Resolution remains a durable incident
-event; delivery follows the [notification record contract](records.md#public-ingress-notification-records).
+event; delivery follows the [incident record contract](records.md#public-ingress-incident-records).
 Public, private, and provider checks use the configured consecutive-pass recovery
 threshold; only the threshold-crossing pass creates the single recovery event.
 
