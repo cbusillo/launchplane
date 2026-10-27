@@ -843,6 +843,13 @@ sorts, waits for the next candidate. A failed candidate keeps the whole-queue
 comparison described under Blocker Isolation. `max_batch_size` caps each new
 candidate.
 
+Configured dependency-bot PRs each occupy one candidate. Ordinary work before
+one can form its own batch; work after it waits for the next candidate. Both
+the explicit bot table and retained legacy dependency IDs impose this boundary,
+independently of update classification or an explicit enqueue label. This does
+not mark dependency PRs for original-PR landing: merge-method singletons keep
+the protected candidate PR and its full build checks.
+
 At a new candidate boundary, pending or unknown engineering heads step aside
 when another eligible head has passing checks and known mergeability. Their
 queue entries report the deferred head and its check/mergeability reason;
@@ -887,6 +894,16 @@ passed on the exact head with the required App bindings. PR identity/head/base
 and the base branch are confirmed after those reads. Missing, pending, failed,
 stale or unreadable evidence selects the normal publication and candidate CI;
 multiple queued PRs always take that path, even if a tree happens to match.
+Reuse also requires the repository/base identity policy, a same-repository PR,
+and a complete commit list ending at the recorded head. The PR author and every
+commit author and committer must have readable user identities; bots must be
+trusted automation. Configured dependency identities, including retained legacy
+IDs, never qualify, even after a trusted refresh. Forks, unknown identities,
+missing policy and unreadable or truncated commit evidence take full candidate
+CI. Construction, controller revalidation and live landing admission share this
+source check. This guard precedes the tenant rollout of secretless source-only
+checks; it neither enables those checks nor retires existing credentials.
+
 PRs with recorded retargets or base force pushes also run full candidate CI:
 their historical head checks may have tested another merge-ref tree. Incomplete
 or unreadable timeline history cannot qualify reuse. The filtered

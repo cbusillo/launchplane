@@ -74,7 +74,7 @@ from tests.test_odoo_import_override_reconciliation import (
     runtime_record as _import_runtime_record,
 )
 from tests import test_preview_reservation_recovery as preview_reservation_tests
-from tests import test_discord_incident_summary as discord_summary_tests
+from tests import test_discord_incident_alerts as discord_alert_tests
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from tests.test_odoo_addon_settings_override import _existing_record as _addon_override_record
@@ -1438,96 +1438,9 @@ class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldR
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
 )
-class RealPostgresDiscordSummaryTests(discord_summary_tests.DiscordIncidentSummaryTests):
+class RealPostgresDiscordAlertTests(discord_alert_tests.DiscordIncidentAlertTests):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
-
-    def test_racing_late_probe_is_in_current_or_next_summary(self) -> None:
-        from control_plane.workflows.public_ingress_monitor import _store_monitor_observation
-
-        self.observe("first-lane")
-        late = self.store.list_public_ingress_observation_records()[0].model_copy(
-            update={
-                "record_id": "late-probe",
-                "instance": "late-lane",
-                "observed_at": "2026-10-25T12:01:00Z",
-                "incident_id": "",
-                "incident_event_id": "",
-            }
-        )
-        staged = threading.Event()
-        resume = threading.Event()
-        delivered = threading.Event()
-        source_threads: list[int] = []
-        original_dedupe = self.store._lock_outbox_dedupe_keys
-
-        def dedupe(session: Any, *, dedupe_keys: tuple[str, ...]) -> None:
-            original_dedupe(session, dedupe_keys=dedupe_keys)
-            if threading.get_ident() in source_threads:
-                staged.set()
-                if not resume.wait(10):
-                    raise AssertionError("Late probe was never released")
-
-        def record_late() -> None:
-            source_threads.append(threading.get_ident())
-            _store_monitor_observation(
-                record_store=self.store,
-                record=late,
-                incident_eligible=True,
-                expected_profile_sha256="",
-                recovery_observation_threshold=1,
-                notify=True,
-                notification_drivers=self.drivers,
-            )
-
-        def clock(_session: Any) -> str:
-            return (
-                "2026-10-25T12:04:59Z"
-                if threading.get_ident() in source_threads
-                else "2026-10-25T12:05:00Z"
-            )
-
-        def send(_url: str, payload: dict[str, object]) -> None:
-            self.sent.append(payload)
-            delivered.set()
-
-        self.drivers.discord_sender = send
-        with (
-            patch.object(self.store, "_lock_outbox_dedupe_keys", side_effect=dedupe),
-            patch.object(self.store, "_database_mutation_timestamp", side_effect=clock),
-            ThreadPoolExecutor(max_workers=2) as executor,
-        ):
-            transition = executor.submit(record_late)
-            worker = None
-            try:
-                self.assertTrue(staged.wait(10))
-                worker = executor.submit(self.drain, "12:05:00")
-                deadline = time.monotonic() + 10
-                while not delivered.is_set():
-                    with self.store._session_factory() as witness:
-                        waiting = witness.scalar(
-                            text(
-                                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock')"
-                            )
-                        )
-                    if waiting:
-                        break
-                    if time.monotonic() >= deadline:
-                        self.fail("Race reached neither delivery nor database contention")
-                    delivered.wait(0.01)
-            finally:
-                resume.set()
-            transition.result(timeout=10)
-            if worker is not None:
-                worker.result(timeout=10)
-        self.drain("12:10:00")
-        self.assertTrue(any("late-lane" in str(payload) for payload in self.sent))
-        self.assertTrue(
-            all(
-                value.status == "open"
-                for value in self.store.list_public_ingress_incident_records()
-            )
-        )
 
 
 @unittest.skipUnless(
@@ -12471,6 +12384,9 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = _application_testing_fixture(self)
 
+    def test_publication_refuses_stale_route_readiness_without_changing_custody(self) -> None:
+        self.fixture.test_publication_refuses_stale_route_readiness_without_changing_custody()
+
     def test_external_admission_persists_once_across_original_restart(self) -> None:
         self.fixture.test_external_admission_persists_once_across_original_restart()
 
@@ -12692,6 +12608,24 @@ class RealPostgresApplicationTestingActivationTests(unittest.TestCase):
 
     def test_supported_application_route_original_intent_and_key_replay(self) -> None:
         self.fixture.assert_supported_http_activation(native_apply=True)
+
+    def test_unanswered_mount_refusal_original_request_and_receipt(self) -> None:
+        self.fixture.assert_http_unanswered_refusal()
+
+    def test_late_mount_after_durable_refusal_remains_recovery_only(self) -> None:
+        self.fixture.test_late_mount_after_durable_refusal_cannot_resume_forward_apply()
+
+    def test_unanswered_refusal_cannot_replace_live_original_execution(self) -> None:
+        self.fixture.test_unanswered_refusal_cannot_replace_a_live_original_lease()
+
+    def test_unanswered_refusal_fences_forward_storage_progress(self) -> None:
+        self.fixture.test_unanswered_refusal_rejects_stale_forward_progress_in_storage()
+
+    def test_plain_apply_cannot_select_unanswered_mount_abandonment(self) -> None:
+        self.fixture.test_plain_authority_changed_apply_cannot_abandon_an_unanswered_mount()
+
+    def test_lost_refusal_completion_adopts_only_the_negative_result(self) -> None:
+        self.fixture.test_lost_negative_completion_adopts_the_refusal_without_forward_work()
 
     def test_interrupted_http_apply_reuses_immutable_original_intent(self) -> None:
         self.fixture.assert_supported_http_activation(native_apply=True, interrupted=True)

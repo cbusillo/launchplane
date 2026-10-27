@@ -7,6 +7,7 @@ from unittest.mock import patch
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     build_merge_train_batch_landing_plan,
+    build_merge_train_batch_candidate_ref,
 )
 from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapsePlanRecord
 from control_plane.contracts.merge_train_structural_provenance import (
@@ -24,7 +25,10 @@ from control_plane.merge_train_controller_run_once import (
 )
 from control_plane.merge_train_github import GitHubMergeTrainClient, merge_train_construction_ref
 from control_plane.storage.filesystem import FilesystemRecordStore
-from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.merge_train_policy_fixtures import (
+    build_test_merge_train_policy_record,
+    dependency_repository_policy,
+)
 from tests.support.repository_evidence import (
     BASE_SHA,
     HEAD_SHA,
@@ -48,6 +52,7 @@ class _AdmissionTransport(_ReuseTransport):
     def __init__(self) -> None:
         super().__init__()
         self.native_paths: list[str] = []
+        self.candidate_checks_missing = False
         self.bindings = {
             "base-main": BASE_SHA,
             "head-1": HEAD_SHA,
@@ -62,6 +67,12 @@ class _AdmissionTransport(_ReuseTransport):
         for alias, sha in self.bindings.items():
             path = path.replace(sha, alias)
         path = path.replace("/pulls/2022", "/pulls/1").replace("/issues/2022", "/issues/1")
+        if self.candidate_checks_missing and "/commits/candidate-after-1/" in path:
+            return self._bind(
+                {"sha": "candidate-after-1", "state": "pending", "statuses": []}
+                if "/status" in path
+                else {"check_runs": []}
+            )
         return self._bind(super().request(method=method, path=path, body=body))
 
     def _bind(self, payload: object) -> object:
@@ -92,6 +103,12 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
 
     def _assert_live_reuse(self, *, has_stack_collapse: bool) -> None:
         policy = build_test_merge_train_policy_record(repository=REPOSITORY)
+        payload = policy.model_dump(mode="json")
+        payload["policy"]["policies"][0] = dependency_repository_policy(
+            20, repository=REPOSITORY
+        ).model_dump(mode="json")
+        payload["policy_sha256"] = ""
+        policy = type(policy).model_validate(payload)
         candidate_record, landing_record, controller, _ = _guard_records(
             policy_sha256=policy.policy_sha256,
             repository=REPOSITORY,
@@ -173,7 +190,9 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
                     )
                 }
             )
-        reuse = client.read_head_check_reuse(candidate=candidate_record.candidate)
+        reuse = client.read_head_check_reuse(
+            candidate=candidate_record.candidate, repository_policy=policy.policy.policies[0]
+        )
         assert reuse is not None
         candidate = MergeTrainBatchCandidate.model_validate(
             candidate_record.candidate.model_dump()
@@ -204,6 +223,7 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
             store.write_merge_train_controller_state_record(controller)
+            store.write_merge_train_policy_record(policy)
             # A passed candidate really reaches observation before the
             # controller creates its landing plan, including full-CI fallback.
             lease = MergeTrainControllerLeaseContext(record=controller)
@@ -241,7 +261,9 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
                         repository=REPOSITORY, base_branch="main"
                     ),
                     transport=transport,
-                    github_client=client,
+                    github_client=GitHubMergeTrainClient(
+                        transport=transport, branch_refresh_store=store
+                    ),
                     trace_id="reuse-test",
                     recorded_at="2026-08-11T03:01:00Z",
                     candidate_store=store,
@@ -335,9 +357,50 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
                     not has_stack_collapse,
                 )
                 transport.check_conclusion = "success"
+                transport.commit_author = {"id": 20, "type": "Bot"}
+                with self.assertRaises(MergeAdmissionDeniedError) as source_denied:
+                    guard.build_proposal(**facts)
+                self.assertEqual(
+                    source_denied.exception.reason_code, "head_check_reuse_unavailable"
+                )
+                transport.commit_author = transport.user
                 admission = guard.admit(**facts)
                 self.assertEqual(admission.expected_effect_sha, candidate.candidate_sha)
                 self.assertEqual(admission.readiness.technical_checks.head_sha, HEAD_SHA)
                 self.assertEqual(
                     store.read_merge_admission_record(admission.admission_id), admission
                 )
+                full_candidate = MergeTrainBatchCandidate.model_validate(
+                    candidate.model_dump()
+                    | {
+                        "head_check_reuse": None,
+                        "candidate_ref": build_merge_train_batch_candidate_ref(
+                            repository=candidate.repository,
+                            base_branch=candidate.base_branch,
+                            batch_id=candidate.batch_id,
+                        ),
+                    }
+                )
+                full_plan = build_merge_train_batch_landing_plan(
+                    candidate=full_candidate, merge_method="merge", created_at=candidate.created_at
+                )
+                transport.candidate_checks_missing = True
+                evaluation = evaluator.evaluate(
+                    candidate_record=candidate_record.model_copy(
+                        update={"candidate": full_candidate}
+                    ),
+                    landing_plan_record=landing_record.model_copy(
+                        update={"landing_plan": full_plan}
+                    ),
+                    **facts,
+                    controller_state=controller,
+                    expected_lease_owner=controller.lease_owner,
+                    stack_collapse_record=collapse_record,
+                    evaluated_at="2026-08-11T03:01:00Z",
+                )
+                self.assertIsNone(full_plan.candidate_pull_request_number)
+                self.assertEqual(
+                    evaluation.readiness.technical_checks.head_sha, candidate.candidate_sha
+                )
+                self.assertNotEqual(evaluation.readiness.technical_checks.status, "pass")
+                self.assertNotEqual(evaluation.readiness.state, "ready")

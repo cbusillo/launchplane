@@ -117,10 +117,11 @@ def register_odoo_upgrade_rehearsal_routes(
                 refuse(403, "authorization_denied")
             if not idempotency_key.strip() or not body.reviewed_plan_sha256:
                 refuse(400, "review_required")
-        if (
+        if body.mode == "readback" and (
             body.action == "validate-business"
-            and body.mode == "readback"
-            and (not idempotency_key.strip() or not body.reviewed_plan_sha256)
+            and not idempotency_key.strip()
+            or idempotency_key.strip()
+            and not body.reviewed_plan_sha256
         ):
             refuse(400, "original_review_required")
         if body.mode != "apply" and not dependencies.authorization_allows(

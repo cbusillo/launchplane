@@ -4,6 +4,7 @@ import json
 from tempfile import TemporaryDirectory
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
@@ -119,6 +120,101 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             headers=_browser_mutation_headers(self.sessions, self.session),
             payload={"decision": decision, "source_event_id": f"ui:{decision}:{operation_id}"},
         )
+
+    async def read_proposals(self) -> Any:
+        return await http_get(
+            self.app,
+            "/v1/production-backup-authority/proposals?product=example-product&context=example-product&instance=prod",
+            headers=_browser_mutation_headers(self.sessions, self.session),
+        )
+
+    async def assert_stale_proposal(self, operation_id: str) -> None:
+        before = self.store.read_privileged_operation_record(operation_id)
+        events = self.store.list_privileged_operation_event_records(operation_id=operation_id)
+        policies = self.store.list_production_backup_policy_records()
+        targets = self.store.list_production_backup_target_records()
+        response = await self.read_proposals()
+        self.assertEqual(response.status_code, 200, response.text)
+        proposal = next(
+            item for item in response.json()["proposals"] if item["operation_id"] == operation_id
+        )
+        self.assertFalse(proposal["can_approve"])
+        self.assertTrue(proposal["can_decline"])
+        self.assertTrue(proposal["approval_unavailable_reason"])
+        self.assertEqual(self.store.read_privileged_operation_record(operation_id), before)
+        self.assertEqual(
+            self.store.list_privileged_operation_event_records(operation_id=operation_id), events
+        )
+        self.assertEqual(self.store.list_production_backup_policy_records(), policies)
+        self.assertEqual(self.store.list_production_backup_target_records(), targets)
+        refused = await self.decide(operation_id)
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], "backup_proposal_conflict")
+        self.assertEqual(self.store.read_privileged_operation_record(operation_id), before)
+        self.assertEqual((await self.decide(operation_id, "decline")).status_code, 200)
+        historical = await self.read_proposals()
+        declined = next(
+            item for item in historical.json()["proposals"] if item["operation_id"] == operation_id
+        )
+        self.assertEqual(declined["status"], "cancelled")
+        self.assertFalse(declined["can_approve"])
+        self.assertFalse(declined["can_decline"])
+
+    async def test_supported_authority_apply_narrows_approval_without_read_writes(self) -> None:
+        operation_id = await self.propose()
+        current = (await self.read_proposals()).json()["proposals"][0]
+        self.assertTrue(current["can_approve"])
+        payload = self.draft.model_dump(mode="json")
+        dry_run = await http_request(
+            self.app,
+            "POST",
+            "/v1/production-backup-authority/apply",
+            headers=_browser_mutation_headers(self.sessions, self.session)
+            | {"Idempotency-Key": "backup-authority-dry-run"},
+            payload=payload,
+        )
+        self.assertEqual(dry_run.status_code, 200, dry_run.text)
+        applied = await http_request(
+            self.app,
+            "POST",
+            "/v1/production-backup-authority/apply",
+            headers=_browser_mutation_headers(self.sessions, self.session)
+            | {"Idempotency-Key": "backup-authority-apply"},
+            payload=payload
+            | {
+                "mode": "apply",
+                "reviewed_authority_digest": dry_run.json()["result"]["authority_digest"],
+            },
+        )
+        self.assertEqual(applied.status_code, 200, applied.text)
+        await self.assert_stale_proposal(operation_id)
+
+    async def test_protection_review_boundary_narrows_approval_without_read_writes(self) -> None:
+        for window in ("policy", "target"):
+            with self.subTest(window=window):
+                authority = self.draft.model_dump(mode="json")
+                boundary = datetime.now(timezone.utc) + timedelta(days=1)
+                item = authority["policy"] if window == "policy" else authority["targets"][0]
+                item["review_after"] = boundary.isoformat()
+                item["record_id"] = ""
+                item.pop("policy_digest", None)
+                item.pop("target_digest", None)
+                self.payload["request"]["authority"] = authority
+                self.payload["source_event_id"] = f"review-boundary-{window}"
+                operation_id = await self.propose()
+                with patch(
+                    "control_plane.privileged_operation_registry.datetime", wraps=datetime
+                ) as clock:
+                    clock.now.return_value = boundary - timedelta(microseconds=1)
+                    response = await self.read_proposals()
+                    current = next(
+                        item
+                        for item in response.json()["proposals"]
+                        if item["operation_id"] == operation_id
+                    )
+                    self.assertTrue(current["can_approve"])
+                    clock.now.return_value = boundary
+                    await self.assert_stale_proposal(operation_id)
 
     def replace_human_rules(self, rules: list[dict[str, Any]]) -> None:
         active = self.store.list_authz_policy_records(status="active", limit=2)[0]
@@ -531,3 +627,30 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             response = await self.decide(operation_id)
         self.assertEqual(response.status_code, 503, response.text)
         self.assertNotIn("private policy diagnostics", response.text)
+
+    async def test_unavailable_plan_disables_approval_without_hiding_decline_or_history(
+        self,
+    ) -> None:
+        operation_id = await self.propose()
+        before = self.store.read_privileged_operation_record(operation_id)
+        events = self.store.list_privileged_operation_event_records(operation_id=operation_id)
+        with patch(
+            "control_plane.storage.postgres.PostgresRecordStore.list_production_backup_policy_records",
+            side_effect=LookupError("private provider diagnostics"),
+        ):
+            response = await self.read_proposals()
+            self.assertEqual(response.status_code, 200, response.text)
+            proposal = response.json()["proposals"][0]
+            self.assertFalse(proposal["can_approve"])
+            self.assertTrue(proposal["can_decline"])
+            self.assertTrue(proposal["approval_unavailable_reason"])
+            self.assertNotIn("private provider diagnostics", response.text)
+            self.assertEqual(self.store.read_privileged_operation_record(operation_id), before)
+            self.assertEqual(
+                self.store.list_privileged_operation_event_records(operation_id=operation_id),
+                events,
+            )
+            self.assertEqual((await self.decide(operation_id, "decline")).status_code, 200)
+            historical = await self.read_proposals()
+            self.assertEqual(historical.status_code, 200, historical.text)
+            self.assertEqual(historical.json()["proposals"][0]["status"], "cancelled")

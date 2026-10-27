@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Literal, cast
 
 import click
@@ -679,8 +680,6 @@ def plan_backup_policy_proposal(
             record_store=authority_store,
             envelope=request.authority,
         )
-        from datetime import datetime, timezone
-
         observed_at = datetime.now(timezone.utc)
         bound_ids = {target.record_id for target in plan.result.targets}
         bound_records = [

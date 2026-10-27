@@ -196,9 +196,11 @@ class SeparationResourcesRefusal(SeparationResourcesPlan, ProgramFailureEvidence
 
 def parse_preparation_receipt(
     value: object,
+    *,
+    extra: Literal["ignore", "forbid"] | None = None,
 ) -> SeparationResourcesResult | SeparationResourcesRefusal:
     return TypeAdapter(SeparationResourcesResult | SeparationResourcesRefusal).validate_python(
-        value
+        value, extra=extra
     )
 
 

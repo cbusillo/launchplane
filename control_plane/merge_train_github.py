@@ -1507,7 +1507,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         return True
 
     def read_head_check_reuse(
-        self, *, candidate: MergeTrainBatchCandidate
+        self,
+        *,
+        candidate: MergeTrainBatchCandidate,
+        repository_policy: MergeTrainRepositoryPolicy | None = None,
     ) -> MergeTrainHeadCheckReuse | None:
         # An equal tree does not establish the candidate's current commit pair.
         if (
@@ -1570,6 +1573,8 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 or str(base_repo.get("full_name") or "").casefold()
                 != candidate.repository.casefold()
             ):
+                return None
+            if not self._head_checks_have_trusted_source(pull, repository_policy=repository_policy):
                 return None
             if (
                 _git_commit_identity(
@@ -1652,7 +1657,13 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 != candidate.base_sha
             ):
                 return None
-        except (MergeTrainGitHubError, TenantAdmissionControllerError, ValueError) as error:
+        except (
+            MergeTrainGitHubError,
+            TenantAdmissionControllerError,
+            ValueError,
+            OSError,
+            SQLAlchemyError,
+        ) as error:
             if isinstance(error, MergeTrainGitHubError) and error.rate_limited:
                 raise
             # Missing/unreadable evidence selects full CI, never a reusable pass.
@@ -1687,6 +1698,58 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 )
                 for required in checks.required_checks
             ),
+        )
+
+    def _head_checks_have_trusted_source(
+        self,
+        pull_request: dict[str, object],
+        *,
+        repository_policy: MergeTrainRepositoryPolicy | None,
+    ) -> bool:
+        policy = dependency_update_policy(
+            pull_request,
+            store=self._branch_refresh_store,
+            repository_policy=repository_policy or self._snapshot_policy,
+        )
+        if policy is None:
+            return False
+
+        def trusted_identity(identity: object) -> bool:
+            if not isinstance(identity, dict):
+                return False
+            user_id = identity.get("id")
+            if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
+                return False
+            if user_id in policy.dependency_identity_ids:
+                return False
+            return identity.get("type") == "User" or (
+                identity.get("type") == "Bot"
+                and user_id in policy.trusted_automation_github_user_ids
+            )
+
+        if not trusted_identity(pull_request.get("user")):
+            return False
+        head = _json_object(pull_request.get("head"), "Head-check source head")
+        base = _json_object(pull_request.get("base"), "Head-check source base")
+        head_repo = _repository_full_name(head.get("repo"), "Head-check source repository")
+        base_repo = _repository_full_name(base.get("repo"), "Head-check base repository")
+        if head_repo.casefold() != base_repo.casefold():
+            return False
+        commits = self.transport.request(
+            method="GET",
+            path=f"/repos/{_repository_path(base_repo)}/pulls/{pull_request['number']}/commits?per_page=100",
+        )
+        return (
+            isinstance(commits, list)
+            and 0 < len(commits) < 100
+            and isinstance(commits[-1], dict)
+            and commits[-1].get("sha") == head.get("sha")
+            and all(
+                isinstance(commit, dict)
+                and trusted_identity(commit.get("author"))
+                and trusted_identity(commit.get("committer"))
+                for commit in commits
+            )
         )
 
     def _head_check_reuse_base_history_is_unchanged(

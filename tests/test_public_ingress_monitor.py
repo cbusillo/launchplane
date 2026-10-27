@@ -2814,7 +2814,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
 
         self.assertEqual([event.event for event in store.incident_events], ["opened", "reminder"])
         self.assertEqual(len(store.notification_attempts), 2)
-        self.assertEqual(len(discord_posts), 2)
+        self.assertEqual(len(discord_posts), 1)
+        self.assertEqual(store.notification_attempts[-1].delivery_status, "skipped")
         reminder_state = store.reminder_states[0]
         self.assertEqual(reminder_state.last_window_index, 1)
         self.assertEqual(reminder_state.next_reminder_at, "2026-05-29T12:30:00Z")

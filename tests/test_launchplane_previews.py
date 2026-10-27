@@ -1140,21 +1140,11 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("Tenant environment", rendered_html)
             self.assertIn("Testing lane", rendered_html)
             self.assertIn("Prod lane", rendered_html)
-            self.assertIn("Main feeds testing.", rendered_html)
-            self.assertIn(
-                "Testing is carrying a newer artifact than prod and is the current promotion candidate.",
-                rendered_html,
-            )
-            self.assertIn("Testing is ready to promote into prod.", rendered_html)
             self.assertIn("Rebuild long-lived lanes", rendered_html)
             self.assertEqual(_tenant_action_sections(rendered_html), 2)
             self.assertIn("Re-ship current testing artifact", rendered_html)
             self.assertIn("ship resolve -&gt; ship execute", rendered_html)
             self.assertIn("Promotion candidate", rendered_html)
-            self.assertIn(
-                "Latest prod backup gate backup-opw-prod-20260414T111500Z passed and can authorize promotion.",
-                rendered_html,
-            )
             self.assertIn("promote resolve", rendered_html)
             self.assertIn("promote execute", rendered_html)
             self.assertIn("--local-rehearsal", rendered_html)

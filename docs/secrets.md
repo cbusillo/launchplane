@@ -182,7 +182,10 @@ uv run python scripts/reconcile-odoo-secret-references.py apply <same arguments>
 
 Dry-run saves the value-free review outside the repository. Apply sends that
 review's keys and digest with the lane confirmation, then reads the plan again
-and passes only when every entry is `already_agrees`.
+and passes only when the readback is nonempty, contains exactly the reviewed
+key set and every entry is `already_agrees`. Empty, missing or extra keys leave
+the correction `accepted_unverified`; preserve its trace and inspect the lane
+before considering another apply.
 
 Use the service route
 `/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile`:
