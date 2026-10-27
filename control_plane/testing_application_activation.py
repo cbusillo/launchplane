@@ -29,6 +29,7 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.dokploy import api, source
+from control_plane.dokploy.application_endpoint import application_endpoint_spec
 from control_plane.dokploy.fresh_application import (
     match_application_volume_mount,
     require_fresh_application_runtime,
@@ -823,6 +824,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             raise TestingActivationRefusal(
                 "The fresh recipient has an unrequested deployment history."
             )
+        self.verify_application_endpoint(record)
         checkpoint(phase)
         record = self.save(record, phase=phase)
         api.trigger_deployment(
@@ -1009,6 +1011,11 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         # Its initial-only fields are replaced only after separately proving their
         # exact original activation values above and the actual runtime below.
         vanilla = deepcopy(live)
+        endpoint = live.get("endpointSpecSwarm")
+        if endpoint is not None:
+            if endpoint != application_endpoint_spec({}):
+                raise TestingActivationRefusal("The application endpoint setting changed.")
+            vanilla["endpointSpecSwarm"] = None
         for key in ("dockerImage", "username", "password", "registryUrl", "registryId"):
             vanilla[key] = None
         vanilla.update(
@@ -1023,6 +1030,47 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
         require_fresh_application_runtime(
             vanilla, environment_id=record.environment_id, project_id=record.project_id
         )
+
+    def verify_application_endpoint(self, record: TestingActivationRecord) -> None:
+        if self.live(record).get("endpointSpecSwarm") != application_endpoint_spec({}):
+            raise TestingActivationRefusal("The application endpoint setting did not verify.")
+
+    def configure_original_undeployed_endpoint(
+        self, record: TestingActivationRecord, checkpoint: Callable[[str], None]
+    ) -> TestingActivationRecord:
+        if (
+            "application_deployment_id" in record.state_recipient
+            or record.phase == "deploy_application_deployment_id"
+            or self.live(record).get("endpointSpecSwarm") is not None
+        ):
+            return record
+        self.verify_provider(record)
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        history = api.list_deployments_for_target(
+            host=host,
+            token=token,
+            target_type="application",
+            target_id=record.target_id,
+            require_complete=True,
+        )
+        if history:
+            raise TestingActivationRefusal(
+                "An original deployment prevents endpoint configuration."
+            )
+        checkpoint("configure_application")
+        record = self.save(record, phase="configure_application")
+        api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/application.update",
+            method="POST",
+            payload={
+                "applicationId": record.target_id,
+                "endpointSpecSwarm": application_endpoint_spec({}),
+            },
+        )
+        self.verify_application_endpoint(record)
+        return record
 
     @staticmethod
     def mount_matches(
@@ -1116,8 +1164,10 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
                     "applicationId": record.target_id,
                     "sourceType": "docker",
                     "autoDeploy": False,
+                    "endpointSpecSwarm": application_endpoint_spec({}),
                 },
             )
+            self.verify_application_endpoint(record)
             checkpoint(record.phase)
             api.dokploy_request(
                 host=host,
@@ -1141,6 +1191,7 @@ class ApplicationActivationAdapter(TestingActivationAdapter):
             )
             self.verify_provider(record)
             record = self.save_state(record, application_configured="true")
+        record = self.configure_original_undeployed_endpoint(record, checkpoint)
         self.verify_provider(record)
         return record
 
