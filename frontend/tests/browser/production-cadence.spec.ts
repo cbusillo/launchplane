@@ -95,6 +95,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       const signal = findSignal(main);
       const attribute = view === "index" ? "data-operational" : "data-tone";
       const healthy = view === "environment" ? "pass" : "verified";
+      const unverified = view === "environment" ? "warning" : "danger";
       await expect(signal).toHaveAttribute(attribute, healthy);
       await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
       const advanceRead = async (milliseconds: number) => {
@@ -123,10 +124,10 @@ for (const view of ["index", "workspace", "environment"] as const) {
           continue;
         }
         // Observe expiry before publication and consecutive stale responses.
-        await advance(origin + (minute + 1) * cadence + 1 - browserTime, "warning");
+        await advance(origin + (minute + 1) * cadence + 1 - browserTime, unverified);
         // Publishing at +11 seconds leaves +5 and +10 second responses stale.
-        await advance(DEADLINE_RETRY_INTERVAL_MS, "warning");
-        await advance(DEADLINE_RETRY_INTERVAL_MS, "warning");
+        await advance(DEADLINE_RETRY_INTERVAL_MS, unverified);
+        await advance(DEADLINE_RETRY_INTERVAL_MS, unverified);
         await advance(DEADLINE_RETRY_INTERVAL_MS, healthy);
       }
       if (journey === "long-lived") {
@@ -156,10 +157,10 @@ for (const view of ["index", "workspace", "environment"] as const) {
       }
       // Successful GETs must not renew stopped monitor evidence.
       stoppedAt = serviceTime;
-      await advance(cadence, "warning");
+      await advance(cadence, unverified);
       // Repeated successful reads cannot renew the stopped observation, and the
       // short follow-up ends after one cadence rather than spinning forever.
-      await advance(READ_REFRESH_INTERVAL_MS, "warning");
+      await advance(READ_REFRESH_INTERVAL_MS, unverified);
       const stoppedReads = reads;
       browserTime += DEADLINE_RETRY_INTERVAL_MS * 2;
       await page.clock.runFor(DEADLINE_RETRY_INTERVAL_MS * 2);
@@ -171,7 +172,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
       // Check after the response renders too, so queued intercepted requests
       // cannot escape the earlier synchronous no-spin assertion.
       expect(reads).toBe(stoppedReads + 1);
-      await expect(signal).toHaveAttribute(attribute, "warning");
+      await expect(signal).toHaveAttribute(attribute, unverified);
       expect(mutations).toEqual([]);
     });
   }
@@ -242,7 +243,7 @@ for (const heldRead of [false, true]) {
     if (heldRead) {
       await page.clock.runFor(5_001);
       await waitForState(() => Boolean(releaseRead)).toBe(true);
-      await expect(prod).toHaveAttribute("data-operational", "warning");
+      await expect(prod).toHaveAttribute("data-operational", "danger");
       await expect(testing).toHaveAttribute("data-operational", "verified");
       await page.clock.runFor(2_000);
       await expect(testing).toHaveAttribute("data-operational", "warning");
@@ -251,7 +252,7 @@ for (const heldRead of [false, true]) {
       await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
     } else {
       await advance(5_001);
-      await expect(prod).toHaveAttribute("data-operational", "warning");
+      await expect(prod).toHaveAttribute("data-operational", "danger");
       await expect(testing).toHaveAttribute("data-operational", "verified");
       await advance(2_000);
       await expect(testing).toHaveAttribute("data-operational", "warning");
