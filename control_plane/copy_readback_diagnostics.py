@@ -60,7 +60,6 @@ class ReadbackPredicate(StrEnum):
     USAGE_DATABASE = "copy_usage_database_valid"
     USAGE_CUTOFF = "copy_usage_cutoff_valid"
     USAGE = "copy_usage_readable"
-    AGGREGATES = "copy_aggregate_readable"
 
 
 class CopyReadbackRefused(RuntimeError):

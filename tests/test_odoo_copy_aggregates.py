@@ -1,28 +1,92 @@
-from io import StringIO
+import base64
+from contextlib import redirect_stdout
+import hashlib
+from io import BytesIO, StringIO
 import json
+from pathlib import Path
+import sys
+from tempfile import TemporaryDirectory
+from typing import Any, cast
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+from fastapi import FastAPI, HTTPException
 from pydantic import ValidationError
 
-from control_plane.odoo_copy_aggregates import AggregateQuery, AggregateCounts, read_aggregates
+from control_plane import odoo_copy_aggregates as reader
+from control_plane._odoo_clean_snapshot_program import CLEAN_TESTING_SNAPSHOT_LIBRARY
+from control_plane.clean_testing_snapshot import CleanTestingSnapshot
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+from control_plane.dokploy import source, api
+from control_plane.http_routes.odoo_runtime import (
+    OdooRuntimeReadDependencies,
+    register_odoo_runtime_read_routes,
+)
+from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
+from control_plane.odoo_testing_restore import generation_binding
+from control_plane.storage.postgres import PostgresRecordStore
+from tests.test_odoo_import_diagnostics import DiagnosticFixture
+from tests.test_odoo_testing_restore import generation
+from tests.support.auth import _identity
+from tests.support.http import request
 
 
-class CopyAggregateTests(unittest.TestCase):
-    def test_query_accepts_identifiers_and_rejects_sql_and_overrides(self) -> None:
-        query = AggregateQuery(table="product_template", key="first_mpn", partition="manufacturer")
-        self.assertEqual(query.table, "product_template")
+COPY_ROWS = (
+    b"-- Archive output\nCOPY public.product_template (active, first_mpn, manufacturer, personal) FROM stdin;\n"
+    b"t\tABC\t1\tprivate@example.invalid\n"
+    b"f\tabc\t1\tprivate@example.invalid\n"
+    b"t\t ABC \t1\tprivate@example.invalid\n"
+    b"t\tabc\t2\tprivate@example.invalid\n"
+    b"t\t\\N\t1\tprivate@example.invalid\n"
+    b"t\t\t1\tprivate@example.invalid\n"
+    b"\\.\n-- Archive completed\n"
+)
+QUERY = reader.AggregateQuery(table="product_template", key="first_mpn", partition="manufacturer")
+
+
+class ArchiveCountTests(unittest.TestCase):
+    def test_archive_counts_group_without_exporting_fields_and_decode_copy_escapes(self) -> None:
+        counts = reader.count_archive_rows(BytesIO(COPY_ROWS), QUERY.model_dump())
+        self.assertEqual(
+            counts, dict(active_rows=5, duplicate_groups=1, duplicate_rows=3, missing_key_rows=2)
+        )
+        self.assertNotIn("private", json.dumps(counts))
+        for escaped, decoded in (
+            (b"\\N", None),
+            (b"\\\\N", r"\N"),
+            (b"a\\tb", "a\tb"),
+            (b"\\303\\251", "é"),
+            (b"\\x41", "A"),
+        ):
+            with self.subTest(escaped=escaped):
+                self.assertEqual(reader.decode_copy_field(escaped), decoded)
+
+    def test_incomplete_foreign_duplicate_or_oversized_tables_never_produce_counts(self) -> None:
+        for data in (
+            COPY_ROWS.replace(b"product_template", b"res_users"),
+            COPY_ROWS.replace(b"\\.\n", b""),
+            COPY_ROWS + COPY_ROWS,
+            COPY_ROWS.replace(b"t\tABC", b"notbool\tABC"),
+        ):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                reader.count_archive_rows(BytesIO(data), QUERY.model_dump())
+        for limit in ("MAX_ROW_BYTES", "MAX_EXTRACTED_BYTES", "MAX_GROUP_BYTES", "MAX_ROWS"):
+            with (
+                self.subTest(limit=limit),
+                patch.object(reader, limit, 1),
+                self.assertRaises(ValueError),
+            ):
+                reader.count_archive_rows(BytesIO(COPY_ROWS), QUERY.model_dump())
+
+    def test_query_and_output_accept_only_identifiers_and_bounded_integer_counts(self) -> None:
         for values in (
             {"table": "product_template;DELETE FROM res_users", "key": "first_mpn"},
-            {"table": "product_template", "key": "first_mpn", "sql": "SELECT * FROM res_users"},
-            {"table": "product_template", "key": "first_mpn", "database": "prod"},
+            {**QUERY.model_dump(), "sql": "SELECT * FROM res_users"},
+            {**QUERY.model_dump(), "database": "prod"},
         ):
             with self.subTest(values=values), self.assertRaises(ValidationError):
-                AggregateQuery.model_validate(values)
-
-    def test_output_rejects_rows_negative_counts_booleans_and_overflow(self) -> None:
+                reader.AggregateQuery.model_validate(values)
         counts = dict(active_rows=10, duplicate_groups=2, duplicate_rows=5, missing_key_rows=1)
-        self.assertEqual(AggregateCounts(**counts).duplicate_rows, 5)
         for values in (
             {**counts, "rows": [{"email": "private@example.invalid"}]},
             {**counts, "active_rows": True},
@@ -30,131 +94,153 @@ class CopyAggregateTests(unittest.TestCase):
             {**counts, "active_rows": 2**63},
         ):
             with self.subTest(values=values), self.assertRaises(ValidationError):
-                AggregateCounts.model_validate(values)
+                reader.AggregateCounts.model_validate(values)
 
-    def test_unqualified_copy_never_dispatches_a_query(self) -> None:
-        store = Mock()
-        store.read_product_profile_record.side_effect = ValueError("unknown custody")
-        with self.assertRaises(ValueError):
-            read_aggregates(
-                store=store,
-                product="example-odoo",
-                query=AggregateQuery(table="product_template", key="first_mpn"),
+
+class SnapshotReaderTests(unittest.TestCase):
+    def test_verified_archive_uses_only_offline_decoder_and_refuses_tampering(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            library: dict[str, Any] = {}
+            exec(CLEAN_TESTING_SNAPSHOT_LIBRARY, library)
+            snapshot_id = "a" * 64
+            with patch("pathlib.Path.home", return_value=root):
+                path = library["clean_snapshot_root"](snapshot_id)
+            path.mkdir()
+            archive = path / "database.dump"
+            archive.write_bytes(b"fixture custom archive")
+            receipt = dict(
+                snapshot_id=snapshot_id,
+                database_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(),
+                filestore_sha256="b" * 64,
             )
-        store.read_clean_testing_snapshot.assert_not_called()
-
-
-class AggregateProgramTests(unittest.TestCase):
-    def test_query_uses_readonly_snapshot_and_refuses_unsanitized_or_remote_relations(self) -> None:
-        import base64
-        from contextlib import redirect_stdout
-        import os
-        import sys
-        from types import SimpleNamespace
-        from unittest.mock import MagicMock, patch
-        from psycopg import sql
-        from control_plane.odoo_copy_aggregates import AGGREGATE_QUERY_PROGRAM
-
-        query = AggregateQuery(table="product_template", key="first_mpn", partition="manufacturer")
-        payload = dict(
-            aggregate_query=query.model_dump(),
-            database_name="copy",
-            witness_key="copy_witness",
-            copy_binding_sha256="a" * 64,
-            readback={},
-        )
-        for readonly, sanitized, relation in (
-            (True, True, "r"),
-            (False, True, "r"),
-            (True, False, "r"),
-            (True, True, "f"),
-            (True, True, "v"),
-        ):
-            with self.subTest(readonly=readonly, sanitized=sanitized, relation=relation):
-                cursor = MagicMock()
-                cursor.__enter__.return_value = cursor
-                cursor.fetchone.side_effect = [("on" if readonly else "off",), (10, 1), (2, 5)]
-                cursor.fetchall.side_effect = [
-                    [("a" * 64,)],
-                    [(relation, False)],
-                    [("active", "bool"), ("first_mpn", "text"), ("manufacturer", "int4")],
-                ]
-                connection = Mock()
-                connection.cursor.return_value = cursor
-                connect = Mock(return_value=connection)
-                isolation = Mock(return_value=([] if sanitized else ["live_connection"], [], 1))
+            (path / "receipt.json").write_text(json.dumps(receipt))
+            snapshot = CleanTestingSnapshot(
+                product="example-odoo",
+                context="example",
+                server_id="fixture-server",
+                captured_at="2026-10-26T00:00:00Z",
+                storage_budget=OdooTestingDrillStorageBudget(
+                    database_bytes=1024,
+                    filestore_bytes=1024,
+                    staging_bytes=1024,
+                    reserve_bytes=1024,
+                ),
+                **receipt,
+            )
+            spec = dict(
+                snapshot=snapshot.model_dump(mode="json"),
+                query=QUERY.model_dump(),
+                project="fixture-copy",
+            )
+            process = Mock(stdout=BytesIO(COPY_ROWS))
+            process.wait.return_value = 0
+            process.poll.return_value = 0
+            files = {
+                str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()
+            }
+            with (
+                patch("pathlib.Path.home", return_value=root),
+                patch.object(
+                    sys,
+                    "argv",
+                    ["read", base64.b64encode(json.dumps(spec).encode()).decode(), "FRAME:"],
+                ),
+                patch("signal.signal"),
+                patch("signal.alarm"),
+                patch(
+                    "subprocess.check_output",
+                    side_effect=lambda arguments, **kwargs: (
+                        b"[]" if arguments[1] == "inspect" else b"a" * 64 + b"\n"
+                    ),
+                ),
+                patch("subprocess.Popen", return_value=process) as decode,
+            ):
                 output = StringIO()
-                with (
-                    patch.dict(
-                        sys.modules, {"psycopg2": SimpleNamespace(connect=connect, sql=sql)}
-                    ),
-                    patch.dict(
-                        os.environ,
-                        {
-                            "PLATFORM_INSTANCE": "testing",
-                            "ODOO_DB_HOST": "database",
-                            "ODOO_DB_USER": "copy",
-                            "ODOO_DB_PASSWORD": "fixture",
-                        },
-                    ),
-                    patch.object(
-                        sys,
-                        "argv",
-                        [
-                            "aggregate",
-                            base64.b64encode(json.dumps(payload).encode()).decode(),
-                        ],
-                    ),
-                    redirect_stdout(output),
-                ):
-                    if readonly and sanitized and relation == "r":
-                        exec(AGGREGATE_QUERY_PROGRAM, {"read_integration_settings": isolation})
-                        counts = AggregateCounts.model_validate_json(output.getvalue())
-                        self.assertEqual(counts.active_rows, 10)
-                        self.assertEqual(counts.duplicate_rows, 5)
-                        statements = [
-                            call.args[0].as_string()
-                            for call in cursor.execute.call_args_list
-                            if isinstance(call.args[0], sql.Composed)
-                        ]
-                        self.assertTrue(
-                            all(
-                                'FROM ONLY "public"."product_template"' in statement
-                                for statement in statements
-                            )
-                        )
-                    else:
-                        with self.assertRaises(RuntimeError):
-                            exec(AGGREGATE_QUERY_PROGRAM, {"read_integration_settings": isolation})
-                        self.assertEqual(output.getvalue(), "")
-                        self.assertFalse(
-                            any(
-                                isinstance(call.args[0], sql.Composed)
-                                for call in cursor.execute.call_args_list
-                            )
-                        )
-                connection.commit.assert_not_called()
-                connection.rollback.assert_called_once()
-                connection.close.assert_called_once()
+                with redirect_stdout(output):
+                    exec(reader.SNAPSHOT_AGGREGATE_PROGRAM, {})
+                frame = json.loads(output.getvalue().removeprefix("FRAME:"))
+                self.assertEqual(frame["counts"]["duplicate_rows"], 3)
+                arguments = decode.call_args.args[0]
+                self.assertIn("--file=-", arguments)
+                self.assertFalse(any(arg.startswith(("-d", "--dbname")) for arg in arguments))
+                self.assertEqual(
+                    files,
+                    {
+                        str(p.relative_to(root)): p.read_bytes()
+                        for p in root.rglob("*")
+                        if p.is_file()
+                    },
+                )
+                decode.reset_mock()
+                archive.write_bytes(b"tampered archive")
+                output = StringIO()
+                with redirect_stdout(output):
+                    exec(reader.SNAPSHOT_AGGREGATE_PROGRAM, {})
+                self.assertEqual(
+                    json.loads(output.getvalue().removeprefix("FRAME:"))["unavailable"],
+                    "snapshot_unavailable",
+                )
+                decode.assert_not_called()
+
+    def test_matching_completed_provenance_required_before_any_provider_read(self) -> None:
+        fixture = DiagnosticFixture()
+        store = fixture.store
+        current = generation().model_copy(
+            update={
+                "product": fixture.profile.product,
+                "context": fixture.context,
+                "completed_at": "2026-10-26T00:00:00Z",
+            }
+        )
+        store.read_fresh_odoo_testing_generation.return_value = current
+        store.list_dokploy_target_id_records.return_value = (
+            store.read_dokploy_target_id_record.return_value,
+        )
+        snapshot = Mock(
+            snapshot_id=generation_binding(current),
+            server_id="fixture-server",
+            database_sha256="b" * 64,
+            captured_at="2026-10-26T00:00:00Z",
+        )
+        snapshot.model_dump.return_value = {}
+        counts = dict(active_rows=12, duplicate_groups=1, duplicate_rows=3, missing_key_rows=2)
+
+        def remote(**kwargs: Any) -> None:
+            kwargs["receive"]({"type": "complete", "counts": counts})
+
+        with (
+            patch.object(reader, "preview_snapshot", return_value=snapshot),
+            patch.object(
+                source, "read_dokploy_config", return_value=("https://provider.invalid", "fixture")
+            ),
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={
+                    "serverId": "fixture-server",
+                    "name": fixture.store.read_dokploy_target_record.return_value.target_name,
+                    "appName": "fixture-copy",
+                },
+            ) as provider,
+            patch.object(reader, "_read_remote", side_effect=remote) as execute,
+        ):
+            result = reader.read_aggregates(
+                store=store, product=fixture.profile.product, query=QUERY
+            )
+            self.assertEqual(result.counts.duplicate_rows, 3)
+            self.assertEqual(result.snapshot_id, snapshot.snapshot_id)
+            execute.reset_mock()
+            provider.reset_mock()
+            snapshot.snapshot_id = "c" * 64
+            with self.assertRaises(ValueError):
+                reader.read_aggregates(store=store, product=fixture.profile.product, query=QUERY)
+            execute.assert_not_called()
+            provider.assert_not_called()
 
 
 class AggregateRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_product_read_scope_no_production_no_overrides_and_fail_closed(self) -> None:
-        from pathlib import Path
-        from typing import Any, cast
-        from unittest.mock import patch
-        from fastapi import FastAPI, HTTPException
-        from control_plane.http_routes.odoo_runtime import (
-            OdooRuntimeReadDependencies,
-            register_odoo_runtime_read_routes,
-        )
-        from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
-        from control_plane.odoo_copy_aggregates import AggregateEvidence, ROUTE
-        from control_plane.storage.postgres import PostgresRecordStore
-        from tests.test_odoo_import_diagnostics import DiagnosticFixture
-        from tests.support.auth import _identity
-        from tests.support.http import request
-
         fixture = DiagnosticFixture()
         store = Mock(spec=PostgresRecordStore)
         store.read_product_profile_record.return_value = fixture.profile
@@ -174,15 +260,14 @@ class AggregateRouteTests(unittest.IsolatedAsyncioTestCase):
                     next_trace_id=lambda: "fixture",
                     authorization_allows=allowed,
                     http_error=http_error,
-                    error_response_model=AggregateCounts,
+                    error_response_model=reader.AggregateCounts,
                 ),
                 control_plane_root=Path("fixture"),
                 database_url=None,
             ),
         )
-        path = ROUTE.format(product=fixture.profile.product, environment="testing")
-        payload = dict(table="product_template", key="first_mpn", partition="manufacturer")
-        evidence = AggregateEvidence(
+        path = reader.ROUTE.format(product=fixture.profile.product, environment="testing")
+        evidence = reader.AggregateEvidence(
             product=fixture.profile.product,
             context=fixture.context,
             generation_sha256="a" * 64,
@@ -193,14 +278,12 @@ class AggregateRouteTests(unittest.IsolatedAsyncioTestCase):
             source_binding_sha256="c" * 64,
             operation_id="fixture-copy",
             observed_at="2026-10-26T00:00:00Z",
-            counts=AggregateCounts(
+            counts=reader.AggregateCounts(
                 active_rows=12, duplicate_groups=1, duplicate_rows=3, missing_key_rows=2
             ),
         )
-        with patch(
-            "control_plane.odoo_copy_aggregates.read_aggregates", return_value=evidence
-        ) as read:
-            response = await request(app, "POST", path, payload=payload)
+        with patch.object(reader, "read_aggregates", return_value=evidence) as read:
+            response = await request(app, "POST", path, payload=QUERY.model_dump())
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
@@ -208,114 +291,27 @@ class AggregateRouteTests(unittest.IsolatedAsyncioTestCase):
             read.reset_mock()
             for invalid in (path.replace("/testing/", "/prod/"), path + "?host=prod"):
                 self.assertEqual(
-                    (await request(app, "POST", invalid, payload=payload)).status_code, 400
+                    (await request(app, "POST", invalid, payload=QUERY.model_dump())).status_code,
+                    400,
                 )
             self.assertEqual(
                 (
                     await request(
-                        app, "POST", path, payload={**payload, "sql": "SELECT * FROM res_users"}
+                        app,
+                        "POST",
+                        path,
+                        payload={**QUERY.model_dump(), "sql": "SELECT * FROM res_users"},
                     )
                 ).status_code,
                 422,
             )
             allowed.return_value = False
-            self.assertEqual((await request(app, "POST", path, payload=payload)).status_code, 403)
+            self.assertEqual(
+                (await request(app, "POST", path, payload=QUERY.model_dump())).status_code, 403
+            )
             read.assert_not_called()
             allowed.return_value = True
             read.side_effect = ValueError("private database credentials")
-            response = await request(app, "POST", path, payload=payload)
+            response = await request(app, "POST", path, payload=QUERY.model_dump())
             self.assertEqual(response.status_code, 503)
             self.assertNotIn("private", response.text)
-
-
-class AggregateProvenanceTests(unittest.TestCase):
-    def test_current_copy_requires_matching_snapshot_and_unchanged_authority(self) -> None:
-        from types import SimpleNamespace
-        from unittest.mock import patch
-        from control_plane import odoo_copy_aggregates as reader
-        from tests.test_odoo_import_diagnostics import DiagnosticFixture
-        from tests.test_odoo_testing_restore import generation
-        from control_plane.odoo_testing_restore import generation_binding
-        from control_plane.dokploy import source, api
-
-        fixture = DiagnosticFixture()
-        lane = next(lane for lane in fixture.profile.lanes if lane.instance == "testing")
-        qualified_lane = lane.model_copy(
-            update={
-                "odoo_data_policy": lane.odoo_data_policy.model_copy(
-                    update={"data_authority": "resettable"}
-                )
-            }
-        )
-        profile = fixture.profile.model_copy(
-            update={
-                "lanes": tuple(
-                    qualified_lane if item.instance == "testing" else item
-                    for item in fixture.profile.lanes
-                )
-            }
-        )
-        store = fixture.store
-        store.read_product_profile_record.return_value = profile
-        current = generation().model_copy(
-            update={
-                "product": profile.product,
-                "context": lane.context,
-                "target_id": store.read_dokploy_target_id_record.return_value.target_id,
-                "completed_at": "2026-10-26T00:00:00Z",
-            }
-        )
-        snapshot = SimpleNamespace(
-            snapshot_id=generation_binding(current),
-            server_id="fixture-server",
-            database_sha256="b" * 64,
-            captured_at="2026-10-26T00:00:00Z",
-        )
-        counts = dict(active_rows=12, duplicate_groups=1, duplicate_rows=3, missing_key_rows=2)
-
-        def receive(**kwargs: object) -> None:
-            callback = kwargs["receive"]
-            assert callable(callback)
-            callback({"type": "complete", "counts": counts})
-
-        with (
-            patch.object(reader, "preview_snapshot", return_value=snapshot),
-            patch.object(reader, "require_distinct_testing_credentials"),
-            patch.object(
-                reader, "read_current_testing_generation", return_value=current
-            ) as read_generation,
-            patch.object(
-                reader, "select_stable_runtime", return_value=fixture.connection.selection
-            ) as select,
-            patch.object(reader, "assert_selection_current"),
-            patch.object(
-                source,
-                "read_dokploy_config",
-                return_value=("https://provider.invalid", "fixture"),
-            ),
-            patch.object(
-                api,
-                "fetch_dokploy_target_payload",
-                return_value={"serverId": "fixture-server", "appName": current.namespace},
-            ) as provider,
-            patch.object(
-                reader, "testing_drill_environment", return_value={"ODOO_DB_NAME": "fixture-copy"}
-            ),
-            patch.object(reader, "inspect_native_testing_receiver", side_effect=receive) as inspect,
-        ):
-            query = reader.AggregateQuery(table="product_template", key="first_mpn")
-            result = reader.read_aggregates(store=store, product=profile.product, query=query)
-            self.assertEqual(result.counts.duplicate_rows, 3)
-            self.assertEqual(result.snapshot_id, snapshot.snapshot_id)
-            self.assertEqual(select.call_args.args[2], "testing")
-            inspect.reset_mock()
-            provider.reset_mock()
-            snapshot.snapshot_id = "c" * 64
-            with self.assertRaises(ValueError):
-                reader.read_aggregates(store=store, product=profile.product, query=query)
-            inspect.assert_not_called()
-            provider.assert_not_called()
-            snapshot.snapshot_id = generation_binding(current)
-            read_generation.side_effect = [current, None]
-            with self.assertRaises(ValueError):
-                reader.read_aggregates(store=store, product=profile.product, query=query)
