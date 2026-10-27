@@ -194,7 +194,7 @@ def private_ingress_snapshot(
     hosts = [host for host in client.list_proxy_hosts() if hostname in host.domain_names]
     if len(hosts) != 1:
         raise ValueError("Use the unique original private testing edge.")
-    host = client.get_proxy_host(hosts[0].id, public_only=True)
+    host = client.get_proxy_host(hosts[0].id, public_only=True, private_bearer_auth=True)
     receipt = latest_testing_private_ingress_receipt(
         store, product=product, context=context, host_id=host.id
     )
@@ -247,6 +247,12 @@ def private_ingress_snapshot(
         != adapter._receipt_authority_sha256(cast(dict[str, object], snapshot["authority"]))
     ):
         raise ValueError("The original private testing ingress receipt changed.")
+    snapshot = {
+        **snapshot,
+        "desired": desired.model_copy(
+            update={"npmplus_location_config": current.npmplus_location_config}
+        ).model_dump(mode="json"),
+    }
     binding = {
         "endpoint_key": endpoint.endpoint_key,
         "server_id": str(cast(dict[str, object], snapshot["authority"])["server_id"]),
