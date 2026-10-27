@@ -404,13 +404,13 @@ It runs as part of `test:browser`; the standalone command above is for focused
 diagnosis. Its scratch folders live under the OS temp directory and are removed
 after the run.
 
-Local runs and CI shards use the same two-worker budget in
-`frontend/playwright.config.ts`, including self-hosted candidate lanes.
+Local runs default to two workers and CI shards retain their four-worker cap
+in `frontend/playwright.config.ts`, including self-hosted candidate lanes.
 Shared-host CPU count is not a per-job browser budget. Use `--workers=1` to
-reduce a diagnostic run further; do not increase concurrency on a shared host.
+reduce a local diagnostic run further; do not increase concurrency on a shared host.
 
 CI partitions the unchanged suite across the [browser matrix](../../.github/workflows/ci.yml)
-with Playwright's built-in `--shard` option. Each job retains the shared worker budget, zero
+with Playwright's built-in `--shard` option. Each job retains four workers, zero
 retries, the isolation probe and browser diagnostics. `BROWSER_SMOKE_SHARD` carries
 the job's one-based index and matrix total through `(cd frontend && pnpm test:browser)`; without it,
 the local command still runs the whole browser suite and checks all screenshots.

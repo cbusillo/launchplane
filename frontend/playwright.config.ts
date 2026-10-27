@@ -7,7 +7,7 @@ export default defineConfig({
   testMatch: "**/*.spec.ts",
   outputDir: smokeArtifact("test-results"),
   fullyParallel: true,
-  workers: 2,
+  workers: process.env.CI ? 4 : 2,
   retries: 0,
   forbidOnly: Boolean(process.env.CI),
   timeout: browserDeadlines.test,
