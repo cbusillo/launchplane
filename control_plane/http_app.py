@@ -876,6 +876,7 @@ from control_plane.service_auth import (
     TerminalAgentIdentity,
     configured_local_operator_identity,
     director_agent_identity,
+    launchplane_identity_actor as launchplane_identity_actor,
     configured_terminal_agent_identity,
     TokenVerifier,
     agent_authz_audit,
@@ -3473,20 +3474,6 @@ def product_config_request_fingerprint(payload: dict[str, object]) -> str:
 def product_config_dry_run_key(payload: dict[str, object]) -> str:
     return "product-config-dry-run:" + product_config_request_fingerprint(
         product_config_continuity_payload(payload)
-    )
-
-
-def launchplane_identity_actor(identity: LaunchplaneIdentity) -> str:
-    if isinstance(identity, GitHubHumanIdentity):
-        return f"github:{identity.login}"
-    if isinstance(identity, LocalOperatorIdentity):
-        return f"local-operator:{identity.subject}"
-    if isinstance(identity, LocalAdminIdentity):
-        return f"local-admin:{identity.subject}"
-    if isinstance(identity, TerminalAgentIdentity):
-        return f"terminal-agent:{identity.subject}"
-    return (
-        f"github-actions:{identity.repository}:{identity.workflow_ref or identity.job_workflow_ref}"
     )
 
 
@@ -10495,6 +10482,7 @@ def create_launchplane_fastapi_app(
                     root=resolved_control_plane_root,
                     store=record_store,
                     request=plan_request.replacement,
+                    actor=launchplane_identity_actor(identity),
                 )
                 plan_payload = native_preflight.model_dump(mode="json")
             else:

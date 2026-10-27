@@ -138,7 +138,6 @@ class TestingPublicationPlan(FrozenRecord):
             or after.target.domains
             or after.target.public_hosts
             or after.target.pending_public_host_effects
-            or after.target.policies.staff_testing_hold
         ):
             raise ValueError(
                 "The candidate cannot acquire generation-owned routing or inline secrets."
