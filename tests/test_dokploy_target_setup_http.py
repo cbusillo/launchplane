@@ -280,7 +280,7 @@ class DokployTargetSetupHttpTests(unittest.TestCase):
                         PostgresRecordStore,
                         "retained_disposable_hostnames",
                         return_value=frozenset({retained}),
-                    ) as reservation,
+                    ),
                     patch(
                         "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup"
                     ) as provider,
@@ -299,8 +299,25 @@ class DokployTargetSetupHttpTests(unittest.TestCase):
                     )
                     self.assertEqual(status, 400, payload)
                     self.assertEqual(payload["error"]["code"], "invalid_dokploy_target_setup")
-                    reservation.assert_called()
                     provider.assert_not_called()
+        with patch.object(
+            PostgresRecordStore,
+            "retained_disposable_hostnames",
+            return_value=frozenset({"other.invalid"}),
+        ):
+            status, payload = self._invoke_with_lane_setup_grant(
+                {
+                    "operation": "create-compose",
+                    "context": "synthetic-context",
+                    "instance": "testing",
+                    "target_name": "synthetic-testing",
+                    "project_name": "Synthetic",
+                    "server_id": "server-synthetic",
+                    "domains": [hostname],
+                },
+                owners=("synthetic-product",),
+            )
+        self.assertEqual(status, 202, payload)
 
     def _invoke_with_lane_setup_grant(
         self, request: dict[str, object], *, owners: tuple[str, ...]
