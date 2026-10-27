@@ -16656,6 +16656,52 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                 writer.execute(text("SET LOCAL lock_timeout='1s'"))
                 writer.execute(text("INSERT INTO sample VALUES(1)"))
 
+    def test_submillisecond_budget_cannot_disable_the_server_deadline(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer)"))
+            with engine.connect() as keeper:
+                expires = datetime.now(timezone.utc) + timedelta(seconds=10)
+                scalar = keeper.scalar
+
+                def near_deadline(statement: Any, *args: Any, **kwargs: Any) -> Any:
+                    if str(statement) == "SELECT clock_timestamp()":
+                        return expires - timedelta(microseconds=100)
+                    return scalar(statement, *args, **kwargs)
+
+                with patch.object(keeper, "scalar", side_effect=near_deadline):
+                    with self.assertRaises(SQLAlchemyError):
+                        with locked_database(keeper, expires_at=expires):
+                            time.sleep(0.05)
+                            keeper.execute(text("SELECT 1"))
+
+    def test_keeper_releases_only_its_own_advisory_lock_acquisitions(self) -> None:
+        from control_plane.database_maintenance import locked_database
+        from sqlalchemy.pool import NullPool
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url, poolclass=NullPool)
+            self.addCleanup(engine.dispose)
+            key = 273645
+            with engine.begin() as connection:
+                connection.execute(text("CREATE TABLE sample(id integer)"))
+            with engine.connect() as keeper:
+                keeper.execute(text("SELECT pg_advisory_lock(:key)"), {"key": key})
+                keeper.commit()
+                with locked_database(
+                    keeper, expires_at=datetime.now(timezone.utc) + timedelta(seconds=10)
+                ):
+                    pass
+                with engine.connect() as observer:
+                    self.assertFalse(
+                        observer.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": key})
+                    )
+
     def test_rehearsal_refuses_the_live_cluster_before_migration(self) -> None:
         from control_plane.database_maintenance import database_system_identifier
         from control_plane.database_maintenance_cli import rehearsal_receipt
@@ -16701,8 +16747,11 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
 
     def test_held_migration_joins_current_attestations_without_losing_retained_rows(self) -> None:
         from control_plane.database_maintenance import (
+            apply_retirement,
             database_snapshot,
+            database_system_identifier,
             locked_database,
+            require_retired_functions_absent,
             retained_snapshot,
         )
         from control_plane.storage.schema_migration import (
@@ -16739,6 +16788,7 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     connection, expires_at=datetime.now(timezone.utc) + timedelta(seconds=30)
                 ):
                     before = database_snapshot(connection)
+                    preview = connection.begin_nested()
                     final = migrate_schema_on_connection(
                         connection, target_revision=retired.revision
                     )
@@ -16749,11 +16799,35 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                         ),
                     )
                     after = database_snapshot(connection)
+                    require_retired_functions_absent(connection)
                     self.assertEqual(set(before) - set(after), set(retired.RETIRED_TABLES))
                     self.assertEqual(retained_snapshot(after), retained_snapshot(before))
                     self.assertEqual(
                         after[current.TABLE_NAME],
                         before[current.TABLE_NAME],
+                    )
+                    preview.rollback()
+                    rehearsal = {
+                        "system_identifier": database_system_identifier(connection) + "-isolated",
+                        "backup_sha256": "a" * 64,
+                        "startup_action": "compatible_ahead",
+                        "schema_invariants_verified": True,
+                        "restored": before,
+                        "retained": retained_snapshot(after),
+                        "revision": final,
+                    }
+                    incompatible = connection.begin_nested()
+                    try:
+                        with patch(
+                            "control_plane.database_maintenance.schema_migration_action",
+                            return_value="upgrade",
+                        ):
+                            with self.assertRaisesRegex(RuntimeError, "incompatible"):
+                                apply_retirement(connection, before=before, rehearsal=rehearsal)
+                    finally:
+                        incompatible.rollback()
+                    self.assertEqual(
+                        apply_retirement(connection, before=before, rehearsal=rehearsal), final
                     )
             with engine.connect() as observer:
                 self.assertEqual(
@@ -16762,6 +16836,28 @@ class RealPostgresDatabaseMaintenanceTests(unittest.TestCase):
                     .all(),
                     [final],
                 )
+
+    def test_trigger_readback_refuses_a_remaining_retired_function(self) -> None:
+        from control_plane.database_maintenance import require_retired_functions_absent
+        from control_plane.storage.migrations.versions import (
+            e7c1d5e9a3b6_drop_retired_delivery_tables as retired,
+        )
+
+        with _isolated_postgres_database() as url:
+            engine = create_engine(url)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                require_retired_functions_absent(connection)
+                name = connection.dialect.identifier_preparer.quote(
+                    retired.RETIRED_TRIGGER_FUNCTIONS[0]
+                )
+                connection.execute(
+                    text(
+                        f"CREATE FUNCTION public.{name}() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'"
+                    )
+                )
+                with self.assertRaisesRegex(RuntimeError, "trigger function remains"):
+                    require_retired_functions_absent(connection)
 
     def test_census_preserves_unknown_rows_and_ignores_scheduler_ownership(self) -> None:
         from control_plane.database_maintenance_cli import in_flight_work

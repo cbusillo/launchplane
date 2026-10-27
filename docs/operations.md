@@ -5582,8 +5582,10 @@ the hold requires the shared-data/release approval below.
 
 The release default never traverses the held branch. If a database has already
 applied the held drop or one of its joins, startup joins the missing approved
-branches at `f87c72d690ab`. After explicit approval, requesting the held revision
-from an activated hostname-only schema reaches that same join. Earlier schemas
+branches through `schema_migration_target`. After explicit approval, requesting
+the held revision from an activated hostname-only schema reaches its compatibility
+join; an integration-attestations schema reaches the later attestations join.
+Use the planner's target for the observed current revision. Earlier schemas
 keep their explicit historical application routes, followed by normal startup.
 These routes leave
 one recorded Alembic revision; startup never mistakes incomparable branches for
@@ -5707,6 +5709,10 @@ so none can proceed after release begins. The independent release waits out
 only each service's own stop before restarting its exact original ID; API and
 merge-train recovery do not wait on a long capture's stop. A busy operation that cannot finish
 within the budget is a failed qualification, never a held-window receipt.
+The timer does not impose a limit on a graceful stop that never finishes.
+The API has no configured graceful-shutdown deadline, and a train stop finishes
+its admitted pass. Qualify their actual drain and recovery times before the live
+window; neither the compose grace period nor zero lease rows proves that bound.
 
 After services exit, the keeper takes the existing schema, dispatch and release
 admission session locks, then exclusive locks on every public application table
@@ -5725,7 +5731,9 @@ count alone is not. The selected deploy drain record is never rewritten.
 
 The `held` receipt binds the hold ID, keeper PID/start time, transaction, exported
 snapshot, PostgreSQL system identifier and every table's full-column/schema/row
-digest plus sequence state.
+digest plus sequence state. Receipts contain table row counts and aggregate row,
+schema and sequence checksums; no column defaults, SQL definitions, payloads or
+per-credential-column hashes are emitted.
 Keep it private. A second host connection can stream the exact staged snapshot:
 
 ```bash
@@ -5760,7 +5768,9 @@ python -m control_plane.database_maintenance_cli rehearse \
 
 The rehearsal compares actual restored schemas, full rows and sequences, applies
 the prepared revision, verifies retained objects and runtime schema invariants,
-and emits a receipt bound to the original hold/snapshot/transaction and dump.
+and verifies the retired trigger functions are absent. It emits a receipt bound
+to the original hold/snapshot/transaction and dump. Live apply repeats the
+function readback and computes compatibility with its own running image.
 Save the receipt in private host state and submit it without a terminal line-length
 limit:
 
@@ -5781,6 +5791,10 @@ keeper backend when still held (PID plus start time), restart the original
 services, check API health and worker survival, remove/read back the deployment
 marker, and disarm/read back the timer. Per-service restart progress is durable;
 a failed marker cleanup cannot stop or restart healthy services a second time.
+Failed PostgreSQL termination or one missing original container cannot prevent
+recovery of the other originals. A missing original or unfinished stop keeps
+recovery UNKNOWN. The host signals release through its private state directory;
+it does not send TERM into the operator's provider cleanup or issue another stop.
 The long-lived operator's cleanup uses cached provider access and writes a
 private readback receipt, so it needs neither a healthy database nor GitHub.
 No credential is written to host state. A missing or failed provider readback

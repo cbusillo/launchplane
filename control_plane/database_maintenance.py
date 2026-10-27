@@ -2,6 +2,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -12,7 +13,9 @@ from control_plane.storage.migrations.versions import (
     e7c1d5e9a3b6_drop_retired_delivery_tables as retirement,
 )
 from control_plane.storage.schema_migration import (
+    SCHEMA_MIGRATION_TARGET_REVISION,
     migrate_schema_on_connection,
+    schema_migration_action,
     schema_migration_target,
 )
 
@@ -40,6 +43,7 @@ def locked_database(connection: Connection, *, expires_at: datetime) -> Iterator
         raise ValueError("A PostgreSQL database and timezone-aware deadline are required.")
     if connection.in_transaction():
         raise ValueError("The keeper needs an idle connection before taking its snapshot.")
+    acquired = []
     try:
         for key in (
             "launchplane:schema-migration",
@@ -52,6 +56,7 @@ def locked_database(connection: Connection, *, expires_at: datetime) -> Iterator
                 raise RuntimeError(
                     "A migration, release or self-deploy still owns its operation lock."
                 )
+            acquired.append(key)
         tables = sorted(inspect(connection).get_table_names(schema="public"))
         connection.commit()
         with connection.execution_options(isolation_level="REPEATABLE READ").begin():
@@ -71,20 +76,9 @@ def locked_database(connection: Connection, *, expires_at: datetime) -> Iterator
                 raise ValueError("The maintenance deadline must be within one hour.")
             connection.execute(
                 text("SELECT set_config('transaction_timeout', :budget, true)"),
-                {"budget": str(int(remaining * 1000))},
+                {"budget": str(max(1, int(remaining * 1000)))},
             )
             connection.execute(text("SET LOCAL idle_in_transaction_session_timeout=0"))
-            for setting, value in (
-                ("TimeZone", "UTC"),
-                ("DateStyle", "ISO, MDY"),
-                ("IntervalStyle", "postgres"),
-                ("extra_float_digits", "3"),
-                ("bytea_output", "hex"),
-            ):
-                connection.execute(
-                    text("SELECT set_config(:setting, :value, true)"),
-                    {"setting": setting, "value": value},
-                )
             require_no_other_clients(connection)
             unsupported = connection.scalar(
                 text(
@@ -102,7 +96,10 @@ def locked_database(connection: Connection, *, expires_at: datetime) -> Iterator
     finally:
         connection.rollback()
         if not connection.invalidated:
-            connection.execute(text("SELECT pg_advisory_unlock_all()"))
+            for key in reversed(acquired):
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))"), {"key": key}
+                )
             connection.commit()
 
 
@@ -174,9 +171,11 @@ def database_snapshot(connection: Connection) -> dict[str, Any]:
                     text(query), {"name": f"public.{quoted}", "table": name}
                 ).scalars()
             )
+        metadata["columns"] = [list(row) for row in columns]
         result[name] = {
-            **metadata,
-            "columns": [list(row) for row in columns],
+            "schema_sha256": hashlib.sha256(
+                json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
             "rows": count,
             "sha256": digest.hexdigest(),
         }
@@ -192,7 +191,10 @@ def database_snapshot(connection: Connection) -> dict[str, Any]:
         values = connection.execute(
             text(f"SELECT last_value, is_called FROM public.{quoted}")
         ).one()
-        sequences[name] = {"owner": owner, "last_value": values[0], "is_called": values[1]}
+        sequences[name] = {
+            "owner": owner,
+            "sha256": hashlib.sha256(json.dumps(list(values)).encode()).hexdigest(),
+        }
     result["__sequences__"] = sequences
     return result
 
@@ -224,6 +226,17 @@ def require_isolated_rehearsal(connection: Connection, source_identifier: object
     ):
         raise RuntimeError("The rehearsal must run in a different PostgreSQL cluster.")
     return current
+
+
+def require_retired_functions_absent(connection: Connection) -> None:
+    if connection.scalar(
+        text(
+            "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+            "WHERE n.nspname='public' AND p.proname=ANY(:names)"
+        ),
+        {"names": list(retirement.RETIRED_TRIGGER_FUNCTIONS)},
+    ):
+        raise RuntimeError("A retired trigger function remains after the migration.")
 
 
 def apply_retirement(
@@ -266,4 +279,9 @@ def apply_retirement(
     final_revision = str(connection.scalar(text("SELECT version_num FROM alembic_version")))
     if final_revision != target:
         raise RuntimeError("The migration revision readback disagrees.")
+    if schema_migration_action(
+        current_revision=final_revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
+    ) not in {"current", "compatible_ahead"}:
+        raise RuntimeError("The migrated schema is incompatible with the running image.")
+    require_retired_functions_absent(connection)
     return final_revision

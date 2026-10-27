@@ -37,9 +37,17 @@ def inspect_container(identifier: str) -> dict[str, Any]:
 
 def save(path: Path, state: dict[str, Any]) -> None:
     temporary = path.with_suffix("." + uuid4().hex)
-    temporary.write_text(json.dumps(state, sort_keys=True))
-    temporary.chmod(0o600)
+    with temporary.open("x") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(json.dumps(state, sort_keys=True))
+        stream.flush()
+        os.fsync(stream.fileno())
     temporary.replace(path)
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def remaining(state: dict[str, Any]) -> float:
@@ -53,12 +61,14 @@ def locked_state(path: Path, *, active: bool = False) -> Iterator[dict[str, Any]
     with path.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = json.loads(path.read_text())
+        original = json.dumps(state, sort_keys=True)
         if active and (state.get("releasing") or state.get("released") or remaining(state) <= 0):
             raise RuntimeError("The maintenance window is already ending or released.")
         try:
             yield state
         finally:
-            save(path, state)
+            if json.dumps(state, sort_keys=True) != original:
+                save(path, state)
 
 
 def update_state(path: Path, **changes: Any) -> dict[str, Any]:
@@ -255,11 +265,18 @@ def stop_services(state_path: Path, identifiers: list[str]) -> None:
 def restart_original(
     identifier: str, state: dict[str, Any], settled: Callable[[str], None] | None = None
 ) -> str:
+    observed = inspect_container(identifier)
+    if observed["Config"]["Labels"].get("com.docker.compose.project") != state["project"]:
+        raise RuntimeError("Original container project identity changed.")
     stop = state.get("stops", {}).get(identifier)
     while stop and process_running(stop):
         time.sleep(0.2)
-    if stop and not stop.get("complete"):
-        run("docker", "stop", "--timeout", "-1", identifier, timeout=None)
+    if stop and not stop.get("complete") and stop["boot"] == boot_identity():
+        deadline = time.monotonic() + 120
+        while inspect_container(identifier)["State"]["Running"]:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("The original stop has no settled container readback.")
+            time.sleep(0.2)
         if settled is not None:
             settled(identifier)
     if not inspect_container(identifier)["State"]["Running"]:
@@ -296,7 +313,6 @@ def release(state_path: Path) -> None:
     with locked_state(state_path) as state:
         if state.get("released"):
             return
-        original_containers(state)
         state["releasing"] = True
         flag = state_path.parent / "releasing"
         flag.touch(mode=0o600)
@@ -306,21 +322,20 @@ def release(state_path: Path) -> None:
             started = keeper["backend_start"].replace("'", "''")
             database = state["database"].replace("'", "''")
             sql = f"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid={int(keeper['pid'])} AND backend_start='{started}'::timestamptz AND datname='{database}';"
-            run(
-                "docker",
-                "exec",
-                "-i",
-                state["postgres"],
-                "sh",
-                "-c",
-                'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"',
-                input_text=sql + "\n",
-            )
-        controller = operator_container(state)
-        if controller and not state.get("database_released") and not state.get("operator_stop"):
-            _, identity = start_process(["docker", "stop", "--timeout", "-1", controller["Id"]])
-            state["operator_stop"] = identity
-            save(state_path, state)
+            try:
+                run(
+                    "docker",
+                    "exec",
+                    "-i",
+                    state["postgres"],
+                    "sh",
+                    "-c",
+                    'exec psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"',
+                    input_text=sql + "\n",
+                )
+            except Exception:
+                state["keeper_termination_unverified"] = True
+                save(state_path, state)
         restarted = set(state.get("restarted_containers", []))
         errors = []
         progress_lock = Lock()
@@ -344,7 +359,7 @@ def release(state_path: Path) -> None:
                         state["restarted_containers"] = sorted(restarted)
                         save(state_path, state)
                 except Exception as error:
-                    errors.append(type(error).__name__)
+                    errors.append(f"{futures[future]}:{type(error).__name__}")
         if errors:
             raise RuntimeError(
                 "Some original services lack recovery readback: " + ", ".join(errors)
@@ -353,8 +368,8 @@ def release(state_path: Path) -> None:
         save(state_path, state)
         (state_path.parent / "restarted").touch(mode=0o600)
         receipt_path = state_path.parent / "marker-release.json"
-        until = time.monotonic() + 15
-        while controller and not receipt_path.exists() and time.monotonic() < until:
+        until = time.monotonic() + 210
+        while not receipt_path.exists() and time.monotonic() < until:
             if operator_container(state) is None:
                 break
             time.sleep(0.2)
@@ -362,7 +377,7 @@ def release(state_path: Path) -> None:
         if receipt_path.exists():
             receipt = json.loads(receipt_path.read_text())
             if receipt.get("uncertain"):
-                if receipt.get("phase") != "release" or operator_container(state) is not None:
+                if operator_container(state) is not None:
                     raise RuntimeError(
                         "Provider marker outcome needs reconciliation; no cleanup write was replayed."
                     )
@@ -377,10 +392,6 @@ def release(state_path: Path) -> None:
         if not marker_released and current_controller and current_controller["State"]["Running"]:
             raise RuntimeError("The original controller has not completed provider cleanup.")
         if state.get("cleanup_uncertain"):
-            if not state.get("fence_confirmed"):
-                raise RuntimeError(
-                    "Provider marker outcome needs reconciliation; no cleanup write was replayed."
-                )
             operator(state, "observe-unfence")
             marker_released = True
         if state.get("fenced") and not marker_released:
@@ -389,10 +400,6 @@ def release(state_path: Path) -> None:
             except Exception:
                 state["cleanup_uncertain"] = True
                 raise
-        elif not marker_released and process_running(
-            state.get("controller", {"pid": 0, "start": None})
-        ):
-            raise RuntimeError("The maintenance controller has not supplied its release readback.")
         state["released"] = True
         save(state_path, state)
         print(
@@ -557,8 +564,7 @@ def hold(state_path: Path) -> None:
             raise RuntimeError("The independent restart timer was not read back.")
         with locked_state(state_path, active=True) as state:
             state["fenced"] = True
-            keeper, identity = start_process(operator_command(state, "hold"), attached=True)
-            state["controller"] = identity
+            keeper, _ = start_process(operator_command(state, "hold"), attached=True)
         assert keeper.stdout is not None and keeper.stdin is not None
         commands = os.open(state["commands"], os.O_RDWR | os.O_NONBLOCK)
         buffered = b""
@@ -589,8 +595,6 @@ def hold(state_path: Path) -> None:
                         if event["event"] == "deployment_held":
                             state = update_state(
                                 state_path,
-                                fenced=True,
-                                fence_confirmed=True,
                                 keeper={
                                     "pid": event["pid"],
                                     "backend_start": event["backend_start"],

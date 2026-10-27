@@ -141,7 +141,10 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
             self.assertTrue(stop_finished)
             return ""
 
-        healthy = {"State": {"Running": True}}
+        healthy = {
+            "Config": {"Labels": {"com.docker.compose.project": "own"}},
+            "State": {"Running": True},
+        }
         with (
             patch.object(host, "process_running", side_effect=lambda _process: not stop_finished),
             patch.object(time, "sleep", side_effect=sleep),
@@ -150,7 +153,11 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
         ):
             self.assertEqual(
                 host.restart_original(
-                    "own-api", {"stops": {"own-api": {"pid": 1, "start": "owned"}}}
+                    "own-api",
+                    {
+                        "project": "own",
+                        "stops": {"own-api": {"pid": 1, "start": "owned", "complete": True}},
+                    },
                 ),
                 "own-api",
             )
@@ -271,4 +278,127 @@ class DatabaseMaintenanceHostTests(unittest.TestCase):
             ):
                 host.release(path)
             inventory.assert_not_called()
+            self.assertTrue(json.loads(path.read_text())["released"])
+
+    def test_keeper_abort_does_not_signal_its_cached_provider_cleanup(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = state_file(
+                root,
+                fenced=True,
+                keeper={"pid": 123, "backend_start": datetime.now(timezone.utc).isoformat()},
+            )
+            state = json.loads(path.read_text())
+
+            def finish_cleanup(_seconds: float) -> None:
+                host.save(
+                    root / "marker-release.json",
+                    {
+                        "released": True,
+                        "deadline": state["expires_at"],
+                        "target_id": state["target_id"],
+                    },
+                )
+
+            with (
+                patch.object(host, "run", return_value="") as run,
+                patch.object(host, "start_process") as signal_controller,
+                patch.object(host, "operator_container", return_value={"State": {"Running": True}}),
+                patch.object(
+                    host,
+                    "restart_original",
+                    side_effect=lambda identifier, _state, _settled: identifier,
+                ),
+                patch.object(time, "sleep", side_effect=finish_cleanup),
+            ):
+                host.release(path)
+            signal_controller.assert_not_called()
+            self.assertTrue(run.call_args.args[:2] == ("docker", "exec"))
+            self.assertTrue(json.loads(path.read_text())["released"])
+
+    def test_database_failure_and_one_missing_service_do_not_block_other_restarts(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(
+                Path(temporary),
+                keeper={"pid": 123, "backend_start": datetime.now(timezone.utc).isoformat()},
+            )
+
+            def restart(identifier: str, _state: dict[str, Any], _settled: Any) -> str:
+                if identifier == "own-api":
+                    raise FileNotFoundError("The original API was removed.")
+                return identifier
+
+            with (
+                patch.object(host, "run", side_effect=RuntimeError("PostgreSQL unavailable")),
+                patch.object(host, "operator_container", return_value=None),
+                patch.object(host, "restart_original", side_effect=restart),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "own-api:FileNotFoundError"):
+                    host.release(path)
+            state = json.loads(path.read_text())
+            self.assertEqual(state["restarted_containers"], ["own-train"])
+            self.assertTrue(state["keeper_termination_unverified"])
+            self.assertFalse(state.get("released", False))
+
+    def test_failed_stop_client_is_observed_until_its_daemon_stop_finishes(self) -> None:
+        stopped = False
+        healthy = {
+            "Config": {"Labels": {"com.docker.compose.project": "own"}},
+            "State": {"Running": True},
+        }
+
+        def inspect(_identifier: str) -> dict[str, Any]:
+            return {**healthy, "State": {"Running": not stopped}}
+
+        def run(*args: str, **_kwargs: Any) -> str:
+            nonlocal stopped
+            self.assertEqual(args, ("docker", "start", "own-api"))
+            self.assertTrue(stopped)
+            stopped = False
+            return ""
+
+        def sleep(_seconds: float) -> None:
+            nonlocal stopped
+            if not restart.called:
+                stopped = True
+
+        with (
+            patch.object(host, "inspect_container", side_effect=inspect),
+            patch.object(host, "process_running", return_value=False),
+            patch.object(host, "boot_identity", return_value="same-boot"),
+            patch.object(host, "run", side_effect=run) as restart,
+            patch.object(time, "sleep", side_effect=sleep),
+        ):
+            self.assertEqual(
+                host.restart_original(
+                    "own-api", {"project": "own", "stops": {"own-api": {"boot": "same-boot"}}}
+                ),
+                "own-api",
+            )
+
+    def test_read_only_state_observation_does_not_rewrite_the_recovery_record(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(Path(temporary))
+            with patch.object(host, "save", wraps=host.save) as save:
+                with host.locked_state(path):
+                    pass
+                save.assert_not_called()
+                with host.locked_state(path) as state:
+                    state["releasing"] = True
+                save.assert_called_once()
+
+    def test_uncertain_install_can_be_reconciled_by_readback_without_another_write(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = state_file(Path(temporary), fenced=True, cleanup_uncertain=True)
+            with (
+                patch.object(host, "operator_container", return_value=None),
+                patch.object(
+                    host,
+                    "restart_original",
+                    side_effect=lambda identifier, _state, _settled: identifier,
+                ),
+                patch.object(host, "operator", return_value={}) as observe,
+            ):
+                host.release(path)
+            self.assertEqual([call.args[1] for call in observe.call_args_list], ["observe-unfence"])
             self.assertTrue(json.loads(path.read_text())["released"])

@@ -1,14 +1,39 @@
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 import unittest
 
 from sqlalchemy.engine import make_url
 
-from control_plane.database_maintenance_cli import require_isolated_runtime
+from control_plane.database_maintenance_cli import await_command, require_isolated_runtime
+from tempfile import TemporaryDirectory
+import io
 
 
 class DatabaseMaintenanceIsolationTests(unittest.TestCase):
+    def test_host_release_wins_over_a_ready_destructive_command(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+
+            def observe() -> None:
+                (directory / "releasing").touch()
+
+            with (
+                patch(
+                    "control_plane.database_maintenance_cli.select.select",
+                    return_value=([True], [], []),
+                ),
+                patch(
+                    "control_plane.database_maintenance_cli.sys.stdin",
+                    io.StringIO('{"action":"apply"}\n'),
+                ),
+            ):
+                with self.assertRaises(InterruptedError):
+                    await_command(
+                        datetime.now(timezone.utc) + timedelta(seconds=10), observe, directory
+                    )
+
     def test_rehearsal_requires_loopback_and_an_empty_production_credential_environment(
         self,
     ) -> None:

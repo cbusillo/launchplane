@@ -18,6 +18,7 @@ from control_plane.database_maintenance import (
     database_system_identifier,
     require_isolated_rehearsal,
     require_no_other_clients,
+    require_retired_functions_absent,
     locked_database,
     retained_snapshot,
 )
@@ -87,9 +88,15 @@ def emit(event: str, **values: Any) -> None:
     print(json.dumps({"event": event, **values}, sort_keys=True), flush=True)
 
 
-def await_command(expires: datetime, observe: Callable[[], None]) -> dict[str, Any]:
+def await_command(
+    expires: datetime, observe: Callable[[], None], job_directory: Path
+) -> dict[str, Any]:
     while datetime.now(timezone.utc) < expires:
+        if (job_directory / "releasing").exists():
+            raise InterruptedError("The host is releasing this maintenance attempt.")
         observe()
+        if (job_directory / "releasing").exists():
+            raise InterruptedError("The host is releasing this maintenance attempt.")
         ready, _, _ = select.select(
             [sys.stdin],
             [],
@@ -97,12 +104,16 @@ def await_command(expires: datetime, observe: Callable[[], None]) -> dict[str, A
             min(5, max(0, (expires - datetime.now(timezone.utc)).total_seconds())),
         )
         if ready:
+            if (job_directory / "releasing").exists():
+                raise InterruptedError("The host is releasing this maintenance attempt.")
             line = sys.stdin.readline()
             if not line:
                 raise EOFError("Maintenance controller input closed; roll back.")
             value = json.loads(line)
             if not isinstance(value, dict):
                 raise ValueError("A maintenance command must be an object.")
+            if (job_directory / "releasing").exists():
+                raise InterruptedError("The host is releasing this maintenance attempt.")
             return value
     raise TimeoutError("Maintenance deadline reached; roll back and release.")
 
@@ -147,6 +158,9 @@ def rehearsal_receipt(
         after = database_snapshot(connection)
         if retained_snapshot(after) != retained_snapshot(restored):
             raise RuntimeError("The isolated rehearsal changed retained objects.")
+        if set(restored) - set(after) != set(retirement.RETIRED_TABLES):
+            raise RuntimeError("The isolated rehearsal removed an unexpected table set.")
+        require_retired_functions_absent(connection)
     verify_postgres_schema_invariants(connection.engine)
     startup_action = schema_migration_action(
         current_revision=revision, target_revision=SCHEMA_MIGRATION_TARGET_REVISION
@@ -191,14 +205,14 @@ def keep_database(
             pid=identity[0],
             backend_start=identity[1].isoformat(),
         )
-        command = await_command(expires, lambda: deployment.observe(deadline=arguments.expires_at))
+        command = await_command(
+            expires,
+            lambda: deployment.observe(deadline=arguments.expires_at),
+            arguments.job_directory,
+        )
         if command.get("action") != "stopped" or (arguments.job_directory / "releasing").exists():
             raise RuntimeError("The host did not confirm its original services stopped.")
         with locked_database(connection, expires_at=expires):
-            if in_flight_work(connection):
-                raise RuntimeError(
-                    "An operation is still running or leased after services stopped."
-                )
             before = database_snapshot(connection)
             snapshot = str(connection.scalar(text("SELECT pg_export_snapshot()")))
             transaction = str(connection.scalar(text("SELECT txid_current()")))
@@ -215,7 +229,7 @@ def keep_database(
                 deployment.observe(deadline=arguments.expires_at)
                 require_no_other_clients(connection, allow_dump=True)
 
-            receipt = await_command(expires, observe)
+            receipt = await_command(expires, observe, arguments.job_directory)
             if receipt.get("action") == "apply":
                 if any(
                     receipt.get(key) != value
@@ -255,7 +269,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Launchplane's bounded stopped-service database keeper."
     )
-    parser.add_argument("mode", choices=("plan", "unfence", "hold", "snapshot", "rehearse"))
+    parser.add_argument("mode", choices=("plan", "unfence", "hold", "rehearse"))
     parser.add_argument("--before-file", type=Path)
     parser.add_argument("--backup-sha256", default="")
     parser.add_argument("--expires-at", required=True)
@@ -317,9 +331,6 @@ def main() -> int:
                         expires=expires,
                     ),
                 )
-                return 0
-            if arguments.mode == "snapshot":
-                emit("snapshot", snapshot=database_snapshot(connection))
                 return 0
             row = connection.execute(
                 text(
