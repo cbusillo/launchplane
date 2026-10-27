@@ -1,5 +1,3 @@
-"""Local fixture image selection must bind one concrete published platform."""
-
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory

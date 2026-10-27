@@ -1,5 +1,3 @@
-"""The native fixture preserves HTTP header semantics and strict public evidence."""
-
 from contextlib import nullcontext
 from http.client import HTTPMessage
 from pathlib import Path
