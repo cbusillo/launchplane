@@ -608,8 +608,11 @@ class TaskRouteTests(unittest.TestCase):
 class AccountProgramTests(unittest.TestCase):
     """Execute the shipped consumer against a tiny ORM, including staff negatives."""
 
+    parameter_api = ("get_param", "set_param")
+
     def setUp(self) -> None:
         self.addCleanup(logging.disable, logging.root.manager.disable)
+        self.enterContext(patch.dict(sys.modules, {"odoo_website_settings": None}))
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.parameters: dict[str, str] = {TESTING_COPY_COMPLETION_PARAMETER: "testing-copy"}
@@ -627,9 +630,12 @@ class AccountProgramTests(unittest.TestCase):
 
         self.users.create.side_effect = create_user
         self.users.browse.return_value.exists.return_value = self.user
-        parameters = MagicMock()
-        parameters.get_param.side_effect = lambda key: self.parameters.get(key)
-        parameters.set_param.side_effect = self.parameters.__setitem__
+        read, write = self.parameter_api
+        parameters = MagicMock(spec=["sudo", read, write])
+        getattr(parameters, read).side_effect = lambda key, default="": self.parameters.get(
+            key, default
+        )
+        getattr(parameters, write).side_effect = self.parameters.__setitem__
         self.env = MagicMock()
         models = {"res.users": self.users, "ir.config_parameter": parameters}
         self.env.__getitem__.side_effect = lambda name: models[name]
@@ -973,3 +979,7 @@ class AccountProgramTests(unittest.TestCase):
         self.assertFalse(read_journal())
         journal.unlink()
         self.assertFalse(read_journal())
+
+
+class TypedAccountProgramTests(AccountProgramTests):
+    parameter_api = ("get_str", "set_str")
