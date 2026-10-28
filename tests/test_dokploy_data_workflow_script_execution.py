@@ -305,7 +305,7 @@ class _Cursor:
             self.rows = [(key,) for key in params[0] if str(config.get(key) or "").strip()]
         elif query.startswith("SELECT to_regclass"):
             self.rows = [(params[0] in tables,)]
-        elif query.startswith("SELECT attname"):
+        elif query.startswith("SELECT attribute.attname"):
             columns = self.database.get("payment_columns", {"code": "character varying", "state": "character varying"})
             self.rows = list(columns.items())
         elif "key = 'shopify.shop_url_key'" in query:

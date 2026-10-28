@@ -337,8 +337,11 @@ def present_config_parameters(cursor, keys):
 
 def payment_provider_activation(cursor: object) -> str:
     cursor.execute(
-        "SELECT attname, atttypid::regtype::text FROM pg_attribute"
-        " WHERE attrelid = to_regclass('payment_provider') AND attnum > 0 AND NOT attisdropped"
+        "SELECT attribute.attname, format_type(attribute.atttypid, NULL)"
+        " FROM pg_attribute attribute JOIN ir_model_fields field"
+        " ON field.name = attribute.attname AND field.model = 'payment.provider'"
+        " WHERE attribute.attrelid = to_regclass('payment_provider')"
+        " AND attribute.attnum > 0 AND NOT attribute.attisdropped"
     )
     columns = dict(cursor.fetchall())
     text_types = {"character varying", "text"}

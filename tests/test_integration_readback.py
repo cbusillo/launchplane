@@ -38,18 +38,7 @@ class PaymentProviderCursor:
         self.rows: list[tuple[Any, ...]] = []
 
     def execute(self, query: str, parameters: tuple[str, ...] = ()) -> None:
-        if query.startswith("SELECT to_regclass"):
-            self.rows = [
-                (bool(self.database.execute("PRAGMA table_info(payment_provider)").fetchall()),)
-            ]
-        elif query.startswith("SELECT attname"):
-            types = {"VARCHAR": "character varying", "BOOLEAN": "boolean", "INTEGER": "integer"}
-            self.rows = [
-                (row[1], types[row[2]])
-                for row in self.database.execute("PRAGMA table_info(payment_provider)")
-            ]
-        else:
-            self.rows = self.database.execute(query, parameters).fetchall()
+        self.rows = self.database.execute(query.replace("%s", "?"), parameters).fetchall()
 
     def fetchone(self) -> tuple[Any, ...]:
         return self.rows[0]
@@ -74,10 +63,32 @@ class PaymentProviderReadbackTests(unittest.TestCase):
             family.tables[0] for family in INTEGRATION_FAMILIES if family.integration == "payment"
         )
 
-    def configured(self, schema: str, values: tuple[object, ...] | None = None) -> bool:
+    def configured(
+        self,
+        schema: str,
+        values: tuple[object, ...] | None = None,
+        registered: tuple[str, ...] | None = None,
+    ) -> bool:
         database = sqlite3.connect(":memory:")
         self.addCleanup(database.close)
         database.execute("CREATE TABLE payment_provider (" + schema + ")")
+        database.create_function("to_regclass", 1, lambda name: name)
+        database.create_function("format_type", 2, lambda name, modifier: name)
+        database.execute("CREATE TABLE ir_model_fields (name VARCHAR, model VARCHAR)")
+        database.execute(
+            "CREATE TABLE pg_attribute (attname VARCHAR, atttypid VARCHAR, attrelid VARCHAR, attnum INTEGER, attisdropped BOOLEAN)"
+        )
+        types = {"VARCHAR": "character varying", "BOOLEAN": "boolean", "INTEGER": "integer"}
+        columns = database.execute("PRAGMA table_info(payment_provider)").fetchall()
+        database.executemany(
+            "INSERT INTO pg_attribute VALUES (?, ?, ?, ?, ?)",
+            [(row[1], types[row[2]], "payment_provider", row[0] + 1, False) for row in columns],
+        )
+        names = registered if registered is not None else tuple(row[1] for row in columns)
+        database.executemany(
+            "INSERT INTO ir_model_fields VALUES (?, ?)",
+            [(name, "payment.provider") for name in names],
+        )
         if values is not None:
             database.execute(
                 "INSERT INTO payment_provider VALUES (" + ",".join("?" for _ in values) + ")",
@@ -107,6 +118,18 @@ class PaymentProviderReadbackTests(unittest.TestCase):
         for state in ("enabled", "test"):
             with self.subTest(state=state):
                 self.assertTrue(self.configured("code VARCHAR, state VARCHAR", ("stripe", state)))
+
+    def test_native20_ignores_a_retired_sql_state_column(self) -> None:
+        for active, legacy_state in ((True, "disabled"), (False, "enabled")):
+            with self.subTest(active=active, legacy_state=legacy_state):
+                self.assertEqual(
+                    self.configured(
+                        "code VARCHAR, active BOOLEAN, is_live BOOLEAN, state VARCHAR",
+                        ("stripe", active, False, legacy_state),
+                        registered=("code", "active", "is_live"),
+                    ),
+                    active,
+                )
 
     def test_native_disabled_archived_and_no_remote_providers_are_exempt(self) -> None:
         self.assertFalse(self.configured("code VARCHAR, state VARCHAR", ("stripe", "disabled")))
