@@ -19,6 +19,7 @@ class RuntimeSourceTests(PrerequisiteFixture):
         super().setUp()
         self.probes: list[dict[str, str]] = []
         self.probe_failure = ""
+        self.probe_unknown = False
         for name, prefix in SOURCE_PREFIXES.items():
             self.values[prefix + ".host"] = name + ".invalid"
         self.set_overrides({"fishbowl.db": "inventory"})
@@ -29,6 +30,10 @@ class RuntimeSourceTests(PrerequisiteFixture):
             settings = json.loads(kwargs["input"])
             self.probes.append(settings)
             if self.probe_failure == settings["host"]:
+                if self.probe_unknown:
+                    return subprocess.CompletedProcess(
+                        command, 0, stdout=json.dumps({"grants": "unknown"})
+                    )
                 raise subprocess.TimeoutExpired(command, 10)
             return subprocess.CompletedProcess(
                 command, 0, stdout=json.dumps({"grants": "read_only"})
@@ -58,6 +63,56 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 mode=mode,
                 sources=tuple(SOURCE_PREFIXES) if mode == "grants" else ("fishbowl",),
             )
+
+    def test_capacity_and_reader_failures_keep_bounded_stages(self) -> None:
+        with patch.object(reader._READ_SLOTS, "acquire", return_value=False):
+            result = self.consume()
+        self.assertEqual(result.failure_stage, "capacity")
+        self.assertEqual(self.probes, [])
+        for failure, expected in (
+            (RuntimeError(PRIVATE), "transport"),
+            (None, "result_validation"),
+        ):
+            with self.subTest(expected=expected), patch.object(self, "remote", side_effect=failure):
+                result = self.consume()
+                self.assertEqual(result.failure_stage, expected)
+                self.assertTrue(all(item.grants == "unknown" for item in result.sources))
+                self.assertNotIn(PRIVATE, result.model_dump_json())
+
+    def test_invalid_failure_stages_are_redacted_validation_failures(self) -> None:
+        minimal = {
+            "runtime": "unknown",
+            "sources": [{"source": name} for name in reader.SOURCE_ADDONS],
+        }
+        for field in ("global", "source"):
+            with self.subTest(field=field):
+                value = json.loads(json.dumps(minimal))
+                target = value if field == "global" else value["sources"][0]
+                target["failure_stage"] = PRIVATE
+
+                def remote(**kwargs: Any) -> None:
+                    kwargs["receive"]({"type": "complete", "result": value})
+
+                with patch.object(self, "remote", side_effect=remote):
+                    result = self.consume()
+                self.assertEqual(result.failure_stage, "result_validation")
+                self.assertNotIn(PRIVATE, result.model_dump_json())
+                self.assertEqual(self.probes, [])
+
+    def test_uninstalled_source_keeps_its_stage_and_other_grants(self) -> None:
+        self.installed[reader.SOURCE_ADDONS["cm_data"][0]] = "uninstalled"
+        result = self.consume()
+        self.assertEqual(result.runtime, "verified")
+        failed = next(item for item in result.sources if item.source == "cm_data")
+        self.assertEqual(failed.failure_stage, "addon_state")
+        self.assertEqual(failed.grants, "unknown")
+        self.assertTrue(
+            all(
+                item.grants == "read_only"
+                for item in result.sources
+                if item.source != failed.source
+            )
+        )
 
     def test_typed_payload_and_installed_defaults_supply_runtime_origin_grants(self) -> None:
         result = self.consume()
@@ -152,9 +207,9 @@ class RuntimeSourceTests(PrerequisiteFixture):
                         json.dumps(payload).encode()
                     ).decode()
                 result = self.consume("preview")
-                self.assertFalse(
-                    next(item for item in result.sources if item.source == "fishbowl").parameters
-                )
+                source = next(item for item in result.sources if item.source == "fishbowl")
+                self.assertFalse(source.parameters)
+                self.assertEqual(source.failure_stage, "source_resolution")
                 self.values["fishbowl.password"] = PRIVATE
 
     def test_parameter_and_container_drift_discards_the_observation(self) -> None:
@@ -165,17 +220,28 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 self.drift = kind
                 result = self.consume("preview")
                 self.assertEqual(result.runtime, "unknown")
+                self.assertEqual(
+                    result.failure_stage, "host_inspection" if kind == "image" else "drift"
+                )
                 self.assertTrue(all(not item.parameters for item in result.sources))
 
-    def test_unreachable_source_does_not_hide_other_sources(self) -> None:
+    def test_probe_timeout_stage_and_unexplained_unknown_preserve_other_sources(self) -> None:
         self.probe_failure = self.values["cm_data.db.host"]
-        result = self.consume()
-        self.assertEqual(
-            next(item for item in result.sources if item.source == "cm_data").grants, "unknown"
-        )
-        self.assertTrue(
-            all(item.grants == "read_only" for item in result.sources if item.source != "cm_data")
-        )
+        for self.probe_unknown in (False, True):
+            with self.subTest(unknown=self.probe_unknown):
+                result = self.consume()
+                failed = next(item for item in result.sources if item.source == "cm_data")
+                self.assertEqual(failed.grants, "unknown")
+                self.assertEqual(
+                    failed.failure_stage, None if self.probe_unknown else "source_resolution"
+                )
+                self.assertTrue(
+                    all(
+                        item.grants == "read_only"
+                        for item in result.sources
+                        if item.source != failed.source
+                    )
+                )
 
     def test_typed_only_authority_reaches_grant_route_and_preview_consumer(self) -> None:
         from control_plane import odoo_import_diagnostics as diagnostic, odoo_runtime_reads as reads
@@ -275,5 +341,10 @@ class RuntimeSourceTests(PrerequisiteFixture):
                 control_plane_root=self.root,
                 database_url=None,
             )
-        self.assertTrue(all(value == "unknown" for value in result.values()))
+        self.assertTrue(
+            all(
+                value.grants == "unknown" and value.failure_stage == "drift"
+                for value in result.values()
+            )
+        )
         self.assertEqual(self.container_calls, 0)

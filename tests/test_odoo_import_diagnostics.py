@@ -22,6 +22,7 @@ from control_plane.odoo_diagnostic_identity import (
     DIAGNOSTIC_IDENTITY_UNAVAILABLE,
 )
 from control_plane import odoo_source_probe as probe
+from control_plane.odoo_runtime_source_prerequisites import SourceConsumerEvidence, SourceName
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetPolicies
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -213,7 +214,10 @@ class DiagnosticTests(unittest.TestCase):
         self.runtime_probe = patch.object(
             diagnostic,
             "runtime_grants",
-            side_effect=lambda connection, sources, **kw: {name: "read_only" for name in sources},
+            side_effect=lambda connection, sources, **kw: {
+                name: SourceConsumerEvidence(source=cast(SourceName, name), grants="read_only")
+                for name in sources
+            },
         )
         self.runtime_mock = self.runtime_probe.start()
         self.addCleanup(self.runtime_probe.stop)
@@ -348,9 +352,14 @@ class DiagnosticTests(unittest.TestCase):
             all(source.binding == "missing_or_unsafe" for source in unavailable.sources)
         )
 
-        def drift(connection: object, sources: tuple[str, ...], **kwargs: object) -> dict[str, str]:
+        def drift(
+            connection: object, sources: tuple[str, ...], **kwargs: object
+        ) -> dict[str, SourceConsumerEvidence]:
             self.fixture.bindings.clear()
-            return {name: "read_only" for name in sources}
+            return {
+                name: SourceConsumerEvidence(source=cast(SourceName, name), grants="read_only")
+                for name in sources
+            }
 
         self.runtime_mock.side_effect = drift
         result = run()
@@ -359,9 +368,53 @@ class DiagnosticTests(unittest.TestCase):
             all(source.applied_connection_grants == "unknown" for source in result.sources)
         )
 
+    def test_runtime_grant_stages_survive_projection_without_erasing_other_sources(self) -> None:
+        from control_plane import odoo_runtime_source_prerequisites as reader
+
+        self.runtime_probe.stop()
+        with patch.object(reader, "read_source_consumers") as consume:
+            for stage in (
+                "capacity",
+                "producer_inventory",
+                "addon_state",
+                "source_resolution",
+                None,
+            ):
+                with (
+                    self.subTest(stage=stage),
+                    patch.dict(diagnostic._FAILED_PROBES, {}, clear=True),
+                ):
+                    consume.return_value = reader.SourceConsumerResult(
+                        runtime="unknown"
+                        if stage in {"capacity", "producer_inventory"}
+                        else "verified",
+                        failure_stage=stage if stage == "capacity" else None,
+                        sources=tuple(
+                            SourceConsumerEvidence(
+                                source=cast(SourceName, name),
+                                failure_stage=stage
+                                if name == "cm_data" and stage != "capacity"
+                                else None,
+                                grants="unknown" if name == "cm_data" else "read_only",
+                            )
+                            for name in diagnostic.SOURCE_PREFIXES
+                        ),
+                    )
+                    result = self.run_runtime_diagnostic()
+                    self.assertEqual(result.sources[0].failure_stage, stage)
+                    self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
+                    self.assertEqual(
+                        result.sources[1].applied_connection_grants,
+                        "unknown" if stage in {"capacity", "producer_inventory"} else "read_only",
+                    )
+                    self.assertNotIn(PRIVATE, result.model_dump_json())
+
     def test_origin_privileges_are_independent(self) -> None:
         self.runtime_mock.side_effect = lambda connection, sources, **kw: {
-            name: "unsafe" if name == "cm_data" else "read_only" for name in sources
+            name: SourceConsumerEvidence(
+                source=cast(SourceName, name), grants="unsafe" if name == "cm_data" else "read_only"
+            )
+            for name in sources
         }
         result = self.run_runtime_diagnostic()
         self.assertEqual(self.run_diagnostic().sources[0].managed_connection_grants, "read_only")
@@ -369,7 +422,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(result.sources[0].applied_connection_grants, "unsafe")
         self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
         self.runtime_mock.side_effect = lambda connection, sources, **kw: {
-            name: "unknown" for name in sources
+            name: SourceConsumerEvidence(source=cast(SourceName, name)) for name in sources
         }
         result = self.run_runtime_diagnostic()
         self.assertTrue(
@@ -392,10 +445,12 @@ class DiagnosticTests(unittest.TestCase):
         self.runtime_mock.assert_not_called()
 
     def test_runtime_probe_single_flight_cooldown_and_fresh_success(self) -> None:
-        def nested(connection: object, sources: tuple[str, ...], **kw: object) -> dict[str, str]:
+        def nested(
+            connection: object, sources: tuple[str, ...], **kw: object
+        ) -> dict[str, SourceConsumerEvidence]:
             self.assertTrue(
                 all(
-                    value == "unknown"
+                    value.grants == "unknown"
                     for value in diagnostic.runtime_origin_grants(
                         self.fixture.connection,
                         diagnostic.import_authority(
@@ -408,12 +463,19 @@ class DiagnosticTests(unittest.TestCase):
                     ).values()
                 )
             )
-            return {name: "unknown" if name == "cm_data" else "read_only" for name in sources}
+            return {
+                name: SourceConsumerEvidence(
+                    source=cast(SourceName, name),
+                    grants="unknown" if name == "cm_data" else "read_only",
+                )
+                for name in sources
+            }
 
         self.runtime_mock.side_effect = nested
         self.run_runtime_diagnostic()
         self.runtime_mock.side_effect = lambda connection, sources, **kw: {
-            name: "read_only" for name in sources
+            name: SourceConsumerEvidence(source=cast(SourceName, name), grants="read_only")
+            for name in sources
         }
         result = self.run_runtime_diagnostic()
         self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
@@ -566,9 +628,14 @@ class DiagnosticTests(unittest.TestCase):
                 self.mocks[1].return_value = self.environment
 
     def test_binding_drift_during_runtime_read_discards_all_evidence(self) -> None:
-        def drift(connection: object, sources: tuple[str, ...], **kwargs: object) -> dict[str, str]:
+        def drift(
+            connection: object, sources: tuple[str, ...], **kwargs: object
+        ) -> dict[str, SourceConsumerEvidence]:
             self.fixture.bindings.clear()
-            return {name: "read_only" for name in sources}
+            return {
+                name: SourceConsumerEvidence(source=cast(SourceName, name), grants="read_only")
+                for name in sources
+            }
 
         self.runtime_mock.side_effect = drift
         result = self.run_runtime_diagnostic()
